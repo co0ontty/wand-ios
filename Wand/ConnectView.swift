@@ -39,6 +39,7 @@ struct ConnectView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .interactiveKeyboardDismiss()
+                .dismissKeyboardOnTap()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

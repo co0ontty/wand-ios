@@ -28,6 +28,9 @@ struct ChatView: View {
                 messageList
             }
         }
+        // 点消息区任意空白处收起键盘；输入栏在 safeAreaInset 里不受影响，
+        // 点发送 / 权限按钮不会误收。
+        .dismissKeyboardOnTap()
         .navigationTitle(store.snapshot?.displayTitle ?? "会话")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

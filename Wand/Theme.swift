@@ -38,6 +38,19 @@ enum Theme {
     }
 }
 
+extension View {
+    /// 点击空白区域收起键盘。挂在滚动容器 / 背景层上：
+    /// 输入框、按钮等可交互控件优先消费点击，不会被误伤；
+    /// 与 scrollDismissesKeyboard 互补（滚动收起 + 点击收起）。
+    func dismissKeyboardOnTap() -> some View {
+        onTapGesture {
+            UIApplication.shared.sendAction(
+                #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil
+            )
+        }
+    }
+}
+
 /// 实心珊瑚色主按钮，禁用态自动变淡。跨平台 SwiftUI，与 macOS 端一致。
 struct WandPrimaryButtonStyle: ButtonStyle {
     @MainActor

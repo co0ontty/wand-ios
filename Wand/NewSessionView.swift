@@ -114,6 +114,7 @@ struct NewSessionView: View {
                     }
                 }
             }
+            .dismissKeyboardOnTap()
             .navigationTitle("新建会话")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
