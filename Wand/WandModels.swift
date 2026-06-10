@@ -333,3 +333,65 @@ struct ServerConfigInfo: Decodable {
     let defaultMode: String?
     let currentVersion: String?
 }
+
+// MARK: - Git 快速提交
+
+/// GET /api/sessions/:id/git-status 的文件条目（porcelain v2 状态码）。
+struct GitFileEntry: Decodable, Identifiable {
+    let path: String
+    let status: String
+    let isSubmodule: Bool?
+
+    var id: String { path }
+
+    /// ".M" → "M"、"??" → "?"，给列表一个紧凑的状态徽标。
+    var shortStatus: String {
+        let cleaned = status.replacingOccurrences(of: ".", with: "")
+        if cleaned == "??" { return "?" }
+        return cleaned.isEmpty ? "·" : cleaned
+    }
+}
+
+/// GET /api/sessions/:id/git-status 响应（服务端 GitStatusResult 子集）。
+struct GitStatusResult: Decodable {
+    struct LastCommit: Decodable {
+        let hash: String
+        let shortHash: String
+        let subject: String
+    }
+
+    let isGit: Bool
+    let branch: String?
+    let modifiedCount: Int?
+    let files: [GitFileEntry]?
+    let initialCommit: Bool?
+    let upstream: String?
+    let ahead: Int?
+    let behind: Int?
+    let lastCommit: LastCommit?
+    let latestTag: String?
+    let hasSubmodule: Bool?
+    let error: String?
+}
+
+/// POST /api/sessions/:id/quick-commit 响应。
+struct QuickCommitResult: Decodable {
+    struct Commit: Decodable {
+        let hash: String
+        let message: String
+    }
+    struct Tag: Decodable {
+        let name: String
+    }
+    struct SubmoduleCommit: Decodable {
+        let path: String
+        let hash: String
+    }
+
+    let ok: Bool
+    let commit: Commit?
+    let tag: Tag?
+    let pushed: Bool?
+    let pushError: String?
+    let submoduleCommits: [SubmoduleCommit]?
+}

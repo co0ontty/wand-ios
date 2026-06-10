@@ -4,11 +4,17 @@ import SwiftUI
 /// 输入栏放在 safeAreaInset(edge: .bottom)，键盘升降由系统接管——
 /// 这正是 WebView 方案里键盘重叠/状态栏错位问题的根治点。
 struct ChatView: View {
+    private let sessionId: String
+    private let api: WandAPI
+
     @StateObject private var store: ChatStore
     @State private var draft = ""
+    @State private var showQuickCommit = false
     @FocusState private var inputFocused: Bool
 
     init(sessionId: String, api: WandAPI) {
+        self.sessionId = sessionId
+        self.api = api
         _store = StateObject(wrappedValue: ChatStore(sessionId: sessionId, api: api))
     }
 
@@ -34,9 +40,21 @@ struct ChatView: View {
         .navigationTitle(store.snapshot?.displayTitle ?? "会话")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) { statusBadge }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                HStack(spacing: 14) {
+                    Button { showQuickCommit = true } label: {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(Theme.brand)
+                    }
+                    statusBadge
+                }
+            }
         }
         .safeAreaInset(edge: .bottom) { bottomBar }
+        .sheet(isPresented: $showQuickCommit) {
+            GitQuickCommitView(sessionId: sessionId, api: api)
+        }
         .onAppear { store.start() }
         .onDisappear { store.shutdown() }
         .overlay(alignment: .top) { toastView }

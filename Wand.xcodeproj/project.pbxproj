@@ -25,6 +25,7 @@
 		A1000000000000000000AC06 /* SessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC06 /* SessionListView.swift */; };
 		A1000000000000000000AC07 /* NewSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC07 /* NewSessionView.swift */; };
 		A1000000000000000000AC08 /* NativeRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC08 /* NativeRootView.swift */; };
+		A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC09 /* GitQuickCommitView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -45,6 +46,7 @@
 		A1000000000000000000BC06 /* SessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC07 /* NewSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC08 /* NativeRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRootView.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC09 /* GitQuickCommitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitQuickCommitView.swift; sourceTree = "<group>"; };
 		A100000000000000000000D1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A100000000000000000000E1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A100000000000000000000F1 /* Wand.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Wand.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -89,6 +91,7 @@
 				A1000000000000000000BC06 /* SessionListView.swift */,
 				A1000000000000000000BC07 /* NewSessionView.swift */,
 				A1000000000000000000BC08 /* NativeRootView.swift */,
+				A1000000000000000000BC09 /* GitQuickCommitView.swift */,
 				A100000000000000000000D1 /* Assets.xcassets */,
 				A100000000000000000000E1 /* Info.plist */,
 			);
@@ -190,6 +193,7 @@
 				A1000000000000000000AC06 /* SessionListView.swift in Sources */,
 				A1000000000000000000AC07 /* NewSessionView.swift in Sources */,
 				A1000000000000000000AC08 /* NativeRootView.swift in Sources */,
+				A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

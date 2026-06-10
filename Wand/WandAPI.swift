@@ -30,13 +30,13 @@ final class WandAPI {
 
     // MARK: - 基础请求
 
-    private func makeRequest(method: String, path: String, body: [String: Any]?) throws -> URLRequest {
+    private func makeRequest(method: String, path: String, body: [String: Any]?, timeout: TimeInterval = 30) throws -> URLRequest {
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw APIError.invalidURL
         }
         var req = URLRequest(url: url)
         req.httpMethod = method
-        req.timeoutInterval = 30
+        req.timeoutInterval = timeout
         req.cachePolicy = .reloadIgnoringLocalCacheData
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -60,8 +60,8 @@ final class WandAPI {
     }
 
     /// 带 401 自动重登的请求入口。
-    private func requestData(method: String, path: String, body: [String: Any]? = nil) async throws -> Data {
-        let req = try makeRequest(method: method, path: path, body: body)
+    private func requestData(method: String, path: String, body: [String: Any]? = nil, timeout: TimeInterval = 30) async throws -> Data {
+        let req = try makeRequest(method: method, path: path, body: body, timeout: timeout)
         var (data, http) = try await perform(req)
         if http.statusCode == 401, let token, !token.isEmpty {
             // session cookie 过期：用 appToken 重新登录一次，cookie 注入共享存储后重试。
@@ -86,8 +86,8 @@ final class WandAPI {
         return data
     }
 
-    private func request<T: Decodable>(_ type: T.Type, method: String, path: String, body: [String: Any]? = nil) async throws -> T {
-        let data = try await requestData(method: method, path: path, body: body)
+    private func request<T: Decodable>(_ type: T.Type, method: String, path: String, body: [String: Any]? = nil, timeout: TimeInterval = 30) async throws -> T {
+        let data = try await requestData(method: method, path: path, body: body, timeout: timeout)
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
@@ -171,6 +171,40 @@ final class WandAPI {
         if let mode, !mode.isEmpty { body["mode"] = mode }
         if let initialInput, !initialInput.isEmpty { body["initialInput"] = initialInput }
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/commands", body: body)
+    }
+
+    // MARK: - Git 快速提交
+
+    func gitStatus(sessionId: String) async throws -> GitStatusResult {
+        try await request(GitStatusResult.self, method: "GET", path: "/api/sessions/\(sessionId)/git-status")
+    }
+
+    /// 快速提交：message 留空（customMessage = nil）时服务端用 AI 根据 staged diff 生成；
+    /// `autoTag` 时再让 AI 推荐下一个语义化版本号。AI 链路服务端单次最长 60s
+    /// （message + tag 两次）+ push 30s，所以请求超时放宽到 180s。
+    func quickCommit(
+        sessionId: String,
+        customMessage: String?,
+        tag: String?,
+        autoTag: Bool,
+        push: Bool,
+        submodule: Bool
+    ) async throws -> QuickCommitResult {
+        var body: [String: Any] = [
+            "autoMessage": customMessage == nil,
+            "autoTag": autoTag,
+            "push": push,
+            "submodule": submodule,
+        ]
+        if let customMessage { body["customMessage"] = customMessage }
+        if let tag, !tag.isEmpty { body["tag"] = tag }
+        return try await request(
+            QuickCommitResult.self,
+            method: "POST",
+            path: "/api/sessions/\(sessionId)/quick-commit",
+            body: body,
+            timeout: 180
+        )
     }
 
     // MARK: - 目录与配置
