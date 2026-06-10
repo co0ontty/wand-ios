@@ -17,6 +17,14 @@
 		A100000000000000000000AA /* WandAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000BA /* WandAuth.swift */; };
 		A100000000000000000000AB /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000BB /* Theme.swift */; };
 		A100000000000000000000C1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000D1 /* Assets.xcassets */; };
+		A1000000000000000000AC01 /* WandModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC01 /* WandModels.swift */; };
+		A1000000000000000000AC02 /* WandAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC02 /* WandAPI.swift */; };
+		A1000000000000000000AC03 /* WandSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC03 /* WandSocket.swift */; };
+		A1000000000000000000AC04 /* ChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC04 /* ChatStore.swift */; };
+		A1000000000000000000AC05 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC05 /* ChatView.swift */; };
+		A1000000000000000000AC06 /* SessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC06 /* SessionListView.swift */; };
+		A1000000000000000000AC07 /* NewSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC07 /* NewSessionView.swift */; };
+		A1000000000000000000AC08 /* NativeRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC08 /* NativeRootView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +37,14 @@
 		A100000000000000000000B9 /* SelfSignedSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfSignedSession.swift; sourceTree = "<group>"; };
 		A100000000000000000000BA /* WandAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandAuth.swift; sourceTree = "<group>"; };
 		A100000000000000000000BB /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC01 /* WandModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandModels.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC02 /* WandAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandAPI.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC03 /* WandSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandSocket.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC04 /* ChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStore.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC05 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC06 /* SessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListView.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC07 /* NewSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionView.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC08 /* NativeRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRootView.swift; sourceTree = "<group>"; };
 		A100000000000000000000D1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A100000000000000000000E1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A100000000000000000000F1 /* Wand.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Wand.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -65,6 +81,14 @@
 				A100000000000000000000B9 /* SelfSignedSession.swift */,
 				A100000000000000000000BA /* WandAuth.swift */,
 				A100000000000000000000BB /* Theme.swift */,
+				A1000000000000000000BC01 /* WandModels.swift */,
+				A1000000000000000000BC02 /* WandAPI.swift */,
+				A1000000000000000000BC03 /* WandSocket.swift */,
+				A1000000000000000000BC04 /* ChatStore.swift */,
+				A1000000000000000000BC05 /* ChatView.swift */,
+				A1000000000000000000BC06 /* SessionListView.swift */,
+				A1000000000000000000BC07 /* NewSessionView.swift */,
+				A1000000000000000000BC08 /* NativeRootView.swift */,
 				A100000000000000000000D1 /* Assets.xcassets */,
 				A100000000000000000000E1 /* Info.plist */,
 			);
@@ -158,6 +182,14 @@
 				A100000000000000000000A9 /* SelfSignedSession.swift in Sources */,
 				A100000000000000000000AA /* WandAuth.swift in Sources */,
 				A100000000000000000000AB /* Theme.swift in Sources */,
+				A1000000000000000000AC01 /* WandModels.swift in Sources */,
+				A1000000000000000000AC02 /* WandAPI.swift in Sources */,
+				A1000000000000000000AC03 /* WandSocket.swift in Sources */,
+				A1000000000000000000AC04 /* ChatStore.swift in Sources */,
+				A1000000000000000000AC05 /* ChatView.swift in Sources */,
+				A1000000000000000000AC06 /* SessionListView.swift in Sources */,
+				A1000000000000000000AC07 /* NewSessionView.swift in Sources */,
+				A1000000000000000000AC08 /* NativeRootView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
