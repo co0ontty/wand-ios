@@ -109,5 +109,8 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         NSLog("[Wand] navigation finished: %@", webView.url?.absoluteString ?? "?")
         hasLoadedOnce = true
         model.phase = .ready
+        // WebContent 进程重建会换一个新的 WKContentView，键盘顶栏会复活，
+        // 每次导航完成后重申一次（幂等）。
+        webView.wandHideKeyboardAccessoryBar()
     }
 }

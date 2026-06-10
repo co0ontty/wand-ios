@@ -139,6 +139,54 @@ private struct ErrorOverlay: View {
     }
 }
 
+// MARK: - 键盘 accessory bar 移除
+
+/// 仅用于借一份「返回 nil 的 inputAccessoryView getter」实现，灌给动态子类。
+private final class WandNoAccessoryStub: NSObject {
+    @objc var inputAccessoryView: UIView? { nil }
+}
+
+extension WKWebView {
+    /// 去掉系统给网页输入框配的键盘顶栏（「∧ ∨ 完成」那条）。原生聊天 App 都没有
+    /// 这条栏，它还会把键盘整体垫高 ~44pt，导致页面按 visualViewport 排版后输入框
+    /// 被它盖住半截。做法是经典 swizzle：找到 scrollView 里的 WKContentView，
+    /// 动态派生一个 inputAccessoryView 返回 nil 的子类并替换 isa。
+    /// 幂等：重复调用（didFinish 每次导航都会触发）不会叠加派生。
+    func wandHideKeyboardAccessoryBar() {
+        guard let target = scrollView.subviews.first(where: {
+            String(describing: type(of: $0)).hasPrefix("WKContent")
+        }) else { return }
+        guard let currentClass = object_getClass(target) else { return }
+        let currentName = NSStringFromClass(currentClass)
+        if currentName.hasSuffix("_WandNoAccessory") { return }
+
+        let newName = currentName + "_WandNoAccessory"
+        let newClass: AnyClass
+        if let cached = NSClassFromString(newName) {
+            newClass = cached
+        } else {
+            guard let allocated = objc_allocateClassPair(currentClass, newName, 0) else { return }
+            let selector = #selector(getter: UIResponder.inputAccessoryView)
+            if let stub = class_getInstanceMethod(
+                WandNoAccessoryStub.self,
+                #selector(getter: WandNoAccessoryStub.inputAccessoryView)
+            ) {
+                class_addMethod(
+                    allocated,
+                    selector,
+                    method_getImplementation(stub),
+                    method_getTypeEncoding(stub)
+                )
+            }
+            objc_registerClassPair(allocated)
+            newClass = allocated
+        }
+        object_setClass(target, newClass)
+        // 若键盘已弹出，刷新一次输入视图让顶栏立刻消失。
+        target.reloadInputViews()
+    }
+}
+
 // MARK: - WKWebView 桥接
 
 struct WebViewRepresentable: UIViewRepresentable {
@@ -164,6 +212,12 @@ struct WebViewRepresentable: UIViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        // 聊天 App 式键盘手感：向下拖动内容即收起键盘；整页不做橡皮筋回弹
+        //（页面自身是 fixed 布局，回弹只会拖出底色）。
+        webView.scrollView.keyboardDismissMode = .interactive
+        webView.scrollView.bounces = false
+        // 去掉键盘上方系统自带的「∧ ∨ 完成」工具栏。
+        webView.wandHideKeyboardAccessoryBar()
         webView.backgroundColor = Theme.uiBackground
         webView.scrollView.backgroundColor = Theme.uiBackground
         webView.isOpaque = false
