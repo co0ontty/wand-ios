@@ -19,7 +19,7 @@ private enum WandColor {
     static let done = Color.green
 }
 
-private func tint(for state: SessionActivityAttributes.ContentState) -> Color {
+private func stateTint(for state: SessionActivityAttributes.ContentState) -> Color {
     if state.needsPermission { return WandColor.permission }
     if state.isDone { return WandColor.done }
     return WandColor.brand
@@ -66,11 +66,11 @@ struct SessionLiveActivityWidget: Widget {
             } compactTrailing: {
                 Image(systemName: context.state.statusSymbol)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(tint(for: context.state))
+                    .foregroundColor(stateTint(for: context.state))
             } minimal: {
                 Image(systemName: context.state.statusSymbol)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(tint(for: context.state))
+                    .foregroundColor(stateTint(for: context.state))
             }
             .keylineTint(WandColor.brand)
         }
@@ -91,7 +91,7 @@ struct SessionLiveActivityWidget: Widget {
             Text(state.statusText)
                 .font(.system(size: 12, weight: .medium))
         }
-        .foregroundColor(tint(for: state))
+        .foregroundColor(stateTint(for: state))
     }
 }
 
@@ -120,7 +120,7 @@ private struct LockScreenActivityView: View {
                             .lineLimit(1)
                     }
                 }
-                .foregroundColor(tint(for: context.state))
+                .foregroundColor(stateTint(for: context.state))
             }
             Spacer(minLength: 0)
             if context.state.isResponding {
