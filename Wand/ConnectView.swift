@@ -12,6 +12,7 @@ struct ConnectView: View {
     @State private var input: String = ""
     @State private var error: String? = nil
     @State private var isConnecting = false
+    @State private var showScanner = false
     @FocusState private var inputFocused: Bool
 
     private var trimmedInput: String {
@@ -45,6 +46,13 @@ struct ConnectView: View {
         }
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { inputFocused = true }
+        }
+        .sheet(isPresented: $showScanner) {
+            QRScannerSheet { code in
+                input = code
+                error = nil
+                connect()
+            }
         }
     }
 
@@ -156,19 +164,41 @@ struct ConnectView: View {
     }
 
     private var connectButton: some View {
-        Button(action: connect) {
-            HStack(spacing: 8) {
-                if isConnecting {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(.white)
+        HStack(spacing: 10) {
+            Button(action: connect) {
+                HStack(spacing: 8) {
+                    if isConnecting {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                    }
+                    Text(isConnecting ? "连接中…" : "连接")
                 }
-                Text(isConnecting ? "连接中…" : "连接")
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity)
+            .buttonStyle(WandPrimaryButtonStyle())
+            .disabled(isConnecting || trimmedInput.isEmpty)
+
+            Button {
+                inputFocused = false
+                showScanner = true
+            } label: {
+                Image(systemName: "qrcode.viewfinder")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(Theme.brand)
+                    .frame(width: 48, height: 48)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Theme.surface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Theme.border, lineWidth: 1)
+                    )
+            }
+            .disabled(isConnecting)
+            .accessibilityLabel("扫码连接")
         }
-        .buttonStyle(WandPrimaryButtonStyle())
-        .disabled(isConnecting || trimmedInput.isEmpty)
     }
 
     private var recentSection: some View {

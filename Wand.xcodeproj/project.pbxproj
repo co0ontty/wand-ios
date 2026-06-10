@@ -26,7 +26,38 @@
 		A1000000000000000000AC07 /* NewSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC07 /* NewSessionView.swift */; };
 		A1000000000000000000AC08 /* NativeRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC08 /* NativeRootView.swift */; };
 		A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC09 /* GitQuickCommitView.swift */; };
+		B2000000000000000000AC01 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC01 /* QRScannerView.swift */; };
+		B2000000000000000000AC02 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC02 /* SettingsView.swift */; };
+		B2000000000000000000AC03 /* SessionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC03 /* SessionActivityAttributes.swift */; };
+		B2000000000000000000AC04 /* SessionLiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC04 /* SessionLiveActivityController.swift */; };
+		B2000000000000000000AC13 /* SessionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC03 /* SessionActivityAttributes.swift */; };
+		B2000000000000000000AC05 /* WandWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC05 /* WandWidgetsBundle.swift */; };
+		B2000000000000000000AC06 /* WandWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B2000000000000000000F101 /* WandWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		B2000000000000000000C101 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000FA00 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B2000000000000000000F701;
+			remoteInfo = WandWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		B2000000000000000000E101 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				B2000000000000000000AC06 /* WandWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		A100000000000000000000B1 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
@@ -47,6 +78,13 @@
 		A1000000000000000000BC07 /* NewSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC08 /* NativeRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRootView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC09 /* GitQuickCommitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitQuickCommitView.swift; sourceTree = "<group>"; };
+		B2000000000000000000BC01 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
+		B2000000000000000000BC02 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		B2000000000000000000BC03 /* SessionActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActivityAttributes.swift; sourceTree = "<group>"; };
+		B2000000000000000000BC04 /* SessionLiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLiveActivityController.swift; sourceTree = "<group>"; };
+		B2000000000000000000BC05 /* WandWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandWidgetsBundle.swift; sourceTree = "<group>"; };
+		B2000000000000000000BC06 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B2000000000000000000F101 /* WandWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WandWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A100000000000000000000D1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A100000000000000000000E1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A100000000000000000000F1 /* Wand.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Wand.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -60,6 +98,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B2000000000000000000F301 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -67,6 +112,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000000000000000000F500 /* Wand */,
+				B2000000000000000000F501 /* WandWidgets */,
 				A1000000000000000000F600 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -92,6 +138,10 @@
 				A1000000000000000000BC07 /* NewSessionView.swift */,
 				A1000000000000000000BC08 /* NativeRootView.swift */,
 				A1000000000000000000BC09 /* GitQuickCommitView.swift */,
+				B2000000000000000000BC01 /* QRScannerView.swift */,
+				B2000000000000000000BC02 /* SettingsView.swift */,
+				B2000000000000000000BC03 /* SessionActivityAttributes.swift */,
+				B2000000000000000000BC04 /* SessionLiveActivityController.swift */,
 				A100000000000000000000D1 /* Assets.xcassets */,
 				A100000000000000000000E1 /* Info.plist */,
 			);
@@ -102,8 +152,18 @@
 			isa = PBXGroup;
 			children = (
 				A100000000000000000000F1 /* Wand.app */,
+				B2000000000000000000F101 /* WandWidgets.appex */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		B2000000000000000000F501 /* WandWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				B2000000000000000000BC05 /* WandWidgetsBundle.swift */,
+				B2000000000000000000BC06 /* Info.plist */,
+			);
+			path = WandWidgets;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -116,15 +176,34 @@
 				A1000000000000000000F800 /* Sources */,
 				A1000000000000000000F300 /* Frameworks */,
 				A1000000000000000000F900 /* Resources */,
+				B2000000000000000000E101 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				B2000000000000000000D101 /* PBXTargetDependency */,
 			);
 			name = Wand;
 			productName = Wand;
 			productReference = A100000000000000000000F1 /* Wand.app */;
 			productType = "com.apple.product-type.application";
+		};
+		B2000000000000000000F701 /* WandWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B2000000000000000000FB01 /* Build configuration list for PBXNativeTarget "WandWidgets" */;
+			buildPhases = (
+				B2000000000000000000F801 /* Sources */,
+				B2000000000000000000F301 /* Frameworks */,
+				B2000000000000000000F901 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = WandWidgets;
+			productName = WandWidgets;
+			productReference = B2000000000000000000F101 /* WandWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -137,6 +216,9 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					A1000000000000000000F700 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					B2000000000000000000F701 = {
 						CreatedOnToolsVersion = 15.0;
 					};
 				};
@@ -156,6 +238,7 @@
 			projectRoot = "";
 			targets = (
 				A1000000000000000000F700 /* Wand */,
+				B2000000000000000000F701 /* WandWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -166,6 +249,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				A100000000000000000000C1 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2000000000000000000F901 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -194,10 +284,31 @@
 				A1000000000000000000AC07 /* NewSessionView.swift in Sources */,
 				A1000000000000000000AC08 /* NativeRootView.swift in Sources */,
 				A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */,
+				B2000000000000000000AC01 /* QRScannerView.swift in Sources */,
+				B2000000000000000000AC02 /* SettingsView.swift in Sources */,
+				B2000000000000000000AC03 /* SessionActivityAttributes.swift in Sources */,
+				B2000000000000000000AC04 /* SessionLiveActivityController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2000000000000000000F801 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B2000000000000000000AC05 /* WandWidgetsBundle.swift in Sources */,
+				B2000000000000000000AC13 /* SessionActivityAttributes.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B2000000000000000000D101 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B2000000000000000000F701 /* WandWidgets */;
+			targetProxy = B2000000000000000000C101 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A100000000000000000000D2 /* Debug */ = {
@@ -316,6 +427,62 @@
 			};
 			name = Release;
 		};
+		B2000000000000000000D401 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 10000;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WandWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wand.app.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B2000000000000000000D501 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 10000;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WandWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wand.app.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -324,6 +491,15 @@
 			buildConfigurations = (
 				A100000000000000000000D4 /* Debug */,
 				A100000000000000000000D5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B2000000000000000000FB01 /* Build configuration list for PBXNativeTarget "WandWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B2000000000000000000D401 /* Debug */,
+				B2000000000000000000D501 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

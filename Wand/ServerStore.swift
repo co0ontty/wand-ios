@@ -13,6 +13,7 @@ final class ServerStore: ObservableObject {
     private let serverURLKey = "wand.serverURL"
     private let tokenKey = "wand.token"
     private let recentInputsKey = "wand.recentInputs"
+    private let liveActivityKey = "wand.liveActivityEnabled"
 
     private static let maxRecent = 6
 
@@ -20,6 +21,10 @@ final class ServerStore: ObservableObject {
     @Published private(set) var token: String?
     /// 最近一次成功连接用到的"原始输入"（连接码或地址），供 ConnectView 一键重连。
     @Published private(set) var recentInputs: [String] = []
+    /// 灵动岛 / 锁屏 Live Activity 开关（iOS 16.1+ 生效），默认开。
+    @Published var liveActivityEnabled: Bool {
+        didSet { defaults.set(liveActivityEnabled, forKey: liveActivityKey) }
+    }
 
     init() {
         if let s = defaults.string(forKey: serverURLKey), let u = URL(string: s) {
@@ -27,6 +32,7 @@ final class ServerStore: ObservableObject {
         }
         self.token = defaults.string(forKey: tokenKey)
         self.recentInputs = defaults.stringArray(forKey: recentInputsKey) ?? []
+        self.liveActivityEnabled = defaults.object(forKey: liveActivityKey) as? Bool ?? true
     }
 
     func connect(serverURL: URL, token: String?) {

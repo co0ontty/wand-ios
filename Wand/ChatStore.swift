@@ -28,6 +28,11 @@ final class ChatStore: ObservableObject {
     private let socket: WandSocket
     private var started = false
 
+    // Live Activity（灵动岛）状态：started = 本会话当前有活动；
+    // sawResponding 防止 PTY 会话在 isResponding 尚未变 true 时被立即收掉。
+    private var liveActivityStarted = false
+    private var liveActivitySawResponding = false
+
     var isStructured: Bool { snapshot?.isStructured ?? true }
     var sessionEnded: Bool { ["exited", "failed", "stopped"].contains(status) }
 
@@ -68,6 +73,11 @@ final class ChatStore: ObservableObject {
 
     func shutdown() {
         socket.close()
+        if liveActivityStarted {
+            SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: true)
+            liveActivityStarted = false
+            liveActivitySawResponding = false
+        }
     }
 
     // MARK: - 推送合流
@@ -82,6 +92,7 @@ final class ChatStore: ObservableObject {
         permissionBlocked = snap.permissionBlocked ?? (snap.pendingEscalation != nil)
         currentTaskTitle = snap.currentTaskTitle
         if snap.pendingEscalation != nil { legacyPermissionPrompt = nil }
+        refreshLiveActivity()
     }
 
     private func handle(_ event: WsIncoming) {
@@ -110,6 +121,33 @@ final class ChatStore: ObservableObject {
             if let message = event.error, !message.isEmpty { toast = message }
         default:
             break
+        }
+        refreshLiveActivity()
+    }
+
+    // MARK: - Live Activity（灵动岛）
+
+    /// 按当前状态同步 Live Activity：回复中 / 待授权更新，结束（或回到空闲）收掉。
+    private func refreshLiveActivity() {
+        guard liveActivityStarted else { return }
+        if sessionEnded {
+            SessionLiveActivityController.shared.end(sessionId: sessionId)
+            liveActivityStarted = false
+            liveActivitySawResponding = false
+        } else if permissionBlocked {
+            liveActivitySawResponding = true
+            SessionLiveActivityController.shared.update(
+                sessionId: sessionId, state: .permission, taskTitle: currentTaskTitle
+            )
+        } else if isResponding {
+            liveActivitySawResponding = true
+            SessionLiveActivityController.shared.update(
+                sessionId: sessionId, state: .responding, taskTitle: currentTaskTitle
+            )
+        } else if liveActivitySawResponding {
+            SessionLiveActivityController.shared.end(sessionId: sessionId)
+            liveActivityStarted = false
+            liveActivitySawResponding = false
         }
     }
 
@@ -191,6 +229,14 @@ final class ChatStore: ObservableObject {
             messages.append(ConversationTurn(role: "user", content: [.text(text: trimmed, subagent: nil)]))
             isResponding = true
         }
+        // 起一条灵动岛活动（开关关闭 / iOS < 16.1 时是 no-op）。
+        SessionLiveActivityController.shared.start(
+            sessionId: sessionId,
+            title: snapshot?.displayTitle ?? "Wand 会话",
+            taskTitle: currentTaskTitle
+        )
+        liveActivityStarted = true
+        liveActivitySawResponding = isStructured
         Task {
             do {
                 if isStructured {

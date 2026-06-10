@@ -79,17 +79,25 @@ struct ChatView: View {
                 .padding(.bottom, 6)
             }
             .modifier(DismissKeyboardOnDrag())
+            .onAppear { pinToBottom(proxy) }
             .onChange(of: store.messages.count) { _ in
                 withAnimation(.easeOut(duration: 0.15)) {
                     proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
             }
             .onChange(of: store.loading) { loading in
-                if !loading {
-                    DispatchQueue.main.async {
-                        proxy.scrollTo("chat-bottom", anchor: .bottom)
-                    }
-                }
+                if !loading { pinToBottom(proxy) }
+            }
+        }
+    }
+
+    /// 打开会话时把列表钉到底部。LazyVStack 首帧尚未完成布局，单次 scrollTo
+    /// 常停在半中间——立即滚一次，再按递增延迟补几次，直到布局稳定。
+    private func pinToBottom(_ proxy: ScrollViewProxy) {
+        proxy.scrollTo("chat-bottom", anchor: .bottom)
+        for delay in [0.05, 0.15, 0.35, 0.7] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                proxy.scrollTo("chat-bottom", anchor: .bottom)
             }
         }
     }

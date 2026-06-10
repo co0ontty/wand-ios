@@ -10,6 +10,7 @@ struct NativeRootView: View {
     @EnvironmentObject private var store: ServerStore
     @State private var phase: Phase = .authenticating
     @State private var showWebFallback = false
+    @State private var showSettings = false
 
     private enum Phase: Equatable {
         case authenticating
@@ -57,6 +58,11 @@ struct NativeRootView: View {
                             ToolbarItem(placement: .navigationBarLeading) {
                                 Menu {
                                     Button {
+                                        showSettings = true
+                                    } label: {
+                                        Label("设置", systemImage: "gearshape")
+                                    }
+                                    Button {
                                         showWebFallback = true
                                     } label: {
                                         Label("打开网页版", systemImage: "safari")
@@ -81,6 +87,15 @@ struct NativeRootView: View {
             WebFallbackContainer(serverURL: serverURL, token: token) {
                 showWebFallback = false
             }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(serverURL: serverURL, token: token) {
+                // sheet 收起动画结束后再呈现 fullScreenCover，避免双 present 冲突。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    showWebFallback = true
+                }
+            }
+            .environmentObject(store)
         }
         .onAppear { authenticate() }
     }
