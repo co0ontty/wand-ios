@@ -1,6 +1,9 @@
 # iOS 客户端
 
-Wand 的 iOS 原生壳，SwiftUI + WKWebView。结构对称 `macos/` 与 `android/` 目录。
+Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权限审批全部原生实现，
+直连 wand 服务端的 REST + WebSocket 协议；WKWebView 仅作为「网页版」兜底入口保留
+（设置、文件浏览等原生未覆盖的功能）。与 `macos/`、`android/` 的 WebView 壳不同，
+iOS 端原生化是为了根治 WebView 在移动端的键盘重叠、状态栏错位等问题。
 
 核心目标：**不充钱买 Apple Developer 账号（$99/年）也能把它装进自己的 iPhone。**
 
@@ -8,7 +11,8 @@ Wand 的 iOS 原生壳，SwiftUI + WKWebView。结构对称 `macos/` 与 `androi
 
 - 工程代码放在 `ios/Wand/`
 - `.app` / `.ipa` 构建产物**不要提交到仓库**（已在 `.gitignore`）
-- 与 macOS/Android 壳共享同一套连接逻辑：连接码（base64 `url#token`）→ `/api/login` 拿 cookie → WebView 加载 SPA
+- 与 macOS/Android 壳共享同一套连接逻辑：连接码（base64 `url#token`）→ `/api/login` 拿 cookie；
+  原生界面用同一份 cookie 调 `/api/*` 与 `/ws`（兜底 WebView 同样注入这份 cookie）
 
 ## 与 macOS/Android 壳的关键差异：没有应用内自动更新
 
@@ -134,17 +138,39 @@ ios/
 │   └── generate-icons.swift   # 生成 1024 单尺寸 App 图标
 └── Wand/
     ├── App.swift              # @main 入口（WindowGroup）
-    ├── ContentView.swift      # 容器：已连接→WebView+切换按钮 / 未连接→ConnectView
+    ├── ContentView.swift      # 容器：已连接→NativeRootView / 未连接→ConnectView
     ├── ConnectView.swift      # 连接界面（连接码 / 地址 + 最近连接）
-    ├── WebContainerView.swift # UIViewRepresentable 包 WKWebView + 加载/错误覆盖层
-    ├── WebBridge.swift        # 导航委托 + 自签名证书放行 + JS 桥（无自动更新）
+    ├── NativeRootView.swift   # 原生根视图：token 登录引导 + 列表导航 + 网页版兜底入口
+    ├── SessionListView.swift  # 会话列表（/api/sessions 轮询 + 下拉刷新 + 滑动删除）
+    ├── ChatView.swift         # 聊天视图：消息块渲染 + 原生输入栏 + 权限审批卡片
+    ├── ChatStore.swift        # 单会话状态机：WS 订阅、增量合流、发送/停止/权限决策
+    ├── NewSessionView.swift   # 新建会话（最近路径 / 目录浏览器 / 类型与模式）
+    ├── WandAPI.swift          # REST 客户端（401 自动用 appToken 重登重试）
+    ├── WandSocket.swift       # /ws 客户端：seq 间隙 resync、心跳看门狗、退避重连
+    ├── WandModels.swift       # 协议 Codable 模型（SessionSnapshot / ConversationTurn / WS 消息）
+    ├── WebContainerView.swift # 兜底 WebView：UIViewRepresentable 包 WKWebView + 覆盖层
+    ├── WebBridge.swift        # WebView 导航委托 + 自签名证书放行 + JS 桥
     ├── ServerStore.swift      # UserDefaults 持久化连接状态
     ├── WandAuth.swift         # 连接码解码 / token 登录 / 可达性探测（与 macOS 共享逻辑）
-    ├── SelfSignedSession.swift# 放行 wand 自签名 HTTPS 的 URLSession
+    ├── SelfSignedSession.swift# 放行 wand 自签名 HTTPS 的 URLSession（REST/WS 共用）
     ├── Theme.swift            # Claude 珊瑚橙主题 + 复用按钮样式
     ├── Info.plist             # ATS 放行任意加载 + 本地网络权限说明
     └── Assets.xcassets/       # AppIcon / AccentColor
 ```
+
+## 原生客户端协议对接（速查）
+
+- 登录：`POST /api/login` `{appToken}` → session cookie（ephemeral 存储，冷启动后由
+  `NativeRootView` 重新登录一次；REST 401 时 `WandAPI` 也会自动重登重试）
+- 会话列表：`GET /api/sessions`（slim，无 messages）；详情 `GET /api/sessions/:id?format=chat`
+- 发消息：`POST /api/sessions/:id/input` —— 结构化会话发原文，PTY 会话发 `text + "\n"` 且带 `view:"chat"`
+- 停止回复：结构化 `POST /api/sessions/:id/stop`；PTY 发 Esc（`` + `shortcutKey:"esc"`）
+- 权限：`pendingEscalation` → `POST /api/sessions/:id/escalations/:requestId/resolve`
+  `{resolution: approve_once|approve_turn|deny}`；PTY 旧式提示走 `approve-permission`/`deny-permission`
+- WebSocket：`/ws` + cookie，发 `{type:"subscribe",sessionId}` 收 `init` 全量快照；
+  `output` 增量按浏览器端同款规则合流（全量 `messages` 优先，`incremental+lastMessage` 末条同 role 替换）；
+  `seq` 出现间隙或收到 `resync_required` 时发 `{type:"resync"}` 要全量
+- 聊天视图对 PTY 会话同样可用：服务端 `ClaudePtyBridge` 已把 PTY 输出解析成结构化消息推送
 
 ## 设计要点
 
