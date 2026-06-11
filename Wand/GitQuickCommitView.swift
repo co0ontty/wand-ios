@@ -577,9 +577,13 @@ private struct MagneticDockView: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            field
-            launchPad
+        GeometryReader { geo in
+            HStack(spacing: 8) {
+                field
+                    .frame(width: max(0, geo.size.width - 84))
+                launchPad
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .leading)
         }
     }
 

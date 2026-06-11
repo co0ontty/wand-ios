@@ -11,8 +11,9 @@ import UIKit
 /// 输入栏所需的额外底部 padding；配合 .ignoresSafeArea(.keyboard) 关掉系统避让，
 /// 行为在 iOS 15+ 上完全确定，不再依赖系统启发式。
 final class KeyboardObserver: ObservableObject {
-    /// 输入栏需要额外抬升的高度 = 键盘遮挡高度 − 底部安全区（home 指示条）。
-    /// 键盘收起 / 外接键盘时为 0。
+    /// 输入栏需要额外抬升的高度 = 键盘与窗口的完整重叠高度。
+    /// ChatView 的 safeAreaInset 已经消费底部安全区；这里再次扣除会让输入栏
+    /// 少抬一截，导致下半部仍落在键盘后面。
     @Published private(set) var lift: CGFloat = 0
 
     private var tokens: [NSObjectProtocol] = []
@@ -51,7 +52,7 @@ final class KeyboardObserver: ObservableObject {
         let frame = window.convert(endValue.cgRectValue, from: window.screen.coordinateSpace)
         let intersection = window.bounds.intersection(frame)
         let overlap = intersection.isNull ? 0 : intersection.height
-        apply(max(0, overlap - window.safeAreaInsets.bottom), note: note)
+        apply(max(0, overlap), note: note)
     }
 
     private func apply(_ newLift: CGFloat, note: Notification) {

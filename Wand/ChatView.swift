@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// 原生聊天视图：结构化消息渲染 + 原生输入栏 + 权限审批卡片。
@@ -13,6 +14,7 @@ struct ChatView: View {
     @StateObject private var keyboard = KeyboardObserver()
     @State private var draft = ""
     @State private var showQuickCommit = false
+    @State private var followsLatest = true
     @FocusState private var inputFocused: Bool
 
     init(sessionId: String, api: WandAPI) {
@@ -85,29 +87,77 @@ struct ChatView: View {
                 .padding(.bottom, 6)
             }
             .modifier(DismissKeyboardOnDrag())
-            .onAppear { pinToBottom(proxy) }
-            .onChange(of: store.messages.count) { _ in
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+            // 用户一开始拖动就暂停跟随，避免高频流式更新在手势完成前
+            // 把列表抢回底部。恢复跟随只通过右下角按钮。
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { _ in followsLatest = false }
+            )
+            .overlay(alignment: .bottomTrailing) {
+                if !followsLatest {
+                    jumpToLatestButton(proxy)
                 }
+            }
+            .onAppear { pinToBottom(proxy) }
+            // 流式回复会原地替换最后一条消息，messages.count 不变；
+            // 直接订阅数组发布事件，跟随状态下每次内容更新都定位到底部。
+            .onReceive(store.$messages.dropFirst()) { _ in
+                scrollToLatestIfFollowing(proxy)
+            }
+            .onChange(of: store.isResponding) { _ in
+                scrollToLatestIfFollowing(proxy)
             }
             .onChange(of: store.loading) { loading in
                 if !loading { pinToBottom(proxy) }
             }
-            // 键盘弹出 → 输入栏抬升、可视区变矮，把列表重新钉到底部，
-            // 否则最后几条消息会被键盘挡住。收起时内容只会多露出来，无需滚动。
+            // 键盘弹出 → 输入栏抬升、可视区变矮，把列表重新钉到底部；
+            // 用户正在看历史消息时不改变当前位置。
             .onChange(of: keyboard.lift) { lift in
-                if lift > 0 { pinToBottom(proxy) }
+                if lift > 0 && followsLatest { pinToBottom(proxy) }
             }
+        }
+    }
+
+    private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
+        Button {
+            followsLatest = true
+            pinToBottom(proxy, animated: true)
+        } label: {
+            Image(systemName: "arrow.down")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 42, height: 42)
+                .background(Circle().fill(Theme.brand))
+                .overlay(Circle().stroke(Color.white.opacity(0.2), lineWidth: 1))
+                .shadow(color: Color.black.opacity(0.22), radius: 8, y: 3)
+        }
+        .accessibilityLabel("回到最新消息并继续跟随")
+        .padding(.trailing, 16)
+        .padding(.bottom, 12)
+        .transition(.scale(scale: 0.85).combined(with: .opacity))
+    }
+
+    private func scrollToLatestIfFollowing(_ proxy: ScrollViewProxy) {
+        guard followsLatest else { return }
+        DispatchQueue.main.async {
+            guard followsLatest else { return }
+            proxy.scrollTo("chat-bottom", anchor: .bottom)
         }
     }
 
     /// 打开会话时把列表钉到底部。LazyVStack 首帧尚未完成布局，单次 scrollTo
     /// 常停在半中间——立即滚一次，再按递增延迟补几次，直到布局稳定。
-    private func pinToBottom(_ proxy: ScrollViewProxy) {
-        proxy.scrollTo("chat-bottom", anchor: .bottom)
+    private func pinToBottom(_ proxy: ScrollViewProxy, animated: Bool = false) {
+        if animated {
+            withAnimation(.easeOut(duration: 0.22)) {
+                proxy.scrollTo("chat-bottom", anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo("chat-bottom", anchor: .bottom)
+        }
         for delay in [0.05, 0.15, 0.35, 0.7] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard followsLatest else { return }
                 proxy.scrollTo("chat-bottom", anchor: .bottom)
             }
         }
@@ -179,8 +229,8 @@ struct ChatView: View {
             }
             inputBar
         }
-        // 手动键盘避让：KeyboardObserver 把键盘遮挡高度（已扣掉底部安全区）
-        // 作为额外底部 padding，使输入栏始终贴在键盘上沿。
+        // 手动键盘避让：使用键盘与窗口的完整重叠高度。safeAreaInset 已经处理
+        // 底部安全区，观察器不能再次扣除，否则输入栏会少抬一截。
         .padding(.bottom, keyboard.lift)
         .background(
             Theme.background
