@@ -1,13 +1,16 @@
 import SwiftUI
 
 /// 原生聊天视图：结构化消息渲染 + 原生输入栏 + 权限审批卡片。
-/// 输入栏放在 safeAreaInset(edge: .bottom)，键盘升降由系统接管——
-/// 这正是 WebView 方案里键盘重叠/状态栏错位问题的根治点。
+/// 输入栏放在 safeAreaInset(edge: .bottom)；键盘避让不走系统自动机制
+/// （NavigationView push 页面 + 多行 TextField 组合下系统避让会漏抬、键盘盖住输入栏），
+/// 而是 .ignoresSafeArea(.keyboard) 关掉系统行为，由 KeyboardObserver
+/// 监听键盘 frame 手动抬升，行为确定。
 struct ChatView: View {
     private let sessionId: String
     private let api: WandAPI
 
     @StateObject private var store: ChatStore
+    @StateObject private var keyboard = KeyboardObserver()
     @State private var draft = ""
     @State private var showQuickCommit = false
     @FocusState private var inputFocused: Bool
@@ -52,6 +55,9 @@ struct ChatView: View {
             }
         }
         .safeAreaInset(edge: .bottom) { bottomBar }
+        // 关掉系统键盘避让，统一交给 KeyboardObserver 手动抬升（见 bottomBar），
+        // 避免「系统抬一次 + 手动抬一次」叠加或两边都不抬的不确定行为。
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showQuickCommit) {
             GitQuickCommitView(sessionId: sessionId, api: api)
         }
@@ -87,6 +93,11 @@ struct ChatView: View {
             }
             .onChange(of: store.loading) { loading in
                 if !loading { pinToBottom(proxy) }
+            }
+            // 键盘弹出 → 输入栏抬升、可视区变矮，把列表重新钉到底部，
+            // 否则最后几条消息会被键盘挡住。收起时内容只会多露出来，无需滚动。
+            .onChange(of: keyboard.lift) { lift in
+                if lift > 0 { pinToBottom(proxy) }
             }
         }
     }
@@ -168,6 +179,9 @@ struct ChatView: View {
             }
             inputBar
         }
+        // 手动键盘避让：KeyboardObserver 把键盘遮挡高度（已扣掉底部安全区）
+        // 作为额外底部 padding，使输入栏始终贴在键盘上沿。
+        .padding(.bottom, keyboard.lift)
         .background(
             Theme.background
                 .opacity(0.97)
@@ -261,11 +275,14 @@ struct ChatView: View {
 }
 
 /// iOS 16+ 才有 scrollDismissesKeyboard；iOS 15 用拖拽手势近似。
+/// 用 .immediately 而非 .interactively：手动键盘避让（KeyboardObserver）依赖
+/// 键盘 frame 通知，而交互式拖拽过程中 UIKit 不发通知，输入栏会悬空脱节；
+/// 立即收起则输入栏随 willHide 同步落下。
 private struct DismissKeyboardOnDrag: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(iOS 16.0, *) {
-            content.scrollDismissesKeyboard(.interactively)
+            content.scrollDismissesKeyboard(.immediately)
         } else {
             content.simultaneousGesture(
                 DragGesture().onChanged { value in
