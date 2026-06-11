@@ -11,6 +11,7 @@ struct NativeRootView: View {
     @State private var phase: Phase = .authenticating
     @State private var showWebFallback = false
     @State private var showSettings = false
+    @ObservedObject private var quickActions = QuickActionCoordinator.shared
 
     private enum Phase: Equatable {
         case authenticating
@@ -84,9 +85,12 @@ struct NativeRootView: View {
         }
         .navigationViewStyle(.stack)
         .fullScreenCover(isPresented: $showWebFallback) {
-            WebFallbackContainer(serverURL: serverURL, token: token) {
+            // 网页版兜底：不再套壳顶栏，返回入口在网页侧边栏（「返回App」按钮）。
+            // 旧版网页 / 加载中 / 出错时 WebContainerView 内部自带回退返回方式。
+            WebContainerView(serverURL: serverURL, token: token) {
                 showWebFallback = false
             }
+            .environmentObject(store)
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(serverURL: serverURL, token: token) {
@@ -98,6 +102,21 @@ struct NativeRootView: View {
             .environmentObject(store)
         }
         .onAppear { authenticate() }
+        // 「打开网页版」快捷操作归本视图消费；登录完成前先挂起，ready 后再接。
+        .onReceive(quickActions.$pending) { _ in
+            handleQuickAction()
+        }
+        .onChange(of: phase) { _ in
+            handleQuickAction()
+        }
+    }
+
+    private func handleQuickAction() {
+        guard phase == .ready else { return }
+        if quickActions.consume(where: { $0 == .openWeb }) != nil {
+            showSettings = false
+            showWebFallback = true
+        }
     }
 
     private func authenticate() {
@@ -124,38 +143,5 @@ struct NativeRootView: View {
                 }
             }
         }
-    }
-}
-
-/// 网页版兜底容器：顶部一条返回栏 + 原 WebContainerView。
-private struct WebFallbackContainer: View {
-    let serverURL: URL
-    let token: String?
-    let onClose: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button(action: onClose) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text("返回原生界面")
-                            .font(.system(size: 14, weight: .medium))
-                    }
-                    .foregroundColor(Theme.brand)
-                }
-                Spacer()
-                Text("网页版")
-                    .font(.system(size: 13))
-                    .foregroundColor(Theme.textSecondary)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(Theme.background)
-            Divider()
-            WebContainerView(serverURL: serverURL, token: token)
-        }
-        .background(Theme.background.ignoresSafeArea())
     }
 }

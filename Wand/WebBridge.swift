@@ -34,6 +34,10 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
     func userContentController(_ uc: WKUserContentController, didReceive msg: WKScriptMessage) {
         guard let dict = msg.body as? [String: Any], let type = dict["type"] as? String else { return }
         switch type {
+        case "backToNative":
+            DispatchQueue.main.async { [weak self] in
+                self?.model.requestClose?()
+            }
         default:
             NSLog("[Wand] ignored native message type=%@ (no-op on iOS)", type)
         }
@@ -112,5 +116,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         // WebContent 进程重建会换一个新的 WKContentView，键盘顶栏会复活，
         // 每次导航完成后重申一次（幂等）。
         webView.wandHideKeyboardAccessoryBar()
+        // 旧版网页没有 __wandNativeBackHooked 标记（侧边栏没有「返回App」按钮），
+        // 此时回退显示壳自带的顶部返回栏，避免用户被困在网页版里。
+        webView.evaluateJavaScript("!!(window.__wandNativeBackHooked)") { [weak self] result, _ in
+            let hooked = (result as? Bool) ?? false
+            self?.model.needsLegacyChrome = !hooked
+        }
     }
 }

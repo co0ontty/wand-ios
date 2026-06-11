@@ -10,6 +10,11 @@ final class WebViewModel: ObservableObject {
     }
 
     @Published var phase: Phase = .loading
+    /// 旧版网页（侧边栏没有「返回原生界面」按钮）：壳回退显示自己的顶部返回栏，
+    /// 避免用户被困在网页版里。由 WebBridge 在 didFinish 时检测后回填。
+    @Published var needsLegacyChrome = false
+    /// WebBridge 收到 backToNative 消息时调用，由容器视图注入（关闭 fullScreenCover）。
+    var requestClose: (() -> Void)?
     /// WebBridge attach 时回填，供"重试"调用 reload()。
     weak var webView: WKWebView?
 
@@ -24,6 +29,9 @@ final class WebViewModel: ObservableObject {
 struct WebContainerView: View {
     let serverURL: URL
     let token: String?
+    /// 「返回原生界面」回调（网页版兜底入口传入）；触发途径：网页侧边栏的
+    /// 「返回App」按钮 → backToNative 消息，或加载中/出错覆盖层上的逃生按钮。
+    var onRequestClose: (() -> Void)? = nil
 
     @EnvironmentObject private var store: ServerStore
     @StateObject private var model = WebViewModel()
@@ -39,9 +47,27 @@ struct WebContainerView: View {
     var body: some View {
         ZStack {
             Theme.background.ignoresSafeArea()
-            WebViewRepresentable(serverURL: serverURL, token: token, model: model)
-                .ignoresSafeArea(.container, edges: .bottom)
+            webContent
             overlay
+            escapeButton
+        }
+        .onAppear { model.requestClose = onRequestClose }
+    }
+
+    @ViewBuilder private var webContent: some View {
+        if model.needsLegacyChrome, let onRequestClose {
+            // 旧版网页：保留壳自带的顶部返回栏（网页里没有返回按钮）。
+            VStack(spacing: 0) {
+                legacyTopBar(onClose: onRequestClose)
+                Divider()
+                WebViewRepresentable(serverURL: serverURL, token: token, model: model)
+                    .ignoresSafeArea(.container, edges: .bottom)
+            }
+        } else {
+            // 新版网页：侧边栏自带「返回App」按钮，WebView 全屏贴到状态栏/灵动岛下，
+            // 顶部间距由网页用 env(safe-area-inset-top) 自己排（viewport-fit=cover）。
+            WebViewRepresentable(serverURL: serverURL, token: token, model: model)
+                .ignoresSafeArea(.container, edges: .all)
         }
     }
 
@@ -60,6 +86,53 @@ struct WebContainerView: View {
         case .ready:
             EmptyView()
         }
+    }
+
+    /// 加载中/出错覆盖层上的逃生口：此时网页侧的返回按钮还不可用。
+    @ViewBuilder private var escapeButton: some View {
+        if model.phase != .ready, let onRequestClose {
+            VStack {
+                HStack {
+                    Button(action: onRequestClose) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("返回")
+                                .font(.system(size: 14, weight: .medium))
+                        }
+                        .foregroundColor(Theme.brand)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(Theme.brand.opacity(0.12)))
+                    }
+                    Spacer()
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 6)
+        }
+    }
+
+    private func legacyTopBar(onClose: @escaping () -> Void) -> some View {
+        HStack {
+            Button(action: onClose) {
+                HStack(spacing: 5) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("返回原生界面")
+                        .font(.system(size: 14, weight: .medium))
+                }
+                .foregroundColor(Theme.brand)
+            }
+            Spacer()
+            Text("网页版")
+                .font(.system(size: 13))
+                .foregroundColor(Theme.textSecondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Theme.background)
     }
 }
 
@@ -202,6 +275,17 @@ struct WebViewRepresentable: UIViewRepresentable {
         let cfg = WKWebViewConfiguration()
         let userController = WKUserContentController()
         userController.add(context.coordinator, name: "wandNative")
+        // 暴露「返回原生界面」入口给网页：新版网页检测到这个函数后会在侧边栏
+        // 渲染「返回App」按钮（macOS 壳和浏览器里没有该函数，不会显示按钮）。
+        userController.addUserScript(WKUserScript(
+            source: """
+            window.__wandBackToNative = function() {
+              try { window.webkit.messageHandlers.wandNative.postMessage({ type: "backToNative" }); } catch (e) {}
+            };
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         cfg.userContentController = userController
         cfg.websiteDataStore = .default()
         cfg.defaultWebpagePreferences.allowsContentJavaScript = true
