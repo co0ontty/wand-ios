@@ -10,6 +10,9 @@ struct SessionListView: View {
     @State private var loadError: String?
     @State private var showNewSession = false
     @State private var showArchived = false
+    /// 长按图标快捷操作「继续会话」的程序化跳转目标。
+    @State private var quickOpenSessionId: String?
+    @ObservedObject private var quickActions = QuickActionCoordinator.shared
 
     private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
@@ -21,6 +24,15 @@ struct SessionListView: View {
         ZStack {
             Theme.background.ignoresSafeArea()
             content
+            // 隐藏的程序化跳转链接：快捷操作「继续会话」用。
+            NavigationLink(isActive: quickOpenActive) {
+                if let id = quickOpenSessionId {
+                    ChatView(sessionId: id, api: api)
+                } else {
+                    EmptyView()
+                }
+            } label: { EmptyView() }
+                .hidden()
         }
         .navigationTitle("Wand")
         .toolbar {
@@ -41,6 +53,36 @@ struct SessionListView: View {
         .task { await load() }
         .onReceive(refreshTimer) { _ in
             Task { await load(silent: true) }
+        }
+        // @Published 订阅时会重放当前值，所以冷启动遗留的待处理操作也能在视图出现时接住。
+        .onReceive(quickActions.$pending) { _ in
+            handleQuickAction()
+        }
+    }
+
+    private var quickOpenActive: Binding<Bool> {
+        Binding(
+            get: { quickOpenSessionId != nil },
+            set: { if !$0 { quickOpenSessionId = nil } }
+        )
+    }
+
+    private func handleQuickAction() {
+        guard let action = quickActions.consume(where: { action in
+            switch action {
+            case .newSession, .openSession: return true
+            case .openWeb: return false
+            }
+        }) else { return }
+        switch action {
+        case .newSession:
+            quickOpenSessionId = nil
+            showNewSession = true
+        case .openSession(let id):
+            showNewSession = false
+            quickOpenSessionId = id
+        case .openWeb:
+            break
         }
     }
 
@@ -98,6 +140,8 @@ struct SessionListView: View {
         do {
             sessions = try await api.listSessions()
             loadError = nil
+            // 同步「最近会话」动态快捷项到长按图标菜单。
+            QuickActionCoordinator.updateRecentSessionShortcuts(sessions)
         } catch {
             if !silent || sessions.isEmpty {
                 loadError = error.localizedDescription

@@ -55,6 +55,25 @@
 	<string>Wand 使用相机扫描电脑端设置页的连接二维码，快速连接服务器。</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.wand.app.shortcut.new-session</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>新建会话</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>plus.bubble</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.wand.app.shortcut.open-web</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>打开网页版</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>safari</string>
+		</dict>
+	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

@@ -31,6 +31,7 @@
 		B2000000000000000000AC02 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC02 /* SettingsView.swift */; };
 		B2000000000000000000AC03 /* SessionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC03 /* SessionActivityAttributes.swift */; };
 		B2000000000000000000AC04 /* SessionLiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC04 /* SessionLiveActivityController.swift */; };
+		B2000000000000000000AC07 /* QuickActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC07 /* QuickActions.swift */; };
 		B2000000000000000000AC13 /* SessionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC03 /* SessionActivityAttributes.swift */; };
 		B2000000000000000000AC05 /* WandWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC05 /* WandWidgetsBundle.swift */; };
 		B2000000000000000000AC06 /* WandWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B2000000000000000000F101 /* WandWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -84,6 +85,7 @@
 		B2000000000000000000BC02 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC03 /* SessionActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActivityAttributes.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC04 /* SessionLiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLiveActivityController.swift; sourceTree = "<group>"; };
+		B2000000000000000000BC07 /* QuickActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActions.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC05 /* WandWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandWidgetsBundle.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC06 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B2000000000000000000F101 /* WandWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WandWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -145,6 +147,7 @@
 				B2000000000000000000BC02 /* SettingsView.swift */,
 				B2000000000000000000BC03 /* SessionActivityAttributes.swift */,
 				B2000000000000000000BC04 /* SessionLiveActivityController.swift */,
+				B2000000000000000000BC07 /* QuickActions.swift */,
 				A100000000000000000000D1 /* Assets.xcassets */,
 				A100000000000000000000E1 /* Info.plist */,
 			);
@@ -292,6 +295,7 @@
 				B2000000000000000000AC02 /* SettingsView.swift in Sources */,
 				B2000000000000000000AC03 /* SessionActivityAttributes.swift in Sources */,
 				B2000000000000000000AC04 /* SessionLiveActivityController.swift in Sources */,
+				B2000000000000000000AC07 /* QuickActions.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
