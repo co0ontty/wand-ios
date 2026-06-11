@@ -141,7 +141,7 @@ struct SessionListView: View {
             sessions = try await api.listSessions()
             loadError = nil
             // 同步「最近会话」动态快捷项到长按图标菜单。
-            QuickActionCoordinator.updateRecentSessionShortcuts(sessions)
+            await QuickActionCoordinator.updateRecentSessionShortcuts(sessions)
         } catch {
             if !silent || sessions.isEmpty {
                 loadError = error.localizedDescription

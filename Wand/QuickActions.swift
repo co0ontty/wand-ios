@@ -31,7 +31,8 @@ enum QuickAction: Equatable {
 }
 
 /// 待处理快捷操作的单例桥：UIKit 委托写入，SwiftUI 视图按归属消费。
-@MainActor
+/// 写入与消费都发生在主线程（UIKit 委托回调 / SwiftUI onReceive），
+/// 刻意不标 @MainActor，避免 View 结构体 nonisolated 方法引用时的隔离摩擦。
 final class QuickActionCoordinator: ObservableObject {
     static let shared = QuickActionCoordinator()
 
@@ -62,6 +63,7 @@ final class QuickActionCoordinator: ObservableObject {
     }
 
     /// 把最近会话同步成动态快捷项（系统把它们排在 Info.plist 静态项之后，最多共展示 4 个）。
+    @MainActor
     static func updateRecentSessionShortcuts(_ sessions: [SessionSnapshot]) {
         let recent = sessions.filter { !($0.archived ?? false) }.prefix(2)
         UIApplication.shared.shortcutItems = recent.map { session in
@@ -78,7 +80,6 @@ final class QuickActionCoordinator: ObservableObject {
 
 /// SwiftUI 生命周期下接快捷操作需要自定义 scene delegate：
 /// 冷启动（App 因快捷操作被拉起）时 shortcutItem 在 connection options 里。
-@MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
@@ -98,7 +99,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 }
 
 /// App 已在运行（前台/后台）时长按图标触发的路径。
-@MainActor
 final class QuickActionSceneDelegate: NSObject, UIWindowSceneDelegate {
     func windowScene(
         _ windowScene: UIWindowScene,
