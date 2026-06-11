@@ -224,6 +224,7 @@ struct SessionSnapshot: Decodable, Identifiable {
     let autoApprovePermissions: Bool?
 
     var isStructured: Bool { (sessionKind ?? "pty") == "structured" }
+    var providerLabel: String { provider == "codex" ? "Codex" : "Claude" }
 
     /// 列表标题：摘要 > 当前任务 > cwd 末段。
     var displayTitle: String {
@@ -371,6 +372,20 @@ struct GitStatusResult: Decodable {
     let lastCommit: LastCommit?
     let latestTag: String?
     let hasSubmodule: Bool?
+    let error: String?
+}
+
+/// POST /api/sessions/:id/generate-commit-message 响应：AI 撰写的 message 与推荐 tag（不提交）。
+struct GenerateCommitMessageResult: Decodable {
+    let message: String?
+    let suggestedTag: String?
+}
+
+/// POST /api/sessions/:id/git/push 响应。部分失败时 HTTP 仍是 200，error 带原因。
+struct GitPushResult: Decodable {
+    let ok: Bool
+    let pushedCommits: Bool?
+    let pushedTags: Bool?
     let error: String?
 }
 

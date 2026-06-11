@@ -157,17 +157,21 @@ final class WandAPI {
 
     /// 结构化会话（非 PTY）：POST /api/structured-sessions。
     @discardableResult
-    func createStructuredSession(cwd: String, mode: String?, prompt: String?) async throws -> SessionSnapshot {
-        var body: [String: Any] = ["cwd": cwd]
+    func createStructuredSession(provider: String, cwd: String, mode: String?, prompt: String?) async throws -> SessionSnapshot {
+        var body: [String: Any] = [
+            "provider": provider,
+            "runner": provider == "codex" ? "codex-cli-exec" : "claude-cli-print",
+            "cwd": cwd,
+        ]
         if let mode, !mode.isEmpty { body["mode"] = mode }
         if let prompt, !prompt.isEmpty { body["prompt"] = prompt }
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/structured-sessions", body: body)
     }
 
-    /// PTY 会话：POST /api/commands（command 固定 claude，由服务端解析别名）。
+    /// PTY 会话：POST /api/commands，command 与 provider 保持一致。
     @discardableResult
-    func createPtySession(cwd: String, mode: String?, initialInput: String?) async throws -> SessionSnapshot {
-        var body: [String: Any] = ["command": "claude", "cwd": cwd]
+    func createPtySession(provider: String, cwd: String, mode: String?, initialInput: String?) async throws -> SessionSnapshot {
+        var body: [String: Any] = ["command": provider, "provider": provider, "cwd": cwd]
         if let mode, !mode.isEmpty { body["mode"] = mode }
         if let initialInput, !initialInput.isEmpty { body["initialInput"] = initialInput }
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/commands", body: body)
@@ -202,6 +206,40 @@ final class WandAPI {
             QuickCommitResult.self,
             method: "POST",
             path: "/api/sessions/\(sessionId)/quick-commit",
+            body: body,
+            timeout: 180
+        )
+    }
+
+    /// AI 预生成 commit message 与推荐 tag（只生成不提交，对应网页版「AI」按钮）。
+    func generateCommitMessage(sessionId: String) async throws -> GenerateCommitMessageResult {
+        try await request(
+            GenerateCommitMessageResult.self,
+            method: "POST",
+            path: "/api/sessions/\(sessionId)/generate-commit-message",
+            body: [:],
+            timeout: 180
+        )
+    }
+
+    /// 补推送：把已有 commit / tag 推到远端；submodule 为 true 时递归推送各 submodule。
+    func gitPush(
+        sessionId: String,
+        pushCommits: Bool,
+        pushTags: Bool,
+        submodule: Bool,
+        tag: String?
+    ) async throws -> GitPushResult {
+        var body: [String: Any] = [
+            "pushCommits": pushCommits,
+            "pushTags": pushTags,
+            "submodule": submodule,
+        ]
+        if let tag, !tag.isEmpty { body["tag"] = tag }
+        return try await request(
+            GitPushResult.self,
+            method: "POST",
+            path: "/api/sessions/\(sessionId)/git/push",
             body: body,
             timeout: 180
         )
