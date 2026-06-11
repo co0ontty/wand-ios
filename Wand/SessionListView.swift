@@ -23,7 +23,16 @@ struct SessionListView: View {
     var body: some View {
         ZStack {
             Theme.background.ignoresSafeArea()
-            content
+            VStack(spacing: 0) {
+                Picker("会话范围", selection: $showArchived) {
+                    Text("进行中").tag(false)
+                    Text("已归档").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                content
+            }
             // 隐藏的程序化跳转链接：快捷操作「继续会话」用。
             NavigationLink(isActive: quickOpenActive) {
                 if let id = quickOpenSessionId {
@@ -125,8 +134,9 @@ struct SessionListView: View {
                         .opacity(0)
                         SessionRow(session: session)
                     }
+                    .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
                     .listRowBackground(Theme.background)
-                    .listRowSeparatorTint(Theme.border)
+                    .listRowSeparator(.hidden)
                 }
                 .onDelete(perform: deleteSessions)
             }
@@ -167,35 +177,48 @@ private struct SessionRow: View {
     let session: SessionSnapshot
 
     var body: some View {
-        HStack(spacing: 12) {
-            statusDot
-            VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 13) {
+            providerMark
+            VStack(alignment: .leading, spacing: 7) {
                 Text(session.displayTitle)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
-                HStack(spacing: 6) {
-                    Text("\(session.providerLabel) · \(session.isStructured ? "聊天" : "终端")")
-                        .font(.system(size: 11, weight: .medium))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule().fill(Theme.surface)
-                        )
-                        .overlay(Capsule().stroke(Theme.border, lineWidth: 0.5))
-                        .foregroundColor(Theme.textSecondary)
-                    Text(cwdTail)
+                HStack(spacing: 7) {
+                    Text(session.providerLabel)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(providerTint)
+                    metadataLabel(
+                        session.isStructured ? "聊天" : "终端",
+                        icon: session.isStructured ? "bubble.left.fill" : "terminal.fill"
+                    )
+                    if !cwdTail.isEmpty {
+                        Text(cwdTail)
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(1)
+                    }
                 }
             }
-            Spacer()
+            Spacer(minLength: 8)
             Text(statusLabel)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(statusTint)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(statusTint.opacity(0.11)))
         }
-        .padding(.vertical, 6)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Theme.border.opacity(0.75), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.04), radius: 8, y: 3)
     }
 
     private var cwdTail: String {
@@ -203,10 +226,43 @@ private struct SessionRow: View {
         return (cwd as NSString).lastPathComponent
     }
 
-    private var statusDot: some View {
-        Circle()
-            .fill(statusTint)
-            .frame(width: 9, height: 9)
+    private var providerMark: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(providerTint.opacity(0.13))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(providerTint.opacity(0.24), lineWidth: 1)
+            Image(systemName: providerIcon)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(providerTint)
+        }
+        .frame(width: 44, height: 44)
+        .overlay(alignment: .bottomTrailing) {
+            Circle()
+                .fill(statusTint)
+                .frame(width: 10, height: 10)
+                .overlay(Circle().stroke(Theme.surface, lineWidth: 2))
+                .offset(x: 2, y: 2)
+        }
+        .accessibilityLabel("\(session.providerLabel)，\(statusLabel)")
+    }
+
+    private func metadataLabel(_ text: String, icon: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+            Text(text)
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundColor(Theme.textSecondary)
+    }
+
+    private var providerIcon: String {
+        session.provider == "codex" ? "chevron.left.forwardslash.chevron.right" : "sparkles"
+    }
+
+    private var providerTint: Color {
+        session.provider == "codex" ? Color(red: 0.20, green: 0.45, blue: 0.72) : Theme.brand
     }
 
     private var statusTint: Color {
