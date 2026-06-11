@@ -131,7 +131,7 @@ private struct SessionRow: View {
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                 HStack(spacing: 6) {
-                    Text(session.isStructured ? "聊天" : "终端")
+                    Text("\(session.providerLabel) · \(session.isStructured ? "聊天" : "终端")")
                         .font(.system(size: 11, weight: .medium))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)

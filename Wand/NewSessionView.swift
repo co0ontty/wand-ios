@@ -10,6 +10,7 @@ struct NewSessionView: View {
 
     @State private var cwd = ""
     @State private var recentPaths: [RecentPath] = []
+    @State private var provider: Provider = .claude
     @State private var sessionType: SessionType = .structured
     @State private var mode: ModeOption = .standard
     @State private var firstMessage = ""
@@ -17,10 +18,16 @@ struct NewSessionView: View {
     @State private var errorMessage: String?
     @State private var showBrowser = false
 
+    enum Provider: String, CaseIterable, Identifiable {
+        case claude, codex
+        var id: String { rawValue }
+        var label: String { self == .claude ? "Claude" : "Codex" }
+    }
+
     enum SessionType: String, CaseIterable, Identifiable {
         case structured, pty
         var id: String { rawValue }
-        var label: String { self == .structured ? "聊天" : "终端 (Claude CLI)" }
+        var label: String { self == .structured ? "聊天" : "终端" }
     }
 
     /// 简化的权限模式：standard 不传 mode（用服务端默认），其余映射 ExecutionMode。
@@ -85,6 +92,15 @@ struct NewSessionView: View {
                             }
                         }
                     }
+                }
+
+                Section("助手") {
+                    Picker("助手", selection: $provider) {
+                        ForEach(Provider.allCases) { option in
+                            Text(option.label).tag(option)
+                        }
+                    }
+                    .pickerStyle(.segmented)
                 }
 
                 Section("会话类型") {
@@ -169,11 +185,17 @@ struct NewSessionView: View {
                 switch sessionType {
                 case .structured:
                     snapshot = try await api.createStructuredSession(
-                        cwd: path, mode: mode.apiValue, prompt: prompt.isEmpty ? nil : prompt
+                        provider: provider.rawValue,
+                        cwd: path,
+                        mode: mode.apiValue,
+                        prompt: prompt.isEmpty ? nil : prompt
                     )
                 case .pty:
                     snapshot = try await api.createPtySession(
-                        cwd: path, mode: mode.apiValue, initialInput: prompt.isEmpty ? nil : prompt
+                        provider: provider.rawValue,
+                        cwd: path,
+                        mode: mode.apiValue,
+                        initialInput: prompt.isEmpty ? nil : prompt
                     )
                 }
                 creating = false

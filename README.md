@@ -144,7 +144,7 @@ ios/
     ├── SessionListView.swift  # 会话列表（/api/sessions 轮询 + 下拉刷新 + 滑动删除）
     ├── ChatView.swift         # 聊天视图：消息块渲染 + 原生输入栏 + 权限审批卡片
     ├── ChatStore.swift        # 单会话状态机：WS 订阅、增量合流、发送/停止/权限决策
-    ├── NewSessionView.swift   # 新建会话（最近路径 / 目录浏览器 / 类型与模式）
+    ├── NewSessionView.swift   # 新建会话（Claude/Codex / 最近路径 / 类型与模式）
     ├── WandAPI.swift          # REST 客户端（401 自动用 appToken 重登重试）
     ├── WandSocket.swift       # /ws 客户端：seq 间隙 resync、心跳看门狗、退避重连
     ├── WandModels.swift       # 协议 Codable 模型（SessionSnapshot / ConversationTurn / WS 消息）
@@ -163,6 +163,8 @@ ios/
 - 登录：`POST /api/login` `{appToken}` → session cookie（ephemeral 存储，冷启动后由
   `NativeRootView` 重新登录一次；REST 401 时 `WandAPI` 也会自动重登重试）
 - 会话列表：`GET /api/sessions`（slim，无 messages）；详情 `GET /api/sessions/:id?format=chat`
+- 新建会话：结构化会话 `POST /api/structured-sessions`，终端会话 `POST /api/commands`；
+  两者均显式传 `provider: claude|codex`
 - 发消息：`POST /api/sessions/:id/input` —— 结构化会话发原文，PTY 会话发 `text + "\n"` 且带 `view:"chat"`
 - 停止回复：结构化 `POST /api/sessions/:id/stop`；PTY 发 Esc（`` + `shortcutKey:"esc"`）
 - 权限：`pendingEscalation` → `POST /api/sessions/:id/escalations/:requestId/resolve`
