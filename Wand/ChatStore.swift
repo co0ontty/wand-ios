@@ -28,7 +28,7 @@ final class ChatStore: ObservableObject {
     private let socket: WandSocket
     private var started = false
 
-    // Live Activity（灵动岛）状态：started = 本会话当前有活动；
+    // Live Activity（灵动岛）状态：started = 本会话当前在聚合长条里有条目；
     // sawResponding 防止 PTY 会话在 isResponding 尚未变 true 时被立即收掉。
     private var liveActivityStarted = false
     private var liveActivitySawResponding = false
@@ -127,11 +127,13 @@ final class ChatStore: ObservableObject {
 
     // MARK: - Live Activity（灵动岛）
 
-    /// 按当前状态同步 Live Activity：回复中 / 待授权更新，结束（或回到空闲）收掉。
+    /// 按当前状态同步 Live Activity：回复中 / 待授权更新；
+    /// 会话退出 / 被杀立即从聚合长条里移除（不展示结束态）；
+    /// 回复成功结束则切「已完成」短暂保留后由控制器自动移除。
     private func refreshLiveActivity() {
         guard liveActivityStarted else { return }
         if sessionEnded {
-            SessionLiveActivityController.shared.end(sessionId: sessionId)
+            SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: true)
             liveActivityStarted = false
             liveActivitySawResponding = false
         } else if permissionBlocked {
@@ -229,7 +231,7 @@ final class ChatStore: ObservableObject {
             messages.append(ConversationTurn(role: "user", content: [.text(text: trimmed, subagent: nil)]))
             isResponding = true
         }
-        // 起一条灵动岛活动（开关关闭 / iOS < 16.1 时是 no-op）。
+        // 把本会话加入灵动岛聚合长条（开关关闭 / iOS < 16.1 时是 no-op）。
         SessionLiveActivityController.shared.start(
             sessionId: sessionId,
             title: snapshot?.displayTitle ?? "Wand 会话",
