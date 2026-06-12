@@ -36,6 +36,14 @@ mkdir -p "$BUILD_DIR" "$DIST_DIR"
 echo "==> 生成 App 图标（1024 单尺寸）"
 swift "$PROJECT_ROOT/scripts/generate-icons.swift" "$ICONSET_DIR"
 
+# Liquid Glass 前置条件：必须用 Xcode 26+（iOS 26 SDK）编译链接。
+# 老 SDK 编出的包在 iOS 26 设备上会被系统按「兼容模式」渲染成旧扁平外观。
+# CI（ios-build.yml）已钉 runs-on: macos-26（默认 Xcode 26.x）；本地构建请自查。
+XCODE_MAJOR=$(xcodebuild -version | awk 'NR==1{print int($2)}')
+if (( XCODE_MAJOR < 26 )); then
+  echo "⚠️  当前 Xcode 主版本 $XCODE_MAJOR < 26：产物不会启用 iOS 26 Liquid Glass 外观" >&2
+fi
+
 echo "==> xcodebuild（iphoneos，未签名）"
 xcodebuild \
   -project Wand.xcodeproj \
