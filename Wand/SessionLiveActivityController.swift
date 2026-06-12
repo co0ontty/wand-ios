@@ -49,22 +49,26 @@ final class SessionLiveActivityController {
     }
 
     /// 会话开始回复：插入（或刷新）条内对应条目，必要时创建活动。
-    func start(sessionId: String, title: String, taskTitle: String?) {
+    func start(sessionId: String, title: String, taskTitle: String?, queuedCount: Int = 0) {
         guard enabled else { return }
         if #available(iOS 16.1, *) {
             cancelDoneRemoval(sessionId)
-            upsert(sessionId: sessionId, title: title, state: .responding, taskTitle: taskTitle)
+            upsert(
+                sessionId: sessionId, title: title, state: .responding,
+                taskTitle: taskTitle, queuedCount: queuedCount
+            )
             sync(allowCreate: true)
         }
     }
 
     /// 更新状态（条内不存在时 no-op，避免在用户关掉开关后复活）。
-    func update(sessionId: String, state: SessionState, taskTitle: String?) {
+    func update(sessionId: String, state: SessionState, taskTitle: String?, queuedCount: Int = 0) {
         if #available(iOS 16.1, *) {
             guard let index = ActivityStore.entries.firstIndex(where: { $0.id == sessionId }) else { return }
             cancelDoneRemoval(sessionId)
             ActivityStore.entries[index].stateRaw = state.rawValue
             ActivityStore.entries[index].taskTitle = taskTitle
+            ActivityStore.entries[index].queuedCount = queuedCount
             sync(allowCreate: false)
         }
     }
@@ -80,6 +84,7 @@ final class SessionLiveActivityController {
             } else {
                 ActivityStore.entries[index].stateRaw = SessionState.done.rawValue
                 ActivityStore.entries[index].taskTitle = nil
+                ActivityStore.entries[index].queuedCount = 0
                 scheduleDoneRemoval(sessionId)
             }
             sync(allowCreate: false)
@@ -89,15 +94,20 @@ final class SessionLiveActivityController {
     // MARK: - 内部
 
     @available(iOS 16.1, *)
-    private func upsert(sessionId: String, title: String, state: SessionState, taskTitle: String?) {
+    private func upsert(
+        sessionId: String, title: String, state: SessionState,
+        taskTitle: String?, queuedCount: Int
+    ) {
         let shortTitle = String(title.prefix(Self.maxTitleLength))
         if let index = ActivityStore.entries.firstIndex(where: { $0.id == sessionId }) {
             ActivityStore.entries[index].title = shortTitle
             ActivityStore.entries[index].stateRaw = state.rawValue
             ActivityStore.entries[index].taskTitle = taskTitle
+            ActivityStore.entries[index].queuedCount = queuedCount
         } else {
             ActivityStore.entries.append(SessionActivityAttributes.SessionEntry(
-                id: sessionId, title: shortTitle, stateRaw: state.rawValue, taskTitle: taskTitle
+                id: sessionId, title: shortTitle, stateRaw: state.rawValue,
+                taskTitle: taskTitle, queuedCount: queuedCount
             ))
             trimEntriesIfNeeded()
         }
@@ -192,8 +202,8 @@ final class SessionLiveActivityController {
         Date().addingTimeInterval(60)
     }
 #else
-    func start(sessionId: String, title: String, taskTitle: String?) {}
-    func update(sessionId: String, state: SessionState, taskTitle: String?) {}
+    func start(sessionId: String, title: String, taskTitle: String?, queuedCount: Int = 0) {}
+    func update(sessionId: String, state: SessionState, taskTitle: String?, queuedCount: Int = 0) {}
     func end(sessionId: String, immediately: Bool = false) {}
 #endif
 }

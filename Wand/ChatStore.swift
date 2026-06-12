@@ -28,6 +28,9 @@ final class ChatStore: ObservableObject {
     @Published var loading = true
     @Published var loadError: String?
     @Published var toast: String?
+    @Published var availableModels: [ModelInfo] = []
+    @Published var selectedModel: String?
+    @Published var thinkingEffort = "off"
     /// AskUserQuestion 卡片的选择状态（toolUseId → 各题已选项 + 是否已提交）。
     /// 放 store 而非卡片 @State：流式推送会整条替换消息重建视图，局部状态会丢。
     @Published var askUserSelections: [String: AskUserSelectionState] = [:]
@@ -76,6 +79,7 @@ final class ChatStore: ObservableObject {
                 loading = false
                 loadError = error.localizedDescription
             }
+            await loadModels()
             socket.connect()
             socket.subscribe(sessionId: sessionId)
         }
@@ -101,6 +105,8 @@ final class ChatStore: ObservableObject {
         pendingEscalation = snap.pendingEscalation
         permissionBlocked = snap.permissionBlocked ?? (snap.pendingEscalation != nil)
         currentTaskTitle = snap.currentTaskTitle
+        selectedModel = snap.selectedModel
+        thinkingEffort = snap.thinkingEffort ?? "off"
         if snap.pendingEscalation != nil { legacyPermissionPrompt = nil }
         refreshLiveActivity()
     }
@@ -149,12 +155,14 @@ final class ChatStore: ObservableObject {
         } else if permissionBlocked {
             liveActivitySawResponding = true
             SessionLiveActivityController.shared.update(
-                sessionId: sessionId, state: .permission, taskTitle: currentTaskTitle
+                sessionId: sessionId, state: .permission, taskTitle: currentTaskTitle,
+                queuedCount: queuedMessages.count
             )
         } else if isResponding {
             liveActivitySawResponding = true
             SessionLiveActivityController.shared.update(
-                sessionId: sessionId, state: .responding, taskTitle: currentTaskTitle
+                sessionId: sessionId, state: .responding, taskTitle: currentTaskTitle,
+                queuedCount: queuedMessages.count
             )
         } else if liveActivitySawResponding {
             SessionLiveActivityController.shared.end(sessionId: sessionId)
@@ -177,7 +185,8 @@ final class ChatStore: ObservableObject {
                 mode: data.mode, status: data.status, exitCode: data.exitCode,
                 startedAt: data.startedAt, endedAt: data.endedAt, archived: data.archived,
                 summary: data.summary, currentTaskTitle: data.currentTaskTitle,
-                selectedModel: data.selectedModel, claudeSessionId: data.claudeSessionId,
+                selectedModel: data.selectedModel, thinkingEffort: data.thinkingEffort,
+                claudeSessionId: data.claudeSessionId,
                 messages: nil, queuedMessages: data.queuedMessages,
                 structuredState: data.structuredState, pendingEscalation: data.pendingEscalation,
                 permissionBlocked: data.permissionBlocked,
@@ -228,6 +237,8 @@ final class ChatStore: ObservableObject {
             }
         }
         if let title = data.currentTaskTitle { currentTaskTitle = title }
+        if let model = data.selectedModel { selectedModel = model }
+        if let effort = data.thinkingEffort { thinkingEffort = effort }
     }
 
     // MARK: - 用户动作
@@ -245,7 +256,8 @@ final class ChatStore: ObservableObject {
         SessionLiveActivityController.shared.start(
             sessionId: sessionId,
             title: snapshot?.displayTitle ?? "Wand 会话",
-            taskTitle: currentTaskTitle
+            taskTitle: currentTaskTitle,
+            queuedCount: queuedMessages.count
         )
         liveActivityStarted = true
         liveActivitySawResponding = isStructured
@@ -259,8 +271,44 @@ final class ChatStore: ObservableObject {
             } catch {
                 toast = error.localizedDescription
                 if isStructured { isResponding = false }
+                SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: true)
+                liveActivityStarted = false
+                liveActivitySawResponding = false
             }
         }
+    }
+
+    func setModel(_ model: String?) {
+        let previous = selectedModel
+        selectedModel = model
+        Task {
+            do {
+                let snap = try await api.setModel(id: sessionId, model: model)
+                apply(snapshot: snap)
+            } catch {
+                selectedModel = previous
+                toast = error.localizedDescription
+            }
+        }
+    }
+
+    func setThinkingEffort(_ effort: String) {
+        let previous = thinkingEffort
+        thinkingEffort = effort
+        Task {
+            do {
+                let snap = try await api.setThinkingEffort(id: sessionId, thinkingEffort: effort)
+                apply(snapshot: snap)
+            } catch {
+                thinkingEffort = previous
+                toast = error.localizedDescription
+            }
+        }
+    }
+
+    private func loadModels() async {
+        guard let response = try? await api.models() else { return }
+        availableModels = snapshot?.provider == "codex" ? response.codexModels : response.models
     }
 
     // MARK: - AskUserQuestion 交互（对齐 Web 端 __askSelect / __askSubmit）

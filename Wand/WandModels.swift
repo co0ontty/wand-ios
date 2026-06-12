@@ -314,6 +314,7 @@ struct SessionSnapshot: Decodable, Identifiable {
     let summary: String?
     let currentTaskTitle: String?
     let selectedModel: String?
+    let thinkingEffort: String?
     let claudeSessionId: String?
     let messages: [ConversationTurn]?
     let queuedMessages: [String]?
@@ -378,6 +379,7 @@ struct WsData: Decodable {
     let summary: String?
     let currentTaskTitle: String?
     let selectedModel: String?
+    let thinkingEffort: String?
     let claudeSessionId: String?
     let messages: [ConversationTurn]?
     let queuedMessages: [String]?
@@ -407,6 +409,29 @@ struct DirectoryItem: Decodable, Identifiable {
 
     var id: String { path }
     var isDirectory: Bool { type == "dir" }
+}
+
+struct ModelInfo: Decodable, Identifiable {
+    let id: String
+    let label: String
+    let alias: Bool?
+}
+
+struct ModelsResponse: Decodable {
+    let models: [ModelInfo]
+    let codexModels: [ModelInfo]
+    let defaultModel: String?
+}
+
+struct UploadedFile: Decodable {
+    let originalName: String
+    let savedPath: String
+    let size: Int
+    let mimeType: String
+}
+
+struct UploadResponse: Decodable {
+    let files: [UploadedFile]
 }
 
 struct DirectoryListing: Decodable {

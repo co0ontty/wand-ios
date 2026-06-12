@@ -1,5 +1,11 @@
 import Foundation
 
+private extension Data {
+    mutating func append(_ string: String) {
+        append(Data(string.utf8))
+    }
+}
+
 /// wand 服务端 REST 客户端。复用 SelfSignedSession（自签证书放行 + 共享
 /// cookieStorage），所以 WandAuth.loginWithToken 拿到的 session cookie 在这里
 /// 的每个请求上自动携带；遇到 401 时用存储的 appToken 重新登录一次再重试。
@@ -107,6 +113,63 @@ final class WandAPI {
 
     func getSession(id: String) async throws -> SessionSnapshot {
         try await request(SessionSnapshot.self, method: "GET", path: "/api/sessions/\(id)?format=chat")
+    }
+
+    func models() async throws -> ModelsResponse {
+        try await request(ModelsResponse.self, method: "GET", path: "/api/models")
+    }
+
+    @discardableResult
+    func setModel(id: String, model: String?) async throws -> SessionSnapshot {
+        try await request(
+            SessionSnapshot.self,
+            method: "POST",
+            path: "/api/sessions/\(id)/model",
+            body: ["model": model ?? NSNull()]
+        )
+    }
+
+    @discardableResult
+    func setThinkingEffort(id: String, thinkingEffort: String) async throws -> SessionSnapshot {
+        try await request(
+            SessionSnapshot.self,
+            method: "POST",
+            path: "/api/sessions/\(id)/thinking-effort",
+            body: ["thinkingEffort": thinkingEffort]
+        )
+    }
+
+    func uploadAttachments(id: String, urls: [URL]) async throws -> [UploadedFile] {
+        let boundary = "WandBoundary-\(UUID().uuidString)"
+        var body = Data()
+        for url in urls.prefix(5) {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: url)
+            guard data.count <= 10 * 1024 * 1024 else {
+                throw APIError.network("\(url.lastPathComponent) 超过 10 MB")
+            }
+            body.append("--\(boundary)\r\n")
+            body.append("Content-Disposition: form-data; name=\"files\"; filename=\"\(url.lastPathComponent)\"\r\n")
+            body.append("Content-Type: application/octet-stream\r\n\r\n")
+            body.append(data)
+            body.append("\r\n")
+        }
+        body.append("--\(boundary)--\r\n")
+
+        guard let url = URL(string: "/api/sessions/\(id)/upload", relativeTo: baseURL)?.absoluteURL else {
+            throw APIError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 60
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        let (data, http) = try await perform(req)
+        guard (200...299).contains(http.statusCode) else {
+            throw APIError.server(status: http.statusCode, message: "附件上传失败")
+        }
+        return try JSONDecoder().decode(UploadResponse.self, from: data).files
     }
 
     @discardableResult

@@ -10,6 +10,8 @@ struct SessionListView: View {
     @State private var loadError: String?
     @State private var showNewSession = false
     @State private var showArchived = false
+    @State private var selectedSessionIds: Set<String> = []
+    @State private var isSelecting = false
     /// 长按图标快捷操作 / 新建完成后的程序化跳转目标。
     @State private var quickOpenSession: SessionSnapshot?
     @ObservedObject private var quickActions = QuickActionCoordinator.shared
@@ -23,16 +25,9 @@ struct SessionListView: View {
     var body: some View {
         ZStack {
             Theme.background.ignoresSafeArea()
-            VStack(spacing: 0) {
-                Picker("会话范围", selection: $showArchived) {
-                    Text("进行中").tag(false)
-                    Text("已归档").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                content
-            }
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             // 隐藏的程序化跳转链接：快捷操作「继续会话」用。
             NavigationLink(isActive: quickOpenActive) {
                 if let session = quickOpenSession {
@@ -43,15 +38,39 @@ struct SessionListView: View {
             } label: { EmptyView() }
                 .hidden()
         }
-        .navigationTitle("Wand")
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                if isSelecting {
+                    Text("已选择 \(selectedSessionIds.count) 项")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                } else {
+                    Picker("会话范围", selection: $showArchived) {
+                        Text("进行中").tag(false)
+                        Text("已归档").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 170)
+                }
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button { showNewSession = true } label: {
-                    Image(systemName: "plus.circle.fill")
+                Button {
+                    if isSelecting {
+                        endSelection()
+                    } else {
+                        showNewSession = true
+                    }
+                } label: {
+                    Image(systemName: isSelecting ? "xmark.circle.fill" : "plus.circle.fill")
                         .font(.system(size: 20))
                         .foregroundColor(Theme.brand)
                 }
             }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if isSelecting { selectionBar }
         }
         .sheet(isPresented: $showNewSession) {
             NewSessionView(api: api) { newSession in
@@ -69,6 +88,12 @@ struct SessionListView: View {
         // @Published 订阅时会重放当前值，所以冷启动遗留的待处理操作也能在视图出现时接住。
         .onReceive(quickActions.$pending) { _ in
             handleQuickAction()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .wandBeginSessionSelection)) { _ in
+            isSelecting = true
+        }
+        .onChange(of: showArchived) { _ in
+            endSelection()
         }
     }
 
@@ -136,12 +161,34 @@ struct SessionListView: View {
         } else {
             List {
                 ForEach(visibleSessions) { session in
-                    ZStack {
-                        NavigationLink(destination: SessionDestinationView(session: session, api: api)) {
-                            EmptyView()
+                    Group {
+                        if isSelecting {
+                            Button {
+                                toggleSelection(session.id)
+                            } label: {
+                                SessionRow(
+                                    session: session,
+                                    selecting: true,
+                                    selected: selectedSessionIds.contains(session.id)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Button {
+                                quickOpenSession = session
+                            } label: {
+                                SessionRow(session: session, selecting: false, selected: false)
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button {
+                                    isSelecting = true
+                                    selectedSessionIds = [session.id]
+                                } label: {
+                                    Label("多选会话", systemImage: "checkmark.circle")
+                                }
+                            }
                         }
-                        .opacity(0)
-                        SessionRow(session: session)
                     }
                     .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
                     .listRowBackground(Theme.background)
@@ -178,6 +225,60 @@ struct SessionListView: View {
             }
         }
     }
+
+    private var selectionBar: some View {
+        HStack {
+            Button(selectedSessionIds.count == visibleSessions.count ? "取消全选" : "全选") {
+                if selectedSessionIds.count == visibleSessions.count {
+                    selectedSessionIds.removeAll()
+                } else {
+                    selectedSessionIds = Set(visibleSessions.map(\.id))
+                }
+            }
+            Spacer()
+            Button(role: .destructive) {
+                deleteSelectedSessions()
+            } label: {
+                Label("删除 \(selectedSessionIds.count)", systemImage: "trash")
+            }
+            .disabled(selectedSessionIds.isEmpty)
+            Spacer()
+            Button("完成") { endSelection() }
+        }
+        .font(.system(size: 14, weight: .semibold))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Theme.surface)
+        .overlay(alignment: .top) { Divider().overlay(Theme.border) }
+    }
+
+    private func toggleSelection(_ id: String) {
+        if selectedSessionIds.contains(id) {
+            selectedSessionIds.remove(id)
+        } else {
+            selectedSessionIds.insert(id)
+        }
+    }
+
+    private func endSelection() {
+        isSelecting = false
+        selectedSessionIds.removeAll()
+    }
+
+    private func deleteSelectedSessions() {
+        let ids = selectedSessionIds
+        sessions.removeAll { ids.contains($0.id) }
+        endSelection()
+        Task {
+            for id in ids {
+                try? await api.deleteSession(id: id)
+            }
+        }
+    }
+}
+
+extension Notification.Name {
+    static let wandBeginSessionSelection = Notification.Name("wandBeginSessionSelection")
 }
 
 private struct SessionDestinationView: View {
@@ -210,11 +311,18 @@ private struct WebSessionView: View {
 
 private struct SessionRow: View {
     let session: SessionSnapshot
+    let selecting: Bool
+    let selected: Bool
 
     var body: some View {
         HStack(spacing: 13) {
+            if selecting {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 20))
+                    .foregroundColor(selected ? Theme.brand : Theme.textSecondary)
+            }
             providerMark
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(session.displayTitle)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
@@ -227,12 +335,13 @@ private struct SessionRow: View {
                         session.isStructured ? "聊天" : "终端",
                         icon: session.isStructured ? "bubble.left.fill" : "terminal.fill"
                     )
-                    if !cwdTail.isEmpty {
-                        Text(cwdTail)
-                        .font(.system(size: 12, design: .monospaced))
+                }
+                if !compactPath.isEmpty {
+                    Text(compactPath)
+                        .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(1)
-                    }
+                        .truncationMode(.head)
                 }
             }
             Spacer(minLength: 8)
@@ -256,9 +365,11 @@ private struct SessionRow: View {
         .shadow(color: Color.black.opacity(0.04), radius: 8, y: 3)
     }
 
-    private var cwdTail: String {
+    private var compactPath: String {
         guard let cwd = session.cwd, !cwd.isEmpty else { return "" }
-        return (cwd as NSString).lastPathComponent
+        let components = (cwd as NSString).pathComponents.filter { $0 != "/" }
+        guard components.count > 3 else { return cwd }
+        return "…/" + components.suffix(3).joined(separator: "/")
     }
 
     private var providerMark: some View {

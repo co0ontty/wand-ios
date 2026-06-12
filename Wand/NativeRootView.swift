@@ -59,6 +59,11 @@ struct NativeRootView: View {
                             ToolbarItem(placement: .navigationBarLeading) {
                                 Menu {
                                     Button {
+                                        NotificationCenter.default.post(name: .wandBeginSessionSelection, object: nil)
+                                    } label: {
+                                        Label("多选会话", systemImage: "checkmark.circle")
+                                    }
+                                    Button {
                                         showSettings = true
                                     } label: {
                                         Label("设置", systemImage: "gearshape")

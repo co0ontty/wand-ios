@@ -16,6 +16,8 @@ struct SessionActivityAttributes: ActivityAttributes {
         var stateRaw: String
         /// 当前任务标题（TodoWrite 派生），可空。
         var taskTitle: String?
+        /// 对话模式中等待发送的消息数。
+        var queuedCount: Int
     }
 
     public struct ContentState: Codable, Hashable {
@@ -32,7 +34,7 @@ extension SessionActivityAttributes.SessionEntry {
 
     var statusText: String {
         switch stateRaw {
-        case "responding": return "运行中"
+        case "responding": return "回复中"
         case "permission": return "等待授权"
         case "done": return "已完成"
         default: return stateRaw
@@ -53,6 +55,7 @@ extension SessionActivityAttributes.SessionEntry {
 extension SessionActivityAttributes.ContentState {
     var respondingCount: Int { sessions.filter(\.isResponding).count }
     var needsPermission: Bool { sessions.contains { $0.needsPermission } }
+    var queuedCount: Int { sessions.reduce(0) { $0 + $1.queuedCount } }
 
     /// 聚合状态：permission > responding > done，给紧凑视图着色 / 选图标用。
     var aggregateStateRaw: String {

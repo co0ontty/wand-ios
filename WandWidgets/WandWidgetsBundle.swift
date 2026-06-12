@@ -44,7 +44,12 @@ struct SessionLiveActivityWidget: Widget {
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    if context.state.sessions.count > 1 {
+                    if context.state.sessions.count == 1, let only = context.state.sessions.first {
+                        Text(only.statusText)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(stateTint(only.stateRaw))
+                            .padding(.trailing, 4)
+                    } else {
                         Text("\(context.state.sessions.count) 个会话")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.white.opacity(0.65))
@@ -52,18 +57,22 @@ struct SessionLiveActivityWidget: Widget {
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(context.state.sessions.prefix(4), id: \.id) { entry in
-                            SessionRow(entry: entry)
+                    if context.state.sessions.count == 1, let only = context.state.sessions.first {
+                        ConversationDetail(entry: only)
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(context.state.sessions.prefix(4), id: \.id) { entry in
+                                SessionRow(entry: entry)
+                            }
+                            if context.state.sessions.count > 4 {
+                                Text("还有 \(context.state.sessions.count - 4) 个会话…")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.white.opacity(0.5))
+                            }
                         }
-                        if context.state.sessions.count > 4 {
-                            Text("还有 \(context.state.sessions.count - 4) 个会话…")
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                        }
+                        .padding(.horizontal, 4)
+                        .padding(.top, 2)
                     }
-                    .padding(.horizontal, 4)
-                    .padding(.top, 2)
                 }
             } compactLeading: {
                 Image(systemName: "wand.and.stars")
@@ -78,6 +87,10 @@ struct SessionLiveActivityWidget: Widget {
                         Text("\(context.state.sessions.count)")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(.white.opacity(0.85))
+                    } else if context.state.queuedCount > 0 {
+                        Text("+\(context.state.queuedCount)")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.85))
                     }
                 }
             } minimal: {
@@ -87,6 +100,42 @@ struct SessionLiveActivityWidget: Widget {
             }
             .keylineTint(WandColor.brand)
         }
+    }
+}
+
+/// 单个对话回合展开后优先展示当前任务与排队消息，比重复一条聚合会话行更有用。
+private struct ConversationDetail: View {
+    let entry: SessionActivityAttributes.SessionEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(entry.title)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+            HStack(spacing: 6) {
+                StatusIndicator(entry: entry, size: 11)
+                Text(detailText)
+                    .font(.system(size: 12))
+                    .foregroundColor(.white.opacity(0.68))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if entry.queuedCount > 0 {
+                    Label("\(entry.queuedCount) 条排队", systemImage: "tray.full")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.62))
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 2)
+    }
+
+    private var detailText: String {
+        if let task = entry.taskTitle, !task.isEmpty { return task }
+        if entry.needsPermission { return "需要你的确认后继续" }
+        if entry.isDone { return "回复已完成" }
+        return "正在生成回复…"
     }
 }
 
@@ -159,6 +208,11 @@ private struct SessionChip: View {
                 Text(entry.statusText)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(stateTint(entry.stateRaw))
+            }
+            if entry.queuedCount > 0 {
+                Text("+\(entry.queuedCount)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.55))
             }
         }
         .padding(.horizontal, 9)

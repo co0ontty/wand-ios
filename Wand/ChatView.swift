@@ -1,5 +1,6 @@
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 原生聊天视图：结构化消息渲染 + 原生输入栏 + 权限审批卡片。
 /// 输入栏放在 safeAreaInset(edge: .bottom)；键盘避让不走系统自动机制
@@ -20,6 +21,9 @@ struct ChatView: View {
     @State private var voiceCanceling = false
     /// 语音输入模式：轻点话筒进入，整个输入框变成「按住说话」面板。
     @State private var voiceMode = false
+    @State private var showFileImporter = false
+    @State private var uploadingAttachments = false
+    @State private var gitStatus: GitStatusResult?
     /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
     @State private var voiceHoldWork: DispatchWorkItem?
     @FocusState private var inputFocused: Bool
@@ -42,6 +46,8 @@ struct ChatView: View {
                         .multilineTextAlignment(.center)
                 }
                 .padding(32)
+            } else if store.isStructured && store.messages.isEmpty && !store.isResponding {
+                sessionLaunchPanel
             } else {
                 messageList
             }
@@ -49,17 +55,18 @@ struct ChatView: View {
         // 点消息区任意空白处收起键盘；输入栏在 safeAreaInset 里不受影响，
         // 点发送 / 权限按钮不会误收。
         .dismissKeyboardOnTap()
-        .navigationTitle(store.snapshot?.displayTitle ?? "会话")
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                navigationStatus
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
-                HStack(spacing: 14) {
-                    Button { showQuickCommit = true } label: {
-                        Image(systemName: "arrow.triangle.branch")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundColor(Theme.brand)
+                HStack(spacing: 12) {
+                    gitChangesButton
+                    if store.isStructured {
+                        sessionSettingsMenu
                     }
-                    statusBadge
                 }
             }
         }
@@ -70,7 +77,19 @@ struct ChatView: View {
         .sheet(isPresented: $showQuickCommit) {
             GitQuickCommitView(sessionId: sessionId, api: api)
         }
-        .onAppear { store.start() }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true,
+            onCompletion: handlePickedAttachments
+        )
+        .onAppear {
+            store.start()
+            refreshGitStatus()
+        }
+        .onChange(of: showQuickCommit) { showing in
+            if !showing { refreshGitStatus() }
+        }
         .onDisappear { store.shutdown() }
         .overlay(alignment: .top) { toastView }
     }
@@ -81,60 +100,54 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(Array(store.messages.enumerated()), id: \.offset) { index, turn in
-                        TurnView(
-                            turn: turn,
-                            isLastTurn: index == store.messages.count - 1,
-                            isResponding: store.isResponding,
-                            askSelections: store.askUserSelections,
-                            onAskToggle: { toolUseId, qIdx, optIdx, multi in
-                                store.toggleAskOption(
-                                    toolUseId: toolUseId, questionIndex: qIdx,
-                                    optionIndex: optIdx, multiSelect: multi
-                                )
-                            },
-                            onAskSubmit: { toolUseId, answerText in
-                                store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
-                            }
-                        )
+                        ForEach(Array(store.messages.enumerated()), id: \.offset) { index, turn in
+                            TurnView(
+                                turn: turn,
+                                isLastTurn: index == store.messages.count - 1,
+                                isResponding: store.isResponding,
+                                askSelections: store.askUserSelections,
+                                onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                                    store.toggleAskOption(
+                                        toolUseId: toolUseId, questionIndex: qIdx,
+                                        optionIndex: optIdx, multiSelect: multi
+                                    )
+                                },
+                                onAskSubmit: { toolUseId, answerText in
+                                    store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
+                                }
+                            )
+                        }
+                        if store.isResponding {
+                            respondingIndicator
+                        }
+                        Color.clear.frame(height: 1).id("chat-bottom")
                     }
-                    if store.isResponding {
-                        respondingIndicator
+                    .padding(.horizontal, 14)
+                    .padding(.top, 12)
+                    .padding(.bottom, 6)
+                }
+                .modifier(DismissKeyboardOnDrag())
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 8)
+                        .onChanged { _ in followsLatest = false }
+                )
+                .overlay(alignment: .bottomTrailing) {
+                    if !followsLatest {
+                        jumpToLatestButton(proxy)
                     }
-                    Color.clear.frame(height: 1).id("chat-bottom")
                 }
-                .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 6)
-            }
-            .modifier(DismissKeyboardOnDrag())
-            // 用户一开始拖动就暂停跟随，避免高频流式更新在手势完成前
-            // 把列表抢回底部。恢复跟随只通过右下角按钮。
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 8)
-                    .onChanged { _ in followsLatest = false }
-            )
-            .overlay(alignment: .bottomTrailing) {
-                if !followsLatest {
-                    jumpToLatestButton(proxy)
+                .onAppear { pinToBottom(proxy) }
+                .onReceive(store.$messages.dropFirst()) { _ in
+                    scrollToLatestIfFollowing(proxy)
                 }
-            }
-            .onAppear { pinToBottom(proxy) }
-            // 流式回复会原地替换最后一条消息，messages.count 不变；
-            // 直接订阅数组发布事件，跟随状态下每次内容更新都定位到底部。
-            .onReceive(store.$messages.dropFirst()) { _ in
-                scrollToLatestIfFollowing(proxy)
-            }
-            .onChange(of: store.isResponding) { _ in
-                scrollToLatestIfFollowing(proxy)
-            }
-            .onChange(of: store.loading) { loading in
-                if !loading { pinToBottom(proxy) }
-            }
-            // 键盘弹出 → 输入栏抬升、可视区变矮，把列表重新钉到底部；
-            // 用户正在看历史消息时不改变当前位置。
-            .onChange(of: keyboard.lift) { lift in
-                if lift > 0 && followsLatest { pinToBottom(proxy) }
+                .onChange(of: store.isResponding) { _ in
+                    scrollToLatestIfFollowing(proxy)
+                }
+                .onChange(of: store.loading) { loading in
+                    if !loading { pinToBottom(proxy) }
+                }
+                .onChange(of: keyboard.lift) { lift in
+                    if lift > 0 && followsLatest { pinToBottom(proxy) }
             }
         }
     }
@@ -197,21 +210,64 @@ struct ChatView: View {
 
     // MARK: - 顶部状态
 
-    private var statusBadge: some View {
-        HStack(spacing: 5) {
-            Circle().fill(statusColor).frame(width: 8, height: 8)
-            Text(statusText)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(Theme.textSecondary)
+    private var sessionLaunchPanel: some View {
+        VStack(spacing: 18) {
+            WandBrandMark(size: 52)
+            Text(store.snapshot?.providerLabel ?? "结构化会话")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundColor(Theme.textPrimary)
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 24)
+        .frame(maxWidth: 340)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Theme.surface)
+                .shadow(color: Color.black.opacity(0.07), radius: 18, y: 7)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        )
+        .padding(.horizontal, 24)
+    }
+
+    private func modelButton(id: String?, label: String) -> some View {
+        Button {
+            store.setModel(id)
+        } label: {
+            if store.selectedModel == id {
+                Label(label, systemImage: "checkmark")
+            } else {
+                Text(label)
+            }
         }
     }
 
-    private var statusColor: Color {
-        if !store.connected { return .gray }
-        if store.permissionBlocked { return .orange }
-        if store.isResponding { return .green }
-        if store.sessionEnded { return .gray }
-        return Theme.brand
+    private static let thinkingLevels = [
+        (id: "off", label: "off"),
+        (id: "standard", label: "think"),
+        (id: "deep", label: "think hard"),
+        (id: "max", label: "ultrathink"),
+    ]
+
+    private static func thinkingLabel(_ id: String) -> String {
+        thinkingLevels.first { $0.id == id }?.label ?? "off"
+    }
+
+    private var navigationStatus: some View {
+        VStack(spacing: 0) {
+            Text(statusText)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
+            Text(store.snapshot?.cwd ?? "未设置工作目录")
+                .font(.system(size: 8, design: .monospaced))
+                .foregroundColor(Theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 190)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private var statusText: String {
@@ -282,6 +338,7 @@ struct ChatView: View {
 
     private var inputBar: some View {
         HStack(alignment: .bottom, spacing: 10) {
+            composerActionsMenu
             micButton
             if voiceMode {
                 voiceHoldField
@@ -323,6 +380,127 @@ struct ChatView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 8)
+    }
+
+    private var sessionSettingsMenu: some View {
+        Menu {
+            Menu {
+                modelButton(id: nil, label: "默认")
+                ForEach(store.availableModels.filter { $0.id != "default" }) { model in
+                    modelButton(id: model.id, label: model.label)
+                }
+            } label: {
+                Label("模型 · \(store.selectedModel ?? "默认")", systemImage: "cpu")
+            }
+
+            Menu {
+                ForEach(Self.thinkingLevels, id: \.id) { level in
+                    Button {
+                        store.setThinkingEffort(level.id)
+                    } label: {
+                        if store.thinkingEffort == level.id {
+                            Label(level.label, systemImage: "checkmark")
+                        } else {
+                            Text(level.label)
+                        }
+                    }
+                }
+            } label: {
+                Label("思考深度 · \(Self.thinkingLabel(store.thinkingEffort))", systemImage: "brain")
+            }
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(Theme.brand)
+        }
+        .accessibilityLabel("会话设置")
+    }
+
+    private var gitChangesButton: some View {
+        Button {
+            showQuickCommit = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                Text("~\(gitChangeCounts.modified)")
+                Text("-\(gitChangeCounts.deleted)")
+                    .foregroundColor(Theme.danger)
+                Text("+\(gitChangeCounts.added)")
+                    .foregroundColor(.green)
+            }
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .foregroundColor(Theme.textSecondary)
+        }
+        .accessibilityLabel(
+            "Git 修改 \(gitChangeCounts.modified)，删除 \(gitChangeCounts.deleted)，新增 \(gitChangeCounts.added)"
+        )
+    }
+
+    private var gitChangeCounts: (modified: Int, deleted: Int, added: Int) {
+        var counts = (modified: 0, deleted: 0, added: 0)
+        for file in gitStatus?.files ?? [] {
+            let status = file.status.uppercased()
+            if status.contains("?") || status.contains("A") {
+                counts.added += 1
+            } else if status.contains("D") {
+                counts.deleted += 1
+            } else {
+                counts.modified += 1
+            }
+        }
+        return counts
+    }
+
+    private func refreshGitStatus() {
+        Task {
+            gitStatus = try? await api.gitStatus(sessionId: sessionId)
+        }
+    }
+
+    private var composerActionsMenu: some View {
+        Menu {
+            Button {
+                showFileImporter = true
+            } label: {
+                Label("上传附件", systemImage: "paperclip")
+            }
+            .disabled(uploadingAttachments)
+        } label: {
+            if uploadingAttachments {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(Theme.textSecondary)
+                    .frame(width: 38, height: 38)
+            } else {
+                Image(systemName: "plus")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 38, height: 38)
+                    .background(Circle().fill(Theme.surface))
+                    .overlay(Circle().stroke(Theme.border, lineWidth: 1))
+            }
+        }
+        .accessibilityLabel("更多操作")
+    }
+
+    private func handlePickedAttachments(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, !urls.isEmpty else {
+            if case .failure(let error) = result { store.toast = error.localizedDescription }
+            return
+        }
+        uploadingAttachments = true
+        Task {
+            defer { uploadingAttachments = false }
+            do {
+                let files = try await api.uploadAttachments(id: sessionId, urls: urls)
+                let paths = files.map(\.savedPath).joined(separator: "\n")
+                let prefix = "[附件已上传，请查看以下文件:\n\(paths)\n]\n\n"
+                draft = prefix + draft
+                store.toast = "已上传 \(files.count) 个附件"
+            } catch {
+                store.toast = error.localizedDescription
+            }
+        }
     }
 
     /// iOS 16+ 用多行自增高输入框；iOS 15 退化为单行。

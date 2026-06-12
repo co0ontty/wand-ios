@@ -185,6 +185,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A1000000000000000000FB00 /* Build configuration list for PBXNativeTarget "Wand" */;
 			buildPhases = (
+				A1000000000000000000FA10 /* Generate App Icon */,
 				A1000000000000000000F800 /* Sources */,
 				A1000000000000000000F300 /* Frameworks */,
 				A1000000000000000000F900 /* Resources */,
@@ -272,6 +273,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A1000000000000000000FA10 /* Generate App Icon */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/scripts/generate-icons.swift",
+			);
+			name = "Generate App Icon";
+			outputPaths = (
+				"$(SRCROOT)/Wand/Assets.xcassets/AppIcon.appiconset/icon_1024.png",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET /usr/bin/swift \"$SRCROOT/scripts/generate-icons.swift\" \"$SRCROOT/Wand/Assets.xcassets/AppIcon.appiconset\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A1000000000000000000F800 /* Sources */ = {
