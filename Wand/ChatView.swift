@@ -12,9 +12,12 @@ struct ChatView: View {
 
     @StateObject private var store: ChatStore
     @StateObject private var keyboard = KeyboardObserver()
+    @StateObject private var speech = SpeechRecognizerService()
     @State private var draft = ""
     @State private var showQuickCommit = false
     @State private var followsLatest = true
+    @State private var voicePressed = false
+    @State private var voiceCanceling = false
     @FocusState private var inputFocused: Bool
 
     init(sessionId: String, api: WandAPI) {
@@ -227,6 +230,12 @@ struct ChatView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 0) {
+            if voicePressed || speech.isRecording {
+                voiceBubble
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+                    .transition(.opacity)
+            }
             if !visibleTodos.isEmpty {
                 TodoProgressBar(todos: visibleTodos)
                     .padding(.horizontal, 12)
@@ -269,6 +278,7 @@ struct ChatView: View {
 
     private var inputBar: some View {
         HStack(alignment: .bottom, spacing: 10) {
+            micButton
             growingTextField
                 .focused($inputFocused)
                 .padding(.horizontal, 14)
@@ -328,6 +338,112 @@ struct ChatView: View {
         let text = draft
         draft = ""
         store.send(text: text)
+    }
+
+    // MARK: - 按住说话（端侧语音识别）
+
+    /// 麦克风按钮：按住录音、上滑取消、松手把识别文本追加进输入框。
+    private var micButton: some View {
+        Image(systemName: speech.isRecording ? "waveform" : "mic")
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundColor(voicePressed ? .white : Theme.brand)
+            .frame(width: 38, height: 38)
+            .background(
+                Circle().fill(
+                    voicePressed
+                        ? (voiceCanceling ? Theme.danger : Theme.brand)
+                        : Theme.brand.opacity(0.12)
+                )
+            )
+            .scaleEffect(voicePressed ? 1.1 : 1)
+            .animation(.easeInOut(duration: 0.15), value: voicePressed)
+            .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
+            .gesture(voiceGesture)
+            .accessibilityLabel("按住说话")
+    }
+
+    /// 上滑超过该距离进入「松开取消」态（对齐 Web 端 VOICE_CANCEL_THRESHOLD）。
+    private static let voiceCancelThreshold: CGFloat = 60
+
+    private var voiceGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if !voicePressed {
+                    voicePressed = true
+                    voiceCanceling = false
+                    speech.start { message in
+                        store.toast = message
+                        voicePressed = false
+                        voiceCanceling = false
+                    }
+                }
+                voiceCanceling = value.translation.height < -Self.voiceCancelThreshold
+            }
+            .onEnded { _ in
+                let cancelled = voiceCanceling
+                voicePressed = false
+                voiceCanceling = false
+                speech.stop(cancelled: cancelled) { text in
+                    appendTranscriptToDraft(text)
+                }
+            }
+    }
+
+    /// 识别文本追加进草稿（不覆盖已有内容，对齐 Web 端 commitVoiceTranscript）。
+    private func appendTranscriptToDraft(_ text: String) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        var existing = draft
+        while let last = existing.unicodeScalars.last,
+              CharacterSet.whitespacesAndNewlines.contains(last) {
+            existing.unicodeScalars.removeLast()
+        }
+        draft = existing.isEmpty ? clean : existing + " " + clean
+    }
+
+    /// 输入栏上方的实时转写气泡。
+    private var voiceBubble: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: voiceCanceling ? "xmark.circle.fill" : "waveform.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
+                Text(voiceCanceling
+                     ? "松开手指，取消输入"
+                     : (speech.transcript.isEmpty ? "正在聆听…" : speech.transcript))
+                    .font(.system(size: 14))
+                    .foregroundColor(
+                        voiceCanceling
+                            ? Theme.danger
+                            : (speech.transcript.isEmpty ? Theme.textSecondary : Theme.textPrimary)
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            if !voiceCanceling {
+                HStack(spacing: 6) {
+                    Text(speech.usingOnDevice ? "端侧识别" : "在线识别")
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Theme.brand.opacity(0.12)))
+                        .foregroundColor(Theme.brand)
+                    Text("松开填入输入框 · 上滑取消")
+                        .foregroundColor(Theme.textSecondary)
+                }
+                .font(.system(size: 11, weight: .medium))
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Theme.surface)
+                .shadow(color: Color.black.opacity(0.1), radius: 6, y: 2)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(voiceCanceling ? Theme.danger.opacity(0.55) : Theme.border, lineWidth: 1)
+        )
     }
 
     // MARK: - Toast

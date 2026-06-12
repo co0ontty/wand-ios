@@ -142,8 +142,9 @@ ios/
     ├── ConnectView.swift      # 连接界面（连接码 / 地址 + 最近连接）
     ├── NativeRootView.swift   # 原生根视图：token 登录引导 + 列表导航 + 网页版兜底入口
     ├── SessionListView.swift  # 会话列表（/api/sessions 轮询 + 下拉刷新 + 滑动删除）
-    ├── ChatView.swift         # 聊天视图：消息块渲染 + 原生输入栏 + 权限审批卡片
+    ├── ChatView.swift         # 聊天视图：消息块渲染 + 原生输入栏（含按住说话）+ 权限审批卡片
     ├── ChatStore.swift        # 单会话状态机：WS 订阅、增量合流、发送/停止/权限决策
+    ├── SpeechRecognizerService.swift # 按住说话：AVAudioEngine + SFSpeechRecognizer 端侧优先转写
     ├── NewSessionView.swift   # 新建会话（Claude/Codex / 最近路径 / 类型与模式）
     ├── WandAPI.swift          # REST 客户端（401 自动用 appToken 重登重试）
     ├── WandSocket.swift       # /ws 客户端：seq 间隙 resync、心跳看门狗、退避重连
@@ -180,6 +181,7 @@ ios/
 - **ATS**：`NSAllowsArbitraryLoads = true`，因为要连局域网 HTTP 地址和自签名 HTTPS。
 - **本地网络权限**：`NSLocalNetworkUsageDescription`，iOS 14+ 连局域网设备会弹一次授权。
 - **切换服务器入口**：iOS 没有菜单栏，连接后在右上角放一个低调的半透明悬浮按钮，点击弹出切换面板（macOS 是用菜单 + 通知，二者共用 `.wandRequestSwitchServer` 通知）。
+- **按住说话（端侧语音输入）**：输入栏左侧麦克风按钮，按住录音 → 气泡实时转写 → 松手把文字**追加**进输入框（不覆盖草稿）→ 上滑取消，交互对齐 Web 端隐藏中的 voice-btn。识别走系统 `SFSpeechRecognizer`：设备已下载当前语言听写模型时强制 `requiresOnDeviceRecognition`（音频不出设备、无时长限制），否则降级 Apple 服务器识别（单次约 1 分钟，足够短句）。语言候选：系统语言 → zh-CN → en-US。不需要任何 entitlement，只新增了 `NSMicrophoneUsageDescription` / `NSSpeechRecognitionUsageDescription` 两条隐私描述，免费账号自签不受影响。
 - **bundle id**：`com.wand.app`，与 macOS 端一致。免费签名时工具可能会改写它，不影响使用。
 - **entitlements**：刻意**不带**特殊 entitlements（推送 / App Groups 等），保持最干净，最大化兼容免费账号签名——带了反而可能签名失败。
 

@@ -53,6 +53,10 @@
 	<string>Wand 需要访问本地网络以连接你在局域网内运行的 wand 服务。</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Wand 使用相机扫描电脑端设置页的连接二维码，快速连接服务器。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Wand 使用麦克风进行「按住说话」语音输入，把语音转成文字填入聊天输入框。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Wand 使用系统语音识别（优先端侧模型，音频不离开设备）把你的语音转成文字。</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIApplicationShortcutItems</key>
