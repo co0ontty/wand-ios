@@ -74,8 +74,22 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(Array(store.messages.enumerated()), id: \.offset) { _, turn in
-                        TurnView(turn: turn)
+                    ForEach(Array(store.messages.enumerated()), id: \.offset) { index, turn in
+                        TurnView(
+                            turn: turn,
+                            isLastTurn: index == store.messages.count - 1,
+                            isResponding: store.isResponding,
+                            askSelections: store.askUserSelections,
+                            onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                                store.toggleAskOption(
+                                    toolUseId: toolUseId, questionIndex: qIdx,
+                                    optionIndex: optIdx, multiSelect: multi
+                                )
+                            },
+                            onAskSubmit: { toolUseId, answerText in
+                                store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
+                            }
+                        )
                     }
                     if store.isResponding {
                         respondingIndicator
@@ -203,8 +217,21 @@ struct ChatView: View {
 
     // MARK: - 底部栏（权限卡 + 队列 + 输入框）
 
+    /// 输入栏上方悬浮的待办进度条数据：当前 turn 的 todos，全部完成后隐藏（对齐 Web）。
+    private var visibleTodos: [TodoItem] {
+        let todos = TodoItem.currentTodos(in: store.messages)
+        guard !todos.isEmpty else { return [] }
+        let completed = todos.filter { $0.status == "completed" }.count
+        return completed == todos.count ? [] : todos
+    }
+
     private var bottomBar: some View {
         VStack(spacing: 0) {
+            if !visibleTodos.isEmpty {
+                TodoProgressBar(todos: visibleTodos)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+            }
             if store.pendingEscalation != nil || store.legacyPermissionPrompt != nil {
                 PermissionCard(
                     escalation: store.pendingEscalation,
@@ -349,8 +376,74 @@ private struct DismissKeyboardOnDrag: ViewModifier {
 
 // MARK: - 单条消息
 
+/// 工具调用与结果在渲染层配成一张卡片（对齐 Web 端 buildToolResultMap / Android pairToolBlocks）。
+private enum DisplayItem {
+    case plain(ContentBlock)
+    case tool(
+        id: String, name: String, description: String?,
+        input: [String: JSONValue], subagent: SubagentMeta?,
+        result: ToolResultInfo?
+    )
+}
+
+/// 配对后挂在工具卡上的结果。
+struct ToolResultInfo {
+    let text: String
+    let isError: Bool
+    let truncated: Bool
+}
+
+/// 优先按 tool_use_id 精确配对（并行工具调用时顺序会交错）；
+/// id 缺失时退回「紧随其后的第一个结果」邻接兜底；没配上的 ToolResult 原样透传。
+private func pairToolBlocks(_ content: [ContentBlock]) -> [DisplayItem] {
+    var items: [DisplayItem] = []
+    var consumed = Set<Int>()
+    for (i, block) in content.enumerated() {
+        if consumed.contains(i) { continue }
+        guard case .toolUse(let id, let name, let description, let input, let subagent) = block else {
+            items.append(.plain(block))
+            continue
+        }
+        var resultIndex = -1
+        if !id.isEmpty {
+            // 1) 全局按 tool_use_id 精确配对
+            for j in (i + 1)..<content.count where !consumed.contains(j) {
+                if case .toolResult(let rid, _, _, _, _) = content[j], rid == id {
+                    resultIndex = j
+                    break
+                }
+            }
+        }
+        if resultIndex < 0 {
+            // 2) 邻接兜底：中间隔着下一个 ToolUse 视为无结果；id 双方都有但不匹配时不抢配。
+            for j in (i + 1)..<content.count where !consumed.contains(j) {
+                if case .toolUse = content[j] { break }
+                if case .toolResult(let rid, _, _, _, _) = content[j] {
+                    if rid.isEmpty || id.isEmpty { resultIndex = j }
+                    break
+                }
+            }
+        }
+        var result: ToolResultInfo?
+        if resultIndex >= 0, case .toolResult(_, let text, let isError, let truncated, _) = content[resultIndex] {
+            consumed.insert(resultIndex)
+            result = ToolResultInfo(text: text, isError: isError, truncated: truncated)
+        }
+        items.append(.tool(
+            id: id, name: name, description: description,
+            input: input, subagent: subagent, result: result
+        ))
+    }
+    return items
+}
+
 private struct TurnView: View {
     let turn: ConversationTurn
+    var isLastTurn = false
+    var isResponding = false
+    var askSelections: [String: AskUserSelectionState] = [:]
+    var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
+    var onAskSubmit: (String, String) -> Void = { _, _ in }
 
     var body: some View {
         if turn.role == "user" {
@@ -386,11 +479,66 @@ private struct TurnView: View {
 
     private var assistantBlocks: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(turn.content.enumerated()), id: \.offset) { _, block in
-                BlockView(block: block)
+            ForEach(Array(pairToolBlocks(turn.content).enumerated()), id: \.offset) { _, item in
+                itemView(item)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private func itemView(_ item: DisplayItem) -> some View {
+        switch item {
+        case .plain(let block):
+            BlockView(block: block)
+        case .tool(let id, let name, let description, let input, let subagent, let result):
+            VStack(alignment: .leading, spacing: 4) {
+                subagentTag(subagent)
+                toolView(
+                    id: id, name: name, description: description,
+                    input: input, result: result
+                )
+            }
+        }
+    }
+
+    /// 工具卡分流（对齐 Web 端 renderToolUseCard）：
+    /// AskUserQuestion → 交互卡；Edit/Write/MultiEdit → diff 卡；Bash → 终端卡；其余 → 通用卡。
+    @ViewBuilder private func toolView(
+        id: String, name: String, description: String?,
+        input: [String: JSONValue], result: ToolResultInfo?
+    ) -> some View {
+        let questions = name == "AskUserQuestion" ? AskUserQuestion.parse(input: input) : []
+        if !questions.isEmpty {
+            AskUserQuestionCard(
+                toolUseId: id,
+                questions: questions,
+                result: result,
+                selection: askSelections[id] ?? AskUserSelectionState(),
+                onToggle: { qIdx, optIdx, multi in onAskToggle(id, qIdx, optIdx, multi) },
+                onSubmit: { answerText in onAskSubmit(id, answerText) }
+            )
+        } else if name == "Edit" || name == "Write" || name == "MultiEdit" {
+            DiffCard(toolName: name, input: input, result: result)
+        } else if name == "Bash" {
+            TerminalCard(input: input, result: result, running: result == nil && isLastTurn && isResponding)
+        } else {
+            ToolUseCard(
+                name: name, description: description, input: input,
+                result: result, running: result == nil && isLastTurn && isResponding
+            )
+        }
+    }
+
+    @ViewBuilder private func subagentTag(_ meta: SubagentMeta?) -> some View {
+        if let meta {
+            HStack(spacing: 4) {
+                Image(systemName: "person.2").font(.system(size: 10))
+                Text(meta.taskDescription ?? meta.agentType ?? "子任务")
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundColor(Theme.brandStrong)
+        }
     }
 }
 
@@ -465,66 +613,193 @@ private struct BlockView: View {
     }
 }
 
-/// 简化 Markdown 渲染：按 ``` 切分代码块，其余段落走 AttributedString 内联样式。
+/// 原生 Markdown 渲染：块级结构独立布局，内联标记交给 AttributedString。
 private struct MarkdownText: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
-                if segment.isCode {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(segment.content)
-                            .font(.system(size: 13, design: .monospaced))
-                            .foregroundColor(Theme.textPrimary)
-                            .textSelection(.enabled)
-                            .padding(10)
-                    }
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Theme.surface)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(Theme.border, lineWidth: 1)
-                    )
-                } else {
-                    Text(attributed(segment.content))
-                        .font(.system(size: 16))
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                blockView(block)
+            }
+        }
+    }
+
+    private enum Block {
+        case paragraph(String)
+        case heading(Int, String)
+        case listItem(marker: String, text: String, indent: Int, checked: Bool?)
+        case quote(String)
+        case code(String, String?)
+        case divider
+    }
+
+    @ViewBuilder private func blockView(_ block: Block) -> some View {
+        switch block {
+        case .paragraph(let content):
+            inlineText(content, size: 16)
+        case .heading(let level, let content):
+            inlineText(content, size: headingSize(level), weight: .semibold)
+                .padding(.top, level <= 2 ? 3 : 1)
+        case .listItem(let marker, let content, let indent, let checked):
+            HStack(alignment: .top, spacing: 7) {
+                Text(checked.map { $0 ? "☑" : "☐" } ?? marker)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(checked == true ? .green : Theme.brand)
+                    .padding(.top, 2)
+                inlineText(content, size: 16)
+            }
+            .padding(.leading, CGFloat(indent * 14))
+        case .quote(let content):
+            HStack(alignment: .top, spacing: 10) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Theme.brand)
+                    .frame(width: 3)
+                inlineText(content, size: 15, color: Theme.textSecondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Theme.surface))
+        case .code(let content, let language):
+            VStack(alignment: .leading, spacing: 2) {
+                if let language, !language.isEmpty {
+                    Text(language)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                        .padding(.leading, 10)
+                        .padding(.top, 6)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(content)
+                        .font(.system(size: 13, design: .monospaced))
                         .foregroundColor(Theme.textPrimary)
                         .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
                 }
             }
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+        case .divider:
+            Divider().overlay(Theme.border).padding(.vertical, 3)
         }
     }
 
-    private struct Segment {
-        let content: String
-        let isCode: Bool
+    private func inlineText(
+        _ content: String,
+        size: CGFloat,
+        weight: Font.Weight = .regular,
+        color: Color = Theme.textPrimary
+    ) -> some View {
+        Text(attributed(content))
+            .font(.system(size: size, weight: weight))
+            .foregroundColor(color)
+            .tint(Theme.brand)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
-    private var segments: [Segment] {
-        let parts = text.components(separatedBy: "```")
-        var result: [Segment] = []
-        for (index, raw) in parts.enumerated() {
-            let isCode = index % 2 == 1
-            var content = raw
-            if isCode {
-                // 去掉语言标记行（``` 后第一行）
-                if let newline = content.firstIndex(of: "\n") {
-                    let firstLine = content[..<newline]
-                    if firstLine.count <= 24, !firstLine.contains(" ") {
-                        content = String(content[content.index(after: newline)...])
-                    }
-                }
-            }
-            content = content.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !content.isEmpty {
-                result.append(Segment(content: content, isCode: isCode))
-            }
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return 21
+        case 2: return 19
+        case 3: return 17
+        default: return 16
         }
+    }
+
+    private var blocks: [Block] {
+        var result: [Block] = []
+        var paragraph: [String] = []
+        var code: [String] = []
+        var fence: String?
+        var language: String?
+
+        func flushParagraph() {
+            guard !paragraph.isEmpty else { return }
+            result.append(.paragraph(paragraph.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)))
+            paragraph.removeAll()
+        }
+        func flushCode() {
+            result.append(.code(code.joined(separator: "\n").trimmingCharacters(in: .newlines), language))
+            code.removeAll()
+            fence = nil
+            language = nil
+        }
+
+        for rawLine in text.components(separatedBy: .newlines) {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            if let fence {
+                if trimmed.hasPrefix(fence) { flushCode() } else { code.append(rawLine) }
+                continue
+            }
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                flushParagraph()
+                fence = String(trimmed.prefix(3))
+                let suffix = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                language = suffix.isEmpty ? nil : suffix
+                continue
+            }
+            if trimmed.isEmpty {
+                flushParagraph()
+                continue
+            }
+            let level = trimmed.prefix { $0 == "#" }.count
+            if (1...6).contains(level), trimmed.dropFirst(level).hasPrefix(" ") {
+                flushParagraph()
+                result.append(.heading(level, String(trimmed.dropFirst(level + 1))))
+                continue
+            }
+            let rule = trimmed.replacingOccurrences(of: " ", with: "")
+            if ["---", "***", "___"].contains(rule) {
+                flushParagraph()
+                result.append(.divider)
+                continue
+            }
+            if trimmed.hasPrefix(">") {
+                flushParagraph()
+                result.append(.quote(String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)))
+                continue
+            }
+            if let item = listItem(rawLine) {
+                flushParagraph()
+                result.append(item)
+                continue
+            }
+            paragraph.append(rawLine)
+        }
+        if fence != nil { flushCode() } else { flushParagraph() }
         return result
+    }
+
+    private func listItem(_ rawLine: String) -> Block? {
+        let leading = rawLine.prefix { $0 == " " || $0 == "\t" }.count
+        let indent = leading / 2
+        let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+        var marker: String?
+        var content: String?
+        for prefix in ["- ", "* ", "+ "] where trimmed.hasPrefix(prefix) {
+            marker = "•"
+            content = String(trimmed.dropFirst(2))
+        }
+        if marker == nil, let end = trimmed.firstIndex(where: { $0 == "." || $0 == ")" }) {
+            let digits = trimmed[..<end]
+            let after = trimmed.index(after: end)
+            if !digits.isEmpty, digits.allSatisfy({ $0.isNumber }), after < trimmed.endIndex, trimmed[after] == " " {
+                marker = String(trimmed[...end])
+                content = String(trimmed[trimmed.index(after: after)...])
+            }
+        }
+        guard let marker, var content else { return nil }
+        var checked: Bool?
+        if content.lowercased().hasPrefix("[x] ") {
+            checked = true
+            content = String(content.dropFirst(4))
+        } else if content.hasPrefix("[ ] ") {
+            checked = false
+            content = String(content.dropFirst(4))
+        }
+        return .listItem(marker: marker, text: content, indent: indent, checked: checked)
     }
 
     private func attributed(_ raw: String) -> AttributedString {
