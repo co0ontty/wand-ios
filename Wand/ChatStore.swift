@@ -1,6 +1,13 @@
 import Foundation
 import Combine
 
+/// AskUserQuestion 卡片的本地选择状态（对齐 Web 端 state.askUserSelections）。
+struct AskUserSelectionState {
+    /// questionIndex → 已选 optionIndex 集合。
+    var selected: [Int: Set<Int>] = [:]
+    var submitted = false
+}
+
 /// 单个会话的状态机：拉取快照、订阅 WebSocket、合并增量推送、发送输入与权限决策。
 /// 合流规则对齐浏览器端 websocket.ts：
 ///   - init / messages 全量 → 直接替换
@@ -21,6 +28,9 @@ final class ChatStore: ObservableObject {
     @Published var loading = true
     @Published var loadError: String?
     @Published var toast: String?
+    /// AskUserQuestion 卡片的选择状态（toolUseId → 各题已选项 + 是否已提交）。
+    /// 放 store 而非卡片 @State：流式推送会整条替换消息重建视图，局部状态会丢。
+    @Published var askUserSelections: [String: AskUserSelectionState] = [:]
 
     let sessionId: String
     let api: WandAPI
@@ -248,6 +258,47 @@ final class ChatStore: ObservableObject {
                 }
             } catch {
                 toast = error.localizedDescription
+                if isStructured { isResponding = false }
+            }
+        }
+    }
+
+    // MARK: - AskUserQuestion 交互（对齐 Web 端 __askSelect / __askSubmit）
+
+    /// 点选一个选项：单选点同一项取消、换选项替换；多选逐项 toggle。已提交后不可改。
+    func toggleAskOption(toolUseId: String, questionIndex: Int, optionIndex: Int, multiSelect: Bool) {
+        var sel = askUserSelections[toolUseId] ?? AskUserSelectionState()
+        guard !sel.submitted else { return }
+        var current = sel.selected[questionIndex] ?? []
+        if multiSelect {
+            if current.contains(optionIndex) { current.remove(optionIndex) } else { current.insert(optionIndex) }
+        } else {
+            current = current.contains(optionIndex) ? [] : [optionIndex]
+        }
+        sel.selected[questionIndex] = current
+        askUserSelections[toolUseId] = sel
+    }
+
+    /// 提交答案：每道题一行、同题多选 ", " 连接（对齐 Web），走与普通消息相同的输入通道。
+    /// 答案不乐观插入用户气泡——服务端会把它作为 tool_result 回推、卡片转只读态。
+    func submitAskUser(toolUseId: String, answerText: String) {
+        var sel = askUserSelections[toolUseId] ?? AskUserSelectionState()
+        guard !sel.submitted else { return }
+        sel.submitted = true
+        askUserSelections[toolUseId] = sel
+        if isStructured { isResponding = true }
+        Task {
+            do {
+                if isStructured {
+                    try await api.sendInput(id: sessionId, input: answerText)
+                } else {
+                    try await api.sendInput(id: sessionId, input: answerText + "\n", view: "chat")
+                }
+            } catch {
+                toast = error.localizedDescription
+                var rollback = askUserSelections[toolUseId] ?? AskUserSelectionState()
+                rollback.submitted = false
+                askUserSelections[toolUseId] = rollback
                 if isStructured { isResponding = false }
             }
         }

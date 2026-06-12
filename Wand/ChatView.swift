@@ -571,9 +571,10 @@ private struct BlockView: View {
                 }
             }
         case .toolUse(_, let name, let description, let input, let subagent):
+            // 兜底：正常路径已在 TurnView 配对分流，这里处理极端的落单 ToolUse。
             VStack(alignment: .leading, spacing: 4) {
                 subagentTag(subagent)
-                ToolUseCard(name: name, description: description, input: input)
+                ToolUseCard(name: name, description: description, input: input, result: nil, running: false)
             }
         case .toolResult(_, let text, let isError, let truncated, _):
             if !text.isEmpty {
@@ -815,41 +816,109 @@ private struct MarkdownText: View {
     }
 }
 
-/// 工具调用卡片：图标 + 工具名 + 参数摘要。
+/// 工具名 → 中文标签；未识别的工具显示原名（对齐 Web 端 toolDisplayName）。
+private func toolLabel(_ name: String) -> String {
+    let lower = name.lowercased()
+    if lower.contains("todo") { return "更新待办" }
+    if lower.contains("websearch") { return "网页搜索" }
+    if lower.contains("webfetch") || lower.contains("fetch") { return "网页获取" }
+    if lower.contains("notebook") { return "编辑笔记本" }
+    if lower.hasPrefix("multiedit") || lower.hasPrefix("edit") { return "编辑文件" }
+    if lower.hasPrefix("write") { return "写入文件" }
+    if lower.hasPrefix("read") { return "读取文件" }
+    if lower.hasPrefix("grep") { return "搜索内容" }
+    if lower.hasPrefix("glob") { return "查找文件" }
+    if lower == "bash" || lower.contains("command") || lower.contains("shell") { return "执行命令" }
+    if lower.hasPrefix("task") || lower.contains("agent") { return "子任务" }
+    return name
+}
+
+/// 工具调用卡片：图标 + 中文工具名 + 参数摘要 + 可折叠结果区。
+/// 三态对齐 Web：运行中（转圈）/ 成功（左侧绿竖线）/ 失败（红弱底 + 红边框）。
 private struct ToolUseCard: View {
     let name: String
     let description: String?
     let input: [String: JSONValue]
+    var result: ToolResultInfo?
+    var running = false
+
+    @State private var expanded = false
+
+    private var isError: Bool { result?.isError == true }
+    private var isSuccess: Bool { result != nil && !isError }
+    private var hasBody: Bool { !(result?.text.isEmpty ?? true) }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: iconName)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(Theme.brand)
-                .frame(width: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                if !summary.isEmpty {
-                    Text(summary)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundColor(Theme.textSecondary)
-                        .lineLimit(2)
+        HStack(spacing: 0) {
+            if isSuccess {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.green.opacity(0.75))
+                    .frame(width: 2)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                header
+                if expanded, let result, hasBody {
+                    ToolResultBody(result: result)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 10)
                 }
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Theme.surface)
+                .fill(isError ? Theme.danger.opacity(0.08) : Theme.surface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Theme.border, lineWidth: 1)
+                .stroke(isError ? Theme.danger.opacity(0.45) : Theme.border, lineWidth: 1)
         )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var header: some View {
+        Button {
+            guard hasBody else { return }
+            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+        } label: {
+            HStack(spacing: 8) {
+                if running {
+                    ProgressView().controlSize(.small).tint(Theme.brand).frame(width: 22)
+                } else {
+                    Image(systemName: iconName)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(isError ? Theme.danger : Theme.brand)
+                        .frame(width: 22)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(toolLabel(name))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(isError ? Theme.danger : Theme.textPrimary)
+                        if isError {
+                            Text("出错")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(Theme.danger)
+                        }
+                    }
+                    if !summary.isEmpty {
+                        Text(summary)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(Theme.textSecondary)
+                            .lineLimit(2)
+                    }
+                }
+                Spacer(minLength: 0)
+                if hasBody {
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var iconName: String {
@@ -877,6 +946,32 @@ private struct ToolUseCard: View {
             return "\(first.key): \(first.value.summaryText)"
         }
         return ""
+    }
+}
+
+/// 工具结果正文：次级底色代码框 + 4000 字截断。
+private struct ToolResultBody: View {
+    let result: ToolResultInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(result.text.count > 4000 ? String(result.text.prefix(4000)) + "\n…（已截断）" : result.text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(result.isError ? Theme.danger : Theme.textPrimary)
+                    .textSelection(.enabled)
+                    .padding(10)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Theme.background.opacity(0.6))
+            )
+            if result.truncated {
+                Text("内容过长，已截断")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textSecondary)
+            }
+        }
     }
 }
 
@@ -998,6 +1093,560 @@ private struct PermissionCard: View {
 
     private var target: String? {
         escalation?.target ?? legacy?.target
+    }
+}
+
+// MARK: - 共享语义色（Web 端 --success 同款 #4F7A58）
+
+private let chatSuccess = Color(red: 0.310, green: 0.478, blue: 0.345)
+
+// MARK: - AskUserQuestion 交互卡片（对齐 Web 端 ask-user 卡）
+
+/// 提问卡：头部「? 提问 · header」，body 是题目 + 选项列表 + 确认提交。
+/// 未答可交互（单选/多选），已答（配对到 tool_result）转只读并高亮用户选过的项。
+private struct AskUserQuestionCard: View {
+    let toolUseId: String
+    let questions: [AskUserQuestion]
+    let result: ToolResultInfo?
+    let selection: AskUserSelectionState
+    let onToggle: (Int, Int, Bool) -> Void
+    let onSubmit: (String) -> Void
+
+    @State private var expanded = true
+
+    private var isAnswered: Bool { result != nil }
+    /// 已答时按行拆答案：每道题一行，行内 ", " 分隔多选 label（对齐 Web 的解析）。
+    private var answerLines: [String] {
+        guard let text = result?.text.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return [] }
+        return text.components(separatedBy: "\n")
+    }
+    private var headerLabel: String? {
+        questions.first(where: { !($0.header ?? "").isEmpty })?.header
+    }
+    private var allAnswered: Bool {
+        (0..<questions.count).allSatisfy { !(selection.selected[$0] ?? []).isEmpty }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            headerView
+            if expanded {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(questions.enumerated()), id: \.offset) { qIdx, question in
+                        questionGroup(qIdx: qIdx, question: question)
+                    }
+                    if !isAnswered {
+                        submitRow
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.brand.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isAnswered ? chatSuccess.opacity(0.55) : Theme.brand.opacity(0.35), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onAppear { expanded = !isAnswered }
+        .onChange(of: isAnswered) { answered in
+            // 回答送达后自动折叠（对齐 Web 已答默认折叠）。
+            if answered { withAnimation(.easeInOut(duration: 0.15)) { expanded = false } }
+        }
+    }
+
+    private var headerView: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: isAnswered ? "checkmark.circle.fill" : "questionmark.circle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(isAnswered ? chatSuccess : Theme.brand)
+                    .frame(width: 22)
+                Text("提问")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                if let headerLabel {
+                    Text(headerLabel)
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.textSecondary)
+                        .lineLimit(1)
+                }
+                if isAnswered {
+                    Text(answerLines.joined(separator: ", "))
+                        .font(.system(size: 12))
+                        .foregroundColor(chatSuccess)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private func questionGroup(qIdx: Int, question: AskUserQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !question.question.isEmpty {
+                Text(question.question)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(question.options.enumerated()), id: \.offset) { optIdx, option in
+                    optionRow(qIdx: qIdx, optIdx: optIdx, option: option, multiSelect: question.multiSelect)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func optionRow(
+        qIdx: Int, optIdx: Int, option: AskUserQuestion.Option, multiSelect: Bool
+    ) -> some View {
+        let chosen: Bool = {
+            if isAnswered {
+                // 只读态：答案第 qIdx 行（缺行回落第一行），按 "," 拆出已选 label。
+                let line = qIdx < answerLines.count ? answerLines[qIdx] : (answerLines.first ?? "")
+                return line.components(separatedBy: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .contains(option.label)
+            }
+            return (selection.selected[qIdx] ?? []).contains(optIdx)
+        }()
+
+        Button {
+            guard !isAnswered, !selection.submitted else { return }
+            onToggle(qIdx, optIdx, multiSelect)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                indicator(chosen: chosen, multiSelect: multiSelect)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.label)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(Theme.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let desc = option.description, !desc.isEmpty {
+                        Text(desc)
+                            .font(.system(size: 12))
+                            .foregroundColor(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(optionFill(chosen: chosen))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(optionBorder(chosen: chosen), lineWidth: chosen ? 1.5 : 1)
+            )
+            .opacity(isAnswered && !chosen ? 0.55 : 1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isAnswered || selection.submitted)
+    }
+
+    private func optionFill(chosen: Bool) -> Color {
+        if isAnswered {
+            return chosen ? chatSuccess.opacity(0.08) : Theme.surface
+        }
+        return chosen ? Theme.brand.opacity(0.16) : Theme.surface
+    }
+
+    private func optionBorder(chosen: Bool) -> Color {
+        if isAnswered {
+            return chosen ? chatSuccess : Theme.border
+        }
+        return chosen ? Theme.brand : Theme.border
+    }
+
+    /// 单选圆形 / 多选圆角方形 indicator，选中实底白点/白勾（对齐 Web）。
+    @ViewBuilder private func indicator(chosen: Bool, multiSelect: Bool) -> some View {
+        let tint = isAnswered ? chatSuccess : Theme.brand
+        ZStack {
+            if multiSelect {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(chosen ? tint : Color.clear)
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(chosen ? tint : Theme.border, lineWidth: 2)
+                if chosen {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                }
+            } else {
+                Circle().fill(chosen ? tint : Color.clear)
+                Circle().stroke(chosen ? tint : Theme.border, lineWidth: 2)
+                if chosen {
+                    Circle().fill(Color.white).frame(width: 6, height: 6)
+                }
+            }
+        }
+        .frame(width: 16, height: 16)
+        .padding(.top, 1)
+    }
+
+    private var submitRow: some View {
+        HStack {
+            Spacer()
+            Button {
+                guard allAnswered, !selection.submitted else { return }
+                var lines: [String] = []
+                for (qIdx, question) in questions.enumerated() {
+                    let chosen = (selection.selected[qIdx] ?? []).sorted()
+                    lines.append(chosen.map { question.options[$0].label }.joined(separator: ", "))
+                }
+                onSubmit(lines.joined(separator: "\n"))
+            } label: {
+                Text(selection.submitted ? "已提交…" : "确认提交")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill((allAnswered && !selection.submitted) ? Theme.brand : Theme.brand.opacity(0.4))
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(!allAnswered || selection.submitted)
+        }
+    }
+}
+
+// MARK: - Diff 卡片（Edit / Write / MultiEdit，对齐 Web 端 inline-diff）
+
+private struct DiffCard: View {
+    let toolName: String
+    let input: [String: JSONValue]
+    let result: ToolResultInfo?
+
+    @State private var expanded = false
+    @State private var initialized = false
+
+    private var path: String {
+        input["file_path"]?.stringValue ?? input["path"]?.stringValue ?? ""
+    }
+    private var fileName: String {
+        let name = (path as NSString).lastPathComponent
+        return name.isEmpty ? path : name
+    }
+    private var isWrite: Bool { toolName == "Write" || toolName == "MultiEdit" }
+    private var oldText: String { input["old_string"]?.stringValue ?? "" }
+    private var newText: String {
+        input["new_string"]?.stringValue ?? input["content"]?.stringValue ?? ""
+    }
+
+    private var statusText: String {
+        guard let result else { return "执行中" }
+        if result.isError {
+            let text = result.text
+            return (text.contains("haven't granted") || text.contains("permission")) ? "等待授权" : "失败"
+        }
+        return "已修改"
+    }
+    private var statusColor: Color {
+        guard let result else { return Theme.brand }
+        return result.isError ? Theme.danger : chatSuccess
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            if expanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    if !isWrite && !oldText.isEmpty {
+                        diffColumn(label: "旧", text: oldText, prefix: "- ", tint: Theme.danger)
+                    }
+                    if !newText.isEmpty {
+                        diffColumn(label: isWrite ? "" : "新", text: newText, prefix: "+ ", tint: chatSuccess)
+                    }
+                    if let result, result.isError, !result.text.isEmpty {
+                        Text(result.text.count > 600 ? String(result.text.prefix(600)) + "…" : result.text)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(Theme.danger)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onAppear {
+            // 默认展开态对齐 Web：执行中展开，已完成折叠。只在首次出现时定初值。
+            if !initialized {
+                expanded = result == nil
+                initialized = true
+            }
+        }
+        .onChange(of: result != nil) { hasResult in
+            // 结果到达后自动收起（对齐 Android / Web 行为；手动点开不受影响）。
+            if hasResult { withAnimation(.easeInOut(duration: 0.15)) { expanded = false } }
+        }
+    }
+
+    private var header: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(Theme.brand)
+                    .frame(width: 22)
+                Text(fileName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                Text(path)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                Spacer(minLength: 0)
+                Text(statusText)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(statusColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(statusColor.opacity(0.12)))
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private func diffColumn(label: String, text: String, prefix: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if !label.isEmpty {
+                Text(label)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(prefix + (text.count > 2000 ? String(text.prefix(2000)) + "\n…（已截断）" : text))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(tint)
+                    .textSelection(.enabled)
+                    .padding(8)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(tint.opacity(0.08))
+            )
+        }
+    }
+}
+
+// MARK: - 终端卡片（Bash，对齐 Web 端 inline-terminal）
+
+private struct TerminalCard: View {
+    let input: [String: JSONValue]
+    let result: ToolResultInfo?
+    var running = false
+
+    @State private var expanded = false
+
+    private var command: String {
+        input["command"]?.stringValue ?? input["cmd"]?.stringValue ?? ""
+    }
+    private var statusColor: Color {
+        guard let result else { return Theme.brand }
+        return result.isError ? Theme.danger : chatSuccess
+    }
+    // 终端卡固定深色，亮暗主题一致（对齐 Web）。
+    private let termBg = Color(red: 0.118, green: 0.118, blue: 0.118)
+    private let termText = Color(red: 0.85, green: 0.85, blue: 0.83)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            if expanded {
+                VStack(alignment: .leading, spacing: 4) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text("$ " + command)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(termText)
+                            .textSelection(.enabled)
+                    }
+                    if let result, !result.text.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            Text(result.text.count > 4000 ? String(result.text.prefix(4000)) + "\n…（已截断）" : result.text)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(result.isError ? Color(red: 0.95, green: 0.55, blue: 0.5) : termText.opacity(0.85))
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(termBg))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var header: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+        } label: {
+            HStack(spacing: 8) {
+                if running {
+                    ProgressView().controlSize(.small).tint(termText)
+                } else {
+                    Circle().fill(statusColor).frame(width: 8, height: 8)
+                }
+                Text("$ " + (command.count > 80 ? String(command.prefix(77)) + "…" : command))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(termText)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(termText.opacity(0.6))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - 待办进度条（TodoWrite，对齐 Web 端 todo-progress）
+
+/// 输入栏上方的悬浮进度条：环形进度 + N/M + 当前任务，点击展开任务列表。
+struct TodoProgressBar: View {
+    let todos: [TodoItem]
+
+    @State private var expanded = false
+
+    private var completed: Int { todos.filter { $0.status == "completed" }.count }
+    /// 1-indexed「正在干第 N 个」：completed+1 封顶（对齐 Web currentStep）。
+    private var currentStep: Int { min(completed + 1, todos.count) }
+    private var activeTask: String {
+        if let active = todos.first(where: { $0.status == "in_progress" }) {
+            let label = active.activeForm ?? active.content
+            if !label.isEmpty { return label }
+        }
+        return ""
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    progressRing
+                    Text("\(currentStep)/\(todos.count)")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundColor(Theme.brand)
+                    if !activeTask.isEmpty {
+                        Text(activeTask)
+                            .font(.system(size: 12))
+                            .foregroundColor(Theme.textSecondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.up")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(todos.enumerated()), id: \.offset) { _, todo in
+                        todoRow(todo)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Theme.surface)
+                .shadow(color: Color.black.opacity(0.08), radius: 6, y: 2)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        )
+    }
+
+    private var progressRing: some View {
+        ZStack {
+            Circle()
+                .stroke(Theme.border, lineWidth: 3)
+            Circle()
+                .trim(from: 0, to: CGFloat(currentStep) / CGFloat(max(todos.count, 1)))
+                .stroke(Theme.brand, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .frame(width: 18, height: 18)
+    }
+
+    @ViewBuilder private func todoRow(_ todo: TodoItem) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Group {
+                switch todo.status {
+                case "completed":
+                    Text("✓").foregroundColor(chatSuccess)
+                case "in_progress":
+                    Text("›").foregroundColor(Theme.brand)
+                default:
+                    Text("○").foregroundColor(Theme.textSecondary)
+                }
+            }
+            .font(.system(size: 12, weight: .bold, design: .monospaced))
+            .frame(width: 14)
+            Text(todo.content)
+                .font(.system(size: 12))
+                .foregroundColor(todo.status == "in_progress" ? Theme.textPrimary : Theme.textSecondary)
+                .strikethrough(todo.status == "completed", color: Theme.textSecondary.opacity(0.6))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
     }
 }
 

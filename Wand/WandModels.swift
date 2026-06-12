@@ -49,6 +49,105 @@ enum JSONValue: Decodable {
         case .object: return "{…}"
         }
     }
+
+    // 便利访问器：tool_use input 的结构化读取（AskUserQuestion / TodoWrite / Edit 等专用卡片用）。
+    var stringValue: String? {
+        if case .string(let s) = self { return s }
+        return nil
+    }
+    var boolValue: Bool? {
+        if case .bool(let b) = self { return b }
+        return nil
+    }
+    var arrayValue: [JSONValue]? {
+        if case .array(let a) = self { return a }
+        return nil
+    }
+    var objectValue: [String: JSONValue]? {
+        if case .object(let o) = self { return o }
+        return nil
+    }
+}
+
+// MARK: - 特殊工具卡片的 input 模型
+
+/// AskUserQuestion 的一道题（tool_use input.questions[i]），字段对齐 Web 端 chat-render.ts。
+struct AskUserQuestion {
+    struct Option {
+        let label: String
+        let description: String?
+    }
+
+    let question: String
+    let header: String?
+    let multiSelect: Bool
+    let options: [Option]
+
+    /// 从 tool_use 的 input 解析 questions 数组；形状不符返回空数组（上层回落普通工具卡）。
+    static func parse(input: [String: JSONValue]) -> [AskUserQuestion] {
+        guard let items = input["questions"]?.arrayValue else { return [] }
+        var result: [AskUserQuestion] = []
+        for item in items {
+            guard let obj = item.objectValue else { continue }
+            var options: [Option] = []
+            for raw in obj["options"]?.arrayValue ?? [] {
+                guard let opt = raw.objectValue else { continue }
+                let label = opt["label"]?.stringValue ?? ""
+                options.append(Option(
+                    label: label.isEmpty ? "选项 \(options.count + 1)" : label,
+                    description: opt["description"]?.stringValue
+                ))
+            }
+            guard !options.isEmpty else { continue }
+            result.append(AskUserQuestion(
+                question: obj["question"]?.stringValue ?? "",
+                header: obj["header"]?.stringValue,
+                multiSelect: obj["multiSelect"]?.boolValue ?? false,
+                options: options
+            ))
+        }
+        return result
+    }
+}
+
+/// TodoWrite 的一项待办（tool_use input.todos[i]）。
+struct TodoItem {
+    let content: String
+    let status: String
+    let activeForm: String?
+
+    static func parse(input: [String: JSONValue]) -> [TodoItem] {
+        guard let items = input["todos"]?.arrayValue else { return [] }
+        var result: [TodoItem] = []
+        for item in items {
+            guard let obj = item.objectValue else { continue }
+            result.append(TodoItem(
+                content: obj["content"]?.stringValue ?? "",
+                status: obj["status"]?.stringValue ?? "pending",
+                activeForm: obj["activeForm"]?.stringValue
+            ))
+        }
+        return result
+    }
+
+    /// 当前 turn 的待办列表：只看最后一条 user 消息之后的 TodoWrite，
+    /// 对齐 Web 端 updateTodoProgress 的 scoping（上一轮的进度条不跨 turn 残留）。
+    static func currentTodos(in messages: [ConversationTurn]) -> [TodoItem] {
+        var startIdx = 0
+        for i in stride(from: messages.count - 1, through: 0, by: -1) where messages[i].role == "user" {
+            startIdx = i + 1
+            break
+        }
+        for i in stride(from: messages.count - 1, through: startIdx, by: -1) {
+            for block in messages[i].content.reversed() {
+                if case .toolUse(_, let name, _, let input, _) = block, name == "TodoWrite" {
+                    let todos = parse(input: input)
+                    if !todos.isEmpty { return todos }
+                }
+            }
+        }
+        return []
+    }
 }
 
 // MARK: - 会话消息块
