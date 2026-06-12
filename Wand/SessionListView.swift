@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 会话列表：原生渲染 /api/sessions，下拉刷新 + 周期轮询，
-/// 点击进入嵌套网页版对应会话，支持滑动删除与新建会话。
+/// 对话模式进入原生聊天，PTY 模式进入嵌套网页版对应会话。
 struct SessionListView: View {
     let api: WandAPI
 
@@ -10,8 +10,8 @@ struct SessionListView: View {
     @State private var loadError: String?
     @State private var showNewSession = false
     @State private var showArchived = false
-    /// 长按图标快捷操作「继续会话」的程序化跳转目标。
-    @State private var quickOpenSessionId: String?
+    /// 长按图标快捷操作 / 新建完成后的程序化跳转目标。
+    @State private var quickOpenSession: SessionSnapshot?
     @ObservedObject private var quickActions = QuickActionCoordinator.shared
 
     private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
@@ -35,8 +35,8 @@ struct SessionListView: View {
             }
             // 隐藏的程序化跳转链接：快捷操作「继续会话」用。
             NavigationLink(isActive: quickOpenActive) {
-                if let id = quickOpenSessionId {
-                    WebSessionView(sessionId: id, api: api)
+                if let session = quickOpenSession {
+                    SessionDestinationView(session: session, api: api)
                 } else {
                     EmptyView()
                 }
@@ -58,7 +58,7 @@ struct SessionListView: View {
                 showNewSession = false
                 sessions.insert(newSession, at: 0)
                 DispatchQueue.main.async {
-                    quickOpenSessionId = newSession.id
+                    quickOpenSession = newSession
                 }
             }
         }
@@ -74,8 +74,8 @@ struct SessionListView: View {
 
     private var quickOpenActive: Binding<Bool> {
         Binding(
-            get: { quickOpenSessionId != nil },
-            set: { if !$0 { quickOpenSessionId = nil } }
+            get: { quickOpenSession != nil },
+            set: { if !$0 { quickOpenSession = nil } }
         )
     }
 
@@ -88,11 +88,17 @@ struct SessionListView: View {
         }) else { return }
         switch action {
         case .newSession:
-            quickOpenSessionId = nil
+            quickOpenSession = nil
             showNewSession = true
         case .openSession(let id):
             showNewSession = false
-            quickOpenSessionId = id
+            if let session = sessions.first(where: { $0.id == id }) {
+                quickOpenSession = session
+            } else {
+                Task {
+                    quickOpenSession = try? await api.getSession(id: id)
+                }
+            }
         case .openWeb:
             break
         }
@@ -131,7 +137,7 @@ struct SessionListView: View {
             List {
                 ForEach(visibleSessions) { session in
                     ZStack {
-                        NavigationLink(destination: WebSessionView(sessionId: session.id, api: api)) {
+                        NavigationLink(destination: SessionDestinationView(session: session, api: api)) {
                             EmptyView()
                         }
                         .opacity(0)
@@ -170,6 +176,19 @@ struct SessionListView: View {
             for target in targets {
                 try? await api.deleteSession(id: target.id)
             }
+        }
+    }
+}
+
+private struct SessionDestinationView: View {
+    let session: SessionSnapshot
+    let api: WandAPI
+
+    @ViewBuilder var body: some View {
+        if session.isStructured {
+            ChatView(sessionId: session.id, api: api)
+        } else {
+            WebSessionView(sessionId: session.id, api: api)
         }
     }
 }
