@@ -18,6 +18,10 @@ struct ChatView: View {
     @State private var followsLatest = true
     @State private var voicePressed = false
     @State private var voiceCanceling = false
+    /// 语音输入模式：轻点话筒进入，整个输入框变成「按住说话」面板。
+    @State private var voiceMode = false
+    /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
+    @State private var voiceHoldWork: DispatchWorkItem?
     @FocusState private var inputFocused: Bool
 
     init(sessionId: String, api: WandAPI) {
@@ -279,18 +283,22 @@ struct ChatView: View {
     private var inputBar: some View {
         HStack(alignment: .bottom, spacing: 10) {
             micButton
-            growingTextField
-                .focused($inputFocused)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(Theme.surface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .stroke(Theme.border, lineWidth: 1)
-                )
+            if voiceMode {
+                voiceHoldField
+            } else {
+                growingTextField
+                    .focused($inputFocused)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(Theme.surface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(Theme.border, lineWidth: 1)
+                    )
+            }
 
             if store.isResponding {
                 Button(action: { store.stopResponding() }) {
@@ -342,9 +350,11 @@ struct ChatView: View {
 
     // MARK: - 按住说话（端侧语音识别）
 
-    /// 麦克风按钮：按住录音、上滑取消、松手把识别文本追加进输入框。
+    /// 麦克风按钮：
+    /// - 轻点 → 切换语音输入模式（整个输入框变成「按住说话」面板，图标变键盘）；
+    /// - 长按 → 立即按住说话（原交互）：按住录音、上滑取消、松手把识别文本追加进输入框。
     private var micButton: some View {
-        Image(systemName: speech.isRecording ? "waveform" : "mic")
+        Image(systemName: micButtonSymbol)
             .font(.system(size: 16, weight: .semibold))
             .foregroundColor(voicePressed ? .white : Theme.brand)
             .frame(width: 38, height: 38)
@@ -358,28 +368,103 @@ struct ChatView: View {
             .scaleEffect(voicePressed ? 1.1 : 1)
             .animation(.easeInOut(duration: 0.15), value: voicePressed)
             .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
-            .gesture(voiceGesture)
-            .accessibilityLabel("按住说话")
+            .gesture(voiceTapOrHoldGesture(onTap: {
+                voiceMode.toggle()
+                if voiceMode { inputFocused = false }
+            }))
+            .accessibilityLabel(voiceMode ? "切回键盘输入" : "轻点切语音模式，长按说话")
+    }
+
+    private var micButtonSymbol: String {
+        if speech.isRecording { return "waveform" }
+        return voiceMode && !voicePressed ? "keyboard" : "mic"
+    }
+
+    /// 语音模式下替换文本框的「按住说话」面板：
+    /// 按住录音（同话筒长按），轻点切回键盘输入；非录音时显示当前草稿，所见即所得。
+    private var voiceHoldField: some View {
+        HStack {
+            if voicePressed || draft.isEmpty {
+                Spacer(minLength: 0)
+            }
+            Group {
+                if voicePressed {
+                    Text(voiceCanceling ? "松开手指，取消输入" : "松开结束 · 上滑取消")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
+                } else if draft.isEmpty {
+                    Text("按住说话")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Theme.textSecondary)
+                } else {
+                    Text(draft)
+                        .font(.system(size: 16))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .frame(minHeight: 38)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(
+                    voicePressed
+                        ? (voiceCanceling ? Theme.danger.opacity(0.16) : Theme.brand.opacity(0.14))
+                        : Theme.surface
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        )
+        .animation(.easeInOut(duration: 0.15), value: voicePressed)
+        .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .gesture(voiceTapOrHoldGesture(onTap: {
+            // 轻点面板：切回键盘并自动聚焦，直接接着打字。
+            voiceMode = false
+            DispatchQueue.main.async { inputFocused = true }
+        }))
+        .accessibilityLabel("按住说话，轻点切回键盘输入")
     }
 
     /// 上滑超过该距离进入「松开取消」态（对齐 Web 端 VOICE_CANCEL_THRESHOLD）。
     private static let voiceCancelThreshold: CGFloat = 60
 
-    private var voiceGesture: some Gesture {
+    /// 轻点 vs 按住的分界：按住超过该时长进入录音，否则按轻点处理。
+    private static let voiceHoldThreshold: TimeInterval = 0.3
+
+    /// 轻点 / 按住二分手势：按满阈值 → 开始录音（移动驱动上滑取消、松手提交）；
+    /// 阈值内松手 → onTap()。
+    private func voiceTapOrHoldGesture(onTap: @escaping () -> Void) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if !voicePressed {
-                    voicePressed = true
-                    voiceCanceling = false
-                    speech.start { message in
-                        store.toast = message
-                        voicePressed = false
-                        voiceCanceling = false
+                if voiceHoldWork == nil && !voicePressed {
+                    // 手指刚按下：起计时，按满阈值才真正开始录音。
+                    let work = DispatchWorkItem {
+                        voiceHoldWork = nil
+                        startVoiceRecording()
                     }
+                    voiceHoldWork = work
+                    DispatchQueue.main.asyncAfter(
+                        deadline: .now() + Self.voiceHoldThreshold, execute: work
+                    )
                 }
-                voiceCanceling = value.translation.height < -Self.voiceCancelThreshold
+                if voicePressed {
+                    voiceCanceling = value.translation.height < -Self.voiceCancelThreshold
+                }
             }
             .onEnded { _ in
+                if let work = voiceHoldWork {
+                    // 阈值内松手 → 轻点。
+                    work.cancel()
+                    voiceHoldWork = nil
+                    onTap()
+                    return
+                }
                 let cancelled = voiceCanceling
                 voicePressed = false
                 voiceCanceling = false
@@ -387,6 +472,18 @@ struct ChatView: View {
                     appendTranscriptToDraft(text)
                 }
             }
+    }
+
+    /// 按满阈值进入录音态（原「按下立即录音」交互的主体）。
+    private func startVoiceRecording() {
+        guard !voicePressed else { return }
+        voicePressed = true
+        voiceCanceling = false
+        speech.start { message in
+            store.toast = message
+            voicePressed = false
+            voiceCanceling = false
+        }
     }
 
     /// 识别文本追加进草稿（不覆盖已有内容，对齐 Web 端 commitVoiceTranscript）。
