@@ -27,6 +27,7 @@
 		A1000000000000000000AC08 /* NativeRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC08 /* NativeRootView.swift */; };
 		A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC09 /* GitQuickCommitView.swift */; };
 		A1000000000000000000AC0A /* KeyboardObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC0A /* KeyboardObserver.swift */; };
+		A1000000000000000000AC0B /* BrandLogos.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC0B /* BrandLogos.swift */; };
 		B2000000000000000000AC01 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC01 /* QRScannerView.swift */; };
 		B2000000000000000000AC02 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC02 /* SettingsView.swift */; };
 		B2000000000000000000AC03 /* SessionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC03 /* SessionActivityAttributes.swift */; };
@@ -81,6 +82,7 @@
 		A1000000000000000000BC08 /* NativeRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRootView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC09 /* GitQuickCommitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitQuickCommitView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC0A /* KeyboardObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardObserver.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC0B /* BrandLogos.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandLogos.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC01 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC02 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC03 /* SessionActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActivityAttributes.swift; sourceTree = "<group>"; };
@@ -143,6 +145,7 @@
 				A1000000000000000000BC08 /* NativeRootView.swift */,
 				A1000000000000000000BC09 /* GitQuickCommitView.swift */,
 				A1000000000000000000BC0A /* KeyboardObserver.swift */,
+				A1000000000000000000BC0B /* BrandLogos.swift */,
 				B2000000000000000000BC01 /* QRScannerView.swift */,
 				B2000000000000000000BC02 /* SettingsView.swift */,
 				B2000000000000000000BC03 /* SessionActivityAttributes.swift */,
@@ -291,6 +294,7 @@
 				A1000000000000000000AC08 /* NativeRootView.swift in Sources */,
 				A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */,
 				A1000000000000000000AC0A /* KeyboardObserver.swift in Sources */,
+				A1000000000000000000AC0B /* BrandLogos.swift in Sources */,
 				B2000000000000000000AC01 /* QRScannerView.swift in Sources */,
 				B2000000000000000000AC02 /* SettingsView.swift in Sources */,
 				B2000000000000000000AC03 /* SessionActivityAttributes.swift in Sources */,

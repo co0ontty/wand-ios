@@ -232,9 +232,9 @@ private struct SessionRow: View {
                 .fill(providerTint.opacity(0.13))
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(providerTint.opacity(0.24), lineWidth: 1)
-            Image(systemName: providerIcon)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundColor(providerTint)
+            BrandLogoShape(provider: session.provider)
+                .fill(providerTint)
+                .frame(width: 21, height: 21)
         }
         .frame(width: 44, height: 44)
         .overlay(alignment: .bottomTrailing) {
@@ -257,12 +257,8 @@ private struct SessionRow: View {
         .foregroundColor(Theme.textSecondary)
     }
 
-    private var providerIcon: String {
-        session.provider == "codex" ? "chevron.left.forwardslash.chevron.right" : "sparkles"
-    }
-
     private var providerTint: Color {
-        session.provider == "codex" ? Color(red: 0.20, green: 0.45, blue: 0.72) : Theme.brand
+        session.provider == "codex" ? Theme.codex : Theme.brand
     }
 
     private var statusTint: Color {
