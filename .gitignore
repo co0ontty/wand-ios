@@ -1,5 +1,6 @@
 build/
 dist/
+.debug-derived-data/
 **/*.ipa
 Wand.xcodeproj/xcuserdata/
 Wand.xcodeproj/project.xcworkspace/

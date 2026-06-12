@@ -100,22 +100,8 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(Array(store.messages.enumerated()), id: \.offset) { index, turn in
-                            TurnView(
-                                turn: turn,
-                                isLastTurn: index == store.messages.count - 1,
-                                isResponding: store.isResponding,
-                                askSelections: store.askUserSelections,
-                                onAskToggle: { toolUseId, qIdx, optIdx, multi in
-                                    store.toggleAskOption(
-                                        toolUseId: toolUseId, questionIndex: qIdx,
-                                        optionIndex: optIdx, multiSelect: multi
-                                    )
-                                },
-                                onAskSubmit: { toolUseId, answerText in
-                                    store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
-                                }
-                            )
+                        ForEach(Array(groupedMessageItems.enumerated()), id: \.offset) { _, item in
+                            messageItemView(item)
                         }
                         if store.isResponding {
                             respondingIndicator
@@ -129,7 +115,14 @@ struct ChatView: View {
                 .modifier(DismissKeyboardOnDrag())
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
-                        .onChanged { _ in followsLatest = false }
+                        .onChanged { value in
+                            // 仅用户明确向下拖动、准备查看更早消息时暂停跟随。
+                            // 旧逻辑任何轻微拖动都会永久关掉跟随，收键盘或触摸
+                            // 列表后，新回复就只能靠右下角按钮才能看到。
+                            if value.translation.height > 18 {
+                                followsLatest = false
+                            }
+                        }
                 )
                 .overlay(alignment: .bottomTrailing) {
                     if !followsLatest {
@@ -150,6 +143,39 @@ struct ChatView: View {
                     if lift > 0 && followsLatest { pinToBottom(proxy) }
             }
         }
+    }
+
+    @ViewBuilder private func messageItemView(_ item: MessageDisplayItem) -> some View {
+        switch item {
+        case .turn(let index, let turn):
+            TurnView(
+                turn: turn,
+                isLastTurn: index == store.messages.count - 1,
+                isResponding: store.isResponding,
+                askSelections: store.askUserSelections,
+                onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                    store.toggleAskOption(
+                        toolUseId: toolUseId, questionIndex: qIdx,
+                        optionIndex: optIdx, multiSelect: multi
+                    )
+                },
+                onAskSubmit: { toolUseId, answerText in
+                    followsLatest = true
+                    store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
+                }
+            )
+        case .explorationGroup(let tools, let lastTurnIndex):
+            ExplorationGroupCard(
+                tools: tools,
+                running: store.isResponding
+                    && lastTurnIndex == store.messages.count - 1
+                    && tools.contains { $0.result == nil }
+            )
+        }
+    }
+
+    private var groupedMessageItems: [MessageDisplayItem] {
+        groupExplorationTurns(store.messages)
     }
 
     private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
@@ -173,9 +199,13 @@ struct ChatView: View {
 
     private func scrollToLatestIfFollowing(_ proxy: ScrollViewProxy) {
         guard followsLatest else { return }
-        DispatchQueue.main.async {
-            guard followsLatest else { return }
-            proxy.scrollTo("chat-bottom", anchor: .bottom)
+        // 流式更新会原地增高最后一条消息，首个 scrollTo 可能早于
+        // LazyVStack 完成新高度布局；补一次短延迟即可稳定贴住底部。
+        for delay in [0.0, 0.08] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard followsLatest else { return }
+                proxy.scrollTo("chat-bottom", anchor: .bottom)
+            }
         }
     }
 
@@ -257,9 +287,12 @@ struct ChatView: View {
 
     private var navigationStatus: some View {
         VStack(spacing: 0) {
-            Text(statusText)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(Theme.textSecondary)
+            Text(latestUserMessage)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 190)
             Text(store.snapshot?.cwd ?? "未设置工作目录")
                 .font(.system(size: 8, design: .monospaced))
                 .foregroundColor(Theme.textSecondary)
@@ -270,12 +303,19 @@ struct ChatView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var statusText: String {
-        if !store.connected { return "重连中" }
-        if store.permissionBlocked { return "待授权" }
-        if store.isResponding { return "回复中" }
-        if store.sessionEnded { return "已结束" }
-        return "就绪"
+    private var latestUserMessage: String {
+        for turn in store.messages.reversed() where turn.role == "user" {
+            let text = turn.content.compactMap { block -> String? in
+                guard case .text(let value, _) = block else { return nil }
+                return value
+            }
+            .joined(separator: " ")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            if !text.isEmpty { return text }
+        }
+        return store.snapshot?.displayTitle ?? "对话详情"
     }
 
     // MARK: - 底部栏（权限卡 + 队列 + 输入框）
@@ -339,23 +379,7 @@ struct ChatView: View {
     private var inputBar: some View {
         HStack(alignment: .bottom, spacing: 10) {
             composerActionsMenu
-            micButton
-            if voiceMode {
-                voiceHoldField
-            } else {
-                growingTextField
-                    .focused($inputFocused)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(Theme.surface)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .stroke(Theme.border, lineWidth: 1)
-                    )
-            }
+            composerField
 
             if store.isResponding {
                 Button(action: { store.stopResponding() }) {
@@ -380,6 +404,31 @@ struct ChatView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 8)
+    }
+
+    private var composerField: some View {
+        ZStack(alignment: .bottomTrailing) {
+            if voiceMode {
+                voiceHoldField
+            } else {
+                growingTextField
+                    .focused($inputFocused)
+                    .padding(.leading, 14)
+                    .padding(.trailing, 48)
+                    .padding(.vertical, 9)
+                    .background(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(Theme.surface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(Theme.border, lineWidth: 1)
+                    )
+            }
+            micButton
+                .padding(.trailing, 4)
+                .padding(.bottom, 3)
+        }
     }
 
     private var sessionSettingsMenu: some View {
@@ -523,6 +572,7 @@ struct ChatView: View {
         guard canSend else { return }
         let text = draft
         draft = ""
+        followsLatest = true
         store.send(text: text)
     }
 
@@ -533,9 +583,9 @@ struct ChatView: View {
     /// - 长按 → 立即按住说话（原交互）：按住录音、上滑取消、松手把识别文本追加进输入框。
     private var micButton: some View {
         Image(systemName: micButtonSymbol)
-            .font(.system(size: 16, weight: .semibold))
+            .font(.system(size: 14, weight: .semibold))
             .foregroundColor(voicePressed ? .white : Theme.brand)
-            .frame(width: 38, height: 38)
+            .frame(width: 32, height: 32)
             .background(
                 Circle().fill(
                     voicePressed
@@ -583,7 +633,8 @@ struct ChatView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
+        .padding(.leading, 14)
+        .padding(.trailing, 48)
         .padding(.vertical, 9)
         .frame(minHeight: 38)
         .background(
@@ -775,6 +826,68 @@ private enum DisplayItem {
         input: [String: JSONValue], subagent: SubagentMeta?,
         result: ToolResultInfo?
     )
+    case explorationGroup([ExplorationToolItem])
+}
+
+private enum MessageDisplayItem {
+    case turn(index: Int, ConversationTurn)
+    case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
+}
+
+private struct ExplorationToolItem {
+    let id: String
+    let name: String
+    let description: String?
+    let input: [String: JSONValue]
+    let subagent: SubagentMeta?
+    let result: ToolResultInfo?
+}
+
+/// 将相邻、且内容完全由只读探索工具组成的 assistant turn 跨消息合并。
+/// 用户消息、正式文本、编辑/命令等操作都会立即终止分组。
+private func groupExplorationTurns(_ turns: [ConversationTurn]) -> [MessageDisplayItem] {
+    var items: [MessageDisplayItem] = []
+    var pendingTools: [ExplorationToolItem] = []
+    var pendingLastIndex = -1
+
+    func flushPending() {
+        guard !pendingTools.isEmpty else { return }
+        items.append(.explorationGroup(tools: pendingTools, lastTurnIndex: pendingLastIndex))
+        pendingTools.removeAll(keepingCapacity: true)
+        pendingLastIndex = -1
+    }
+
+    for (index, turn) in turns.enumerated() {
+        if let tools = explorationToolsOnly(in: turn) {
+            pendingTools.append(contentsOf: tools)
+            pendingLastIndex = index
+        } else {
+            flushPending()
+            items.append(.turn(index: index, turn))
+        }
+    }
+    flushPending()
+    return items
+}
+
+private func explorationToolsOnly(in turn: ConversationTurn) -> [ExplorationToolItem]? {
+    guard turn.role == "assistant" else { return nil }
+    var tools: [ExplorationToolItem] = []
+    for item in pairToolBlocks(turn.content) {
+        switch item {
+        case .explorationGroup(let group):
+            tools.append(contentsOf: group)
+        case .tool(let id, let name, let description, let input, let subagent, let result)
+            where isExplorationTool(name):
+            tools.append(ExplorationToolItem(
+                id: id, name: name, description: description,
+                input: input, subagent: subagent, result: result
+            ))
+        default:
+            return nil
+        }
+    }
+    return tools.isEmpty ? nil : tools
 }
 
 /// 配对后挂在工具卡上的结果。
@@ -787,12 +900,12 @@ struct ToolResultInfo {
 /// 优先按 tool_use_id 精确配对（并行工具调用时顺序会交错）；
 /// id 缺失时退回「紧随其后的第一个结果」邻接兜底；没配上的 ToolResult 原样透传。
 private func pairToolBlocks(_ content: [ContentBlock]) -> [DisplayItem] {
-    var items: [DisplayItem] = []
+    var paired: [DisplayItem] = []
     var consumed = Set<Int>()
     for (i, block) in content.enumerated() {
         if consumed.contains(i) { continue }
         guard case .toolUse(let id, let name, let description, let input, let subagent) = block else {
-            items.append(.plain(block))
+            paired.append(.plain(block))
             continue
         }
         var resultIndex = -1
@@ -820,12 +933,58 @@ private func pairToolBlocks(_ content: [ContentBlock]) -> [DisplayItem] {
             consumed.insert(resultIndex)
             result = ToolResultInfo(text: text, isError: isError, truncated: truncated)
         }
-        items.append(.tool(
+        paired.append(.tool(
             id: id, name: name, description: description,
             input: input, subagent: subagent, result: result
         ))
     }
+    return collapseConsecutiveExplorationTools(paired)
+}
+
+/// 连续读取、搜索、网页获取通常只是模型探索上下文，不需要逐张占满对话流。
+/// 至少连续两次才合并，单次操作仍保留完整工具卡。
+private func collapseConsecutiveExplorationTools(_ paired: [DisplayItem]) -> [DisplayItem] {
+    var items: [DisplayItem] = []
+    var exploration: [ExplorationToolItem] = []
+
+    func flushExploration() {
+        if exploration.count >= 2 {
+            items.append(.explorationGroup(exploration))
+        } else if let tool = exploration.first {
+            items.append(.tool(
+                id: tool.id, name: tool.name, description: tool.description,
+                input: tool.input, subagent: tool.subagent, result: tool.result
+            ))
+        }
+        exploration.removeAll(keepingCapacity: true)
+    }
+
+    for item in paired {
+        if case .tool(let id, let name, let description, let input, let subagent, let result) = item,
+           isExplorationTool(name) {
+            exploration.append(ExplorationToolItem(
+                id: id, name: name, description: description,
+                input: input, subagent: subagent, result: result
+            ))
+        } else {
+            flushExploration()
+            items.append(item)
+        }
+    }
+    flushExploration()
     return items
+}
+
+private func isExplorationTool(_ name: String) -> Bool {
+    let lower = name.lowercased()
+    return lower.hasPrefix("read")
+        || lower.hasPrefix("grep")
+        || lower.hasPrefix("glob")
+        || lower.hasPrefix("search")
+        || lower.hasPrefix("find")
+        || lower.contains("websearch")
+        || lower.contains("webfetch")
+        || lower == "todoread"
 }
 
 private struct TurnView: View {
@@ -889,6 +1048,11 @@ private struct TurnView: View {
                     input: input, result: result
                 )
             }
+        case .explorationGroup(let tools):
+            ExplorationGroupCard(
+                tools: tools,
+                running: isLastTurn && isResponding && tools.contains { $0.result == nil }
+            )
         }
     }
 
@@ -1023,6 +1187,7 @@ private struct MarkdownText: View {
         case listItem(marker: String, text: String, indent: Int, checked: Bool?)
         case quote(String)
         case code(String, String?)
+        case table(headers: [String], rows: [[String]])
         case divider
     }
 
@@ -1072,9 +1237,55 @@ private struct MarkdownText: View {
             }
             .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+        case .table(let headers, let rows):
+            markdownTable(headers: headers, rows: rows)
         case .divider:
             Divider().overlay(Theme.border).padding(.vertical, 3)
         }
+    }
+
+    private func markdownTable(headers: [String], rows: [[String]]) -> some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 0) {
+                tableRow(headers, header: true)
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                    tableRow(normalizedRow(row, count: headers.count), header: false)
+                        .background(index.isMultiple(of: 2) ? Theme.surface : Theme.background.opacity(0.45))
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Theme.border, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+    }
+
+    private func tableRow(_ cells: [String], header: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { index, cell in
+                Text(attributed(cell))
+                    .font(.system(size: header ? 13 : 12, weight: header ? .semibold : .regular))
+                    .foregroundColor(header ? Theme.textPrimary : Theme.textSecondary)
+                    .tint(Theme.brand)
+                    .textSelection(.enabled)
+                    .frame(minWidth: 110, maxWidth: 190, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 9)
+                    .background(header ? Theme.brand.opacity(0.09) : Color.clear)
+                    .overlay(alignment: .trailing) {
+                        if index < cells.count - 1 {
+                            Divider().overlay(Theme.border)
+                        }
+                    }
+            }
+        }
+        .overlay(alignment: .bottom) { Divider().overlay(Theme.border) }
+    }
+
+    private func normalizedRow(_ row: [String], count: Int) -> [String] {
+        if row.count >= count { return Array(row.prefix(count)) }
+        return row + Array(repeating: "", count: count - row.count)
     }
 
     private func inlineText(
@@ -1119,10 +1330,14 @@ private struct MarkdownText: View {
             language = nil
         }
 
-        for rawLine in text.components(separatedBy: .newlines) {
+        let lines = text.components(separatedBy: .newlines)
+        var lineIndex = 0
+        while lineIndex < lines.count {
+            let rawLine = lines[lineIndex]
             let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
             if let fence {
                 if trimmed.hasPrefix(fence) { flushCode() } else { code.append(rawLine) }
+                lineIndex += 1
                 continue
             }
             if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
@@ -1130,38 +1345,76 @@ private struct MarkdownText: View {
                 fence = String(trimmed.prefix(3))
                 let suffix = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 language = suffix.isEmpty ? nil : suffix
+                lineIndex += 1
                 continue
             }
             if trimmed.isEmpty {
                 flushParagraph()
+                lineIndex += 1
+                continue
+            }
+            if lineIndex + 1 < lines.count,
+               let headers = tableCells(rawLine),
+               isTableSeparator(lines[lineIndex + 1], columnCount: headers.count) {
+                flushParagraph()
+                var rows: [[String]] = []
+                lineIndex += 2
+                while lineIndex < lines.count, let row = tableCells(lines[lineIndex]), !row.isEmpty {
+                    rows.append(row)
+                    lineIndex += 1
+                }
+                result.append(.table(headers: headers, rows: rows))
                 continue
             }
             let level = trimmed.prefix { $0 == "#" }.count
             if (1...6).contains(level), trimmed.dropFirst(level).hasPrefix(" ") {
                 flushParagraph()
                 result.append(.heading(level, String(trimmed.dropFirst(level + 1))))
+                lineIndex += 1
                 continue
             }
             let rule = trimmed.replacingOccurrences(of: " ", with: "")
             if ["---", "***", "___"].contains(rule) {
                 flushParagraph()
                 result.append(.divider)
+                lineIndex += 1
                 continue
             }
             if trimmed.hasPrefix(">") {
                 flushParagraph()
                 result.append(.quote(String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)))
+                lineIndex += 1
                 continue
             }
             if let item = listItem(rawLine) {
                 flushParagraph()
                 result.append(item)
+                lineIndex += 1
                 continue
             }
             paragraph.append(rawLine)
+            lineIndex += 1
         }
         if fence != nil { flushCode() } else { flushParagraph() }
         return result
+    }
+
+    private func tableCells(_ line: String) -> [String]? {
+        var trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|") else { return nil }
+        if trimmed.hasPrefix("|") { trimmed.removeFirst() }
+        if trimmed.hasSuffix("|") { trimmed.removeLast() }
+        let cells = trimmed.split(separator: "|", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+        return cells.count >= 2 ? cells : nil
+    }
+
+    private func isTableSeparator(_ line: String, columnCount: Int) -> Bool {
+        guard let cells = tableCells(line), cells.count == columnCount else { return false }
+        return cells.allSatisfy { cell in
+            let marker = cell.replacingOccurrences(of: ":", with: "")
+            return marker.count >= 3 && marker.allSatisfy { $0 == "-" }
+        }
     }
 
     private func listItem(_ rawLine: String) -> Block? {
@@ -1224,6 +1477,164 @@ private func toolLabel(_ name: String) -> String {
     return name
 }
 
+/// 连续只读探索操作的紧凑进度卡。默认折叠，避免探索阶段淹没对话。
+private struct ExplorationGroupCard: View {
+    let tools: [ExplorationToolItem]
+    let running: Bool
+
+    @State private var expanded = false
+
+    private var completedCount: Int { tools.filter { $0.result != nil }.count }
+    private var failedCount: Int { tools.filter { $0.result?.isError == true }.count }
+    private var progress: Double {
+        guard !tools.isEmpty else { return 0 }
+        return Double(completedCount) / Double(tools.count)
+    }
+    private var tint: Color {
+        if failedCount > 0 { return Theme.danger }
+        if running { return Theme.brand }
+        return chatSuccess
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 11) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(tint.opacity(0.11))
+                        if running {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(tint)
+                        } else {
+                            Image(systemName: "magnifyingglass.circle")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(tint)
+                        }
+                    }
+                    .frame(width: 34, height: 34)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("探索上下文")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(Theme.textPrimary)
+                            Spacer(minLength: 8)
+                            Text("\(completedCount)/\(tools.count)")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(tint)
+                        }
+                        Text(activitySummary)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(Theme.textSecondary)
+                            .lineLimit(1)
+                        ProgressView(value: progress)
+                            .tint(tint)
+                    }
+
+                    if failedCount > 0 {
+                        Text("失败 \(failedCount)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(Theme.danger)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Theme.danger.opacity(0.10)))
+                    }
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(Theme.textSecondary)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                Divider()
+                    .overlay(Theme.border.opacity(0.7))
+                    .padding(.horizontal, 12)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(tools.enumerated()), id: \.offset) { _, tool in
+                        HStack(spacing: 8) {
+                            Image(systemName: toolStatusIcon(tool))
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(toolStatusColor(tool))
+                                .frame(width: 14)
+                            Text(toolLabel(tool.name))
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(Theme.textPrimary)
+                                .frame(width: 54, alignment: .leading)
+                            Text(toolSummary(tool))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(Theme.textSecondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(tint.opacity(failedCount > 0 ? 0.42 : 0.16), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.035), radius: 7, y: 2)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var activitySummary: String {
+        var counts: [String: Int] = [:]
+        for tool in tools {
+            counts[activityLabel(tool.name), default: 0] += 1
+        }
+        return ["读取", "搜索", "网页", "待办"]
+            .compactMap { label in counts[label].map { "\(label) \($0)" } }
+            .joined(separator: " · ")
+    }
+
+    private func activityLabel(_ name: String) -> String {
+        let lower = name.lowercased()
+        if lower.contains("web") { return "网页" }
+        if lower == "todoread" { return "待办" }
+        if lower.hasPrefix("read") { return "读取" }
+        return "搜索"
+    }
+
+    private func toolSummary(_ tool: ExplorationToolItem) -> String {
+        for key in ["file_path", "path", "pattern", "query", "url", "file", "filename"] {
+            if let value = tool.input[key] {
+                let text = value.summaryText
+                if !text.isEmpty { return text }
+            }
+        }
+        return tool.description
+            ?? tool.input.first.map { "\($0.key): \($0.value.summaryText)" }
+            ?? "无参数"
+    }
+
+    private func toolStatusIcon(_ tool: ExplorationToolItem) -> String {
+        if tool.result?.isError == true { return "xmark.circle.fill" }
+        if tool.result != nil { return "checkmark.circle.fill" }
+        return "circle.dotted"
+    }
+
+    private func toolStatusColor(_ tool: ExplorationToolItem) -> Color {
+        if tool.result?.isError == true { return Theme.danger }
+        if tool.result != nil { return chatSuccess }
+        return Theme.brand
+    }
+}
+
 /// 工具调用卡片：图标 + 中文工具名 + 参数摘要 + 可折叠结果区。
 /// 三态对齐 Web：运行中（转圈）/ 成功（左侧绿竖线）/ 失败（红弱底 + 红边框）。
 private struct ToolUseCard: View {
@@ -1238,32 +1649,42 @@ private struct ToolUseCard: View {
     private var isError: Bool { result?.isError == true }
     private var isSuccess: Bool { result != nil && !isError }
     private var hasBody: Bool { !(result?.text.isEmpty ?? true) }
+    private var statusColor: Color {
+        if isError { return Theme.danger }
+        if running { return Theme.brand }
+        if isSuccess { return chatSuccess }
+        return Theme.textSecondary
+    }
+    private var statusText: String {
+        if isError { return "失败" }
+        if running { return "处理中" }
+        if isSuccess { return "完成" }
+        return "待执行"
+    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            if isSuccess {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Color.green.opacity(0.75))
-                    .frame(width: 2)
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                header
-                if expanded, let result, hasBody {
-                    ToolResultBody(result: result)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 10)
-                }
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            if expanded, let result, hasBody {
+                Divider()
+                    .overlay(Theme.border.opacity(0.7))
+                    .padding(.horizontal, 12)
+                ToolResultBody(result: result)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
+                    .padding(.bottom, 12)
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isError ? Theme.danger.opacity(0.08) : Theme.surface)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.surface)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(isError ? Theme.danger.opacity(0.45) : Theme.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(statusColor.opacity(isError ? 0.42 : 0.16), lineWidth: 1)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: Color.black.opacity(0.035), radius: 7, y: 2)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private var header: some View {
@@ -1271,42 +1692,57 @@ private struct ToolUseCard: View {
             guard hasBody else { return }
             withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 11) {
                 if running {
-                    ProgressView().controlSize(.small).tint(Theme.brand).frame(width: 22)
-                } else {
-                    Image(systemName: iconName)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(isError ? Theme.danger : Theme.brand)
-                        .frame(width: 22)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(toolLabel(name))
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(isError ? Theme.danger : Theme.textPrimary)
-                        if isError {
-                            Text("出错")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(Theme.danger)
-                        }
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(statusColor.opacity(0.12))
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(statusColor)
                     }
+                    .frame(width: 34, height: 34)
+                } else {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(statusColor.opacity(isSuccess ? 0.10 : 0.12))
+                        Image(systemName: iconName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(statusColor)
+                    }
+                    .frame(width: 34, height: 34)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(toolLabel(name))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(isError ? Theme.danger : Theme.textPrimary)
                     if !summary.isEmpty {
                         Text(summary)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(Theme.textSecondary)
-                            .lineLimit(2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
                 Spacer(minLength: 0)
+                Text(statusText)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(statusColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(statusColor.opacity(0.10)))
                 if hasBody {
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(Theme.textSecondary)
+                    ZStack {
+                        Circle().fill(Theme.background)
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Theme.textSecondary)
+                    }
+                    .frame(width: 24, height: 24)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 10)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

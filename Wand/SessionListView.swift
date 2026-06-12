@@ -3,15 +3,27 @@ import SwiftUI
 /// 会话列表：原生渲染 /api/sessions，下拉刷新 + 周期轮询，
 /// 对话模式进入原生聊天，PTY 模式进入嵌套网页版对应会话。
 struct SessionListView: View {
+    private enum SessionScope: String {
+        case active
+        case history
+    }
+
     let api: WandAPI
 
     @State private var sessions: [SessionSnapshot] = []
+    @State private var historySessions: [HistorySession] = []
     @State private var loading = true
     @State private var loadError: String?
     @State private var showNewSession = false
-    @State private var showArchived = false
+    @State private var scope: SessionScope = .active
+    @State private var showClearHistoryConfirmation = false
+    @State private var historyActionInProgress = false
     @State private var selectedSessionIds: Set<String> = []
     @State private var isSelecting = false
+    @State private var sessionRowFrames: [String: CGRect] = [:]
+    @State private var dragSelectionAnchorId: String?
+    @State private var dragSelectionBaseIds: Set<String> = []
+    @State private var suppressedSessionTapId: String?
     /// 长按图标快捷操作 / 新建完成后的程序化跳转目标。
     @State private var quickOpenSession: SessionSnapshot?
     @ObservedObject private var quickActions = QuickActionCoordinator.shared
@@ -19,7 +31,20 @@ struct SessionListView: View {
     private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
     private var visibleSessions: [SessionSnapshot] {
-        sessions.filter { ($0.archived ?? false) == showArchived }
+        sessions.filter { !($0.archived ?? false) }
+    }
+
+    private var visibleHistorySessions: [HistorySession] {
+        let managedIds = Set(sessions.compactMap(\.claudeSessionId))
+        return historySessions
+            .filter {
+                ($0.hasConversation ?? true)
+                    && !($0.managedByWand ?? false)
+                    && !managedIds.contains($0.claudeSessionId)
+            }
+            .sorted {
+                ($0.mtimeMs ?? 0) > ($1.mtimeMs ?? 0)
+            }
     }
 
     var body: some View {
@@ -47,26 +72,29 @@ struct SessionListView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(Theme.textPrimary)
                 } else {
-                    Picker("会话范围", selection: $showArchived) {
-                        Text("进行中").tag(false)
-                        Text("已归档").tag(true)
+                    Picker("会话范围", selection: $scope) {
+                        Text("进行中").tag(SessionScope.active)
+                        Text("历史会话").tag(SessionScope.history)
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 170)
+                    .frame(width: 190)
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     if isSelecting {
                         endSelection()
+                    } else if scope == .history {
+                        showClearHistoryConfirmation = true
                     } else {
                         showNewSession = true
                     }
                 } label: {
-                    Image(systemName: isSelecting ? "xmark.circle.fill" : "plus.circle.fill")
+                    Image(systemName: trailingToolbarIcon)
                         .font(.system(size: 20))
-                        .foregroundColor(Theme.brand)
+                        .foregroundColor(scope == .history && !isSelecting ? .red : Theme.brand)
                 }
+                .disabled(scope == .history && visibleHistorySessions.isEmpty)
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -92,9 +120,27 @@ struct SessionListView: View {
         .onReceive(NotificationCenter.default.publisher(for: .wandBeginSessionSelection)) { _ in
             isSelecting = true
         }
-        .onChange(of: showArchived) { _ in
+        .onChange(of: scope) { _ in
             endSelection()
+            Task { await load(silent: true) }
         }
+        .confirmationDialog(
+            "确认清空全部历史会话？",
+            isPresented: $showClearHistoryConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("清空全部 \(visibleHistorySessions.count) 条历史会话", role: .destructive) {
+                clearAllHistory()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这会删除本机 Claude 和 Codex 的历史会话文件，无法撤销。")
+        }
+    }
+
+    private var trailingToolbarIcon: String {
+        if isSelecting { return "xmark.circle.fill" }
+        return scope == .history ? "trash.circle.fill" : "plus.circle.fill"
     }
 
     private var quickOpenActive: Binding<Bool> {
@@ -130,9 +176,9 @@ struct SessionListView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if loading && sessions.isEmpty {
+        if loading && sessions.isEmpty && historySessions.isEmpty {
             ProgressView().tint(Theme.brand)
-        } else if let error = loadError, sessions.isEmpty {
+        } else if let error = loadError, sessions.isEmpty && historySessions.isEmpty {
             VStack(spacing: 12) {
                 Image(systemName: "wifi.exclamationmark")
                     .font(.system(size: 30))
@@ -145,51 +191,48 @@ struct SessionListView: View {
                     .buttonStyle(WandSecondaryButtonStyle())
             }
             .padding(32)
+        } else if scope == .history {
+            historyContent
         } else if visibleSessions.isEmpty {
             VStack(spacing: 14) {
                 WandBrandMark(size: 52)
-                Text(showArchived ? "没有已归档的会话" : "还没有会话")
+                Text("还没有会话")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundColor(Theme.textPrimary)
-                if !showArchived {
-                    Button { showNewSession = true } label: {
-                        Text("新建会话")
-                    }
-                    .buttonStyle(WandPrimaryButtonStyle())
+                Button { showNewSession = true } label: {
+                    Text("新建会话")
                 }
+                .buttonStyle(WandPrimaryButtonStyle())
             }
         } else {
             List {
                 ForEach(visibleSessions) { session in
-                    Group {
+                    SessionRow(
+                        session: session,
+                        selecting: isSelecting,
+                        selected: selectedSessionIds.contains(session.id)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if suppressedSessionTapId == session.id {
+                            suppressedSessionTapId = nil
+                            return
+                        }
                         if isSelecting {
-                            Button {
-                                toggleSelection(session.id)
-                            } label: {
-                                SessionRow(
-                                    session: session,
-                                    selecting: true,
-                                    selected: selectedSessionIds.contains(session.id)
-                                )
-                            }
-                            .buttonStyle(.plain)
+                            toggleSelection(session.id)
                         } else {
-                            Button {
-                                quickOpenSession = session
-                            } label: {
-                                SessionRow(session: session, selecting: false, selected: false)
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button {
-                                    isSelecting = true
-                                    selectedSessionIds = [session.id]
-                                } label: {
-                                    Label("多选会话", systemImage: "checkmark.circle")
-                                }
-                            }
+                            quickOpenSession = session
                         }
                     }
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: SessionRowFramePreferenceKey.self,
+                                value: [session.id: proxy.frame(in: .named("session-list"))]
+                            )
+                        }
+                    )
+                    .simultaneousGesture(selectionGesture(startingWith: session.id))
                     .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
                     .listRowBackground(Theme.background)
                     .listRowSeparator(.hidden)
@@ -197,6 +240,8 @@ struct SessionListView: View {
                 .onDelete(perform: deleteSessions)
             }
             .listStyle(.plain)
+            .coordinateSpace(name: "session-list")
+            .onPreferenceChange(SessionRowFramePreferenceKey.self) { sessionRowFrames = $0 }
             .refreshable { await load(silent: true) }
         }
     }
@@ -204,16 +249,107 @@ struct SessionListView: View {
     private func load(silent: Bool = false) async {
         if !silent { loading = true }
         do {
-            sessions = try await api.listSessions()
+            async let active = api.listSessions()
+            async let claudeHistory = api.listClaudeHistory()
+            async let codexHistory = api.listCodexHistory()
+            let (loadedSessions, loadedClaudeHistory, loadedCodexHistory) = try await (active, claudeHistory, codexHistory)
+            sessions = loadedSessions
+            historySessions = loadedClaudeHistory.map { history in
+                HistorySession(
+                    claudeSessionId: history.claudeSessionId,
+                    cwd: history.cwd,
+                    firstUserMessage: history.firstUserMessage,
+                    timestamp: history.timestamp,
+                    mtimeMs: history.mtimeMs,
+                    hasConversation: history.hasConversation,
+                    managedByWand: history.managedByWand,
+                    provider: "claude"
+                )
+            } + loadedCodexHistory
             loadError = nil
             // 同步「最近会话」动态快捷项到长按图标菜单。
-            await QuickActionCoordinator.updateRecentSessionShortcuts(sessions)
+            QuickActionCoordinator.updateRecentSessionShortcuts(sessions)
         } catch {
             if !silent || sessions.isEmpty {
                 loadError = error.localizedDescription
             }
         }
         loading = false
+    }
+
+    @ViewBuilder private var historyContent: some View {
+        if visibleHistorySessions.isEmpty {
+            VStack(spacing: 14) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 42, weight: .light))
+                    .foregroundColor(Theme.textSecondary)
+                Text("没有历史会话")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                Text("Claude 和 Codex 的本地历史会话会显示在这里")
+                    .font(.footnote)
+                    .foregroundColor(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(32)
+        } else {
+            List {
+                ForEach(visibleHistorySessions) { history in
+                    Button {
+                        resume(history)
+                    } label: {
+                        HistorySessionRow(history: history)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(historyActionInProgress)
+                    .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
+                    .listRowBackground(Theme.background)
+                    .listRowSeparator(.hidden)
+                }
+                .onDelete(perform: deleteHistory)
+            }
+            .listStyle(.plain)
+            .refreshable { await load(silent: true) }
+        }
+    }
+
+    private func resume(_ history: HistorySession) {
+        guard !historyActionInProgress else { return }
+        historyActionInProgress = true
+        Task {
+            do {
+                let resumed = try await api.resumeHistory(history)
+                historySessions.removeAll { $0.id == history.id }
+                sessions.insert(resumed, at: 0)
+                quickOpenSession = resumed
+                loadError = nil
+            } catch {
+                loadError = error.localizedDescription
+            }
+            historyActionInProgress = false
+        }
+    }
+
+    private func deleteHistory(at offsets: IndexSet) {
+        let targets = offsets.map { visibleHistorySessions[$0] }
+        historySessions.removeAll { history in targets.contains { $0.id == history.id } }
+        Task {
+            for target in targets {
+                try? await api.deleteHistory(target)
+            }
+        }
+    }
+
+    private func clearAllHistory() {
+        let targets = visibleHistorySessions
+        guard !targets.isEmpty else { return }
+        historySessions.removeAll { history in targets.contains { $0.id == history.id } }
+        Task {
+            let claudeIds = targets.filter { $0.provider != "codex" }.map(\.id)
+            let codexIds = targets.filter { $0.provider == "codex" }.map(\.id)
+            try? await api.deleteHistoryBatch(provider: "claude", ids: claudeIds)
+            try? await api.deleteHistoryBatch(provider: "codex", ids: codexIds)
+        }
     }
 
     private func deleteSessions(at offsets: IndexSet) {
@@ -260,9 +396,67 @@ struct SessionListView: View {
         }
     }
 
+    /// 长按当前行立即进入多选；手指保持按下并划过其它行时连续加入选择。
+    /// 使用 sequenced 手势避免普通点击打开会话时误触多选。
+    private func selectionGesture(startingWith id: String) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.42, maximumDistance: 18)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("session-list")))
+            .onChanged { value in
+                switch value {
+                case .second(true, let drag?):
+                    beginDragSelection(with: id)
+                    selectSessionRange(through: drag.location)
+                default:
+                    break
+                }
+            }
+            .onEnded { _ in
+                dragSelectionAnchorId = nil
+                dragSelectionBaseIds.removeAll()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    suppressedSessionTapId = nil
+                }
+            }
+    }
+
+    private func beginDragSelection(with id: String) {
+        guard dragSelectionAnchorId == nil else { return }
+        if !isSelecting { isSelecting = true }
+        dragSelectionAnchorId = id
+        dragSelectionBaseIds = selectedSessionIds
+        suppressedSessionTapId = id
+        selectedSessionIds.insert(id)
+    }
+
+    private func selectSessionRange(through location: CGPoint) {
+        guard
+            let anchorId = dragSelectionAnchorId,
+            let anchorIndex = visibleSessions.firstIndex(where: { $0.id == anchorId }),
+            let targetId = sessionId(nearestTo: location),
+            let targetIndex = visibleSessions.firstIndex(where: { $0.id == targetId })
+        else { return }
+
+        let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
+        let rangeIds = Set(bounds.map { visibleSessions[$0].id })
+        selectedSessionIds = dragSelectionBaseIds.union(rangeIds)
+    }
+
+    /// 手指落在卡片间隙时也取垂直方向最近的行，避免快速滑动漏选。
+    private func sessionId(nearestTo location: CGPoint) -> String? {
+        if let hit = sessionRowFrames.first(where: { $0.value.contains(location) }) {
+            return hit.key
+        }
+        return sessionRowFrames.min {
+            abs($0.value.midY - location.y) < abs($1.value.midY - location.y)
+        }?.key
+    }
+
     private func endSelection() {
         isSelecting = false
         selectedSessionIds.removeAll()
+        dragSelectionAnchorId = nil
+        dragSelectionBaseIds.removeAll()
+        suppressedSessionTapId = nil
     }
 
     private func deleteSelectedSessions() {
@@ -279,6 +473,14 @@ struct SessionListView: View {
 
 extension Notification.Name {
     static let wandBeginSessionSelection = Notification.Name("wandBeginSessionSelection")
+}
+
+private struct SessionRowFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
 }
 
 private struct SessionDestinationView: View {
@@ -426,5 +628,90 @@ private struct SessionRow: View {
         case "failed": return "失败"
         default: return session.status ?? ""
         }
+    }
+}
+
+private struct HistorySessionRow: View {
+    let history: HistorySession
+
+    var body: some View {
+        HStack(spacing: 13) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(providerTint.opacity(0.13))
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(providerTint.opacity(0.24), lineWidth: 1)
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundColor(providerTint)
+            }
+            .frame(width: 44, height: 44)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(history.firstUserMessage.isEmpty ? "空会话" : history.firstUserMessage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(2)
+
+                HStack(spacing: 7) {
+                    Text(providerLabel)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(providerTint)
+                    if !relativeTime.isEmpty {
+                        Label(relativeTime, systemImage: "clock")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Theme.textSecondary)
+                    }
+                }
+
+                if !compactPath.isEmpty {
+                    Text(compactPath)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+            }
+
+            Spacer(minLength: 8)
+            Image(systemName: "arrow.counterclockwise.circle.fill")
+                .font(.system(size: 20))
+                .foregroundColor(providerTint.opacity(0.8))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Theme.border.opacity(0.75), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.04), radius: 8, y: 3)
+    }
+
+    private var providerLabel: String {
+        history.provider == "codex" ? "Codex" : "Claude"
+    }
+
+    private var providerTint: Color {
+        history.provider == "codex" ? Theme.codex : Theme.brand
+    }
+
+    private var compactPath: String {
+        let components = (history.cwd as NSString).pathComponents.filter { $0 != "/" }
+        guard components.count > 3 else { return history.cwd }
+        return "…/" + components.suffix(3).joined(separator: "/")
+    }
+
+    private var relativeTime: String {
+        guard let timestamp = history.timestamp else { return "" }
+        let formatter = ISO8601DateFormatter()
+        guard let date = formatter.date(from: timestamp) else { return "" }
+        let relative = RelativeDateTimeFormatter()
+        relative.locale = Locale(identifier: "zh_CN")
+        relative.unitsStyle = .short
+        return relative.localizedString(for: date, relativeTo: Date())
     }
 }

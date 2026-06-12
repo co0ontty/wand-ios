@@ -194,6 +194,44 @@ final class WandAPI {
         try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions/\(id)/resume", body: [:])
     }
 
+    // MARK: - 历史会话
+
+    func listClaudeHistory() async throws -> [HistorySession] {
+        try await request([HistorySession].self, method: "GET", path: "/api/claude-history")
+    }
+
+    func listCodexHistory() async throws -> [HistorySession] {
+        try await request([HistorySession].self, method: "GET", path: "/api/codex-history")
+    }
+
+    @discardableResult
+    func resumeHistory(_ history: HistorySession) async throws -> SessionSnapshot {
+        let provider = history.provider == "codex" ? "codex" : "claude"
+        return try await request(
+            SessionSnapshot.self,
+            method: "POST",
+            path: "/api/\(provider)-sessions/\(percentEncode(history.claudeSessionId))/resume",
+            body: ["cwd": history.cwd]
+        )
+    }
+
+    func deleteHistory(_ history: HistorySession) async throws {
+        let provider = history.provider == "codex" ? "codex" : "claude"
+        _ = try await requestData(
+            method: "DELETE",
+            path: "/api/\(provider)-history/\(percentEncode(history.claudeSessionId))"
+        )
+    }
+
+    func deleteHistoryBatch(provider: String, ids: [String]) async throws {
+        guard !ids.isEmpty else { return }
+        _ = try await requestData(
+            method: "POST",
+            path: "/api/\(provider)-history/batch-delete",
+            body: ["claudeSessionIds": ids]
+        )
+    }
+
     // MARK: - 权限
 
     @discardableResult

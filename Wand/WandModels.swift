@@ -347,6 +347,22 @@ struct SessionSnapshot: Decodable, Identifiable {
     }
 }
 
+// MARK: - 历史会话
+
+/// 从 Claude/Codex 本地历史文件扫描出的会话。两个 provider 的接口形状一致。
+struct HistorySession: Decodable, Identifiable {
+    let claudeSessionId: String
+    let cwd: String
+    let firstUserMessage: String
+    let timestamp: String?
+    let mtimeMs: Double?
+    let hasConversation: Bool?
+    let managedByWand: Bool?
+    let provider: String?
+
+    var id: String { claudeSessionId }
+}
+
 // MARK: - WebSocket 消息
 
 /// /ws 推送的统一包络。data 的形状随 type 不同，这里用「超集 struct」承接：
