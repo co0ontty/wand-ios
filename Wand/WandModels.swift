@@ -69,6 +69,23 @@ enum JSONValue: Decodable {
     }
 }
 
+/// 读取 tool_use input 里的数组字段，容忍服务端把数组拍成 JSON 字符串的情况。
+/// `claude -p --output-format stream-json`（默认结构化 runner）会把 TodoWrite.todos /
+/// AskUserQuestion.questions 当成 "[{...}]" 字符串下发，直接取 arrayValue 会拿到 nil，
+/// 待办进度条与提问卡片整段渲染不出来。这里数组形态直接用，字符串形态再解析一次。
+func jsonArrayField(_ input: [String: JSONValue], _ key: String) -> [JSONValue]? {
+    switch input[key] {
+    case .array(let a):
+        return a
+    case .string(let s):
+        guard let data = s.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([JSONValue].self, from: data) else { return nil }
+        return decoded
+    default:
+        return nil
+    }
+}
+
 // MARK: - 特殊工具卡片的 input 模型
 
 /// AskUserQuestion 的一道题（tool_use input.questions[i]），字段对齐 Web 端 chat-render.ts。
@@ -85,7 +102,7 @@ struct AskUserQuestion {
 
     /// 从 tool_use 的 input 解析 questions 数组；形状不符返回空数组（上层回落普通工具卡）。
     static func parse(input: [String: JSONValue]) -> [AskUserQuestion] {
-        guard let items = input["questions"]?.arrayValue else { return [] }
+        guard let items = jsonArrayField(input, "questions") else { return [] }
         var result: [AskUserQuestion] = []
         for item in items {
             guard let obj = item.objectValue else { continue }
@@ -117,7 +134,7 @@ struct TodoItem {
     let activeForm: String?
 
     static func parse(input: [String: JSONValue]) -> [TodoItem] {
-        guard let items = input["todos"]?.arrayValue else { return [] }
+        guard let items = jsonArrayField(input, "todos") else { return [] }
         var result: [TodoItem] = []
         for item in items {
             guard let obj = item.objectValue else { continue }
