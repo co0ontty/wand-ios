@@ -23,6 +23,8 @@ enum Theme {
     // 品牌色（明暗下统一，便于辨识）
     static let brand = Color(red: 0.851, green: 0.467, blue: 0.341)        // #D97757
     static let brandStrong = Color(red: 0.741, green: 0.376, blue: 0.255)  // #BD6041
+    /// Codex（OpenAI）标识蓝，与 Android 端 info 色对一致。
+    static let codex = dynamic(light: rgb(0.290, 0.435, 0.647), dark: rgb(0.494, 0.612, 0.769)) // #4A6FA5 / #7E9CC4
 
     // 表面 / 文本（自适应）
     static let background = dynamic(light: rgb(0.980, 0.976, 0.961), dark: rgb(0.137, 0.137, 0.129)) // #FAF9F5 / #232321
