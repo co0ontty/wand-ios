@@ -15,7 +15,8 @@ struct NewSessionView: View {
     @State private var recentPaths: [RecentPath] = []
     @State private var provider = "claude"
     @State private var isStructured = true
-    @State private var mode = "default"
+    // 默认托管模式（claude 全自动完成）；codex 切换时 clamp 成全权限。
+    @State private var mode = "managed"
     @State private var firstMessage = ""
     @State private var creating = false
     @State private var errorMessage: String?
@@ -182,8 +183,8 @@ struct NewSessionView: View {
         let selected = provider == id
         return Button {
             provider = id
-            // codex 仅支持全权限，切换时同步 clamp 选中态，对齐 Web getSafeModeForTool。
-            if id == "codex" { mode = "full-access" }
+            // codex 仅支持全权限，切换时同步 clamp；切回 claude 恢复默认托管模式。
+            mode = id == "codex" ? "full-access" : "managed"
         } label: {
             VStack(spacing: 6) {
                 ZStack {

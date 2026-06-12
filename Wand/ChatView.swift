@@ -58,6 +58,9 @@ struct ChatView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                providerBadge
+            }
             ToolbarItem(placement: .principal) {
                 navigationStatus
             }
@@ -283,6 +286,23 @@ struct ChatView: View {
 
     private static func thinkingLabel(_ id: String) -> String {
         thinkingLevels.first { $0.id == id }?.label ?? "off"
+    }
+
+    /// 顶栏左侧 provider 小徽标：品牌色弱底圆角方块 + 品牌 logo，标明当前 Claude / Codex。
+    private var providerBadge: some View {
+        let isCodex = store.snapshot?.provider == "codex"
+        let tint: Color = isCodex ? Theme.codex : Theme.brand
+        return ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(tint.opacity(0.13))
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(tint.opacity(0.24), lineWidth: 1)
+            BrandLogoShape(provider: store.snapshot?.provider)
+                .fill(tint)
+                .frame(width: 15, height: 15)
+        }
+        .frame(width: 26, height: 26)
+        .accessibilityLabel(isCodex ? "Codex" : "Claude")
     }
 
     private var navigationStatus: some View {
