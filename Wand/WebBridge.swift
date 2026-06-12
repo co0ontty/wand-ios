@@ -9,6 +9,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
     private weak var webView: WKWebView?
     private var serverURL: URL?
     private var hasLoadedOnce = false
+    private var keyboardObservers: [NSObjectProtocol] = []
 
     init(model: WebViewModel) {
         self.model = model
@@ -18,6 +19,40 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         self.webView = webView
         self.serverURL = serverURL
         self.model.webView = webView
+        installKeyboardObservers()
+    }
+
+    deinit {
+        for observer in keyboardObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func installKeyboardObservers() {
+        guard keyboardObservers.isEmpty else { return }
+        let center = NotificationCenter.default
+        keyboardObservers = [
+            center.addObserver(
+                forName: UIResponder.keyboardDidShowNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.dispatchKeyboardState("shown")
+            },
+            center.addObserver(
+                forName: UIResponder.keyboardDidHideNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.dispatchKeyboardState("hidden")
+            },
+        ]
+    }
+
+    private func dispatchKeyboardState(_ state: String) {
+        webView?.evaluateJavaScript(
+            "window.dispatchEvent(new CustomEvent('wand-ios-ime-state',{detail:{state:'\(state)'}}));"
+        )
     }
 
     /// 切换到错误覆盖层（主线程）。token 登录失败时由 WebViewRepresentable 调用。

@@ -29,6 +29,7 @@ final class WebViewModel: ObservableObject {
 struct WebContainerView: View {
     let serverURL: URL
     let token: String?
+    var sessionId: String? = nil
     /// 「返回原生界面」回调（网页版兜底入口传入）；触发途径：网页侧边栏的
     /// 「返回App」按钮 → backToNative 消息，或加载中/出错覆盖层上的逃生按钮。
     var onRequestClose: (() -> Void)? = nil
@@ -60,13 +61,13 @@ struct WebContainerView: View {
             VStack(spacing: 0) {
                 legacyTopBar(onClose: onRequestClose)
                 Divider()
-                WebViewRepresentable(serverURL: serverURL, token: token, model: model)
+                WebViewRepresentable(serverURL: serverURL, token: token, sessionId: sessionId, model: model)
                     .ignoresSafeArea(.container, edges: .bottom)
             }
         } else {
             // 新版网页：侧边栏自带「返回App」按钮，WebView 全屏贴到状态栏/灵动岛下，
             // 顶部间距由网页用 env(safe-area-inset-top) 自己排（viewport-fit=cover）。
-            WebViewRepresentable(serverURL: serverURL, token: token, model: model)
+            WebViewRepresentable(serverURL: serverURL, token: token, sessionId: sessionId, model: model)
                 .ignoresSafeArea(.container, edges: .all)
         }
     }
@@ -265,6 +266,7 @@ extension WKWebView {
 struct WebViewRepresentable: UIViewRepresentable {
     let serverURL: URL
     let token: String?
+    let sessionId: String?
     let model: WebViewModel
 
     func makeCoordinator() -> WebBridge {
@@ -279,6 +281,7 @@ struct WebViewRepresentable: UIViewRepresentable {
         // 渲染「返回App」按钮（macOS 壳和浏览器里没有该函数，不会显示按钮）。
         userController.addUserScript(WKUserScript(
             source: """
+            window.__wandIosNative = true;
             window.__wandBackToNative = function() {
               try { window.webkit.messageHandlers.wandNative.postMessage({ type: "backToNative" }); } catch (e) {}
             };
@@ -313,7 +316,8 @@ struct WebViewRepresentable: UIViewRepresentable {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
         webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1 WandApp/\(version) WandPlatform/iOS"
 
-        context.coordinator.attach(webView: webView, serverURL: serverURL)
+        let targetURL = sessionURL()
+        context.coordinator.attach(webView: webView, serverURL: targetURL)
 
         // 有 token：先调 /api/login 拿 session cookie 注入 WKHTTPCookieStore，再加载主页。
         // 没有 token：当成裸 URL（ConnectView 已探测过可达性），直接加载。
@@ -331,7 +335,7 @@ struct WebViewRepresentable: UIViewRepresentable {
                         }
                         group.notify(queue: .main) {
                             NSLog("[Wand] %d cookie(s) injected, loading %@", cookies.count, serverURL.absoluteString)
-                            webView.load(URLRequest(url: serverURL))
+                            webView.load(URLRequest(url: targetURL))
                         }
                     }
                 case .failure(let err):
@@ -345,10 +349,22 @@ struct WebViewRepresentable: UIViewRepresentable {
             }
         } else {
             NSLog("[Wand] no token; loading %@ directly", serverURL.absoluteString)
-            webView.load(URLRequest(url: serverURL))
+            webView.load(URLRequest(url: targetURL))
         }
         return webView
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    private func sessionURL() -> URL {
+        guard let sessionId, !sessionId.isEmpty,
+              var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false) else {
+            return serverURL
+        }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == "session" }
+        items.append(URLQueryItem(name: "session", value: sessionId))
+        components.queryItems = items
+        return components.url ?? serverURL
+    }
 }

@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 会话列表：原生渲染 /api/sessions，下拉刷新 + 周期轮询，
-/// 点击进入原生 ChatView，支持滑动删除与新建会话。
+/// 点击进入嵌套网页版对应会话，支持滑动删除与新建会话。
 struct SessionListView: View {
     let api: WandAPI
 
@@ -36,7 +36,7 @@ struct SessionListView: View {
             // 隐藏的程序化跳转链接：快捷操作「继续会话」用。
             NavigationLink(isActive: quickOpenActive) {
                 if let id = quickOpenSessionId {
-                    ChatView(sessionId: id, api: api)
+                    WebSessionView(sessionId: id, api: api)
                 } else {
                     EmptyView()
                 }
@@ -57,6 +57,9 @@ struct SessionListView: View {
             NewSessionView(api: api) { newSession in
                 showNewSession = false
                 sessions.insert(newSession, at: 0)
+                DispatchQueue.main.async {
+                    quickOpenSessionId = newSession.id
+                }
             }
         }
         .task { await load() }
@@ -128,7 +131,7 @@ struct SessionListView: View {
             List {
                 ForEach(visibleSessions) { session in
                     ZStack {
-                        NavigationLink(destination: ChatView(sessionId: session.id, api: api)) {
+                        NavigationLink(destination: WebSessionView(sessionId: session.id, api: api)) {
                             EmptyView()
                         }
                         .opacity(0)
@@ -168,6 +171,19 @@ struct SessionListView: View {
                 try? await api.deleteSession(id: target.id)
             }
         }
+    }
+}
+
+private struct WebSessionView: View {
+    let sessionId: String
+    let api: WandAPI
+    @Environment(\.presentationMode) private var presentationMode
+
+    var body: some View {
+        WebContainerView(serverURL: api.baseURL, token: api.token, sessionId: sessionId) {
+            presentationMode.wrappedValue.dismiss()
+        }
+            .navigationBarHidden(true)
     }
 }
 
