@@ -1,4 +1,5 @@
 import Combine
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -22,6 +23,7 @@ struct ChatView: View {
     /// 语音输入模式：轻点话筒进入，整个输入框变成「按住说话」面板。
     @State private var voiceMode = false
     @State private var showFileImporter = false
+    @State private var showPhotoPicker = false
     @State private var uploadingAttachments = false
     @State private var gitStatus: GitStatusResult?
     /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
@@ -58,12 +60,33 @@ struct ChatView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+#if compiler(>=6.2)
+            if #available(iOS 26.0, *) {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    providerBadge
+                }
+                .sharedBackgroundVisibility(.hidden)
+
+                ToolbarItem(placement: .principal) {
+                    navigationStatus
+                }
+                .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    providerBadge
+                }
+                ToolbarItem(placement: .principal) {
+                    navigationStatus
+                }
+            }
+#else
             ToolbarItem(placement: .navigationBarLeading) {
                 providerBadge
             }
             ToolbarItem(placement: .principal) {
                 navigationStatus
             }
+#endif
             ToolbarItem(placement: .navigationBarTrailing) {
                 HStack(spacing: 12) {
                     gitChangesButton
@@ -86,6 +109,12 @@ struct ChatView: View {
             allowsMultipleSelection: true,
             onCompletion: handlePickedAttachments
         )
+        .sheet(isPresented: $showPhotoPicker) {
+            PhotoLibraryPicker { result in
+                showPhotoPicker = false
+                handlePickedPhotos(result)
+            }
+        }
         .onAppear {
             store.start()
             refreshGitStatus()
@@ -385,8 +414,7 @@ struct ChatView: View {
             }
             inputBar
         }
-        // 手动键盘避让：使用键盘与窗口的完整重叠高度。safeAreaInset 已经处理
-        // 底部安全区，观察器不能再次扣除，否则输入栏会少抬一截。
+        // 手动键盘避让：观察器只返回键盘在底部安全区上方的高度。
         .padding(.bottom, keyboard.lift)
         .background(
             Theme.background
@@ -529,9 +557,16 @@ struct ChatView: View {
     private var composerActionsMenu: some View {
         Menu {
             Button {
+                showPhotoPicker = true
+            } label: {
+                Label("从相册选择", systemImage: "photo.on.rectangle")
+            }
+            .disabled(uploadingAttachments)
+
+            Button {
                 showFileImporter = true
             } label: {
-                Label("上传附件", systemImage: "paperclip")
+                Label("从文件选择", systemImage: "paperclip")
             }
             .disabled(uploadingAttachments)
         } label: {
@@ -557,9 +592,28 @@ struct ChatView: View {
             if case .failure(let error) = result { store.toast = error.localizedDescription }
             return
         }
+        uploadAttachments(urls)
+    }
+
+    private func handlePickedPhotos(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, !urls.isEmpty else {
+            if case .failure(let error) = result { store.toast = error.localizedDescription }
+            return
+        }
+        uploadAttachments(urls, cleanupAfterUpload: true)
+    }
+
+    private func uploadAttachments(_ urls: [URL], cleanupAfterUpload: Bool = false) {
         uploadingAttachments = true
         Task {
-            defer { uploadingAttachments = false }
+            defer {
+                uploadingAttachments = false
+                if cleanupAfterUpload {
+                    for url in urls {
+                        try? FileManager.default.removeItem(at: url)
+                    }
+                }
+            }
             do {
                 let files = try await api.uploadAttachments(id: sessionId, urls: urls)
                 let paths = files.map(\.savedPath).joined(separator: "\n")
@@ -2515,5 +2569,121 @@ private struct PermissionButtonStyle: ButtonStyle {
                     .stroke(kind == .primary ? Color.clear : Theme.border, lineWidth: 1)
             )
             .opacity(configuration.isPressed ? 0.7 : 1)
+    }
+}
+
+/// 系统相册选择器。PHPicker 只把用户明确选择的图片交给应用，无需申请整库访问权限。
+private struct PhotoLibraryPicker: UIViewControllerRepresentable {
+    let onComplete: (Result<[URL], Error>) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onComplete: onComplete)
+    }
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var configuration = PHPickerConfiguration(photoLibrary: .shared())
+        configuration.filter = .images
+        configuration.selectionLimit = 5
+        let picker = PHPickerViewController(configuration: configuration)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        private let onComplete: (Result<[URL], Error>) -> Void
+
+        init(onComplete: @escaping (Result<[URL], Error>) -> Void) {
+            self.onComplete = onComplete
+        }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            picker.dismiss(animated: true)
+            guard !results.isEmpty else {
+                onComplete(.success([]))
+                return
+            }
+
+            let group = DispatchGroup()
+            let lock = NSLock()
+            var copiedURLs: [URL] = []
+            var firstError: Error?
+
+            for result in results {
+                let provider = result.itemProvider
+                guard let typeIdentifier = provider.registeredTypeIdentifiers.first(where: {
+                    UTType($0)?.conforms(to: .image) == true
+                }) else {
+                    lock.lock()
+                    firstError = PhotoLibraryPickerError.unsupportedImage
+                    lock.unlock()
+                    continue
+                }
+
+                group.enter()
+                provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { url, error in
+                    defer { group.leave() }
+                    do {
+                        if let error { throw error }
+                        guard let url else { throw PhotoLibraryPickerError.missingFile }
+                        let copiedURL = try Self.copyToTemporaryDirectory(
+                            source: url,
+                            suggestedName: provider.suggestedName,
+                            typeIdentifier: typeIdentifier
+                        )
+                        lock.lock()
+                        copiedURLs.append(copiedURL)
+                        lock.unlock()
+                    } catch {
+                        lock.lock()
+                        if firstError == nil { firstError = error }
+                        lock.unlock()
+                    }
+                }
+            }
+
+            group.notify(queue: .main) {
+                if let firstError {
+                    for url in copiedURLs {
+                        try? FileManager.default.removeItem(at: url)
+                    }
+                    self.onComplete(.failure(firstError))
+                } else {
+                    self.onComplete(.success(copiedURLs))
+                }
+            }
+        }
+
+        private static func copyToTemporaryDirectory(
+            source: URL,
+            suggestedName: String?,
+            typeIdentifier: String
+        ) throws -> URL {
+            let suggested = suggestedName.map {
+                URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent
+            }
+            let baseName = suggested.flatMap { $0.isEmpty ? nil : $0 } ?? "photo"
+            let fileExtension = source.pathExtension.isEmpty
+                ? (UTType(typeIdentifier)?.preferredFilenameExtension ?? "jpg")
+                : source.pathExtension
+            let destination = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(baseName)-\(UUID().uuidString)")
+                .appendingPathExtension(fileExtension)
+            try FileManager.default.copyItem(at: source, to: destination)
+            return destination
+        }
+    }
+}
+
+private enum PhotoLibraryPickerError: LocalizedError {
+    case unsupportedImage
+    case missingFile
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupportedImage: return "无法读取所选图片格式"
+        case .missingFile: return "无法读取所选图片"
+        }
     }
 }
