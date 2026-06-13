@@ -87,7 +87,13 @@ struct SessionListView: View {
             // 隐藏的程序化跳转链接：快捷操作「继续会话」用。
             NavigationLink(isActive: quickOpenActive) {
                 if let session = quickOpenSession {
+                    // 必须按 session.id 绑定身份：本视图只有这一个隐藏 NavigationLink 承接
+                    // 所有会话跳转，结构上是同一节点。不加 .id 时 SwiftUI 会复用上一个会话的
+                    // 视图身份，ChatView 里的 @StateObject ChatStore 只在首次身份创建时求值，
+                    // 第二个会话拿到的仍是上一个会话的 store（started=true → start() no-op，
+                    // socket 不重连、快照不重拉），表现为打开后没有数据。
                     SessionDestinationView(session: session, api: api)
+                        .id(session.id)
                 } else {
                     EmptyView()
                 }
