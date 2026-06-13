@@ -40,6 +40,7 @@ final class ChatStore: ObservableObject {
     @Published private(set) var snapshot: SessionSnapshot?
     private let socket: WandSocket
     private var started = false
+    private var queuePromotePending = false
 
     // Live Activity（灵动岛）状态：started = 本会话当前在聚合长条里有条目；
     // sawResponding 防止 PTY 会话在 isResponding 尚未变 true 时被立即收掉。
@@ -260,10 +261,17 @@ final class ChatStore: ObservableObject {
     func send(text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        // 乐观插入用户消息，等服务端推送修正。
+        let queueing = isStructured && isResponding && status == "running"
+        let previousMessages = messages
+        let previousQueue = queuedMessages
         if isStructured {
-            messages.append(ConversationTurn(role: "user", content: [.text(text: trimmed, subagent: nil)]))
-            isResponding = true
+            if queueing {
+                queuedMessages.append(trimmed)
+                toast = "已加入排队，等当前回复完成会自动发送。"
+            } else {
+                messages.append(ConversationTurn(role: "user", content: [.text(text: trimmed, subagent: nil)]))
+                isResponding = true
+            }
         }
         // 把本会话加入灵动岛聚合长条（开关关闭 / iOS < 16.1 时是 no-op）。
         SessionLiveActivityController.shared.start(
@@ -284,7 +292,13 @@ final class ChatStore: ObservableObject {
                 }
             } catch {
                 toast = error.localizedDescription
-                if isStructured { isResponding = false }
+                if isStructured {
+                    if queueing { queuedMessages = previousQueue }
+                    else {
+                        messages = previousMessages
+                        isResponding = false
+                    }
+                }
                 SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: true)
                 liveActivityStarted = false
                 liveActivitySawResponding = false
@@ -418,31 +432,31 @@ final class ChatStore: ObservableObject {
 
     /// 当前是否处于「inFlight」（结构化会话且 running 时回复在跑），用于判断 promote 是否要 interrupt。
     var queueInFlight: Bool {
-        guard isStructured, status == "running" else { return false }
-        return snapshot?.structuredState?.inFlight ?? false
+        isStructured && status == "running" && isResponding
     }
 
     /// 立即发送第 index 条排队消息（乐观剥掉本地、失败回滚）。对齐 Web queueBarPromoteIndex。
     func promoteQueued(index: Int) {
         guard isStructured else { return }
+        guard !queuePromotePending else { return }
         let queue = queuedMessages
         guard index >= 0, index < queue.count else { return }
         let picked = queue[index]
         let previous = queue
         let next = Array(queue[..<index]) + Array(queue[(index + 1)...])
         let inFlight = queueInFlight
+        queuePromotePending = true
         queuedMessages = next
         toast = inFlight ? "已请求中断当前回复，立即发送这条。" : "已立即发送这条消息。"
         Task {
             do {
-                let snap = try await api.promoteQueued(
-                    id: sessionId, index: index, text: picked, inFlight: inFlight
-                )
+                let snap = try await api.promoteQueued(id: sessionId, index: index, expectedText: picked)
                 apply(snapshot: snap)
             } catch {
                 queuedMessages = previous
                 toast = error.localizedDescription
             }
+            queuePromotePending = false
         }
     }
 

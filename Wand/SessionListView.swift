@@ -523,41 +523,48 @@ private struct SessionRow: View {
     let selected: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .top, spacing: 12) {
             if selecting {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 21, weight: .medium))
                     .foregroundColor(selected ? Theme.brand : Theme.textSecondary)
             }
 
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-                GridRow(alignment: .top) {
-                    providerMark
-                    Text(session.displayTitle)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(2)
-                }
-
-                GridRow(alignment: .center) {
-                    metadataChip(
+            VStack(spacing: 6) {
+                providerMark
+                metadataChip(
                         session.isStructured ? "聊天" : "终端",
                         icon: session.isStructured ? "bubble.left.fill" : "terminal.fill",
                         tint: Theme.textSecondary
                     )
+            }
 
-                    if let cwd = session.cwd, !cwd.isEmpty {
-                        Text(cwd)
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            VStack(alignment: .leading, spacing: 10) {
+                Text(session.displayTitle)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(2)
+
+                HStack(spacing: 8) {
+                    Text(session.cwd?.isEmpty == false ? session.cwd! : "未设置工作目录")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(Theme.textSecondary.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if !durationLabel.isEmpty {
+                        Label(durationLabel, systemImage: "clock")
+                            .font(.system(size: 10, weight: .medium))
                             .foregroundColor(Theme.textSecondary.opacity(0.9))
-                            .fixedSize(horizontal: false, vertical: true)
+                            .fixedSize()
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 13)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(selected ? Theme.brand.opacity(0.08) : Theme.surface)
@@ -570,27 +577,33 @@ private struct SessionRow: View {
     }
 
     private var providerMark: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [providerTint.opacity(0.2), providerTint.opacity(0.08)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+        ZStack(alignment: .bottomTrailing) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [providerTint.opacity(0.16), providerTint.opacity(0.06)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                )
-            BrandLogoShape(provider: session.provider)
-                .fill(providerTint)
-                .frame(width: 22, height: 22)
-        }
-        .frame(width: 46, height: 46)
-        .overlay(alignment: .bottomTrailing) {
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(providerTint.opacity(0.16), lineWidth: 1)
+                    )
+                BrandLogoShape(provider: session.provider)
+                    .fill(providerTint.opacity(0.88))
+                    .frame(width: 20, height: 20)
+            }
+            .frame(width: 44, height: 44)
+
             Circle()
                 .fill(statusTint)
-                .frame(width: 11, height: 11)
-                .overlay(Circle().stroke(selected ? Theme.background : Theme.surface, lineWidth: 2))
-                .offset(x: 1, y: 1)
+                .frame(width: 8, height: 8)
+                .padding(2)
+                .background(Circle().fill(Theme.surface.opacity(0.82)))
         }
+        .frame(width: 48, height: 48, alignment: .topLeading)
         .accessibilityLabel("\(session.providerLabel)，\(statusLabel)")
     }
 
@@ -611,6 +624,20 @@ private struct SessionRow: View {
 
     private var providerTint: Color {
         session.provider == "codex" ? Theme.codex : Theme.brand
+    }
+
+    private static let isoFormatter = ISO8601DateFormatter()
+
+    private var durationLabel: String {
+        guard let raw = session.startedAt, let started = Self.isoFormatter.date(from: raw) else { return "" }
+        let ended = session.endedAt.flatMap(Self.isoFormatter.date(from:)) ?? Date()
+        let seconds = max(0, Int(ended.timeIntervalSince(started)))
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        let remainder = seconds % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
+            : String(format: "%02d:%02d", minutes, remainder)
     }
 
     private var statusTint: Color {

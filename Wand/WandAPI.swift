@@ -187,22 +187,17 @@ final class WandAPI {
 
     // MARK: - 排队消息（仅结构化会话）
 
-    /// 立刻发送第 index 条排队消息。inFlight 时带 interrupt+preserveQueue（中断当前回复，
-    /// 保留其余队列）；否则当普通新消息发出。对齐 Web 端 queueBarPromoteIndex。
+    /// 由服务端按 index 摘掉队列项并立即发送，避免客户端与自动 flush 重复发送。
     @discardableResult
-    func promoteQueued(id: String, index: Int, text: String, inFlight: Bool) async throws -> SessionSnapshot {
-        var body: [String: Any] = [
-            "input": text,
+    func promoteQueued(id: String, index: Int, expectedText: String) async throws -> SessionSnapshot {
+        let body: [String: Any] = [
+            "expectedText": expectedText,
             "idempotencyKey": UUID().uuidString,
         ]
-        if inFlight {
-            body["interrupt"] = true
-            body["preserveQueue"] = true
-        }
         return try await request(
             SessionSnapshot.self,
             method: "POST",
-            path: "/api/structured-sessions/\(id)/messages",
+            path: "/api/structured-sessions/\(id)/queued/\(index)/promote",
             body: body
         )
     }
