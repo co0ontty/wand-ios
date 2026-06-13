@@ -414,6 +414,72 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    // MARK: - 排队消息
+
+    /// 当前是否处于「inFlight」（结构化会话且 running 时回复在跑），用于判断 promote 是否要 interrupt。
+    var queueInFlight: Bool {
+        guard isStructured, status == "running" else { return false }
+        return snapshot?.structuredState?.inFlight ?? false
+    }
+
+    /// 立即发送第 index 条排队消息（乐观剥掉本地、失败回滚）。对齐 Web queueBarPromoteIndex。
+    func promoteQueued(index: Int) {
+        guard isStructured else { return }
+        let queue = queuedMessages
+        guard index >= 0, index < queue.count else { return }
+        let picked = queue[index]
+        let previous = queue
+        let next = Array(queue[..<index]) + Array(queue[(index + 1)...])
+        let inFlight = queueInFlight
+        queuedMessages = next
+        toast = inFlight ? "已请求中断当前回复，立即发送这条。" : "已立即发送这条消息。"
+        Task {
+            do {
+                let snap = try await api.promoteQueued(
+                    id: sessionId, index: index, text: picked, inFlight: inFlight
+                )
+                apply(snapshot: snap)
+            } catch {
+                queuedMessages = previous
+                toast = error.localizedDescription
+            }
+        }
+    }
+
+    /// 删除第 index 条排队消息（乐观剥掉本地、失败回滚）。
+    func deleteQueued(index: Int) {
+        guard isStructured else { return }
+        let queue = queuedMessages
+        guard index >= 0, index < queue.count else { return }
+        let previous = queue
+        queuedMessages = Array(queue[..<index]) + Array(queue[(index + 1)...])
+        Task {
+            do {
+                try await api.deleteQueued(id: sessionId, index: index)
+            } catch {
+                queuedMessages = previous
+                toast = error.localizedDescription
+            }
+        }
+    }
+
+    /// 清空全部排队消息（乐观清空、失败回滚）。
+    func clearQueued() {
+        guard isStructured else { return }
+        let previous = queuedMessages
+        guard !previous.isEmpty else { return }
+        queuedMessages = []
+        Task {
+            do {
+                try await api.clearQueued(id: sessionId)
+                toast = "已清空 \(previous.count) 条排队消息。"
+            } catch {
+                queuedMessages = previous
+                toast = error.localizedDescription
+            }
+        }
+    }
+
     /// 会话已结束时按 claudeSessionId 原地恢复（服务端 reuseId 复用本会话）。
     func resume() {
         Task {

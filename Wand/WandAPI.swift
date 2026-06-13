@@ -185,6 +185,44 @@ final class WandAPI {
         try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions/\(id)/stop", body: [:])
     }
 
+    // MARK: - 排队消息（仅结构化会话）
+
+    /// 立刻发送第 index 条排队消息。inFlight 时带 interrupt+preserveQueue（中断当前回复，
+    /// 保留其余队列）；否则当普通新消息发出。对齐 Web 端 queueBarPromoteIndex。
+    @discardableResult
+    func promoteQueued(id: String, index: Int, text: String, inFlight: Bool) async throws -> SessionSnapshot {
+        var body: [String: Any] = [
+            "input": text,
+            "idempotencyKey": UUID().uuidString,
+        ]
+        if inFlight {
+            body["interrupt"] = true
+            body["preserveQueue"] = true
+        }
+        return try await request(
+            SessionSnapshot.self,
+            method: "POST",
+            path: "/api/structured-sessions/\(id)/messages",
+            body: body
+        )
+    }
+
+    /// 删除第 index 条排队消息。
+    func deleteQueued(id: String, index: Int) async throws {
+        _ = try await requestData(
+            method: "DELETE",
+            path: "/api/structured-sessions/\(id)/queued/\(index)"
+        )
+    }
+
+    /// 清空全部排队消息。
+    func clearQueued(id: String) async throws {
+        _ = try await requestData(
+            method: "DELETE",
+            path: "/api/structured-sessions/\(id)/queued"
+        )
+    }
+
     func deleteSession(id: String) async throws {
         _ = try await requestData(method: "DELETE", path: "/api/sessions/\(id)")
     }

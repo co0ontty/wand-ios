@@ -30,6 +30,8 @@ struct ChatView: View {
     @State private var voiceHoldWork: DispatchWorkItem?
     /// 停止任务二次确认弹窗开关：点停止按钮先弹确认，避免误触中断正在跑的任务。
     @State private var showStopConfirm = false
+    /// 排队消息气泡条是否展开成列表（默认折叠成「已排队 N 条」徽章）。
+    @State private var queueBarExpanded = false
     /// 应用前后台感知：回前台做连接健康检查 + 拉最新快照，避免半死连接苦等 40s 看门狗。
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var inputFocused: Bool
@@ -142,8 +144,12 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(Array(groupedMessageItems.enumerated()), id: \.offset) { _, item in
-                            messageItemView(item)
+                        // 把每个 assistant turn 摊平成独立的 LazyVStack 行（而非整条 turn 一个
+                        // 急加载 VStack）：一条 assistant 消息可能携带上百个 text/工具/diff 块，
+                        // 整条一次性构建会在主线程同步堆出数百个嵌套视图，打开会话时直接卡死、
+                        // 什么都渲染不出来。摊平后 LazyVStack 只实例化进入视口的行。
+                        ForEach(Array(groupedMessageItems.enumerated()), id: \.offset) { _, row in
+                            messageItemView(row)
                         }
                         if store.isResponding {
                             respondingIndicator
@@ -496,15 +502,15 @@ struct ChatView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             if !store.queuedMessages.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "tray.full")
-                        .font(.system(size: 11))
-                    Text("已排队 \(store.queuedMessages.count) 条消息")
-                        .font(.system(size: 12))
-                    Spacer()
-                }
-                .foregroundColor(Theme.textSecondary)
-                .padding(.horizontal, 18)
+                QueueBar(
+                    items: store.queuedMessages,
+                    expanded: $queueBarExpanded,
+                    inFlight: store.queueInFlight,
+                    onPromote: { store.promoteQueued(index: $0) },
+                    onDelete: { store.deleteQueued(index: $0) },
+                    onClearAll: { store.clearQueued() }
+                )
+                .padding(.horizontal, 12)
                 .padding(.bottom, 6)
             }
             inputBar
@@ -2782,5 +2788,129 @@ private enum PhotoLibraryPickerError: LocalizedError {
         case .unsupportedImage: return "无法读取所选图片格式"
         case .missingFile: return "无法读取所选图片"
         }
+    }
+}
+
+// MARK: - 排队消息气泡条
+
+/// 输入栏上方的「已排队 N 条消息」气泡条。折叠态只显示数量徽章，展开后逐条列出
+/// 每条都能「立即发送(⚡)」「删除(×)」，整条尾部带「清空全部」。乐观更新由 ChatStore 负责。
+private struct QueueBar: View {
+    let items: [String]
+    @Binding var expanded: Bool
+    let inFlight: Bool
+    let onPromote: (Int) -> Void
+    let onDelete: (Int) -> Void
+    let onClearAll: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            header
+            if expanded {
+                VStack(spacing: 6) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { index, text in
+                        row(index: index, text: text)
+                    }
+                    clearAllButton
+                }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        )
+        .animation(.easeInOut(duration: 0.18), value: expanded)
+        .animation(.easeInOut(duration: 0.18), value: items.count)
+    }
+
+    private var header: some View {
+        Button {
+            expanded.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "tray.full")
+                    .font(.system(size: 11))
+                Text("已排队 \(items.count) 条消息")
+                    .font(.system(size: 12, weight: .medium))
+                if inFlight {
+                    Text("· 中断后立即发送")
+                        .font(.system(size: 10))
+                        .foregroundColor(Theme.brand)
+                }
+                Spacer()
+                Image(systemName: expanded ? "chevron.down" : "chevron.up")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundColor(Theme.textSecondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(expanded ? "收起排队消息列表" : "展开排队消息列表")
+    }
+
+    private func row(index: Int, text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundColor(Theme.textPrimary)
+                .lineLimit(3)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+            Button {
+                onPromote(index)
+            } label: {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Theme.brand))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("立即发送第 \(index + 1) 条")
+            Button {
+                onDelete(index)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.danger)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Theme.danger.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("删除第 \(index + 1) 条")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.background.opacity(0.5))
+        )
+    }
+
+    private var clearAllButton: some View {
+        Button(role: .destructive) {
+            onClearAll()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "trash")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("清空全部")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundColor(Theme.danger)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Theme.danger.opacity(0.1)))
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
