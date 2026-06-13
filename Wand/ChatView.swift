@@ -283,25 +283,110 @@ struct ChatView: View {
     // MARK: - 顶部状态
 
     private var sessionLaunchPanel: some View {
-        VStack(spacing: 18) {
-            WandBrandMark(size: 52)
-            Text(store.snapshot?.providerLabel ?? "结构化会话")
-                .font(.system(size: 18, weight: .bold))
+        let isCodex = store.snapshot?.provider == "codex"
+        let tint: Color = isCodex ? Theme.codex : Theme.brand
+        return VStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(tint.opacity(0.1))
+                    .frame(width: 72, height: 72)
+                BrandLogoShape(provider: store.snapshot?.provider)
+                    .fill(tint)
+                    .frame(width: 32, height: 32)
+            }
+            Text("开始新的\(isCodex ? " Codex" : " Claude") 对话")
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
+            Text("输入消息，让它帮你完成任务")
+                .font(.system(size: 13))
+                .foregroundColor(Theme.textSecondary)
+            if let cwd = store.snapshot?.cwd, !cwd.isEmpty {
+                Text(cwd)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(Theme.textSecondary.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Theme.surface))
+            }
+            HStack(spacing: 10) {
+                launchOptionMenu(
+                    title: "模型",
+                    value: launchModelLabel,
+                    icon: "cpu"
+                ) {
+                    modelButton(id: nil, label: "默认")
+                    ForEach(store.availableModels.filter { $0.id != "default" }) { model in
+                        modelButton(id: model.id, label: model.label)
+                    }
+                }
+                launchOptionMenu(
+                    title: "思考深度",
+                    value: Self.thinkingLabel(store.thinkingEffort),
+                    icon: "brain"
+                ) {
+                    ForEach(Self.thinkingLevels, id: \.id) { level in
+                        Button {
+                            store.setThinkingEffort(level.id)
+                        } label: {
+                            store.thinkingEffort == level.id
+                                ? Label(level.label, systemImage: "checkmark")
+                                : Label(level.label, systemImage: "circle")
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: 340)
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 24)
-        .frame(maxWidth: 340)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Theme.surface)
-                .shadow(color: Color.black.opacity(0.07), radius: 18, y: 7)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Theme.border, lineWidth: 1)
-        )
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 32)
+    }
+
+    private var launchModelLabel: String {
+        guard let selected = store.selectedModel, !selected.isEmpty, selected != "default" else {
+            return "默认"
+        }
+        return store.availableModels.first(where: { $0.id == selected })?.label ?? selected
+    }
+
+    private func launchOptionMenu<Content: View>(
+        title: String,
+        value: String,
+        icon: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Menu(content: content) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.brand)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(Theme.textSecondary)
+                    Text(value)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Theme.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Theme.border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     private func modelButton(id: String?, label: String) -> some View {

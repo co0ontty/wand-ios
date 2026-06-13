@@ -25,14 +25,12 @@ struct SessionListView: View {
         case session(SessionSnapshot)
         case history(HistorySession)
         case sessions([SessionSnapshot])
-        case histories([HistorySession])
 
         var id: String {
             switch self {
             case .session(let s): return "session-\(s.id)"
             case .history(let h): return "history-\(h.id)"
             case .sessions(let arr): return "sessions-\(arr.map(\.id).joined(separator: ","))"
-            case .histories(let arr): return "histories-\(arr.map(\.id).joined(separator: ","))"
             }
         }
 
@@ -41,7 +39,6 @@ struct SessionListView: View {
             case .session: return "删除会话"
             case .history: return "删除历史会话"
             case .sessions(let arr): return "删除 \(arr.count) 个会话"
-            case .histories(let arr): return "删除 \(arr.count) 条历史会话"
             }
         }
 
@@ -50,17 +47,12 @@ struct SessionListView: View {
             case .session: return "此操作无法撤销，确定要删除这个会话吗？"
             case .history: return "此操作无法撤销，确定要删除这条历史会话吗？"
             case .sessions: return "此操作无法撤销，确定要删除选中的会话吗？"
-            case .histories: return "此操作无法撤销，确定要删除选中的历史会话吗？"
             }
         }
     }
     @State private var historyActionInProgress = false
     @State private var selectedSessionIds: Set<String> = []
     @State private var isSelecting = false
-    @State private var sessionRowFrames: [String: CGRect] = [:]
-    @State private var dragSelectionAnchorId: String?
-    @State private var dragSelectionBaseIds: Set<String> = []
-    @State private var suppressedSessionTapId: String?
     /// 长按图标快捷操作 / 新建完成后的程序化跳转目标。
     @State private var quickOpenSession: SessionSnapshot?
     @ObservedObject private var quickActions = QuickActionCoordinator.shared
@@ -269,34 +261,37 @@ struct SessionListView: View {
                     )
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        if suppressedSessionTapId == session.id {
-                            suppressedSessionTapId = nil
-                            return
-                        }
                         if isSelecting {
                             toggleSelection(session.id)
                         } else {
                             quickOpenSession = session
                         }
                     }
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear.preference(
-                                key: SessionRowFramePreferenceKey.self,
-                                value: [session.id: proxy.frame(in: .named("session-list"))]
-                            )
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            pendingDelete = .session(session)
+                        } label: {
+                            Label("删除", systemImage: "trash")
                         }
-                    )
-                    .simultaneousGesture(selectionGesture(startingWith: session.id))
+                    }
+                    .contextMenu {
+                        Button {
+                            beginSelection(with: session.id)
+                        } label: {
+                            Label("多选会话", systemImage: "checkmark.circle")
+                        }
+                        Button(role: .destructive) {
+                            pendingDelete = .session(session)
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                    }
                     .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
                     .listRowBackground(Theme.background)
                     .listRowSeparator(.hidden)
                 }
-                .onDelete(perform: deleteSessions)
             }
             .listStyle(.plain)
-            .coordinateSpace(name: "session-list")
-            .onPreferenceChange(SessionRowFramePreferenceKey.self) { sessionRowFrames = $0 }
             .refreshable { await load(silent: true) }
         }
     }
@@ -357,11 +352,24 @@ struct SessionListView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(historyActionInProgress)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            pendingDelete = .history(history)
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                    }
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            pendingDelete = .history(history)
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                    }
                     .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
                     .listRowBackground(Theme.background)
                     .listRowSeparator(.hidden)
                 }
-                .onDelete(perform: deleteHistory)
             }
             .listStyle(.plain)
             .refreshable { await load(silent: true) }
@@ -385,12 +393,6 @@ struct SessionListView: View {
         }
     }
 
-    private func deleteHistory(at offsets: IndexSet) {
-        let targets = offsets.map { visibleHistorySessions[$0] }
-        guard !targets.isEmpty else { return }
-        pendingDelete = .histories(targets)
-    }
-
     /// 用户在确认弹窗里点了「删除」才真正落库：先乐观更新本地 state 让 UI 立刻消失，
     /// 再后台逐个调 API；网络失败时下次 load 会重新拉回。
     private func performDelete() {
@@ -409,11 +411,6 @@ struct SessionListView: View {
             Task {
                 for s in arr { try? await api.deleteSession(id: s.id) }
             }
-        case .histories(let arr):
-            historySessions.removeAll { h in arr.contains { $0.id == h.id } }
-            Task {
-                for h in arr { try? await api.deleteHistory(h) }
-            }
         }
     }
 
@@ -427,12 +424,6 @@ struct SessionListView: View {
             try? await api.deleteHistoryBatch(provider: "claude", ids: claudeIds)
             try? await api.deleteHistoryBatch(provider: "codex", ids: codexIds)
         }
-    }
-
-    private func deleteSessions(at offsets: IndexSet) {
-        let targets = offsets.map { visibleSessions[$0] }
-        guard !targets.isEmpty else { return }
-        pendingDelete = .sessions(targets)
     }
 
     private var selectionBar: some View {
@@ -469,67 +460,14 @@ struct SessionListView: View {
         }
     }
 
-    /// 长按当前行立即进入多选；手指保持按下并划过其它行时连续加入选择。
-    /// 使用 sequenced 手势避免普通点击打开会话时误触多选。
-    private func selectionGesture(startingWith id: String) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.42, maximumDistance: 18)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("session-list")))
-            .onChanged { value in
-                switch value {
-                case .second(true, let drag?):
-                    beginDragSelection(with: id)
-                    selectSessionRange(through: drag.location)
-                default:
-                    break
-                }
-            }
-            .onEnded { _ in
-                dragSelectionAnchorId = nil
-                dragSelectionBaseIds.removeAll()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    suppressedSessionTapId = nil
-                }
-            }
-    }
-
-    private func beginDragSelection(with id: String) {
-        guard dragSelectionAnchorId == nil else { return }
+    private func beginSelection(with id: String) {
         if !isSelecting { isSelecting = true }
-        dragSelectionAnchorId = id
-        dragSelectionBaseIds = selectedSessionIds
-        suppressedSessionTapId = id
         selectedSessionIds.insert(id)
-    }
-
-    private func selectSessionRange(through location: CGPoint) {
-        guard
-            let anchorId = dragSelectionAnchorId,
-            let anchorIndex = visibleSessions.firstIndex(where: { $0.id == anchorId }),
-            let targetId = sessionId(nearestTo: location),
-            let targetIndex = visibleSessions.firstIndex(where: { $0.id == targetId })
-        else { return }
-
-        let bounds = min(anchorIndex, targetIndex)...max(anchorIndex, targetIndex)
-        let rangeIds = Set(bounds.map { visibleSessions[$0].id })
-        selectedSessionIds = dragSelectionBaseIds.union(rangeIds)
-    }
-
-    /// 手指落在卡片间隙时也取垂直方向最近的行，避免快速滑动漏选。
-    private func sessionId(nearestTo location: CGPoint) -> String? {
-        if let hit = sessionRowFrames.first(where: { $0.value.contains(location) }) {
-            return hit.key
-        }
-        return sessionRowFrames.min {
-            abs($0.value.midY - location.y) < abs($1.value.midY - location.y)
-        }?.key
     }
 
     private func endSelection() {
         isSelecting = false
         selectedSessionIds.removeAll()
-        dragSelectionAnchorId = nil
-        dragSelectionBaseIds.removeAll()
-        suppressedSessionTapId = nil
     }
 
     private func deleteSelectedSessions() {
@@ -542,14 +480,6 @@ struct SessionListView: View {
 
 extension Notification.Name {
     static let wandBeginSessionSelection = Notification.Name("wandBeginSessionSelection")
-}
-
-private struct SessionRowFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [String: CGRect] = [:]
-
-    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
-    }
 }
 
 private struct SessionDestinationView: View {
@@ -586,92 +516,90 @@ private struct SessionRow: View {
     let selected: Bool
 
     var body: some View {
-        HStack(spacing: 13) {
+        HStack(alignment: .center, spacing: 12) {
             if selecting {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 20))
+                    .font(.system(size: 21, weight: .medium))
                     .foregroundColor(selected ? Theme.brand : Theme.textSecondary)
             }
-            providerMark
-            VStack(alignment: .leading, spacing: 6) {
-                Text(session.displayTitle)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(1)
-                HStack(spacing: 7) {
-                    Text(session.providerLabel)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(providerTint)
-                    metadataLabel(
-                        session.isStructured ? "聊天" : "终端",
-                        icon: session.isStructured ? "bubble.left.fill" : "terminal.fill"
-                    )
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow(alignment: .top) {
+                    providerMark
+                    Text(session.displayTitle)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(2)
                 }
-                if !compactPath.isEmpty {
-                    Text(compactPath)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(Theme.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
+
+                GridRow(alignment: .center) {
+                    metadataChip(
+                        session.isStructured ? "聊天" : "终端",
+                        icon: session.isStructured ? "bubble.left.fill" : "terminal.fill",
+                        tint: Theme.textSecondary
+                    )
+
+                    if let cwd = session.cwd, !cwd.isEmpty {
+                        Text(cwd)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(Theme.textSecondary.opacity(0.9))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
-            Spacer(minLength: 8)
-            Text(statusLabel)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(statusTint)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(statusTint.opacity(0.11)))
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 13)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.surface)
+                .fill(selected ? Theme.brand.opacity(0.08) : Theme.surface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Theme.border.opacity(0.75), lineWidth: 1)
+                .stroke(selected ? Theme.brand.opacity(0.5) : Theme.border.opacity(0.75), lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.04), radius: 8, y: 3)
-    }
-
-    private var compactPath: String {
-        guard let cwd = session.cwd, !cwd.isEmpty else { return "" }
-        let components = (cwd as NSString).pathComponents.filter { $0 != "/" }
-        guard components.count > 3 else { return cwd }
-        return "…/" + components.suffix(3).joined(separator: "/")
+        .shadow(color: Color.black.opacity(selected ? 0.06 : 0.035), radius: 7, y: 2)
     }
 
     private var providerMark: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(providerTint.opacity(0.13))
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(providerTint.opacity(0.24), lineWidth: 1)
+                .fill(
+                    LinearGradient(
+                        colors: [providerTint.opacity(0.2), providerTint.opacity(0.08)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
             BrandLogoShape(provider: session.provider)
                 .fill(providerTint)
-                .frame(width: 21, height: 21)
+                .frame(width: 22, height: 22)
         }
-        .frame(width: 44, height: 44)
+        .frame(width: 46, height: 46)
         .overlay(alignment: .bottomTrailing) {
             Circle()
                 .fill(statusTint)
-                .frame(width: 10, height: 10)
-                .overlay(Circle().stroke(Theme.surface, lineWidth: 2))
-                .offset(x: 2, y: 2)
+                .frame(width: 11, height: 11)
+                .overlay(Circle().stroke(selected ? Theme.background : Theme.surface, lineWidth: 2))
+                .offset(x: 1, y: 1)
         }
         .accessibilityLabel("\(session.providerLabel)，\(statusLabel)")
     }
 
-    private func metadataLabel(_ text: String, icon: String) -> some View {
+    private func metadataChip(_ text: String, icon: String?, tint: Color) -> some View {
         HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 9, weight: .semibold))
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .semibold))
+            }
             Text(text)
         }
-        .font(.system(size: 11, weight: .medium))
-        .foregroundColor(Theme.textSecondary)
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundColor(tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(tint.opacity(0.1)))
     }
 
     private var providerTint: Color {
@@ -695,7 +623,9 @@ private struct SessionRow: View {
         case "idle": return "空闲"
         case "exited", "stopped": return "已结束"
         case "failed": return "失败"
-        default: return session.status ?? ""
+        default:
+            if let status = session.status, !status.isEmpty { return status }
+            return "未知"
         }
     }
 }
@@ -704,51 +634,47 @@ private struct HistorySessionRow: View {
     let history: HistorySession
 
     var body: some View {
-        HStack(spacing: 13) {
+        HStack(alignment: .top, spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(providerTint.opacity(0.13))
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(providerTint.opacity(0.24), lineWidth: 1)
+                    .fill(
+                        LinearGradient(
+                            colors: [providerTint.opacity(0.2), providerTint.opacity(0.08)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 19, weight: .semibold))
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundColor(providerTint)
             }
-            .frame(width: 44, height: 44)
+            .frame(width: 46, height: 46)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text(history.firstUserMessage.isEmpty ? "空会话" : history.firstUserMessage)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(2)
 
-                HStack(spacing: 7) {
-                    Text(providerLabel)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(providerTint)
-                    if !relativeTime.isEmpty {
-                        Label(relativeTime, systemImage: "clock")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(Theme.textSecondary)
-                    }
+                if !relativeTime.isEmpty {
+                    Label(relativeTime, systemImage: "clock")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Theme.textSecondary.opacity(0.08)))
                 }
 
-                if !compactPath.isEmpty {
-                    Text(compactPath)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(Theme.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.head)
+                if !history.cwd.isEmpty {
+                    Text(history.cwd)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(Theme.textSecondary.opacity(0.9))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-
-            Spacer(minLength: 8)
-            Image(systemName: "arrow.counterclockwise.circle.fill")
-                .font(.system(size: 20))
-                .foregroundColor(providerTint.opacity(0.8))
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 13)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Theme.surface)
@@ -757,21 +683,11 @@ private struct HistorySessionRow: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Theme.border.opacity(0.75), lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.04), radius: 8, y: 3)
-    }
-
-    private var providerLabel: String {
-        history.provider == "codex" ? "Codex" : "Claude"
+        .shadow(color: Color.black.opacity(0.035), radius: 7, y: 2)
     }
 
     private var providerTint: Color {
         history.provider == "codex" ? Theme.codex : Theme.brand
-    }
-
-    private var compactPath: String {
-        let components = (history.cwd as NSString).pathComponents.filter { $0 != "/" }
-        guard components.count > 3 else { return history.cwd }
-        return "…/" + components.suffix(3).joined(separator: "/")
     }
 
     // 复用单例 formatter：构造 ISO8601DateFormatter / RelativeDateTimeFormatter 很贵，

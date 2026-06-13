@@ -489,6 +489,8 @@ struct RecentPath: Decodable, Identifiable {
 struct ServerConfigInfo: Decodable {
     let defaultCwd: String?
     let defaultMode: String?
+    let defaultModel: String?
+    let defaultThinkingEffort: String?
     let currentVersion: String?
 }
 

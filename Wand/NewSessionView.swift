@@ -17,6 +17,10 @@ struct NewSessionView: View {
     @State private var isStructured = true
     // 默认托管模式（claude 全自动完成）；codex 切换时 clamp 成全权限。
     @State private var mode = "managed"
+    @State private var availableModels: [ModelInfo] = []
+    @State private var codexModels: [ModelInfo] = []
+    @State private var selectedModel = ""
+    @State private var thinkingEffort = "off"
     @State private var firstMessage = ""
     @State private var creating = false
     @State private var errorMessage: String?
@@ -37,6 +41,17 @@ struct NewSessionView: View {
         SessionMode(id: "native", label: "原生", desc: "原生结构化输出"),
     ]
 
+    private static let thinkingLevels = [
+        (id: "off", label: "关闭"),
+        (id: "standard", label: "标准"),
+        (id: "deep", label: "深入"),
+        (id: "max", label: "最大"),
+    ]
+
+    private var providerModels: [ModelInfo] {
+        provider == "codex" ? codexModels : availableModels
+    }
+
     /// codex 仅支持 full-access，对齐 Web getSupportedModes。
     private var supportedModes: Set<String> {
         provider == "codex" ? ["full-access"] : Set(Self.sessionModes.map { $0.id })
@@ -49,37 +64,66 @@ struct NewSessionView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         sectionHeader("Provider")
-                        HStack(spacing: 10) {
-                            providerCard(
-                                id: "claude",
-                                label: "Claude",
-                                desc: "完整 Claude 会话能力",
-                                accent: Theme.brand
-                            )
-                            providerCard(
-                                id: "codex",
-                                label: "Codex",
-                                desc: "结构化 JSONL 或 PTY 会话",
-                                accent: Theme.codex
-                            )
+                        Picker("Provider", selection: $provider) {
+                            Text("Claude").tag("claude")
+                            Text("Codex").tag("codex")
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: provider) { _, newProvider in
+                            mode = supportedMode(mode, provider: newProvider)
                         }
 
                         sectionHeader("会话类型")
-                        HStack(spacing: 10) {
-                            kindCard(
-                                structured: true,
-                                icon: "bubble.left.and.bubble.right",
-                                label: "结构化",
-                                desc: "智能对话模式"
-                            )
-                            kindCard(
-                                structured: false,
-                                icon: "terminal",
-                                label: "PTY",
-                                desc: "交互式终端会话"
-                            )
+                        Picker("会话类型", selection: $isStructured) {
+                            Text("结构化").tag(true)
+                            Text("PTY").tag(false)
                         }
+                        .pickerStyle(.segmented)
                         fieldHint(Self.sessionKindHint(provider: provider, structured: isStructured))
+
+                        sectionHeader("模型与思考")
+                        HStack(spacing: 10) {
+                            optionMenuCard(
+                                title: "模型",
+                                value: selectedModelLabel,
+                                icon: "cpu"
+                            ) {
+                                Button {
+                                    selectedModel = ""
+                                    saveDefaults(model: "")
+                                } label: {
+                                    selectedModel.isEmpty
+                                        ? Label("默认", systemImage: "checkmark")
+                                        : Label("默认", systemImage: "circle")
+                                }
+                                ForEach(providerModels.filter { $0.id != "default" }) { model in
+                                    Button {
+                                        selectedModel = model.id
+                                        saveDefaults(model: model.id)
+                                    } label: {
+                                        selectedModel == model.id
+                                            ? Label(model.label, systemImage: "checkmark")
+                                            : Label(model.label, systemImage: "circle")
+                                    }
+                                }
+                            }
+                            optionMenuCard(
+                                title: "思考深度",
+                                value: thinkingLabel,
+                                icon: "brain"
+                            ) {
+                                ForEach(Self.thinkingLevels, id: \.id) { level in
+                                    Button {
+                                        thinkingEffort = level.id
+                                        saveDefaults(thinkingEffort: level.id)
+                                    } label: {
+                                        thinkingEffort == level.id
+                                            ? Label(level.label, systemImage: "checkmark")
+                                            : Label(level.label, systemImage: "circle")
+                                    }
+                                }
+                            }
+                        }
 
                         sectionHeader("模式")
                         LazyVGrid(
@@ -137,15 +181,32 @@ struct NewSessionView: View {
         }
         .navigationViewStyle(.stack)
         .task {
+            let config = try? await api.serverConfig()
+            mode = supportedMode(config?.defaultMode ?? "managed", provider: provider)
+            selectedModel = config?.defaultModel ?? ""
+            thinkingEffort = config?.defaultThinkingEffort ?? "off"
+            if let response = try? await api.models() {
+                availableModels = response.models
+                codexModels = response.codexModels
+            }
             recentPaths = (try? await api.recentPaths()) ?? []
             if cwd.isEmpty {
                 if let first = recentPaths.first {
                     cwd = first.path
-                } else if let config = try? await api.serverConfig(), let def = config.defaultCwd {
+                } else if let def = config?.defaultCwd {
                     cwd = def
                 }
             }
         }
+    }
+
+    private var selectedModelLabel: String {
+        guard !selectedModel.isEmpty, selectedModel != "default" else { return "默认" }
+        return providerModels.first(where: { $0.id == selectedModel })?.label ?? selectedModel
+    }
+
+    private var thinkingLabel: String {
+        Self.thinkingLevels.first(where: { $0.id == thinkingEffort })?.label ?? "关闭"
     }
 
     // MARK: - 区块组件
@@ -154,8 +215,8 @@ struct NewSessionView: View {
         Text(text)
             .font(.system(size: 13, weight: .semibold))
             .foregroundColor(Theme.textSecondary)
-            .padding(.top, 20)
-            .padding(.bottom, 8)
+            .padding(.top, 16)
+            .padding(.bottom, 7)
     }
 
     /// 区块下方的说明文案，对应 Web 的 .field-hint。
@@ -164,7 +225,7 @@ struct NewSessionView: View {
             .font(.system(size: 12))
             .lineSpacing(3)
             .foregroundColor(Theme.textSecondary.opacity(0.85))
-            .padding(.top, 8)
+            .padding(.top, 6)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -178,62 +239,44 @@ struct NewSessionView: View {
             )
     }
 
-    /// Provider 选择卡：品牌 logo（圆形软底）+ 名称 + 一句话说明，2 张横排。
-    private func providerCard(id: String, label: String, desc: String, accent: Color) -> some View {
-        let selected = provider == id
-        return Button {
-            provider = id
-            // codex 仅支持全权限，切换时同步 clamp；切回 claude 恢复默认托管模式。
-            mode = id == "codex" ? "full-access" : "managed"
-        } label: {
-            VStack(spacing: 6) {
-                ZStack {
-                    Circle().fill(accent.opacity(0.13))
-                    BrandLogoShape(provider: id)
-                        .fill(accent)
-                        .frame(width: 20, height: 20)
+    private func optionMenuCard<Content: View>(
+        title: String,
+        value: String,
+        icon: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Menu(content: content) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(Theme.brand)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Theme.brand.opacity(0.1)))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Theme.textSecondary)
+                    Text(value)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(1)
                 }
-                .frame(width: 36, height: 36)
-                Text(label)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
-                Text(desc)
-                    .font(.system(size: 11))
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
                     .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 14)
-            .background(cardBackground(selected: selected))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(cardBackground(selected: false))
         }
         .buttonStyle(.plain)
     }
 
-    /// 会话类型卡：图标 + 标签 + 一句话说明，2 张横排。
-    private func kindCard(structured: Bool, icon: String, label: String, desc: String) -> some View {
-        let selected = isStructured == structured
-        return Button {
-            isStructured = structured
-        } label: {
-            VStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(selected ? Theme.brand : Theme.textSecondary)
-                Text(label)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
-                Text(desc)
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 12)
-            .background(cardBackground(selected: selected))
-        }
-        .buttonStyle(.plain)
+    private func supportedMode(_ value: String, provider: String) -> String {
+        if provider == "codex" { return "full-access" }
+        return Self.sessionModes.contains(where: { $0.id == value }) ? value : "managed"
     }
 
     /// 模式卡（两列网格单元，标签 + 一句话说明），不支持的模式降透明度且不可点。
@@ -242,6 +285,7 @@ struct NewSessionView: View {
         let enabled = supportedModes.contains(option.id)
         return Button {
             mode = option.id
+            saveDefaults(mode: option.id)
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(option.label)
@@ -254,8 +298,8 @@ struct NewSessionView: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 11)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 8)
             .background(cardBackground(selected: selected))
         }
         .buttonStyle(.plain)
@@ -263,24 +307,28 @@ struct NewSessionView: View {
         .opacity(enabled ? 1 : 0.4)
     }
 
-    /// 工作目录卡：路径输入 + 浏览目录入口 + 最近路径快速选择。
+    /// 工作目录卡：路径输入 + 右侧浏览按钮 + 最近路径快速选择。
     private var cwdCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            TextField("/path/to/project", text: $cwd)
-                .font(.system(size: 14, design: .monospaced))
-                .autocapitalization(.none)
-                .disableAutocorrection(true)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 11)
-            Divider().background(Theme.border)
-            Button {
-                showBrowser = true
-            } label: {
-                Label("浏览目录…", systemImage: "folder")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(Theme.brand)
-                    .padding(.horizontal, 12)
+            HStack(spacing: 0) {
+                TextField("/path/to/project", text: $cwd)
+                    .font(.system(size: 14, design: .monospaced))
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .padding(.leading, 12)
                     .padding(.vertical, 11)
+
+                Button {
+                    showBrowser = true
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(Theme.brand)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("浏览目录")
             }
             if !recentPaths.isEmpty {
                 Divider().background(Theme.border)
@@ -407,6 +455,16 @@ struct NewSessionView: View {
         !cwd.trimmingCharacters(in: .whitespaces).isEmpty && !creating
     }
 
+    private func saveDefaults(mode: String? = nil, model: String? = nil, thinkingEffort: String? = nil) {
+        Task {
+            do {
+                try await api.updateNewSessionDefaults(mode: mode, model: model, thinkingEffort: thinkingEffort)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func create() {
         guard canCreate else { return }
         creating = true
@@ -423,6 +481,8 @@ struct NewSessionView: View {
                         provider: provider,
                         cwd: path,
                         mode: effectiveMode,
+                        model: selectedModel.isEmpty ? nil : selectedModel,
+                        thinkingEffort: thinkingEffort,
                         prompt: prompt.isEmpty ? nil : prompt
                     )
                 } else {
@@ -430,6 +490,8 @@ struct NewSessionView: View {
                         provider: provider,
                         cwd: path,
                         mode: effectiveMode,
+                        model: selectedModel.isEmpty ? nil : selectedModel,
+                        thinkingEffort: thinkingEffort,
                         initialInput: prompt.isEmpty ? nil : prompt
                     )
                 }

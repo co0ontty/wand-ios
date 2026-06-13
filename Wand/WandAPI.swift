@@ -258,22 +258,40 @@ final class WandAPI {
 
     /// 结构化会话（非 PTY）：POST /api/structured-sessions。
     @discardableResult
-    func createStructuredSession(provider: String, cwd: String, mode: String?, prompt: String?) async throws -> SessionSnapshot {
+    func createStructuredSession(
+        provider: String,
+        cwd: String,
+        mode: String?,
+        model: String?,
+        thinkingEffort: String?,
+        prompt: String?
+    ) async throws -> SessionSnapshot {
         var body: [String: Any] = [
             "provider": provider,
             "runner": provider == "codex" ? "codex-cli-exec" : "claude-cli-print",
             "cwd": cwd,
         ]
         if let mode, !mode.isEmpty { body["mode"] = mode }
+        if let model, !model.isEmpty { body["model"] = model }
+        if let thinkingEffort, !thinkingEffort.isEmpty { body["thinkingEffort"] = thinkingEffort }
         if let prompt, !prompt.isEmpty { body["prompt"] = prompt }
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/structured-sessions", body: body)
     }
 
     /// PTY 会话：POST /api/commands，command 与 provider 保持一致。
     @discardableResult
-    func createPtySession(provider: String, cwd: String, mode: String?, initialInput: String?) async throws -> SessionSnapshot {
+    func createPtySession(
+        provider: String,
+        cwd: String,
+        mode: String?,
+        model: String?,
+        thinkingEffort: String?,
+        initialInput: String?
+    ) async throws -> SessionSnapshot {
         var body: [String: Any] = ["command": provider, "provider": provider, "cwd": cwd]
         if let mode, !mode.isEmpty { body["mode"] = mode }
+        if let model, !model.isEmpty { body["model"] = model }
+        if let thinkingEffort, !thinkingEffort.isEmpty { body["thinkingEffort"] = thinkingEffort }
         if let initialInput, !initialInput.isEmpty { body["initialInput"] = initialInput }
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/commands", body: body)
     }
@@ -358,5 +376,13 @@ final class WandAPI {
 
     func serverConfig() async throws -> ServerConfigInfo {
         try await request(ServerConfigInfo.self, method: "GET", path: "/api/config")
+    }
+
+    func updateNewSessionDefaults(mode: String? = nil, model: String? = nil, thinkingEffort: String? = nil) async throws {
+        var body: [String: Any] = [:]
+        if let mode { body["defaultMode"] = mode }
+        if let model { body["defaultModel"] = model }
+        if let thinkingEffort { body["defaultThinkingEffort"] = thinkingEffort }
+        _ = try await requestData(method: "POST", path: "/api/settings/config", body: body)
     }
 }
