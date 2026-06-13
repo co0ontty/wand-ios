@@ -138,6 +138,12 @@ private struct CameraPreview: UIViewControllerRepresentable {
         private let sessionQueue = DispatchQueue(label: "wand.qr.session")
         private var previewLayer: AVCaptureVideoPreviewLayer?
 
+        deinit {
+            // viewWillDisappear 已停 session，但极端时序（直接 dealloc）可能漏；
+            // deinit 兜底，确保摄像头硬件释放、不耗电、不阻塞其他 App 用摄像头。
+            if session.isRunning { session.stopRunning() }
+        }
+
         override func viewDidLoad() {
             super.viewDidLoad()
             view.backgroundColor = .black

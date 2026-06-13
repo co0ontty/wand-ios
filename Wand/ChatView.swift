@@ -125,7 +125,27 @@ struct ChatView: View {
             if !showing { refreshGitStatus() }
         }
         .onDisappear { store.shutdown() }
+        .overlay(alignment: .top) { connectionBanner }
+        .animation(.easeInOut(duration: 0.2), value: store.connected)
         .overlay(alignment: .top) { toastView }
+    }
+
+    // MARK: - 断线提示条
+
+    @ViewBuilder private var connectionBanner: some View {
+        if !store.connected {
+            HStack(spacing: 6) {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("连接已断开，正在重连…")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .foregroundColor(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background(Theme.danger)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
     }
 
     // MARK: - 消息列表
@@ -658,6 +678,11 @@ struct ChatView: View {
         draft = ""
         followsLatest = true
         store.send(text: text)
+        // 清空 draft 后，权限卡/todo bar 的插入移除可能让 @FocusState 丢焦点、键盘收起，
+        // 用户得再点一次输入框才能继续。非语音模式且会话未结束时主动保持焦点，连续对话不断。
+        if !voiceMode && !store.sessionEnded {
+            inputFocused = true
+        }
     }
 
     // MARK: - 按住说话（端侧语音识别）
@@ -682,7 +707,12 @@ struct ChatView: View {
             .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
             .gesture(voiceTapOrHoldGesture(onTap: {
                 voiceMode.toggle()
-                if voiceMode { inputFocused = false }
+                if voiceMode {
+                    inputFocused = false
+                    // 进入语音模式即预热：把首次冷启成本（recognizer/授权/setCategory）
+                    // 前移到用户还没按下时，避免「按下去很久识别框才出现」。
+                    speech.prewarm()
+                }
             }))
             .accessibilityLabel(voiceMode ? "切回键盘输入" : "轻点切语音模式，长按说话")
     }
@@ -748,7 +778,8 @@ struct ChatView: View {
     private static let voiceCancelThreshold: CGFloat = 60
 
     /// 轻点 vs 按住的分界：按住超过该时长进入录音，否则按轻点处理。
-    private static let voiceHoldThreshold: TimeInterval = 0.3
+    /// 0.18s 仍足以区分轻点/长按，但比 0.3s 让识别框出现快 ~40%，减少「按下去没反应」的感知延迟。
+    private static let voiceHoldThreshold: TimeInterval = 0.18
 
     /// 轻点 / 按住二分手势：按满阈值 → 开始录音（移动驱动上滑取消、松手提交）；
     /// 阈值内松手 → onTap()。

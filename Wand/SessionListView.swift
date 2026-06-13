@@ -29,6 +29,8 @@ struct SessionListView: View {
     @ObservedObject private var quickActions = QuickActionCoordinator.shared
 
     private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
+    /// 列表页是否可见：离开页面后周期轮询暂停，避免后台白耗电和流量。
+    @State private var listVisible = false
 
     private var visibleSessions: [SessionSnapshot] {
         sessions.filter { !($0.archived ?? false) }
@@ -110,7 +112,10 @@ struct SessionListView: View {
             }
         }
         .task { await load() }
+        .onAppear { listVisible = true }
+        .onDisappear { listVisible = false }
         .onReceive(refreshTimer) { _ in
+            guard listVisible else { return }
             Task { await load(silent: true) }
         }
         // @Published 订阅时会重放当前值，所以冷启动遗留的待处理操作也能在视图出现时接住。
@@ -705,13 +710,19 @@ private struct HistorySessionRow: View {
         return "…/" + components.suffix(3).joined(separator: "/")
     }
 
+    // 复用单例 formatter：构造 ISO8601DateFormatter / RelativeDateTimeFormatter 很贵，
+    // 历史列表上百行各 new 一个会卡主线程。都在主线程渲染，static 复用安全。
+    private static let isoFormatter = ISO8601DateFormatter()
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.unitsStyle = .short
+        return f
+    }()
+
     private var relativeTime: String {
         guard let timestamp = history.timestamp else { return "" }
-        let formatter = ISO8601DateFormatter()
-        guard let date = formatter.date(from: timestamp) else { return "" }
-        let relative = RelativeDateTimeFormatter()
-        relative.locale = Locale(identifier: "zh_CN")
-        relative.unitsStyle = .short
-        return relative.localizedString(for: date, relativeTo: Date())
+        guard let date = Self.isoFormatter.date(from: timestamp) else { return "" }
+        return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
     }
 }
