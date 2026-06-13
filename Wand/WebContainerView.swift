@@ -308,9 +308,7 @@ struct WebViewRepresentable: UIViewRepresentable {
         webView.backgroundColor = Theme.uiBackground
         webView.scrollView.backgroundColor = Theme.uiBackground
         webView.isOpaque = false
-        if #available(iOS 15.0, *) {
-            webView.underPageBackgroundColor = Theme.uiBackground
-        }
+        webView.underPageBackgroundColor = Theme.uiBackground
 
         // UA 标记：让前端识别这是 iOS 原生壳
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"

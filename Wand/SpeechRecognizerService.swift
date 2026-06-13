@@ -67,10 +67,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     /// 已授权同步判定：两项都 .authorized/.granted 时可走快路径、零异步 hop。
     private static func alreadyAuthorized() -> Bool {
         guard SFSpeechRecognizer.authorizationStatus() == .authorized else { return false }
-        if #available(iOS 17.0, *) {
-            return AVAudioApplication.shared.recordPermission == .granted
-        }
-        return AVAudioSession.sharedInstance().recordPermission == .granted
+        return AVAudioApplication.shared.recordPermission == .granted
     }
 
     /// 依次请求语音识别 + 麦克风权限，结果回调在主线程。
@@ -81,7 +78,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
                     completion(false, "语音识别权限被拒绝，请到 设置 > Wand 中开启")
                     return
                 }
-                AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                AVAudioApplication.requestRecordPermission { granted in
                     DispatchQueue.main.async {
                         completion(granted, granted ? nil : "麦克风权限被拒绝，请到 设置 > Wand 中开启")
                     }
@@ -180,9 +177,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         } else {
             usingOnDevice = false
         }
-        if #available(iOS 16.0, *) {
-            request.addsPunctuation = true
-        }
+        request.addsPunctuation = true
         self.request = request
 
         generation += 1

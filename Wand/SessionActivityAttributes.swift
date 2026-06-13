@@ -1,11 +1,9 @@
 import Foundation
-#if canImport(ActivityKit)
 import ActivityKit
 
 /// 会话 Live Activity 的契约，主 App 与 WandWidgets 扩展共同编译。
 /// 所有活跃会话聚合进**同一条**活动（长条样式）：ContentState 携带会话条目数组，
 /// 每个条目只保留「哪个会话、缩略标题、什么状态」——灵动岛空间有限。
-@available(iOS 16.1, *)
 struct SessionActivityAttributes: ActivityAttributes {
     /// 长条内的单个会话条目。
     struct SessionEntry: Codable, Hashable {
@@ -26,7 +24,6 @@ struct SessionActivityAttributes: ActivityAttributes {
     }
 }
 
-@available(iOS 16.1, *)
 extension SessionActivityAttributes.SessionEntry {
     var isResponding: Bool { stateRaw == "responding" }
     var needsPermission: Bool { stateRaw == "permission" }
@@ -51,7 +48,6 @@ extension SessionActivityAttributes.SessionEntry {
     }
 }
 
-@available(iOS 16.1, *)
 extension SessionActivityAttributes.ContentState {
     var respondingCount: Int { sessions.filter(\.isResponding).count }
     var needsPermission: Bool { sessions.contains { $0.needsPermission } }
@@ -72,4 +68,3 @@ extension SessionActivityAttributes.ContentState {
         }
     }
 }
-#endif

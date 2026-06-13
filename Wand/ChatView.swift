@@ -64,33 +64,15 @@ struct ChatView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-#if compiler(>=6.2)
-            if #available(iOS 26.0, *) {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    providerBadge
-                }
-                .sharedBackgroundVisibility(.hidden)
-
-                ToolbarItem(placement: .principal) {
-                    navigationStatus
-                }
-                .sharedBackgroundVisibility(.hidden)
-            } else {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    providerBadge
-                }
-                ToolbarItem(placement: .principal) {
-                    navigationStatus
-                }
-            }
-#else
             ToolbarItem(placement: .navigationBarLeading) {
                 providerBadge
             }
+            .sharedBackgroundVisibility(.hidden)
+
             ToolbarItem(placement: .principal) {
                 navigationStatus
             }
-#endif
+            .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .navigationBarTrailing) {
                 HStack(spacing: 12) {
                     gitChangesButton
@@ -662,16 +644,11 @@ struct ChatView: View {
         }
     }
 
-    /// iOS 16+ 用多行自增高输入框；iOS 15 退化为单行。
-    @ViewBuilder private var growingTextField: some View {
-        if #available(iOS 16.0, *) {
-            TextField("发消息…", text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .font(.system(size: 16))
-        } else {
-            TextField("发消息…", text: $draft)
-                .font(.system(size: 16))
-        }
+    /// 多行自增高输入框（iOS 26+ 唯一支持形态）。
+    private var growingTextField: some View {
+        TextField("发消息…", text: $draft, axis: .vertical)
+            .lineLimit(1...5)
+            .font(.system(size: 16))
     }
 
     private var canSend: Bool {
@@ -914,26 +891,14 @@ struct ChatView: View {
     }
 }
 
-/// iOS 16+ 才有 scrollDismissesKeyboard；iOS 15 用拖拽手势近似。
+/// scrollDismissesKeyboard 在消息列表拖动时立即收起键盘。
 /// 用 .immediately 而非 .interactively：手动键盘避让（KeyboardObserver）依赖
 /// 键盘 frame 通知，而交互式拖拽过程中 UIKit 不发通知，输入栏会悬空脱节；
 /// 立即收起则输入栏随 willHide 同步落下。
 private struct DismissKeyboardOnDrag: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(iOS 16.0, *) {
-            content.scrollDismissesKeyboard(.immediately)
-        } else {
-            content.simultaneousGesture(
-                DragGesture().onChanged { value in
-                    if value.translation.height > 24 {
-                        UIApplication.shared.sendAction(
-                            #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil
-                        )
-                    }
-                }
-            )
-        }
+        content.scrollDismissesKeyboard(.immediately)
     }
 }
 
