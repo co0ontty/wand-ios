@@ -94,6 +94,21 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    /// 回前台健康检查：先判断再行动，避免无谓重连。
+    /// connect() 每次会 generation += 1 新建 task，幂等但有握手成本，所以用 connected 守卫；
+    /// 无论是否重连都拉一份最新快照（requestResync 未订阅时自身 no-op），消除后台期间可能的过期状态。
+    func handleEnterForeground() {
+        if !connected { socket.connect() }
+        socket.requestResync()
+    }
+
+    /// 退后台：本期刻意不 close()。
+    /// iOS 进后台会很快冻结 socket，回前台时 handleEnterForeground 已做健康检查 + 重连，
+    /// 主动 close 只会徒增回前台的重连延迟。留作 no-op；若实测后台耗电明显再改为 socket.close()。
+    func handleEnterBackground() {
+        // no-op（见上方注释的取舍说明）
+    }
+
     // MARK: - 推送合流
 
     private func apply(snapshot snap: SessionSnapshot) {

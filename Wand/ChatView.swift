@@ -30,6 +30,8 @@ struct ChatView: View {
     @State private var voiceHoldWork: DispatchWorkItem?
     /// 停止任务二次确认弹窗开关：点停止按钮先弹确认，避免误触中断正在跑的任务。
     @State private var showStopConfirm = false
+    /// 应用前后台感知：回前台做连接健康检查 + 拉最新快照，避免半死连接苦等 40s 看门狗。
+    @Environment(\.scenePhase) private var scenePhase
     @FocusState private var inputFocused: Bool
 
     init(sessionId: String, api: WandAPI) {
@@ -125,6 +127,10 @@ struct ChatView: View {
             if !showing { refreshGitStatus() }
         }
         .onDisappear { store.shutdown() }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .active { store.handleEnterForeground() }
+            else if newPhase == .background { store.handleEnterBackground() }
+        }
         .overlay(alignment: .top) { connectionBanner }
         .animation(.easeInOut(duration: 0.2), value: store.connected)
         .overlay(alignment: .top) { toastView }
