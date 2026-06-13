@@ -87,11 +87,6 @@ final class ChatStore: ObservableObject {
 
     func shutdown() {
         socket.close()
-        if liveActivityStarted {
-            SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: true)
-            liveActivityStarted = false
-            liveActivitySawResponding = false
-        }
     }
 
     /// 回前台健康检查：先判断再行动，避免无谓重连。
@@ -162,23 +157,26 @@ final class ChatStore: ObservableObject {
     /// 会话退出 / 被杀立即从聚合长条里移除（不展示结束态）；
     /// 回复成功结束则切「已完成」短暂保留后由控制器自动移除。
     private func refreshLiveActivity() {
-        guard liveActivityStarted else { return }
         if sessionEnded {
             SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: true)
             liveActivityStarted = false
             liveActivitySawResponding = false
         } else if permissionBlocked {
             liveActivitySawResponding = true
-            SessionLiveActivityController.shared.update(
-                sessionId: sessionId, state: .permission, taskTitle: currentTaskTitle,
+            SessionLiveActivityController.shared.start(
+                sessionId: sessionId, title: snapshot?.displayTitle ?? "Wand 会话",
+                provider: snapshot?.provider, state: .permission, taskTitle: currentTaskTitle,
                 queuedCount: queuedMessages.count
             )
+            liveActivityStarted = true
         } else if isResponding {
             liveActivitySawResponding = true
-            SessionLiveActivityController.shared.update(
-                sessionId: sessionId, state: .responding, taskTitle: currentTaskTitle,
+            SessionLiveActivityController.shared.start(
+                sessionId: sessionId, title: snapshot?.displayTitle ?? "Wand 会话",
+                provider: snapshot?.provider, taskTitle: currentTaskTitle,
                 queuedCount: queuedMessages.count
             )
+            liveActivityStarted = true
         } else if liveActivitySawResponding {
             SessionLiveActivityController.shared.end(sessionId: sessionId)
             liveActivityStarted = false
@@ -271,6 +269,7 @@ final class ChatStore: ObservableObject {
         SessionLiveActivityController.shared.start(
             sessionId: sessionId,
             title: snapshot?.displayTitle ?? "Wand 会话",
+            provider: snapshot?.provider,
             taskTitle: currentTaskTitle,
             queuedCount: queuedMessages.count
         )

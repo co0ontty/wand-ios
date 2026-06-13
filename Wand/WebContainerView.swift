@@ -285,6 +285,22 @@ struct WebViewRepresentable: UIViewRepresentable {
             window.__wandBackToNative = function() {
               try { window.webkit.messageHandlers.wandNative.postMessage({ type: "backToNative" }); } catch (e) {}
             };
+            window.WandNative = {
+              getPermission: function() { return "granted"; },
+              requestPermission: function() {
+                try { window.webkit.messageHandlers.wandNative.postMessage({ type: "requestNotificationPermission" }); } catch (e) {}
+              },
+              sendNotification: function(title, body, tag) {
+                try {
+                  window.webkit.messageHandlers.wandNative.postMessage({
+                    type: "sendNotification",
+                    title: String(title || "Wand"),
+                    body: String(body || ""),
+                    tag: String(tag || "")
+                  });
+                } catch (e) {}
+              }
+            };
             """,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true

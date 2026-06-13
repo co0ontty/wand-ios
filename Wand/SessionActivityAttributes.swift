@@ -10,6 +10,8 @@ struct SessionActivityAttributes: ActivityAttributes {
         var id: String
         /// 缩略标题（目录名或摘要，控制器侧已截断）。
         var title: String
+        /// claude / codex，用于快速区分并发会话。
+        var providerRaw: String
         /// responding / permission / done
         var stateRaw: String
         /// 当前任务标题（TodoWrite 派生），可空。
@@ -28,6 +30,12 @@ extension SessionActivityAttributes.SessionEntry {
     var isResponding: Bool { stateRaw == "responding" }
     var needsPermission: Bool { stateRaw == "permission" }
     var isDone: Bool { stateRaw == "done" }
+
+    var providerText: String { providerRaw == "codex" ? "Codex" : "Claude" }
+
+    var providerSymbol: String {
+        providerRaw == "codex" ? "chevron.left.forwardslash.chevron.right" : "sparkles"
+    }
 
     var statusText: String {
         switch stateRaw {

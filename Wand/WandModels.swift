@@ -362,6 +362,10 @@ struct SessionSnapshot: Decodable, Identifiable {
     var hasPendingPermission: Bool {
         pendingEscalation != nil || (permissionBlocked ?? false)
     }
+
+    var isEnded: Bool {
+        ["exited", "failed", "stopped"].contains(status ?? "")
+    }
 }
 
 // MARK: - 历史会话

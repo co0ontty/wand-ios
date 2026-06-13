@@ -1,4 +1,6 @@
 import SwiftUI
+import ActivityKit
+import UserNotifications
 
 /// 原生设置页：服务器信息 / 功能开关 / 网页版入口 / 关于。
 /// 服务端的完整设置（更新通道、Android 下载等）仍在网页版里，这里聚焦客户端本身。
@@ -13,6 +15,7 @@ struct SettingsView: View {
 
     @State private var serverVersion: String?
     @State private var confirmDisconnect = false
+    @State private var notificationStatus = "读取中…"
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
 
@@ -37,6 +40,7 @@ struct SettingsView: View {
         .navigationViewStyle(.stack)
         .task {
             serverVersion = (try? await api.serverConfig())?.currentVersion
+            await refreshNotificationStatus()
         }
         .confirmationDialog("断开后需要重新输入连接码才能连回来。", isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("断开连接", role: .destructive) {
@@ -81,10 +85,45 @@ struct SettingsView: View {
         Section {
             Toggle("灵动岛 / 实时活动", isOn: $store.liveActivityEnabled)
                 .tint(Theme.brand)
+                .onChange(of: store.liveActivityEnabled) { _, enabled in
+                    if !enabled { SessionLiveActivityController.shared.endAll() }
+                }
+            HStack {
+                Label("系统实时活动权限", systemImage: "bolt.horizontal.circle")
+                Spacer()
+                Text(ActivityAuthorizationInfo().areActivitiesEnabled ? "已开启" : "已关闭")
+                    .foregroundColor(
+                        ActivityAuthorizationInfo().areActivitiesEnabled ? .green : Theme.danger
+                    )
+            }
+            .font(.system(size: 14))
+            Toggle("回复完成 / 等待授权通知", isOn: $store.notificationsEnabled)
+                .tint(Theme.brand)
+                .onChange(of: store.notificationsEnabled) { _, enabled in
+                    if enabled {
+                        SessionNotificationController.shared.requestAuthorization()
+                    } else {
+                        SessionNotificationController.shared.clearPending()
+                    }
+                    Task { await refreshNotificationStatus() }
+                }
+            HStack {
+                Label("系统通知权限", systemImage: "bell.badge")
+                Spacer()
+                Text(notificationStatus)
+                    .foregroundColor(notificationStatus == "已开启" ? .green : Theme.danger)
+            }
+            .font(.system(size: 14))
+            Button {
+                SessionNotificationController.shared.sendTestNotification()
+            } label: {
+                Label("发送测试通知", systemImage: "bell.and.waves.left.and.right")
+            }
+            .disabled(notificationStatus != "已开启")
         } header: {
             Text("功能")
         } footer: {
-            Text("会话运行时在灵动岛与锁屏显示聚合长条：每个会话的缩略标题 + 状态（运行中 / 等待授权 / 已完成）。已退出或被杀的会话不展示。需要 iOS 16.1+；App 被系统挂起后状态会暂停更新。")
+            Text("灵动岛显示实时状态；系统通知在 App 位于后台时提醒回复完成或等待授权。若权限关闭，请到 iOS 设置 → Wand 开启。App 被系统彻底挂起后，本地状态与通知都会暂停更新。")
         }
     }
 
@@ -117,6 +156,20 @@ struct SettingsView: View {
     private var appVersion: String {
         let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         return "v\(short)"
+    }
+
+    private func refreshNotificationStatus() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            notificationStatus = "已开启"
+        case .denied:
+            notificationStatus = "已关闭"
+        case .notDetermined:
+            notificationStatus = "未请求"
+        @unknown default:
+            notificationStatus = "未知"
+        }
     }
 
     private func infoRow(_ label: String, _ value: String, mono: Bool = false) -> some View {

@@ -1,5 +1,6 @@
 import Foundation
 import ActivityKit
+import os
 
 /// 会话 Live Activity 管理器：所有活跃会话聚合进**同一条**灵动岛活动（长条样式），
 /// 条内每个会话显示缩略标题 + 运行状态。回复成功的会话保留「已完成」态片刻再移除，
@@ -27,6 +28,8 @@ final class SessionLiveActivityController {
     private static let maxEntries = 8
     /// 缩略标题最大长度。
     private static let maxTitleLength = 24
+    private static let maxTaskTitleLength = 40
+    private let logger = Logger(subsystem: "com.wand.app", category: "LiveActivity")
 
     /// 存储活动参考与辅助状态：全局唯一的 Activity 实例、条内会话表、完成后延迟移除定时器。
     @MainActor
@@ -42,23 +45,64 @@ final class SessionLiveActivityController {
     }
 
     /// 会话开始回复：插入（或刷新）条内对应条目，必要时创建活动。
-    func start(sessionId: String, title: String, taskTitle: String?, queuedCount: Int = 0) {
+    func start(
+        sessionId: String,
+        title: String,
+        provider: String?,
+        state: SessionState = .responding,
+        taskTitle: String?,
+        queuedCount: Int = 0
+    ) {
         guard enabled else { return }
         cancelDoneRemoval(sessionId)
         upsert(
-            sessionId: sessionId, title: title, state: .responding,
+            sessionId: sessionId, title: title, provider: provider, state: state,
             taskTitle: taskTitle, queuedCount: queuedCount
         )
         sync(allowCreate: true)
     }
 
-    /// 更新状态（条内不存在时 no-op，避免在用户关掉开关后复活）。
-    func update(sessionId: String, state: SessionState, taskTitle: String?, queuedCount: Int = 0) {
-        guard let index = ActivityStore.entries.firstIndex(where: { $0.id == sessionId }) else { return }
-        cancelDoneRemoval(sessionId)
-        ActivityStore.entries[index].stateRaw = state.rawValue
-        ActivityStore.entries[index].taskTitle = taskTitle
-        ActivityStore.entries[index].queuedCount = queuedCount
+    /// 按服务端快照恢复或更新活动。已有运行中的会话不再依赖本机先点一次发送。
+    func sync(snapshot: SessionSnapshot) {
+        if snapshot.hasPendingPermission {
+            start(
+                sessionId: snapshot.id, title: snapshot.displayTitle, provider: snapshot.provider,
+                state: .permission, taskTitle: snapshot.currentTaskTitle,
+                queuedCount: snapshot.queuedMessages?.count ?? 0
+            )
+        } else if snapshot.isResponding {
+            start(
+                sessionId: snapshot.id, title: snapshot.displayTitle, provider: snapshot.provider,
+                taskTitle: snapshot.currentTaskTitle, queuedCount: snapshot.queuedMessages?.count ?? 0
+            )
+        } else if snapshot.isEnded {
+            end(sessionId: snapshot.id, immediately: true)
+        } else if let entry = ActivityStore.entries.first(where: { $0.id == snapshot.id }),
+                  !entry.isDone {
+            end(sessionId: snapshot.id)
+        }
+    }
+
+    /// 列表轮询是全局事实来源：恢复所有活跃会话，并清掉服务端已不存在的遗留条目。
+    func reconcile(snapshots: [SessionSnapshot]) {
+        guard ServerStore.shared.liveActivityEnabled else {
+            endAll()
+            return
+        }
+        let visibleIds = Set(snapshots.filter { !($0.archived ?? false) }.map(\.id))
+        for snapshot in snapshots where !(snapshot.archived ?? false) {
+            sync(snapshot: snapshot)
+        }
+        let missingIds = ActivityStore.entries.map(\.id).filter { !visibleIds.contains($0) }
+        for id in missingIds {
+            end(sessionId: id, immediately: true)
+        }
+    }
+
+    func endAll() {
+        for task in ActivityStore.doneRemovalTasks.values { task.cancel() }
+        ActivityStore.doneRemovalTasks.removeAll()
+        ActivityStore.entries.removeAll()
         sync(allowCreate: false)
     }
 
@@ -81,19 +125,21 @@ final class SessionLiveActivityController {
     // MARK: - 内部
 
     private func upsert(
-        sessionId: String, title: String, state: SessionState,
+        sessionId: String, title: String, provider: String?, state: SessionState,
         taskTitle: String?, queuedCount: Int
     ) {
         let shortTitle = String(title.prefix(Self.maxTitleLength))
+        let shortTaskTitle = taskTitle.map { String($0.prefix(Self.maxTaskTitleLength)) }
         if let index = ActivityStore.entries.firstIndex(where: { $0.id == sessionId }) {
             ActivityStore.entries[index].title = shortTitle
+            ActivityStore.entries[index].providerRaw = provider ?? "claude"
             ActivityStore.entries[index].stateRaw = state.rawValue
-            ActivityStore.entries[index].taskTitle = taskTitle
+            ActivityStore.entries[index].taskTitle = shortTaskTitle
             ActivityStore.entries[index].queuedCount = queuedCount
         } else {
             ActivityStore.entries.append(SessionActivityAttributes.SessionEntry(
-                id: sessionId, title: shortTitle, stateRaw: state.rawValue,
-                taskTitle: taskTitle, queuedCount: queuedCount
+                id: sessionId, title: shortTitle, providerRaw: provider ?? "claude",
+                stateRaw: state.rawValue, taskTitle: shortTaskTitle, queuedCount: queuedCount
             ))
             trimEntriesIfNeeded()
         }
@@ -156,7 +202,7 @@ final class SessionLiveActivityController {
                 content: ActivityContent(state: state, staleDate: staleDate())
             )
         } catch {
-            // 系统额度用尽 / 用户全局关闭等，静默忽略。
+            logger.error("Live Activity 创建失败: \(error.localizedDescription, privacy: .public)")
         }
     }
 

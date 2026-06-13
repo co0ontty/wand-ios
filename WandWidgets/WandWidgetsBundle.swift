@@ -38,8 +38,8 @@ struct SessionLiveActivityWidget: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Image(systemName: "wand.and.stars")
-                        .font(.system(size: 16, weight: .medium))
+                    Label("Wand", systemImage: "wand.and.stars")
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(WandColor.brand)
                         .padding(.leading, 4)
                 }
@@ -75,7 +75,9 @@ struct SessionLiveActivityWidget: Widget {
                     }
                 }
             } compactLeading: {
-                Image(systemName: "wand.and.stars")
+                Image(systemName: context.state.sessions.count == 1
+                    ? context.state.sessions[0].providerSymbol
+                    : "wand.and.stars")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(WandColor.brand)
             } compactTrailing: {
@@ -109,10 +111,15 @@ private struct ConversationDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(entry.title)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(.white)
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                Label(entry.providerText, systemImage: entry.providerSymbol)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(WandColor.brand)
+                Text(entry.title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+            }
             HStack(spacing: 6) {
                 StatusIndicator(entry: entry, size: 11)
                 Text(detailText)
@@ -146,6 +153,9 @@ private struct SessionRow: View {
     var body: some View {
         HStack(spacing: 6) {
             StatusIndicator(entry: entry, size: 11)
+            Image(systemName: entry.providerSymbol)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(WandColor.brand)
             Text(entry.title)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white)
@@ -174,7 +184,16 @@ private struct LockScreenStripView: View {
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(WandColor.brand)
             if state.sessions.count == 1, let only = state.sessions.first {
-                SessionChip(entry: only, showsStatusText: true)
+                VStack(alignment: .leading, spacing: 3) {
+                    SessionChip(entry: only, showsStatusText: true)
+                    if let task = only.taskTitle, !task.isEmpty {
+                        Text(task)
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.55))
+                            .lineLimit(1)
+                            .padding(.leading, 9)
+                    }
+                }
             } else {
                 ForEach(state.sessions.prefix(3), id: \.id) { entry in
                     SessionChip(entry: entry)
@@ -200,6 +219,9 @@ private struct SessionChip: View {
     var body: some View {
         HStack(spacing: 5) {
             StatusIndicator(entry: entry, size: 10)
+            Image(systemName: entry.providerSymbol)
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundColor(WandColor.brand)
             Text(entry.title)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(.white)

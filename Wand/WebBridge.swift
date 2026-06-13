@@ -73,6 +73,13 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
             DispatchQueue.main.async { [weak self] in
                 self?.model.requestClose?()
             }
+        case "requestNotificationPermission":
+            SessionNotificationController.shared.requestAuthorization()
+        case "sendNotification":
+            let title = dict["title"] as? String ?? "Wand"
+            let body = dict["body"] as? String ?? ""
+            let tag = dict["tag"] as? String ?? ""
+            SessionNotificationController.shared.sendWebNotification(title: title, body: body, tag: tag)
         default:
             NSLog("[Wand] ignored native message type=%@ (no-op on iOS)", type)
         }

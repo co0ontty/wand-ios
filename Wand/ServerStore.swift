@@ -14,6 +14,7 @@ final class ServerStore: ObservableObject {
     private let tokenKey = "wand.token"
     private let recentInputsKey = "wand.recentInputs"
     private let liveActivityKey = "wand.liveActivityEnabled"
+    private let notificationsKey = "wand.notificationsEnabled"
 
     private static let maxRecent = 6
 
@@ -25,6 +26,10 @@ final class ServerStore: ObservableObject {
     @Published var liveActivityEnabled: Bool {
         didSet { defaults.set(liveActivityEnabled, forKey: liveActivityKey) }
     }
+    /// 会话回复完成 / 等待授权的本地通知，默认开。
+    @Published var notificationsEnabled: Bool {
+        didSet { defaults.set(notificationsEnabled, forKey: notificationsKey) }
+    }
 
     init() {
         if let s = defaults.string(forKey: serverURLKey), let u = URL(string: s) {
@@ -33,6 +38,7 @@ final class ServerStore: ObservableObject {
         self.token = defaults.string(forKey: tokenKey)
         self.recentInputs = defaults.stringArray(forKey: recentInputsKey) ?? []
         self.liveActivityEnabled = defaults.object(forKey: liveActivityKey) as? Bool ?? true
+        self.notificationsEnabled = defaults.object(forKey: notificationsKey) as? Bool ?? true
     }
 
     func connect(serverURL: URL, token: String?) {

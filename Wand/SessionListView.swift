@@ -304,6 +304,7 @@ struct SessionListView: View {
             async let codexHistory = api.listCodexHistory()
             let (loadedSessions, loadedClaudeHistory, loadedCodexHistory) = try await (active, claudeHistory, codexHistory)
             sessions = loadedSessions
+            SessionLiveActivityController.shared.reconcile(snapshots: loadedSessions)
             historySessions = loadedClaudeHistory.map { history in
                 HistorySession(
                     claudeSessionId: history.claudeSessionId,

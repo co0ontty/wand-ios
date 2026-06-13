@@ -53,6 +53,11 @@ final class QuickActionCoordinator: ObservableObject {
         return true
     }
 
+    func enqueue(_ action: QuickAction) {
+        pendingAt = Date()
+        pending = action
+    }
+
     /// 消费匹配的待处理操作；过期或不匹配时返回 nil（不清除，留给真正的归属视图）。
     func consume(where matches: (QuickAction) -> Bool) -> QuickAction? {
         guard let action = pending,
@@ -81,6 +86,14 @@ final class QuickActionCoordinator: ObservableObject {
 /// SwiftUI 生命周期下接快捷操作需要自定义 scene delegate：
 /// 冷启动（App 因快捷操作被拉起）时 shortcutItem 在 connection options 里。
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        SessionNotificationController.shared.configure()
+        return true
+    }
+
     func application(
         _ application: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
