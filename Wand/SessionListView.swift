@@ -17,6 +17,43 @@ struct SessionListView: View {
     @State private var showNewSession = false
     @State private var scope: SessionScope = .active
     @State private var showClearHistoryConfirmation = false
+    /// 待确认的删除：拦截所有删除入口（滑动 / 多选 / 取消选择等），
+    /// 在用户二次确认后才真正调用 API；防误触清掉正在用的会话。
+    @State private var pendingDelete: PendingDelete?
+
+    private enum PendingDelete: Identifiable {
+        case session(SessionSnapshot)
+        case history(HistorySession)
+        case sessions([SessionSnapshot])
+        case histories([HistorySession])
+
+        var id: String {
+            switch self {
+            case .session(let s): return "session-\(s.id)"
+            case .history(let h): return "history-\(h.id)"
+            case .sessions(let arr): return "sessions-\(arr.map(\.id).joined(separator: ","))"
+            case .histories(let arr): return "histories-\(arr.map(\.id).joined(separator: ","))"
+            }
+        }
+
+        var dialogTitle: String {
+            switch self {
+            case .session: return "删除会话"
+            case .history: return "删除历史会话"
+            case .sessions(let arr): return "删除 \(arr.count) 个会话"
+            case .histories(let arr): return "删除 \(arr.count) 条历史会话"
+            }
+        }
+
+        var dialogMessage: String {
+            switch self {
+            case .session: return "此操作无法撤销，确定要删除这个会话吗？"
+            case .history: return "此操作无法撤销，确定要删除这条历史会话吗？"
+            case .sessions: return "此操作无法撤销，确定要删除选中的会话吗？"
+            case .histories: return "此操作无法撤销，确定要删除选中的历史会话吗？"
+            }
+        }
+    }
     @State private var historyActionInProgress = false
     @State private var selectedSessionIds: Set<String> = []
     @State private var isSelecting = false
@@ -140,6 +177,19 @@ struct SessionListView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("这会删除本机 Claude 和 Codex 的历史会话文件，无法撤销。")
+        }
+        .confirmationDialog(
+            pendingDelete?.dialogTitle ?? "",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive) { performDelete() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(pendingDelete?.dialogMessage ?? "")
         }
     }
 
@@ -337,10 +387,32 @@ struct SessionListView: View {
 
     private func deleteHistory(at offsets: IndexSet) {
         let targets = offsets.map { visibleHistorySessions[$0] }
-        historySessions.removeAll { history in targets.contains { $0.id == history.id } }
-        Task {
-            for target in targets {
-                try? await api.deleteHistory(target)
+        guard !targets.isEmpty else { return }
+        pendingDelete = .histories(targets)
+    }
+
+    /// 用户在确认弹窗里点了「删除」才真正落库：先乐观更新本地 state 让 UI 立刻消失，
+    /// 再后台逐个调 API；网络失败时下次 load 会重新拉回。
+    private func performDelete() {
+        guard let pending = pendingDelete else { return }
+        pendingDelete = nil
+        switch pending {
+        case .session(let s):
+            sessions.removeAll { $0.id == s.id }
+            Task { try? await api.deleteSession(id: s.id) }
+        case .history(let h):
+            historySessions.removeAll { $0.id == h.id }
+            Task { try? await api.deleteHistory(h) }
+        case .sessions(let arr):
+            sessions.removeAll { snap in arr.contains { $0.id == snap.id } }
+            endSelection()
+            Task {
+                for s in arr { try? await api.deleteSession(id: s.id) }
+            }
+        case .histories(let arr):
+            historySessions.removeAll { h in arr.contains { $0.id == h.id } }
+            Task {
+                for h in arr { try? await api.deleteHistory(h) }
             }
         }
     }
@@ -359,12 +431,8 @@ struct SessionListView: View {
 
     private func deleteSessions(at offsets: IndexSet) {
         let targets = offsets.map { visibleSessions[$0] }
-        sessions.removeAll { snap in targets.contains { $0.id == snap.id } }
-        Task {
-            for target in targets {
-                try? await api.deleteSession(id: target.id)
-            }
-        }
+        guard !targets.isEmpty else { return }
+        pendingDelete = .sessions(targets)
     }
 
     private var selectionBar: some View {
@@ -466,13 +534,9 @@ struct SessionListView: View {
 
     private func deleteSelectedSessions() {
         let ids = selectedSessionIds
-        sessions.removeAll { ids.contains($0.id) }
-        endSelection()
-        Task {
-            for id in ids {
-                try? await api.deleteSession(id: id)
-            }
-        }
+        let targets = visibleSessions.filter { ids.contains($0.id) }
+        guard !targets.isEmpty else { return }
+        pendingDelete = .sessions(targets)
     }
 }
 
