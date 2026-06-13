@@ -28,6 +28,8 @@ struct ChatView: View {
     @State private var gitStatus: GitStatusResult?
     /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
     @State private var voiceHoldWork: DispatchWorkItem?
+    /// 停止任务二次确认弹窗开关：点停止按钮先弹确认，避免误触中断正在跑的任务。
+    @State private var showStopConfirm = false
     @FocusState private var inputFocused: Bool
 
     init(sessionId: String, api: WandAPI) {
@@ -430,7 +432,7 @@ struct ChatView: View {
             composerField
 
             if store.isResponding {
-                Button(action: { store.stopResponding() }) {
+                Button(action: { showStopConfirm = true }) {
                     Image(systemName: "stop.fill")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(.white)
@@ -452,6 +454,14 @@ struct ChatView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 8)
+        .confirmationDialog(
+            "确定要停止当前正在运行的任务吗？",
+            isPresented: $showStopConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("停止", role: .destructive) { store.stopResponding() }
+            Button("取消", role: .cancel) {}
+        }
     }
 
     private var composerField: some View {
