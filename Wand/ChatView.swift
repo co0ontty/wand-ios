@@ -198,6 +198,7 @@ struct ChatView: View {
         case .turn(let index, let turn):
             TurnView(
                 turn: turn,
+                baseURL: store.api.baseURL,
                 isLastTurn: index == store.messages.count - 1,
                 isResponding: store.isResponding,
                 askSelections: store.askUserSelections,
@@ -1055,7 +1056,7 @@ private func explorationToolsOnly(in turn: ConversationTurn) -> [ExplorationTool
         case .explorationGroup(let group):
             tools.append(contentsOf: group)
         case .tool(let id, let name, let description, let input, let subagent, let result)
-            where isExplorationTool(name):
+            where isGroupableExplorationTool(name: name, input: input):
             tools.append(ExplorationToolItem(
                 id: id, name: name, description: description,
                 input: input, subagent: subagent, result: result
@@ -1138,7 +1139,7 @@ private func collapseConsecutiveExplorationTools(_ paired: [DisplayItem]) -> [Di
 
     for item in paired {
         if case .tool(let id, let name, let description, let input, let subagent, let result) = item,
-           isExplorationTool(name) {
+           isGroupableExplorationTool(name: name, input: input) {
             exploration.append(ExplorationToolItem(
                 id: id, name: name, description: description,
                 input: input, subagent: subagent, result: result
@@ -1164,8 +1165,22 @@ private func isExplorationTool(_ name: String) -> Bool {
         || lower == "todoread"
 }
 
+/// Read 工具读到的是图片：这种工具卡要单独显示（内联缩略图常驻），
+/// 不并进探索分组（对齐 Web chat-render.ts 把 Read 读图从分组里排除）。
+private func isReadImageTool(name: String, input: [String: JSONValue]) -> Bool {
+    guard name == "Read" else { return false }
+    let path = input["file_path"]?.stringValue ?? input["path"]?.stringValue
+    return isImagePath(path)
+}
+
+/// 探索分组判定：是探索工具，且不是 Read 读图（后者要单独显示缩略图）。
+private func isGroupableExplorationTool(name: String, input: [String: JSONValue]) -> Bool {
+    isExplorationTool(name) && !isReadImageTool(name: name, input: input)
+}
+
 private struct TurnView: View {
     let turn: ConversationTurn
+    var baseURL: URL? = nil
     var isLastTurn = false
     var isResponding = false
     var askSelections: [String: AskUserSelectionState] = [:]
@@ -1188,19 +1203,46 @@ private struct TurnView: View {
         return pieces.joined(separator: "\n")
     }
 
+    /// 解析上传附件前缀：图片渲染缩略图、其余渲染文件块，正文保持在下方气泡。
+    private var parsedUser: ParsedUserMessage {
+        parseUserAttachmentMessage(userText)
+    }
+
     private var userBubble: some View {
-        HStack {
-            Spacer(minLength: 48)
-            Text(userText)
-                .font(.system(size: 16))
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Theme.brand)
-                )
-                .textSelection(.enabled)
+        let parsed = parsedUser
+        return VStack(alignment: .trailing, spacing: 6) {
+            if !parsed.attachmentPaths.isEmpty {
+                attachmentsView(parsed.attachmentPaths)
+            }
+            if !parsed.body.isEmpty {
+                HStack {
+                    Spacer(minLength: 48)
+                    Text(parsed.body)
+                        .font(.system(size: 16))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Theme.brand)
+                        )
+                        .textSelection(.enabled)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    /// 上传附件：图片走缩略图、非图片走文件块，整体靠右对齐用户侧。
+    @ViewBuilder private func attachmentsView(_ paths: [String]) -> some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            ForEach(Array(paths.enumerated()), id: \.offset) { _, path in
+                if let baseURL, isImagePath(path) {
+                    WandImageThumbnail(baseURL: baseURL, path: path)
+                } else {
+                    WandFileChip(path: path)
+                }
+            }
         }
     }
 
@@ -1256,7 +1298,8 @@ private struct TurnView: View {
         } else {
             ToolUseCard(
                 name: name, description: description, input: input,
-                result: result, running: result == nil && isLastTurn && isResponding
+                result: result, running: result == nil && isLastTurn && isResponding,
+                baseURL: baseURL
             )
         }
     }
@@ -1820,8 +1863,16 @@ private struct ToolUseCard: View {
     let input: [String: JSONValue]
     var result: ToolResultInfo?
     var running = false
+    var baseURL: URL? = nil
 
     @State private var expanded = false
+
+    /// Read 读到的图片路径（用于卡片内常驻缩略图，对齐 Web 端 inline-tool-image）。
+    private var imagePath: String? {
+        guard name == "Read" else { return nil }
+        let path = input["file_path"]?.stringValue ?? input["path"]?.stringValue
+        return isImagePath(path) ? path : nil
+    }
 
     private var isError: Bool { result?.isError == true }
     private var isSuccess: Bool { result != nil && !isError }
@@ -1842,6 +1893,12 @@ private struct ToolUseCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            if let imagePath, let baseURL {
+                // Read 读到图片：卡片里常驻内联缩略图（点击放大），对齐 Web。
+                WandImageThumbnail(baseURL: baseURL, path: imagePath)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+            }
             if expanded, let result, hasBody {
                 Divider()
                     .overlay(Theme.border.opacity(0.7))
