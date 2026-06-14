@@ -112,6 +112,7 @@ struct ChatView: View {
         }
         .onDisappear { store.shutdown() }
         .onChange(of: scenePhase) { newPhase in
+            wlog("session", "scenePhase=\(newPhase) session=\(sessionId)")
             if newPhase == .active { store.handleEnterForeground() }
             else if newPhase == .background { store.handleEnterBackground() }
         }
@@ -144,6 +145,21 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
+                        // 窗口化：顶部还有更早消息时放一个哨兵行。用户上滑到顶、它进入视口即
+                        // 自动拉下一页（prepend）。初始视图固定在底部，哨兵不在视口，不会误触发。
+                        if store.canLoadEarlier {
+                            HStack(spacing: 8) {
+                                Spacer()
+                                ProgressView().controlSize(.small).tint(Theme.brand)
+                                Text("加载更早的消息…")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(Theme.textSecondary)
+                                Spacer()
+                            }
+                            .padding(.vertical, 8)
+                            .onAppear { store.loadEarlier() }
+                            .id("chat-top")
+                        }
                         // 把每个 assistant turn 摊平成独立的 LazyVStack 行（而非整条 turn 一个
                         // 急加载 VStack）：一条 assistant 消息可能携带上百个 text/工具/diff 块，
                         // 整条一次性构建会在主线程同步堆出数百个嵌套视图，打开会话时直接卡死、
@@ -2620,12 +2636,20 @@ struct TodoProgressBar: View {
     private var completed: Int { todos.filter { $0.status == "completed" }.count }
     /// 1-indexed「正在干第 N 个」：completed+1 封顶（对齐 Web currentStep）。
     private var currentStep: Int { min(completed + 1, todos.count) }
+    /// 右侧当前步骤描述：优先取首个 in_progress 的 activeForm / content；
+    /// 没有进行中项时（模型已标完上一步、还没标下一步 in_progress），回退到首个
+    /// pending 任务的描述；都没有再兜底「准备中…」——保证右侧空白区始终有内容
+    /// （对齐 Web / macOS fallback）。
     private var activeTask: String {
         if let active = todos.first(where: { $0.status == "in_progress" }) {
-            let label = active.activeForm ?? active.content
+            let label = (active.activeForm?.isEmpty == false) ? active.activeForm! : active.content
             if !label.isEmpty { return label }
         }
-        return ""
+        if let pending = todos.first(where: { $0.status == "pending" }) {
+            let label = (pending.activeForm?.isEmpty == false) ? pending.activeForm! : pending.content
+            if !label.isEmpty { return label }
+        }
+        return "准备中…"
     }
 
     var body: some View {
@@ -2638,13 +2662,13 @@ struct TodoProgressBar: View {
                     Text("\(currentStep)/\(todos.count)")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundColor(Theme.brand)
-                    if !activeTask.isEmpty {
-                        Text(activeTask)
-                            .font(.system(size: 12))
-                            .foregroundColor(Theme.textSecondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
+                    Text(activeTask)
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(-1)
+                    Spacer(minLength: 8)
                     Image(systemName: expanded ? "chevron.down" : "chevron.up")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(Theme.textSecondary)
@@ -2708,6 +2732,13 @@ struct TodoProgressBar: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
+        // 进行中项高亮（对齐安卓 brandSoft 背景）。
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(todo.status == "in_progress" ? Theme.brand.opacity(0.1) : Color.clear)
+        )
     }
 }
 

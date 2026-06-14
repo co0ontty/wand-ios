@@ -1,5 +1,6 @@
 import SwiftUI
 import ActivityKit
+import UIKit
 import UserNotifications
 
 /// 原生设置页：服务器信息 / 功能开关 / 网页版入口 / 关于。
@@ -16,6 +17,8 @@ struct SettingsView: View {
     @State private var serverVersion: String?
     @State private var confirmDisconnect = false
     @State private var notificationStatus = "读取中…"
+    @State private var logShare: LogShareItem?
+    @State private var logExportEmpty = false
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
 
@@ -24,6 +27,7 @@ struct SettingsView: View {
             Form {
                 serverSection
                 featureSection
+                diagnosticsSection
                 moreSection
                 aboutSection
             }
@@ -50,6 +54,14 @@ struct SettingsView: View {
                 }
             }
             Button("取消", role: .cancel) {}
+        }
+        .sheet(item: $logShare) { item in
+            ActivityView(activityItems: [item.url])
+        }
+        .alert("最近 5 分钟没有日志", isPresented: $logExportEmpty) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text("打开会话、收发消息或复现问题后再导出，才能捕获到有用的上下文。")
         }
     }
 
@@ -127,6 +139,31 @@ struct SettingsView: View {
         }
     }
 
+    private var diagnosticsSection: some View {
+        Section {
+            Button {
+                exportLogs()
+            } label: {
+                Label("导出最近 5 分钟日志", systemImage: "square.and.arrow.up.on.square")
+                    .font(.system(size: 15))
+            }
+        } header: {
+            Text("诊断")
+        } footer: {
+            Text("会话打开后空白、连接异常等偶发问题时，复现后立即来这里导出日志（会话加载 / WebSocket / 网络请求等事件），发给开发者排查。日志只存在本机内存，不含密码。")
+        }
+    }
+
+    /// 拼最近 5 分钟日志写临时文件并弹系统分享面板；窗口内没有日志时给出提示。
+    private func exportLogs() {
+        guard WandLog.shared.recentCount(within: 5) > 0 else {
+            logExportEmpty = true
+            return
+        }
+        guard let url = WandLog.shared.exportToFile(within: 5) else { return }
+        logShare = LogShareItem(url: url)
+    }
+
     private var moreSection: some View {
         Section {
             Button {
@@ -185,4 +222,21 @@ struct SettingsView: View {
                 .truncationMode(.middle)
         }
     }
+}
+
+/// 包一层让 URL 可作为 `.sheet(item:)` 的标识。
+struct LogShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+/// UIActivityViewController 的 SwiftUI 封装，用于系统分享面板（存文件 / AirDrop / 发送给开发者）。
+struct ActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

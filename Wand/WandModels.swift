@@ -147,23 +147,101 @@ struct TodoItem {
         return result
     }
 
-    /// 当前 turn 的待办列表：只看最后一条 user 消息之后的 TodoWrite，
+    /// 当前 turn 的待办列表：只看最后一条 user 消息之后的待办事件，
     /// 对齐 Web 端 updateTodoProgress 的 scoping（上一轮的进度条不跨 turn 残留）。
+    /// 全部完成时返回空（对齐 Web/安卓 allDone 隐藏）。
+    /// 同时支持两套协议：
+    ///   - 旧 TodoWrite：最后一次写入即完整快照，倒序取最新。
+    ///   - 新 TaskCreate / TaskUpdate：创建与更新是增量事件，按时间顺序归并。
     static func currentTodos(in messages: [ConversationTurn]) -> [TodoItem] {
         var startIdx = 0
         for i in stride(from: messages.count - 1, through: 0, by: -1) where messages[i].role == "user" {
             startIdx = i + 1
             break
         }
+
+        // 旧 TodoWrite 协议：最后一次写入就是完整快照，倒序取最新即可。
         for i in stride(from: messages.count - 1, through: startIdx, by: -1) {
             for block in messages[i].content.reversed() {
                 if case .toolUse(_, let name, _, let input, _) = block, name == "TodoWrite" {
                     let todos = parse(input: input)
-                    if !todos.isEmpty { return todos }
+                    if todos.isEmpty { continue }
+                    let completed = todos.filter { $0.status == "completed" }.count
+                    return completed == todos.count ? [] : todos
                 }
             }
         }
-        return []
+
+        // 新 TaskCreate / TaskUpdate 协议：两遍归并（对齐 Web reconstructTodosFromTaskTools）。
+        guard startIdx <= messages.count else { return [] }
+        // 第一遍：按 tool_use_id 收集所有 tool_result 文本——TaskCreate 分配的真实 id
+        // 只在结果文本里（「Task #N created …」），input 里没有。
+        var resultById: [String: String] = [:]
+        for i in startIdx..<messages.count {
+            for block in messages[i].content {
+                if case .toolResult(let toolUseId, let text, _, _, _) = block {
+                    resultById[toolUseId] = text
+                }
+            }
+        }
+        // 第二遍：按调用顺序重放 TaskCreate（新建）/ TaskUpdate（改状态/标题）；
+        // order 保插入序，看到 TaskCreate 就建条目（结果未到时用 fallback 序号兜底）。
+        var order: [String] = []
+        var tasks: [String: TodoItem] = [:]
+        var sawTaskTool = false
+        var createFallback = 0
+        for i in startIdx..<messages.count {
+            for block in messages[i].content {
+                guard case .toolUse(let id, let name, _, let input, _) = block else { continue }
+                if name == "TaskCreate" {
+                    sawTaskTool = true
+                    createFallback += 1
+                    let cid = Self.extractTaskId(resultById[id] ?? "") ?? String(createFallback)
+                    if tasks[cid] == nil { order.append(cid) }
+                    tasks[cid] = TodoItem(
+                        content: input["subject"]?.stringValue
+                            ?? input["description"]?.stringValue
+                            ?? "Task #\(cid)",
+                        status: "pending",
+                        activeForm: input["activeForm"]?.stringValue
+                    )
+                } else if name == "TaskUpdate" {
+                    sawTaskTool = true
+                    guard let uid = Self.idString(input["taskId"]) else { continue }
+                    let existing = tasks[uid]
+                    if existing == nil { order.append(uid) }
+                    tasks[uid] = TodoItem(
+                        content: input["subject"]?.stringValue ?? existing?.content ?? "Task #\(uid)",
+                        status: input["status"]?.stringValue ?? existing?.status ?? "pending",
+                        activeForm: input["activeForm"]?.stringValue ?? existing?.activeForm
+                    )
+                }
+            }
+        }
+        guard sawTaskTool else { return [] }
+        let derived = order.compactMap { tasks[$0] }.filter { $0.status != "deleted" }
+        if derived.isEmpty { return [] }
+        let completed = derived.filter { $0.status == "completed" }.count
+        return completed == derived.count ? [] : derived
+    }
+
+    /// 从 TaskCreate 返回文本里抽取「Task #N」中的 N（id 由数字组成）。
+    private static let taskIdRegex = try? NSRegularExpression(pattern: #"#(\d+)"#)
+    private static func extractTaskId(_ text: String) -> String? {
+        guard let re = taskIdRegex else { return nil }
+        let ns = text as NSString
+        guard let match = re.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+              match.numberOfRanges > 1 else { return nil }
+        return ns.substring(with: match.range(at: 1))
+    }
+
+    /// taskId 兼容字符串与数字两种 JSON 形态。
+    private static func idString(_ value: JSONValue?) -> String? {
+        switch value {
+        case .string(let s): return s
+        case .number(let n): return n == n.rounded() ? String(Int64(n)) : String(n)
+        default: return nil
+        }
     }
 }
 
@@ -334,6 +412,10 @@ struct SessionSnapshot: Decodable, Identifiable {
     let thinkingEffort: String?
     let claudeSessionId: String?
     let messages: [ConversationTurn]?
+    /// 窗口化：messages 是完整历史的「最近一窗」，messageOffset = 首条的绝对下标，
+    /// messageTotal = 完整 turn 数。更早的消息按需翻页（GET /api/sessions/:id/messages）。
+    let messageOffset: Int?
+    let messageTotal: Int?
     let queuedMessages: [String]?
     let structuredState: StructuredSessionState?
     let pendingEscalation: EscalationRequest?
@@ -366,6 +448,13 @@ struct SessionSnapshot: Decodable, Identifiable {
     var isEnded: Bool {
         ["exited", "failed", "stopped"].contains(status ?? "")
     }
+}
+
+/// GET /api/sessions/:id/messages 的分页响应：完整历史的 [offset, offset+limit) 段 + 总数。
+struct MessagesPage: Decodable {
+    let messages: [ConversationTurn]
+    let offset: Int
+    let total: Int
 }
 
 // MARK: - 历史会话
@@ -419,6 +508,8 @@ struct WsData: Decodable {
     let thinkingEffort: String?
     let claudeSessionId: String?
     let messages: [ConversationTurn]?
+    let messageOffset: Int?
+    let messageTotal: Int?
     let queuedMessages: [String]?
     let structuredState: StructuredSessionState?
     let pendingEscalation: EscalationRequest?

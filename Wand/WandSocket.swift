@@ -71,9 +71,15 @@ final class WandSocket {
 
     private func openSocket() {
         guard !closed, let url = wsURL else { return }
+        wlog("ws", "openSocket \(url.absoluteString) session=\(subscribedSessionId ?? "nil")")
         generation += 1
         let gen = generation
         let socket = SelfSignedSession.shared.session.webSocketTask(with: url)
+        // 默认 maximumMessageSize 仅 1 MiB：活跃会话的流式 output、init/resync 全量快照
+        // （消息里塞满工具输出时）单帧轻松破 1MB，超限会让 receive 直接报错断开 ——
+        // 表现为「每隔几秒断一次、不停重连」。浏览器 WebSocket 没有此限制，所以仅 iOS 受影响。
+        // 调到 64 MiB，远超任何单条会话快照。
+        socket.maximumMessageSize = 64 * 1024 * 1024
         task = socket
         lastMessageAt = Date()
         socket.resume()
@@ -91,7 +97,9 @@ final class WandSocket {
             DispatchQueue.main.async {
                 guard let self, gen == self.generation else { return }
                 switch result {
-                case .failure:
+                case .failure(let error):
+                    let ns = error as NSError
+                    wlog("ws", "receive 失败 domain=\(ns.domain) code=\(ns.code) \(ns.localizedDescription)")
                     self.scheduleReconnect()
                 case .success(let message):
                     self.lastMessageAt = Date()
@@ -124,6 +132,7 @@ final class WandSocket {
             // seq 间隙说明服务端因背压丢过事件，主动要一份全量快照。
             if let id = incoming.sessionId, let seq = incoming.seq {
                 if let last = lastSeqBySession[id], seq > last + 1 {
+                    wlog("ws", "seq 间隙 \(last)→\(seq)，请求 resync session=\(id)")
                     lastSeqBySession[id] = seq
                     requestResync()
                     return
@@ -147,6 +156,7 @@ final class WandSocket {
 
     private func scheduleReconnect() {
         guard !closed else { return }
+        wlog("ws", "断线，\(reconnectDelay)s 后重连 session=\(subscribedSessionId ?? "nil")")
         onConnectionChange?(false)
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
@@ -164,6 +174,7 @@ final class WandSocket {
         watchdog = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             guard let self, !self.closed, self.task != nil else { return }
             if Date().timeIntervalSince(self.lastMessageAt) > 40 {
+                wlog("ws", "看门狗：40s 无消息，强制重连 session=\(self.subscribedSessionId ?? "nil")")
                 self.lastMessageAt = Date()
                 self.scheduleReconnect()
             }

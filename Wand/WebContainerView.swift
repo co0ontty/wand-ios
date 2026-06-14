@@ -337,7 +337,6 @@ struct WebViewRepresentable: UIViewRepresentable {
         // 没有 token：当成裸 URL（ConnectView 已探测过可达性），直接加载。
         let cookieStore = cfg.websiteDataStore.httpCookieStore
         if let token, !token.isEmpty {
-            NSLog("[Wand] token-login before load: %@", serverURL.absoluteString)
             WandAuth.loginWithToken(serverURL: serverURL, appToken: token) { result in
                 switch result {
                 case .success(let cookies):
@@ -348,12 +347,12 @@ struct WebViewRepresentable: UIViewRepresentable {
                             cookieStore.setCookie(cookie) { group.leave() }
                         }
                         group.notify(queue: .main) {
-                            NSLog("[Wand] %d cookie(s) injected, loading %@", cookies.count, serverURL.absoluteString)
+                            wlog("web", "注入 \(cookies.count) 个 cookie，加载网页版 \(serverURL.absoluteString)")
                             webView.load(URLRequest(url: targetURL))
                         }
                     }
                 case .failure(let err):
-                    NSLog("[Wand] token-login FAILED: %@", err.userMessage)
+                    wlog("web", "网页版 token 登录失败: \(err.userMessage)")
                     context.coordinator.fail(
                         title: "无法登录 wand 服务器",
                         message: err.userMessage,
@@ -362,7 +361,7 @@ struct WebViewRepresentable: UIViewRepresentable {
                 }
             }
         } else {
-            NSLog("[Wand] no token; loading %@ directly", serverURL.absoluteString)
+            wlog("web", "无 token，直接加载网页版 \(serverURL.absoluteString)")
             webView.load(URLRequest(url: targetURL))
         }
         return webView

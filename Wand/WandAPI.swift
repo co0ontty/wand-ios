@@ -61,6 +61,7 @@ final class WandAPI {
         } catch let err as APIError {
             throw err
         } catch {
+            wlog("api", "网络错误 \(req.httpMethod ?? "?") \(req.url?.path ?? "?"): \(error.localizedDescription)")
             throw APIError.network(error.localizedDescription)
         }
     }
@@ -70,6 +71,7 @@ final class WandAPI {
         let req = try makeRequest(method: method, path: path, body: body, timeout: timeout)
         var (data, http) = try await perform(req)
         if http.statusCode == 401, let token, !token.isEmpty {
+            wlog("api", "401 \(method) \(path)，用 appToken 重新登录后重试")
             // session cookie 过期：用 appToken 重新登录一次，cookie 注入共享存储后重试。
             let relogged = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
                 WandAuth.loginWithToken(serverURL: baseURL, appToken: token) { result in
@@ -81,12 +83,16 @@ final class WandAPI {
             (data, http) = try await perform(req)
         }
         guard (200...299).contains(http.statusCode) else {
-            if http.statusCode == 401 { throw APIError.unauthorized }
+            if http.statusCode == 401 {
+                wlog("api", "401 \(method) \(path)（重登后仍失败）")
+                throw APIError.unauthorized
+            }
             var message = "服务器返回 \(http.statusCode)"
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let err = obj["error"] as? String, !err.isEmpty {
                 message = err
             }
+            wlog("api", "\(http.statusCode) \(method) \(path): \(message)")
             throw APIError.server(status: http.statusCode, message: message)
         }
         return data
@@ -113,6 +119,12 @@ final class WandAPI {
 
     func getSession(id: String) async throws -> SessionSnapshot {
         try await request(SessionSnapshot.self, method: "GET", path: "/api/sessions/\(id)?format=chat")
+    }
+
+    /// 历史消息分页：返回完整历史的 [offset, offset+limit) 这一段。
+    func fetchMessages(id: String, offset: Int, limit: Int) async throws -> MessagesPage {
+        try await request(MessagesPage.self, method: "GET",
+                          path: "/api/sessions/\(id)/messages?offset=\(offset)&limit=\(limit)")
     }
 
     func models() async throws -> ModelsResponse {

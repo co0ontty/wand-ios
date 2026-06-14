@@ -35,6 +35,14 @@ final class ChatStore: ObservableObject {
     /// 放 store 而非卡片 @State：流式推送会整条替换消息重建视图，局部状态会丢。
     @Published var askUserSelections: [String: AskUserSelectionState] = [:]
 
+    // 消息窗口化：messages 是完整历史的「后缀」，loadedOffset = messages[0] 的绝对下标，
+    // messageTotal = 完整 turn 数。loadedOffset > 0 表示顶部还有更早的可加载。
+    @Published private(set) var loadedOffset = 0
+    @Published private(set) var messageTotal = 0
+    @Published private(set) var loadingEarlier = false
+    private let earlierPageSize = 40
+    var canLoadEarlier: Bool { loadedOffset > 0 }
+
     let sessionId: String
     let api: WandAPI
     @Published private(set) var snapshot: SessionSnapshot?
@@ -59,8 +67,12 @@ final class ChatStore: ObservableObject {
     // MARK: - 生命周期
 
     func start() {
-        guard !started else { return }
+        guard !started else {
+            wlog("session", "start() 跳过 session=\(sessionId)（已 started，复用旧 store）")
+            return
+        }
         started = true
+        wlog("session", "start() session=\(sessionId)")
 
         // WandSocket 的回调已保证主线程，用 assumeIsolated 接回 MainActor 隔离，
         // 不用 Task 包装——Task 不保证 FIFO，会打乱增量合流顺序。
@@ -76,9 +88,11 @@ final class ChatStore: ObservableObject {
                 let snap = try await api.getSession(id: sessionId)
                 apply(snapshot: snap)
                 loading = false
+                wlog("session", "REST 快照 session=\(sessionId) msgs=\(snap.messages?.count ?? -1) status=\(snap.status ?? "?") structured=\(snap.isStructured) responding=\(snap.isResponding)")
             } catch {
                 loading = false
                 loadError = error.localizedDescription
+                wlog("session", "REST 快照失败 session=\(sessionId): \(error.localizedDescription)")
             }
             await loadModels()
             socket.connect()
@@ -87,6 +101,7 @@ final class ChatStore: ObservableObject {
     }
 
     func shutdown() {
+        wlog("session", "shutdown() session=\(sessionId)（视图销毁，关闭 socket）")
         socket.close()
     }
 
@@ -107,9 +122,37 @@ final class ChatStore: ObservableObject {
 
     // MARK: - 推送合流
 
+    /// 应用一份「窗口化」快照消息（init / 全量 output / ended / REST）。
+    /// 关键约束：
+    ///   - 绝不用「空」覆盖「非空」——停止/重连/丢帧时服务端可能回推空 messages，
+    ///     直接赋值会清光历史（用户报「点停止后历史没了」）。
+    ///   - 不丢弃用户已翻页加载的更早消息——快照只含尾部窗口时，把本地比该窗口更早的
+    ///     前缀拼回去，再接上快照尾部。
+    private func applyWindowedMessages(_ incoming: [ConversationTurn]?, offset: Int?, total: Int?) {
+        guard let incoming else { return }
+        let snapOffset = offset ?? 0
+        let snapTotal = total ?? max(snapOffset + incoming.count, incoming.count)
+        if incoming.isEmpty && !messages.isEmpty && snapTotal == 0 { return }
+
+        if messages.isEmpty {
+            messages = incoming
+            loadedOffset = snapOffset
+        } else if loadedOffset <= snapOffset {
+            // 本地持有的 [loadedOffset, snapOffset) 是比快照窗口更早、已加载的前缀，保留它。
+            let keep = min(max(snapOffset - loadedOffset, 0), messages.count)
+            messages = Array(messages[0..<keep]) + incoming
+            // loadedOffset 不变（仍是更早那条的下标）。
+        } else {
+            // 异常：快照比本地还早，直接以快照为准。
+            messages = incoming
+            loadedOffset = snapOffset
+        }
+        messageTotal = max(snapTotal, loadedOffset + messages.count)
+    }
+
     private func apply(snapshot snap: SessionSnapshot) {
         self.snapshot = snap
-        if let msgs = snap.messages { messages = msgs }
+        applyWindowedMessages(snap.messages, offset: snap.messageOffset, total: snap.messageTotal)
         status = snap.status ?? status
         isResponding = snap.isResponding
         queuedMessages = snap.queuedMessages ?? []
@@ -123,12 +166,16 @@ final class ChatStore: ObservableObject {
     }
 
     private func handle(_ event: WsIncoming) {
-        guard event.sessionId == sessionId || event.sessionId == nil else { return }
+        guard event.sessionId == sessionId || event.sessionId == nil else {
+            wlog("ws", "丢弃事件 type=\(event.type) 来自 session=\(event.sessionId ?? "nil")，当前 session=\(sessionId)")
+            return
+        }
         switch event.type {
         case "init":
             if let data = event.data {
                 applyWsSnapshot(data)
                 loading = false
+                wlog("ws", "init session=\(sessionId) msgs=\(data.messages?.count ?? -1) status=\(data.status ?? "?")")
             }
         case "output":
             if let data = event.data { applyOutput(data) }
@@ -136,7 +183,7 @@ final class ChatStore: ObservableObject {
             if let data = event.data { applyStatus(data) }
         case "ended":
             if let data = event.data {
-                if let msgs = data.messages { messages = msgs }
+                applyWindowedMessages(data.messages, offset: data.messageOffset, total: data.messageTotal)
                 status = data.status ?? "exited"
                 isResponding = false
                 applyCommonFields(data)
@@ -145,7 +192,10 @@ final class ChatStore: ObservableObject {
                 isResponding = false
             }
         case "error":
-            if let message = event.error, !message.isEmpty { toast = message }
+            if let message = event.error, !message.isEmpty {
+                toast = message
+                wlog("ws", "error session=\(sessionId): \(message)")
+            }
         default:
             break
         }
@@ -187,7 +237,7 @@ final class ChatStore: ObservableObject {
 
     /// init 的 data 就是一份完整 SessionSnapshot（以 WsData 超集形状承接）。
     private func applyWsSnapshot(_ data: WsData) {
-        if let msgs = data.messages { messages = msgs }
+        applyWindowedMessages(data.messages, offset: data.messageOffset, total: data.messageTotal)
         status = data.status ?? status
         if let s = data.structuredState { isResponding = s.inFlight ?? false }
         applyCommonFields(data)
@@ -201,7 +251,8 @@ final class ChatStore: ObservableObject {
                 summary: data.summary, currentTaskTitle: data.currentTaskTitle,
                 selectedModel: data.selectedModel, thinkingEffort: data.thinkingEffort,
                 claudeSessionId: data.claudeSessionId,
-                messages: nil, queuedMessages: data.queuedMessages,
+                messages: nil, messageOffset: data.messageOffset, messageTotal: data.messageTotal,
+                queuedMessages: data.queuedMessages,
                 structuredState: data.structuredState, pendingEscalation: data.pendingEscalation,
                 permissionBlocked: data.permissionBlocked,
                 autoApprovePermissions: data.autoApprovePermissions
@@ -212,15 +263,17 @@ final class ChatStore: ObservableObject {
     private func applyOutput(_ data: WsData) {
         let incremental = data.incremental ?? false
         if let msgs = data.messages {
-            // 全量赢
-            messages = msgs
+            // 全量赢（窗口合并：空不覆盖非空、保留已加载的更早前缀）。
+            applyWindowedMessages(msgs, offset: data.messageOffset, total: data.messageTotal)
         } else if incremental, let incoming = data.lastMessage {
+            // expected 是完整历史总数；本地绝对条数 = loadedOffset + messages.count。
             let expected = data.messageCount ?? 0
             if let last = messages.last, last.role == incoming.role {
                 messages[messages.count - 1] = incoming
-            } else if messages.count < expected || expected == 0 {
+            } else if loadedOffset + messages.count < expected || expected == 0 {
                 messages.append(incoming)
             }
+            if expected > 0 { messageTotal = max(messageTotal, expected) }
         }
         if let responding = data.isResponding { isResponding = responding }
         applyCommonFields(data)
@@ -491,6 +544,30 @@ final class ChatStore: ObservableObject {
                 queuedMessages = previous
                 toast = error.localizedDescription
             }
+        }
+    }
+
+    /// 加载更早的一页消息（滚动到顶时触发），prepend 到 messages 并前移 loadedOffset。
+    func loadEarlier() {
+        guard canLoadEarlier, !loadingEarlier else { return }
+        let currentOffset = loadedOffset
+        let newOffset = max(0, currentOffset - earlierPageSize)
+        let limit = currentOffset - newOffset
+        guard limit > 0 else { return }
+        loadingEarlier = true
+        Task {
+            do {
+                let page = try await api.fetchMessages(id: sessionId, offset: newOffset, limit: limit)
+                // 仅当本地起点没被其它更新改动时才 prepend，避免错位重复。
+                if loadedOffset == currentOffset {
+                    messages.insert(contentsOf: page.messages, at: 0)
+                    loadedOffset = newOffset
+                    messageTotal = max(messageTotal, page.total)
+                }
+            } catch {
+                toast = error.localizedDescription
+            }
+            loadingEarlier = false
         }
     }
 

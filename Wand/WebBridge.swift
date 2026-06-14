@@ -81,7 +81,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
             let tag = dict["tag"] as? String ?? ""
             SessionNotificationController.shared.sendWebNotification(title: title, body: body, tag: tag)
         default:
-            NSLog("[Wand] ignored native message type=%@ (no-op on iOS)", type)
+            wlog("web", "ignored native message type=\(type) (no-op on iOS)")
         }
     }
 
@@ -98,23 +98,21 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
 
         if method == NSURLAuthenticationMethodServerTrust {
             if let trust = space.serverTrust {
-                NSLog("[Wand] auth challenge: trust granted host=%@", host)
                 completionHandler(.useCredential, URLCredential(trust: trust))
             } else {
-                NSLog("[Wand] auth challenge: serverTrust nil host=%@ — falling back to default", host)
+                wlog("web", "auth challenge: serverTrust nil host=\(host) — 回退默认处理")
                 completionHandler(.performDefaultHandling, nil)
             }
             return
         }
 
-        NSLog("[Wand] auth challenge: non-ServerTrust method=%@ host=%@ — default handling", method, host)
+        wlog("web", "auth challenge: 非 ServerTrust method=\(method) host=\(host) — 默认处理")
         completionHandler(.performDefaultHandling, nil)
     }
 
     // MARK: - Navigation lifecycle / diagnostics
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        NSLog("[Wand] navigation start: %@", webView.url?.absoluteString ?? "?")
         // 仅首屏加载（或显式重试）显示加载层；会话中途的局部跳转不打扰用户。
         if !hasLoadedOnce {
             model.phase = .loading
@@ -125,21 +123,18 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         let ns = error as NSError
         if ns.code == NSURLErrorCancelled { return } // 被新导航/reload 打断，不算错误
         let url = webView.url?.absoluteString ?? serverURL?.absoluteString ?? "?"
-        NSLog("[Wand] provisional navigation FAILED url=%@ domain=%@ code=%ld reason=%@",
-              url, ns.domain, ns.code, ns.localizedDescription)
+        wlog("web", "首屏导航失败 url=\(url) domain=\(ns.domain) code=\(ns.code) reason=\(ns.localizedDescription)")
         showLoadError(error: ns, url: url)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         let ns = error as NSError
         if ns.code == NSURLErrorCancelled { return }
-        NSLog("[Wand] navigation FAILED domain=%@ code=%ld reason=%@", ns.domain, ns.code, ns.localizedDescription)
+        wlog("web", "导航失败 domain=\(ns.domain) code=\(ns.code) reason=\(ns.localizedDescription)")
         showLoadError(error: ns, url: webView.url?.absoluteString ?? serverURL?.absoluteString ?? "?")
     }
 
-    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        NSLog("[Wand] navigation committed: %@", webView.url?.absoluteString ?? "?")
-    }
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {}
 
     private func showLoadError(error: NSError, url: String) {
         let message = """
@@ -152,7 +147,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        NSLog("[Wand] navigation finished: %@", webView.url?.absoluteString ?? "?")
         hasLoadedOnce = true
         model.phase = .ready
         // WebContent 进程重建会换一个新的 WKContentView，键盘顶栏会复活，
