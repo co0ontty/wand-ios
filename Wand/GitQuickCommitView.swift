@@ -760,15 +760,17 @@ private struct MagneticDockView: View {
                 }
                 dragMembers = members
 
-                // 队伍按 Commit → Tag → Push → Sub 排成一行，居中跟随指尖。
+                // 拖动中的队伍层叠显示；标签无需完整可读，露出的前缘足以表示已吸附。
                 let ids = allIds.filter { members.contains($0) }
-                let total = ids.reduce(CGFloat(0)) { $0 + w($1) } + 5 * CGFloat(max(0, ids.count - 1))
+                let stackStep: CGFloat = 24
+                let widest = ids.map(w).max() ?? 0
+                let total = widest + stackStep * CGFloat(max(0, ids.count - 1))
                 let h = chipH
                 let y = min(max(loc.y - h / 2, 2), max(2, fieldSize.height - h - 2))
                 var x = loc.x - total / 2
                 for cid in ids {
                     chipPos[cid] = CGPoint(x: x, y: y)
-                    x += w(cid) + 5
+                    x += stackStep
                 }
                 clusterBox = ids.count > 1
                     ? CGRect(x: loc.x - total / 2 - 7, y: y - 7, width: total + 14, height: h + 14)
