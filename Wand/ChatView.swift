@@ -229,6 +229,24 @@ struct ChatView: View {
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
+        case .assistantItem(let turnIndex, let displayItem):
+            AssistantItemView(
+                item: displayItem,
+                baseURL: store.api.baseURL,
+                isLastTurn: turnIndex == store.messages.count - 1,
+                isResponding: store.isResponding,
+                askSelections: store.askUserSelections,
+                onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                    store.toggleAskOption(
+                        toolUseId: toolUseId, questionIndex: qIdx,
+                        optionIndex: optIdx, multiSelect: multi
+                    )
+                },
+                onAskSubmit: { toolUseId, answerText in
+                    followsLatest = true
+                    store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
+                }
+            )
         case .explorationGroup(let tools, let lastTurnIndex):
             ExplorationGroupCard(
                 tools: tools,
@@ -240,7 +258,7 @@ struct ChatView: View {
     }
 
     private var groupedMessageItems: [MessageDisplayItem] {
-        groupExplorationTurns(store.messages)
+        flattenAssistantTurns(groupExplorationTurns(store.messages))
     }
 
     private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
@@ -1025,6 +1043,8 @@ private enum DisplayItem {
 
 private enum MessageDisplayItem {
     case turn(index: Int, ConversationTurn)
+    /// 摊平后的单个 assistant 内容块（见 flattenAssistantTurns / AssistantItemView）。
+    case assistantItem(turnIndex: Int, item: DisplayItem)
     case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
 }
 
@@ -1062,6 +1082,25 @@ private func groupExplorationTurns(_ turns: [ConversationTurn]) -> [MessageDispl
     }
     flushPending()
     return items
+}
+
+/// 把 assistant turn 摊平成「每个内容块一行」，使顶层 LazyVStack 能按需实例化。
+/// user turn 保持整条一行（一个气泡，无性能问题）；探索分组本就是单行卡片。
+/// 历史问题：一条 assistant turn 可携带上百个 text/工具/diff 块，整条作为单行
+/// 由 LazyVStack 渲染时单行高度过大，滚到底部后视口落在空白区、该懒加载行迟迟不绘制
+/// （表现为打开会话白屏，主线程并不忙、CPU 为 0）；摊平成多行后按行懒加载即可。
+private func flattenAssistantTurns(_ items: [MessageDisplayItem]) -> [MessageDisplayItem] {
+    var out: [MessageDisplayItem] = []
+    for item in items {
+        if case .turn(let index, let turn) = item, turn.role == "assistant" {
+            for displayItem in pairToolBlocks(turn.content) {
+                out.append(.assistantItem(turnIndex: index, item: displayItem))
+            }
+        } else {
+            out.append(item)
+        }
+    }
+    return out
 }
 
 private func explorationToolsOnly(in turn: ConversationTurn) -> [ExplorationToolItem]? {
@@ -1262,16 +1301,38 @@ private struct TurnView: View {
         }
     }
 
+    /// 兜底路径（非摊平场景，例如未来复用 TurnView 渲染整条 assistant turn）。
+    /// 主列表已改为 flattenAssistantTurns + AssistantItemView 逐块摊平到顶层
+    /// LazyVStack，避免单条 turn 携带上百块时一次性构建数百视图。
     private var assistantBlocks: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(pairToolBlocks(turn.content).enumerated()), id: \.offset) { _, item in
-                itemView(item)
+                AssistantItemView(
+                    item: item, baseURL: baseURL,
+                    isLastTurn: isLastTurn, isResponding: isResponding,
+                    askSelections: askSelections,
+                    onAskToggle: onAskToggle, onAskSubmit: onAskSubmit
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    @ViewBuilder private func itemView(_ item: DisplayItem) -> some View {
+/// 单个 assistant 内容块（plain / 工具卡 / 探索分组）的渲染。
+/// 抽成独立视图，让主列表能把一条 assistant turn 的每个块摊平成顶层 LazyVStack
+/// 的独立行——单条 turn 携带上百个块时，避免整条 turn 一次性构建数百个嵌套视图
+/// （会卡死/白屏），改由 LazyVStack 仅实例化进入视口的块。
+private struct AssistantItemView: View {
+    let item: DisplayItem
+    var baseURL: URL? = nil
+    var isLastTurn = false
+    var isResponding = false
+    var askSelections: [String: AskUserSelectionState] = [:]
+    var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
+    var onAskSubmit: (String, String) -> Void = { _, _ in }
+
+    var body: some View {
         switch item {
         case .plain(let block):
             BlockView(block: block)

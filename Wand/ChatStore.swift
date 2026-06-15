@@ -39,9 +39,14 @@ final class ChatStore: ObservableObject {
     // messageTotal = 完整 turn 数。loadedOffset > 0 表示顶部还有更早的可加载。
     @Published private(set) var loadedOffset = 0
     @Published private(set) var messageTotal = 0
+    /// 块级窗口：messages[0] 被切掉的头部块数（0=该 turn 完整），及该 turn 的完整块数。
+    /// 滚动到顶时先按块翻完 messages[0] 的头部，再按 turn 往前翻更早的整条。
+    @Published private(set) var leadingBlockOffset = 0
+    @Published private(set) var leadingBlockTotal = 0
     @Published private(set) var loadingEarlier = false
     private let earlierPageSize = 40
-    var canLoadEarlier: Bool { loadedOffset > 0 }
+    private let earlierBlockPageSize = 40
+    var canLoadEarlier: Bool { leadingBlockOffset > 0 || loadedOffset > 0 }
 
     let sessionId: String
     let api: WandAPI
@@ -62,6 +67,8 @@ final class ChatStore: ObservableObject {
         self.sessionId = sessionId
         self.api = api
         self.socket = WandSocket(baseURL: api.baseURL)
+        // init/resync/全量快照也按块级窗口下发（与 REST getSession 的 blockBudget 对齐）。
+        self.socket.blockBudget = WandAPI.chatBlockWindow
     }
 
     // MARK: - 生命周期
@@ -128,7 +135,10 @@ final class ChatStore: ObservableObject {
     ///     直接赋值会清光历史（用户报「点停止后历史没了」）。
     ///   - 不丢弃用户已翻页加载的更早消息——快照只含尾部窗口时，把本地比该窗口更早的
     ///     前缀拼回去，再接上快照尾部。
-    private func applyWindowedMessages(_ incoming: [ConversationTurn]?, offset: Int?, total: Int?) {
+    private func applyWindowedMessages(
+        _ incoming: [ConversationTurn]?, offset: Int?, total: Int?,
+        leadingOffset: Int? = nil, leadingTotal: Int? = nil
+    ) {
         guard let incoming else { return }
         let snapOffset = offset ?? 0
         let snapTotal = total ?? max(snapOffset + incoming.count, incoming.count)
@@ -148,11 +158,23 @@ final class ChatStore: ObservableObject {
             loadedOffset = snapOffset
         }
         messageTotal = max(snapTotal, loadedOffset + messages.count)
+
+        // leading 块状态描述 messages[0]：当 messages[0] 正是快照的最旧入窗 turn
+        //（loadedOffset == snapOffset）时取快照的 leading；否则 messages[0] 是用户已整条
+        // 翻页加载的更早 turn，视为完整（leadingBlockOffset = 0）。
+        if loadedOffset == snapOffset {
+            leadingBlockOffset = max(0, leadingOffset ?? 0)
+            leadingBlockTotal = leadingTotal ?? (messages.first?.content.count ?? 0)
+        } else {
+            leadingBlockOffset = 0
+            leadingBlockTotal = messages.first?.content.count ?? 0
+        }
     }
 
     private func apply(snapshot snap: SessionSnapshot) {
         self.snapshot = snap
-        applyWindowedMessages(snap.messages, offset: snap.messageOffset, total: snap.messageTotal)
+        applyWindowedMessages(snap.messages, offset: snap.messageOffset, total: snap.messageTotal,
+                              leadingOffset: snap.leadingBlockOffset, leadingTotal: snap.leadingBlockTotal)
         status = snap.status ?? status
         isResponding = snap.isResponding
         queuedMessages = snap.queuedMessages ?? []
@@ -183,7 +205,8 @@ final class ChatStore: ObservableObject {
             if let data = event.data { applyStatus(data) }
         case "ended":
             if let data = event.data {
-                applyWindowedMessages(data.messages, offset: data.messageOffset, total: data.messageTotal)
+                applyWindowedMessages(data.messages, offset: data.messageOffset, total: data.messageTotal,
+                                      leadingOffset: data.leadingBlockOffset, leadingTotal: data.leadingBlockTotal)
                 status = data.status ?? "exited"
                 isResponding = false
                 applyCommonFields(data)
@@ -237,7 +260,8 @@ final class ChatStore: ObservableObject {
 
     /// init 的 data 就是一份完整 SessionSnapshot（以 WsData 超集形状承接）。
     private func applyWsSnapshot(_ data: WsData) {
-        applyWindowedMessages(data.messages, offset: data.messageOffset, total: data.messageTotal)
+        applyWindowedMessages(data.messages, offset: data.messageOffset, total: data.messageTotal,
+                              leadingOffset: data.leadingBlockOffset, leadingTotal: data.leadingBlockTotal)
         status = data.status ?? status
         if let s = data.structuredState { isResponding = s.inFlight ?? false }
         applyCommonFields(data)
@@ -264,12 +288,19 @@ final class ChatStore: ObservableObject {
         let incremental = data.incremental ?? false
         if let msgs = data.messages {
             // 全量赢（窗口合并：空不覆盖非空、保留已加载的更早前缀）。
-            applyWindowedMessages(msgs, offset: data.messageOffset, total: data.messageTotal)
+            applyWindowedMessages(msgs, offset: data.messageOffset, total: data.messageTotal,
+                                  leadingOffset: data.leadingBlockOffset, leadingTotal: data.leadingBlockTotal)
         } else if incremental, let incoming = data.lastMessage {
             // expected 是完整历史总数；本地绝对条数 = loadedOffset + messages.count。
             let expected = data.messageCount ?? 0
             if let last = messages.last, last.role == incoming.role {
                 messages[messages.count - 1] = incoming
+                // 替换到的若是 messages[0]（单条窗口，通常是流式巨型 turn）：增量带的是完整 turn，
+                // 块级窗口已被它填满，leading 归零，避免之后误按块翻一条其实已完整的 turn。
+                if messages.count == 1 {
+                    leadingBlockOffset = 0
+                    leadingBlockTotal = incoming.content.count
+                }
             } else if loadedOffset + messages.count < expected || expected == 0 {
                 messages.append(incoming)
             }
@@ -547,9 +578,46 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// 加载更早的一页消息（滚动到顶时触发），prepend 到 messages 并前移 loadedOffset。
+    /// 加载更早的一页（滚动到顶时触发）。两阶段：先按「块」翻完 messages[0] 这条 turn
+    /// 被切掉的头部（块级窗口），再按「整条 turn」往前翻更早的会话。
     func loadEarlier() {
-        guard canLoadEarlier, !loadingEarlier else { return }
+        guard !loadingEarlier else { return }
+        if leadingBlockOffset > 0 {
+            loadEarlierBlocks()
+        } else if loadedOffset > 0 {
+            loadEarlierTurns()
+        }
+    }
+
+    /// 翻 messages[0] 更早的块：把这条 turn 被切掉的头部按页 prepend 回它的 content。
+    private func loadEarlierBlocks() {
+        let turnIndex = loadedOffset
+        let currentBlockOffset = leadingBlockOffset
+        let leadingRole = messages.first?.role
+        guard currentBlockOffset > 0, let leadingRole else { return }
+        loadingEarlier = true
+        Task {
+            do {
+                let page = try await api.fetchEarlierBlocks(
+                    id: sessionId, turn: turnIndex,
+                    blockOffset: currentBlockOffset, blockLimit: earlierBlockPageSize
+                )
+                // 仅当起点没被其它更新改动、且 messages[0] 仍是同一条 turn 时才 prepend，避免错位。
+                if loadedOffset == turnIndex, leadingBlockOffset == currentBlockOffset,
+                   let head = messages.first, head.role == leadingRole, !page.blocks.isEmpty {
+                    messages[0] = ConversationTurn(role: head.role, content: page.blocks + head.content)
+                    leadingBlockOffset = page.blockOffset
+                    leadingBlockTotal = max(leadingBlockTotal, page.blockTotal)
+                }
+            } catch {
+                toast = error.localizedDescription
+            }
+            loadingEarlier = false
+        }
+    }
+
+    /// 翻更早的整条 turn：messages[0] 已完整、其前面还有更早 turn 时，prepend 整条并前移 loadedOffset。
+    private func loadEarlierTurns() {
         let currentOffset = loadedOffset
         let newOffset = max(0, currentOffset - earlierPageSize)
         let limit = currentOffset - newOffset
@@ -563,6 +631,9 @@ final class ChatStore: ObservableObject {
                     messages.insert(contentsOf: page.messages, at: 0)
                     loadedOffset = newOffset
                     messageTotal = max(messageTotal, page.total)
+                    // 整条翻页拿到的最旧一条是完整 turn，leading 归零并指向新的 messages[0]。
+                    leadingBlockOffset = 0
+                    leadingBlockTotal = messages.first?.content.count ?? 0
                 }
             } catch {
                 toast = error.localizedDescription

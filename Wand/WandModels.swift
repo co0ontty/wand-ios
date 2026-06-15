@@ -416,6 +416,10 @@ struct SessionSnapshot: Decodable, Identifiable {
     /// messageTotal = 完整 turn 数。更早的消息按需翻页（GET /api/sessions/:id/messages）。
     let messageOffset: Int?
     let messageTotal: Int?
+    /// 块级窗口（iOS 带 blockBudget 时）：messages[0] 被切掉的头部块数（0=该 turn 完整），
+    /// 以及 turn messageOffset 的完整块数。滚动到顶时先按块翻这条 turn 的头部，再按 turn 往前翻。
+    var leadingBlockOffset: Int? = nil
+    var leadingBlockTotal: Int? = nil
     let queuedMessages: [String]?
     let structuredState: StructuredSessionState?
     let pendingEscalation: EscalationRequest?
@@ -455,6 +459,15 @@ struct MessagesPage: Decodable {
     let messages: [ConversationTurn]
     let offset: Int
     let total: Int
+}
+
+/// GET /api/sessions/:id/messages?turn=&blockOffset=&blockLimit= 的块级分页响应：
+/// 某条 turn 的 [blockOffset, 原 leading 偏移) 段内容块 + 该 turn 的完整块数。
+struct BlocksPage: Decodable {
+    let turnIndex: Int
+    let blocks: [ContentBlock]
+    let blockOffset: Int
+    let blockTotal: Int
 }
 
 // MARK: - 历史会话
@@ -510,6 +523,8 @@ struct WsData: Decodable {
     let messages: [ConversationTurn]?
     let messageOffset: Int?
     let messageTotal: Int?
+    let leadingBlockOffset: Int?
+    let leadingBlockTotal: Int?
     let queuedMessages: [String]?
     let structuredState: StructuredSessionState?
     let pendingEscalation: EscalationRequest?

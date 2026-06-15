@@ -11,6 +11,8 @@ final class WandSocket {
     var onConnectionChange: ((Bool) -> Void)?
 
     private let baseURL: URL
+    /// 块级窗口预算：>0 时在 subscribe 里带给服务端，init/resync/全量快照只下发最近这么多个块。
+    var blockBudget: Int = 0
     private var task: URLSessionWebSocketTask?
     private var subscribedSessionId: String?
     private var lastSeqBySession: [String: Int] = [:]
@@ -50,7 +52,14 @@ final class WandSocket {
     func subscribe(sessionId: String) {
         subscribedSessionId = sessionId
         lastSeqBySession[sessionId] = nil
-        sendJSON(["type": "subscribe", "sessionId": sessionId])
+        sendJSON(subscribePayload(sessionId))
+    }
+
+    /// subscribe 负载：带上块级窗口预算（>0 时），让 init/resync 与全量快照都按块窗口化。
+    private func subscribePayload(_ sessionId: String) -> [String: Any] {
+        var payload: [String: Any] = ["type": "subscribe", "sessionId": sessionId]
+        if blockBudget > 0 { payload["blockBudget"] = blockBudget }
+        return payload
     }
 
     func requestResync() {
@@ -87,7 +96,7 @@ final class WandSocket {
         // 重新订阅当前会话；服务端会推一份 init 快照，相当于天然 resync。
         if let id = subscribedSessionId {
             lastSeqBySession[id] = nil
-            sendJSON(["type": "subscribe", "sessionId": id])
+            sendJSON(subscribePayload(id))
         }
         receiveNext(socket, generation: gen)
     }

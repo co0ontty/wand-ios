@@ -10,6 +10,9 @@ private extension Data {
 /// cookieStorage），所以 WandAuth.loginWithToken 拿到的 session cookie 在这里
 /// 的每个请求上自动携带；遇到 401 时用存储的 appToken 重新登录一次再重试。
 final class WandAPI {
+    /// 聊天块级窗口默认预算：打开会话只拉最近这么多个内容块，更早的滚动到顶时按需翻页。
+    static let chatBlockWindow = 60
+
     let baseURL: URL
     let token: String?
 
@@ -117,14 +120,24 @@ final class WandAPI {
         try await request([SessionSnapshot].self, method: "GET", path: "/api/sessions")
     }
 
-    func getSession(id: String) async throws -> SessionSnapshot {
-        try await request(SessionSnapshot.self, method: "GET", path: "/api/sessions/\(id)?format=chat")
+    /// 块级窗口：带 blockBudget 时服务端只回最近这么多个内容块（必要时切掉最旧 turn 的头部），
+    /// 根治「单条 turn 上百块/1MB」长任务的打开慢。blockBudget=0 退回 turn 级窗口。
+    func getSession(id: String, blockBudget: Int = WandAPI.chatBlockWindow) async throws -> SessionSnapshot {
+        var path = "/api/sessions/\(id)?format=chat"
+        if blockBudget > 0 { path += "&blockBudget=\(blockBudget)" }
+        return try await request(SessionSnapshot.self, method: "GET", path: path)
     }
 
     /// 历史消息分页：返回完整历史的 [offset, offset+limit) 这一段。
     func fetchMessages(id: String, offset: Int, limit: Int) async throws -> MessagesPage {
         try await request(MessagesPage.self, method: "GET",
                           path: "/api/sessions/\(id)/messages?offset=\(offset)&limit=\(limit)")
+    }
+
+    /// 块级翻页：取某条 turn 的 [start, blockOffset) 段内容块（start = max(0, blockOffset - blockLimit)）。
+    func fetchEarlierBlocks(id: String, turn: Int, blockOffset: Int, blockLimit: Int) async throws -> BlocksPage {
+        try await request(BlocksPage.self, method: "GET",
+                          path: "/api/sessions/\(id)/messages?turn=\(turn)&blockOffset=\(blockOffset)&blockLimit=\(blockLimit)")
     }
 
     func models() async throws -> ModelsResponse {
