@@ -13,6 +13,7 @@ struct ConnectView: View {
     @State private var error: String? = nil
     @State private var isConnecting = false
     @State private var showScanner = false
+    @State private var showLocalNetworkHint = false
     @FocusState private var inputFocused: Bool
 
     private var trimmedInput: String {
@@ -92,6 +93,10 @@ struct ConnectView: View {
                 errorBanner(error)
             }
 
+            if showLocalNetworkHint {
+                localNetworkHint
+            }
+
             connectButton
 
             if !store.recentInputs.isEmpty {
@@ -160,6 +165,32 @@ struct ConnectView: View {
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Theme.danger.opacity(0.1))
+        )
+    }
+
+    private var localNetworkHint: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("请检查「本地网络」权限", systemImage: "lock.shield")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+            Text("Wand 需要本地网络权限才能连接局域网内的服务。请在系统设置中允许 Wand 访问本地网络，然后重试。")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("打开 Wand 设置") {
+                LocalNetworkPermission.openSettings()
+            }
+            .font(.system(size: 13, weight: .medium))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.brand.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.brand.opacity(0.35), lineWidth: 1)
         )
     }
 
@@ -272,6 +303,7 @@ struct ConnectView: View {
         guard !raw.isEmpty, !isConnecting else { return }
         isConnecting = true
         error = nil
+        showLocalNetworkHint = false
         inputFocused = false
 
         WandAuth.resolve(rawInput: raw) { result in
@@ -284,6 +316,11 @@ struct ConnectView: View {
                     onDismiss?()
                 case .failure(let err):
                     error = err.userMessage
+                    if case .network = err {
+                        let host = WandAuth.decodeConnectCode(raw)?.url.host
+                            ?? WandAuth.candidateURLs(from: raw).first?.host
+                        showLocalNetworkHint = LocalNetworkPermission.isLikelyLanHost(host)
+                    }
                 }
             }
         }

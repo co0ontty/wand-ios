@@ -76,12 +76,7 @@ struct ChatView: View {
             }
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .navigationBarTrailing) {
-                HStack(spacing: 12) {
-                    gitChangesButton
-                    if store.isStructured {
-                        sessionSettingsMenu
-                    }
-                }
+                gitChangesButton
             }
         }
         .safeAreaInset(edge: .bottom) { bottomBar }
@@ -560,34 +555,42 @@ struct ChatView: View {
         .animation(.easeInOut(duration: 0.2), value: store.pendingEscalation)
     }
 
-    private var inputBar: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            composerActionsMenu
-            composerField
+    /// 输入栏是否展开成卡片态（聚焦 / 语音模式 / 有草稿）。否则收起成单行胶囊。
+    /// 对齐 Codex App：默认是一条胶囊，点进去（聚焦）才长出底部控制行。
+    private var inputExpanded: Bool {
+        inputFocused || voiceMode || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
-            if store.isResponding {
-                Button(action: { showStopConfirm = true }) {
-                    Image(systemName: "stop.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(width: 38, height: 38)
-                        .background(Circle().fill(Theme.danger))
+    private var inputBar: some View {
+        VStack(alignment: .leading, spacing: inputExpanded ? 10 : 0) {
+            HStack(alignment: .bottom, spacing: 8) {
+                if !inputExpanded {
+                    composerActionsMenu
+                }
+                composerInputContent
+                if !inputExpanded {
+                    micButton
+                    trailingButtons
                 }
             }
-            Button(action: sendDraft) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(.white)
-                    .frame(width: 38, height: 38)
-                    .background(
-                        Circle().fill(canSend ? Theme.brand : Theme.brand.opacity(0.4))
-                    )
+            if inputExpanded {
+                controlRow
             }
-            .disabled(!canSend)
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        )
         .padding(.horizontal, 12)
-        .padding(.top, 8)
+        .padding(.top, 4)
         .padding(.bottom, 8)
+        .animation(.easeInOut(duration: 0.18), value: inputExpanded)
         .confirmationDialog(
             "确定要停止当前正在运行的任务吗？",
             isPresented: $showStopConfirm,
@@ -598,43 +601,137 @@ struct ChatView: View {
         }
     }
 
-    private var composerField: some View {
-        ZStack(alignment: .bottomTrailing) {
-            if voiceMode {
-                voiceHoldField
-            } else {
-                growingTextField
-                    .focused($inputFocused)
-                    .padding(.leading, 14)
-                    .padding(.trailing, 48)
-                    .padding(.vertical, 9)
-                    .background(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(Theme.surface)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .stroke(Theme.border, lineWidth: 1)
-                    )
-            }
-            micButton
+    /// 顶部内容：键盘模式是自增高文本框，语音模式是「按住说话」面板。背景/描边交给外层卡片。
+    @ViewBuilder private var composerInputContent: some View {
+        if voiceMode {
+            voiceHoldField
+        } else {
+            growingTextField
+                .focused($inputFocused)
+                .padding(.leading, 6)
                 .padding(.trailing, 4)
-                .padding(.bottom, 3)
+                .padding(.vertical, 4)
+                .frame(minHeight: 32)
         }
     }
 
-    private var sessionSettingsMenu: some View {
+    /// 展开态底部控制行：+ / 模式徽标 / 模型·思考徽标 / 话筒 / 发送·停止。
+    /// 把原本散落在右上角的会话设置（模型 + 思考深度）+ 模式开关全部收拢到这里。
+    private var controlRow: some View {
+        HStack(spacing: 8) {
+            composerActionsMenu
+            if store.isStructured {
+                modeChip
+            }
+            Spacer(minLength: 4)
+            if store.isStructured {
+                modelThinkingChip
+            }
+            micButton
+            trailingButtons
+        }
+    }
+
+    /// 发送 / 停止按钮组：
+    /// - 运行中且无草稿 → 唯一按钮是白底停止（对齐 Codex 的白圆黑方块）；
+    /// - 有草稿 → 发送按钮（运行中时左侧追加一个红色停止，可一边排队一边停）。
+    @ViewBuilder private var trailingButtons: some View {
+        if store.isResponding && !canSend {
+            stopButtonPrimary
+        } else {
+            if store.isResponding {
+                stopButtonSecondary
+            }
+            sendButton
+        }
+    }
+
+    private var stopButtonPrimary: some View {
+        Button { showStopConfirm = true } label: {
+            Image(systemName: "stop.fill")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.black)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(Color.white))
+                .overlay(Circle().stroke(Theme.border, lineWidth: 0.5))
+        }
+        .accessibilityLabel("停止任务")
+    }
+
+    private var stopButtonSecondary: some View {
+        Button { showStopConfirm = true } label: {
+            Image(systemName: "stop.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(Theme.danger))
+        }
+        .accessibilityLabel("停止任务")
+    }
+
+    private var sendButton: some View {
+        Button(action: sendDraft) {
+            Image(systemName: "arrow.up")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(canSend ? Theme.brand : Theme.brand.opacity(0.4)))
+        }
+        .disabled(!canSend)
+        .accessibilityLabel("发送")
+    }
+
+    // MARK: - 控制行徽标（模式 / 模型·思考）
+
+    /// 执行模式选项（与 NewSessionView.sessionModes 一致）。codex 锁 full-access。
+    private static let sessionModes = [
+        (id: "managed", label: "托管"),
+        (id: "full-access", label: "全权限"),
+        (id: "auto-edit", label: "自动编辑"),
+        (id: "default", label: "标准"),
+        (id: "native", label: "原生"),
+    ]
+
+    private static func modeLabel(_ id: String) -> String {
+        sessionModes.first { $0.id == id }?.label ?? "标准"
+    }
+
+    /// 高权限模式（托管 / 全权限）用橙色提示，其余用次要色。
+    private var modeTint: Color {
+        (store.mode == "full-access" || store.mode == "managed") ? .orange : Theme.textSecondary
+    }
+
+    private var modeChip: some View {
+        let isCodex = store.snapshot?.provider == "codex"
+        return Menu {
+            ForEach(Self.sessionModes, id: \.id) { option in
+                Button {
+                    store.setMode(option.id)
+                } label: {
+                    if store.mode == option.id {
+                        Label(option.label, systemImage: "checkmark")
+                    } else {
+                        Text(option.label)
+                    }
+                }
+                .disabled(isCodex && option.id != "full-access")
+            }
+        } label: {
+            chipLabel(icon: "lock.shield", text: Self.modeLabel(store.mode), tint: modeTint)
+        }
+        .disabled(isCodex)
+        .accessibilityLabel("执行模式")
+    }
+
+    private var modelThinkingChip: some View {
         Menu {
-            Menu {
+            Section("模型") {
                 modelButton(id: nil, label: "默认")
                 ForEach(store.availableModels.filter { $0.id != "default" }) { model in
                     modelButton(id: model.id, label: model.label)
                 }
-            } label: {
-                Label("模型 · \(store.selectedModel ?? "默认")", systemImage: "cpu")
             }
-
-            Menu {
+            Section("思考深度") {
                 ForEach(Self.thinkingLevels, id: \.id) { level in
                     Button {
                         store.setThinkingEffort(level.id)
@@ -646,15 +743,47 @@ struct ChatView: View {
                         }
                     }
                 }
-            } label: {
-                Label("思考深度 · \(Self.thinkingLabel(store.thinkingEffort))", systemImage: "brain")
             }
         } label: {
-            Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(Theme.brand)
+            chipLabel(icon: "cpu", text: modelThinkingText, tint: Theme.brand)
         }
-        .accessibilityLabel("会话设置")
+        .accessibilityLabel("模型与思考深度")
+    }
+
+    private var modelThinkingText: String {
+        let model = shortModelLabel
+        guard store.thinkingEffort != "off" else { return model }
+        return "\(model) · \(Self.thinkingLabel(store.thinkingEffort))"
+    }
+
+    /// 控制行徽标用的精简模型名：去掉「opus（最新 Opus）」这类括号补充（全角/半角都吃），只留主名。
+    private var shortModelLabel: String {
+        let full = launchModelLabel
+        if let idx = full.firstIndex(where: { $0 == "（" || $0 == "(" }) {
+            return String(full[..<idx]).trimmingCharacters(in: .whitespaces)
+        }
+        return full
+    }
+
+    /// 控制行通用胶囊徽标：图标 + 文字 + 弱色底。
+    private func chipLabel(icon: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+            Text(text)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 140)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .opacity(0.6)
+        }
+        .foregroundColor(tint)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(tint.opacity(0.10)))
+        .overlay(Capsule().stroke(tint.opacity(0.22), lineWidth: 1))
     }
 
     private var gitChangesButton: some View {
@@ -718,14 +847,14 @@ struct ChatView: View {
                 ProgressView()
                     .controlSize(.small)
                     .tint(Theme.textSecondary)
-                    .frame(width: 38, height: 38)
+                    .frame(width: 34, height: 34)
             } else {
+                // 卡片内的「+」走极简：无圆底描边，仅图标（对齐 Codex）。
                 Image(systemName: "plus")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 18, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
-                    .frame(width: 38, height: 38)
-                    .background(Circle().fill(Theme.surface))
-                    .overlay(Circle().stroke(Theme.border, lineWidth: 1))
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
             }
         }
         .accessibilityLabel("更多操作")
@@ -856,25 +985,21 @@ struct ChatView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.leading, 14)
-        .padding(.trailing, 48)
-        .padding(.vertical, 9)
-        .frame(minHeight: 38)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
+        .frame(minHeight: 32)
+        // 背景/描边交给外层输入卡片；这里只在按住时给一层淡淡的状态底色。
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(
                     voicePressed
-                        ? (voiceCanceling ? Theme.danger.opacity(0.16) : Theme.brand.opacity(0.14))
-                        : Theme.surface
+                        ? (voiceCanceling ? Theme.danger.opacity(0.14) : Theme.brand.opacity(0.12))
+                        : Color.clear
                 )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Theme.border, lineWidth: 1)
         )
         .animation(.easeInOut(duration: 0.15), value: voicePressed)
         .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contentShape(Rectangle())
         .gesture(voiceTapOrHoldGesture(onTap: {
             // 轻点面板：切回键盘并自动聚焦，直接接着打字。
             voiceMode = false

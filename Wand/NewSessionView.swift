@@ -25,6 +25,12 @@ struct NewSessionView: View {
     @State private var creating = false
     @State private var errorMessage: String?
     @State private var showBrowser = false
+    @FocusState private var focusedField: InputField?
+
+    private enum InputField: Hashable {
+        case cwd
+        case firstMessage
+    }
 
     /// 模式选项：id / 标签 / 卡片内一句话说明，与 Web renderModeCards 完全一致。
     private struct SessionMode: Identifiable {
@@ -151,8 +157,15 @@ struct NewSessionView: View {
                     }
                     .padding(.horizontal, 16)
                 }
+                .scrollDismissesKeyboard(.interactively)
             }
-            .safeAreaInset(edge: .bottom) { createBar }
+            // 键盘出现时若仍保留 safeAreaInset 创建栏，系统会先把创建栏抬到键盘
+            // 上方，再继续滚动表单保证输入框可见，造成输入框过量上浮。
+            .safeAreaInset(edge: .bottom) {
+                if focusedField == nil {
+                    createBar
+                }
+            }
             .dismissKeyboardOnTap()
             .navigationTitle("新建会话")
             .navigationBarTitleDisplayMode(.inline)
@@ -170,6 +183,10 @@ struct NewSessionView: View {
                             .foregroundColor(canCreate ? Theme.brand : Theme.textSecondary)
                             .disabled(!canCreate)
                     }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { focusedField = nil }
                 }
             }
             .sheet(isPresented: $showBrowser) {
@@ -315,6 +332,7 @@ struct NewSessionView: View {
                     .font(.system(size: 14, design: .monospaced))
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
+                    .focused($focusedField, equals: .cwd)
                     .padding(.leading, 12)
                     .padding(.vertical, 11)
 
@@ -371,6 +389,7 @@ struct NewSessionView: View {
     private var firstMessageCard: some View {
         TextField("想让它做什么…", text: $firstMessage)
             .font(.system(size: 15))
+            .focused($focusedField, equals: .firstMessage)
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
             .background(cardBackground(selected: false))

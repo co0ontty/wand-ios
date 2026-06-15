@@ -164,6 +164,16 @@ final class WandAPI {
         )
     }
 
+    @discardableResult
+    func setMode(id: String, mode: String) async throws -> SessionSnapshot {
+        try await request(
+            SessionSnapshot.self,
+            method: "POST",
+            path: "/api/sessions/\(id)/mode",
+            body: ["mode": mode]
+        )
+    }
+
     func uploadAttachments(id: String, urls: [URL]) async throws -> [UploadedFile] {
         let boundary = "WandBoundary-\(UUID().uuidString)"
         var body = Data()

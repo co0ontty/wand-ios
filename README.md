@@ -179,7 +179,7 @@ ios/
 
 - **自签名 HTTPS 放行**：wand 默认用 `cert.ts` 生成自签名证书，`WebBridge` 和 `SelfSignedSession` 对 ServerTrust 一律放行，等价 Android 的 `trustSelfSigned()`。
 - **ATS**：`NSAllowsArbitraryLoads = true`，因为要连局域网 HTTP 地址和自签名 HTTPS。
-- **本地网络权限**：`NSLocalNetworkUsageDescription`，iOS 14+ 连局域网设备会弹一次授权。
+- **本地网络权限**：`NSLocalNetworkUsageDescription`；应用完成启动后主动用无数据 UDP connect 触发一次授权检查，局域网连接失败时提供 App 设置入口。
 - **切换服务器入口**：iOS 没有菜单栏，连接后在右上角放一个低调的半透明悬浮按钮，点击弹出切换面板（macOS 是用菜单 + 通知，二者共用 `.wandRequestSwitchServer` 通知）。
 - **按住说话（端侧语音输入）**：输入栏左侧麦克风按钮，按住录音 → 气泡实时转写 → 松手把文字**追加**进输入框（不覆盖草稿）→ 上滑取消，交互对齐 Web 端隐藏中的 voice-btn。识别走系统 `SFSpeechRecognizer`：设备已下载当前语言听写模型时强制 `requiresOnDeviceRecognition`（音频不出设备、无时长限制），否则降级 Apple 服务器识别（单次约 1 分钟，足够短句）。语言候选：系统语言 → zh-CN → en-US。不需要任何 entitlement，只新增了 `NSMicrophoneUsageDescription` / `NSSpeechRecognitionUsageDescription` 两条隐私描述，免费账号自签不受影响。
 - **bundle id**：`com.wand.app`，与 macOS 端一致。免费签名时工具可能会改写它，不影响使用。

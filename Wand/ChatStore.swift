@@ -31,6 +31,9 @@ final class ChatStore: ObservableObject {
     @Published var availableModels: [ModelInfo] = []
     @Published var selectedModel: String?
     @Published var thinkingEffort = "off"
+    /// 当前执行模式（managed / full-access / auto-edit / default / native）。
+    /// 输入栏的模式徽标读它，可中途切换（结构化会话下一轮生效）。
+    @Published var mode = "default"
     /// AskUserQuestion 卡片的选择状态（toolUseId → 各题已选项 + 是否已提交）。
     /// 放 store 而非卡片 @State：流式推送会整条替换消息重建视图，局部状态会丢。
     @Published var askUserSelections: [String: AskUserSelectionState] = [:]
@@ -183,6 +186,7 @@ final class ChatStore: ObservableObject {
         currentTaskTitle = snap.currentTaskTitle
         selectedModel = snap.selectedModel
         thinkingEffort = snap.thinkingEffort ?? "off"
+        mode = snap.mode ?? mode
         if snap.pendingEscalation != nil { legacyPermissionPrompt = nil }
         refreshLiveActivity()
     }
@@ -337,6 +341,7 @@ final class ChatStore: ObservableObject {
         if let title = data.currentTaskTitle { currentTaskTitle = title }
         if let model = data.selectedModel { selectedModel = model }
         if let effort = data.thinkingEffort { thinkingEffort = effort }
+        if let m = data.mode { mode = m }
     }
 
     // MARK: - 用户动作
@@ -413,6 +418,21 @@ final class ChatStore: ObservableObject {
                 apply(snapshot: snap)
             } catch {
                 thinkingEffort = previous
+                toast = error.localizedDescription
+            }
+        }
+    }
+
+    /// 中途切换执行模式（乐观更新，失败回滚）。codex 会话固定 full-access，调用方负责拦。
+    func setMode(_ newMode: String) {
+        let previous = mode
+        mode = newMode
+        Task {
+            do {
+                let snap = try await api.setMode(id: sessionId, mode: newMode)
+                apply(snapshot: snap)
+            } catch {
+                mode = previous
                 toast = error.localizedDescription
             }
         }

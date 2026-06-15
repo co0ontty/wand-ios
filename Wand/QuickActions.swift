@@ -91,6 +91,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         SessionNotificationController.shared.configure()
+        // 等应用完成启动后主动触发本地网络权限检查。未决定时系统会弹框；
+        // 已允许或拒绝时不会重复打扰用户。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            LocalNetworkPermission.triggerPromptIfNeeded()
+        }
         return true
     }
 

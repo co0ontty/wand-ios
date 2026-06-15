@@ -48,6 +48,12 @@ struct NativeRootView: View {
                             .multilineTextAlignment(.center)
                         Button("重试") { authenticate() }
                             .buttonStyle(WandPrimaryButtonStyle())
+                        if LocalNetworkPermission.isLikelyLanHost(serverURL.host) {
+                            Button("打开 Wand 设置") {
+                                LocalNetworkPermission.openSettings()
+                            }
+                            .buttonStyle(WandSecondaryButtonStyle())
+                        }
                         Button("重新连接") { store.disconnect() }
                             .buttonStyle(WandSecondaryButtonStyle())
                     }
