@@ -30,6 +30,10 @@ struct WebContainerView: View {
     let serverURL: URL
     let token: String?
     var sessionId: String? = nil
+    /// 嵌入终端模式：URL 带 ?embed=terminal，网页只渲染终端黑窗 + 输入栏。
+    /// 用于把 PTY 会话套进原生导航头（见 PtySessionView）。此模式下不显示
+    /// 壳自带的顶部返回栏与加载覆盖层逃生按钮——返回交给原生导航条。
+    var embedTerminal: Bool = false
     /// 「返回原生界面」回调（网页版兜底入口传入）；触发途径：网页侧边栏的
     /// 「返回App」按钮 → backToNative 消息，或加载中/出错覆盖层上的逃生按钮。
     var onRequestClose: (() -> Void)? = nil
@@ -56,7 +60,12 @@ struct WebContainerView: View {
     }
 
     @ViewBuilder private var webContent: some View {
-        if model.needsLegacyChrome, let onRequestClose {
+        if embedTerminal {
+            // 嵌入终端：原生导航条已消费顶部安全区，WebView 贴在头部下沿，
+            // 只向底部 home indicator 延伸（输入栏自己消费 --input-safe-bottom）。
+            WebViewRepresentable(serverURL: serverURL, token: token, sessionId: sessionId, embedTerminal: true, model: model)
+                .ignoresSafeArea(.container, edges: .bottom)
+        } else if model.needsLegacyChrome, let onRequestClose {
             // 旧版网页：保留壳自带的顶部返回栏（网页里没有返回按钮）。
             VStack(spacing: 0) {
                 legacyTopBar(onClose: onRequestClose)
@@ -91,7 +100,7 @@ struct WebContainerView: View {
 
     /// 加载中/出错覆盖层上的逃生口：此时网页侧的返回按钮还不可用。
     @ViewBuilder private var escapeButton: some View {
-        if model.phase != .ready, let onRequestClose {
+        if !embedTerminal, model.phase != .ready, let onRequestClose {
             VStack {
                 HStack {
                     Button(action: onRequestClose) {
@@ -267,6 +276,7 @@ struct WebViewRepresentable: UIViewRepresentable {
     let serverURL: URL
     let token: String?
     let sessionId: String?
+    var embedTerminal: Bool = false
     let model: WebViewModel
 
     func makeCoordinator() -> WebBridge {
@@ -375,8 +385,11 @@ struct WebViewRepresentable: UIViewRepresentable {
             return serverURL
         }
         var items = components.queryItems ?? []
-        items.removeAll { $0.name == "session" }
+        items.removeAll { $0.name == "session" || $0.name == "embed" }
         items.append(URLQueryItem(name: "session", value: sessionId))
+        if embedTerminal {
+            items.append(URLQueryItem(name: "embed", value: "terminal"))
+        }
         components.queryItems = items
         return components.url ?? serverURL
     }

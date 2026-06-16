@@ -65,7 +65,7 @@ struct NewSessionView: View {
 
     var body: some View {
         NavigationView {
-            ZStack {
+            ZStack(alignment: .bottom) {
                 Theme.background.ignoresSafeArea()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
@@ -156,12 +156,17 @@ struct NewSessionView: View {
                         Spacer(minLength: 24)
                     }
                     .padding(.horizontal, 16)
+                    // 创建栏改为浮层后不再占布局，这里补足其高度，确保表单尾部内容
+                    // 能滚动到浮层上方、不被遮住。
+                    .padding(.bottom, focusedField == nil ? 68 : 0)
                 }
                 .scrollDismissesKeyboard(.interactively)
-            }
-            // 键盘出现时若仍保留 safeAreaInset 创建栏，系统会先把创建栏抬到键盘
-            // 上方，再继续滚动表单保证输入框可见，造成输入框过量上浮。
-            .safeAreaInset(edge: .bottom) {
+
+                // 创建栏作为 ZStack 底部兄弟视图浮在表单上，而非放进 safeAreaInset。
+                // safeAreaInset 会把创建栏并入底部安全区参与系统键盘避让：键盘弹出时
+                // 系统先把创建栏抬到键盘上方，再滚动表单保证输入框可见，两段叠加导致
+                // 输入框过量上浮、底边与键盘顶端留出大空隙。改为浮层后创建栏不再参与
+                // 避让，聚焦时直接隐藏，系统只按键盘高度把输入框滚到键盘上方一次。
                 if focusedField == nil {
                     createBar
                 }

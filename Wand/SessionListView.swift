@@ -497,21 +497,66 @@ private struct SessionDestinationView: View {
         if session.isStructured {
             ChatView(sessionId: session.id, api: api)
         } else {
-            WebSessionView(sessionId: session.id, api: api)
+            PtySessionView(session: session, api: api)
         }
     }
 }
 
-private struct WebSessionView: View {
-    let sessionId: String
+/// PTY 会话的原生外壳：套用与 ChatView 一致的原生导航头（provider 徽章 + 标题 +
+/// cwd），中间嵌入 embed=terminal 的 WebView，只渲染终端黑窗 + 输入栏。
+/// 这样 PTY 会话不再是「直接打开整张网页版」，而是和对话模式同样的原生观感，
+/// 只是内容区换成了那块黑色终端窗口。
+private struct PtySessionView: View {
+    let session: SessionSnapshot
     let api: WandAPI
-    @Environment(\.presentationMode) private var presentationMode
 
     var body: some View {
-        WebContainerView(serverURL: api.baseURL, token: api.token, sessionId: sessionId) {
-            presentationMode.wrappedValue.dismiss()
+        WebContainerView(
+            serverURL: api.baseURL,
+            token: api.token,
+            sessionId: session.id,
+            embedTerminal: true
+        )
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) { providerBadge }
+            ToolbarItem(placement: .principal) { titleStatus }
         }
-            .navigationBarHidden(true)
+    }
+
+    private var providerBadge: some View {
+        let isCodex = session.provider == "codex"
+        let tint: Color = isCodex ? Theme.codex : Theme.brand
+        return ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(tint.opacity(0.13))
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(tint.opacity(0.24), lineWidth: 1)
+            BrandLogoShape(provider: session.provider)
+                .fill(tint)
+                .frame(width: 15, height: 15)
+        }
+        .frame(width: 26, height: 26)
+        .accessibilityLabel(isCodex ? "Codex" : "Claude")
+    }
+
+    private var titleStatus: some View {
+        VStack(spacing: 0) {
+            Text(session.displayTitle)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 190)
+            Text(session.cwd?.isEmpty == false ? session.cwd! : "未设置工作目录")
+                .font(.system(size: 8, design: .monospaced))
+                .foregroundColor(Theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 190)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
