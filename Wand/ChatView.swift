@@ -8,6 +8,14 @@ import UniformTypeIdentifiers
 /// （NavigationView push 页面 + 多行 TextField 组合下系统避让会漏抬、键盘盖住输入栏），
 /// 而是 .ignoresSafeArea(.keyboard) 关掉系统行为，由 KeyboardObserver
 /// 监听键盘 frame 手动抬升，行为确定。
+/// 钉顶占位计算用：收集锚点行在滚动坐标系内的纵向位置。
+private struct ChatPinMetricsKey: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
 struct ChatView: View {
     private let sessionId: String
     private let api: WandAPI
@@ -18,6 +26,13 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var showQuickCommit = false
     @State private var followsLatest = true
+    /// 抽纸式钉顶：发出新消息后，把最新一条用户消息钉到视口顶端，回复在其下方展开，
+    /// 更早历史折进摘要卡。短回复时用底部占位撑出空间，保证用户消息能滚到最顶。
+    /// 视口高度 + 占位高度由 ScrollView 几何测量驱动（见 chatPinMetrics / updatePinSpacer）。
+    @State private var chatViewportHeight: CGFloat = 0
+    @State private var pinSpacerHeight: CGFloat = 0
+    /// 钉顶时用户消息距视口顶端的留白（对齐 web 的 PIN_TOP_OFFSET = 12）。
+    private let chatPinTopInset: CGFloat = 12
     @State private var voicePressed = false
     @State private var voiceCanceling = false
     /// 语音输入模式：轻点话筒进入，整个输入框变成「按住说话」面板。
@@ -140,6 +155,7 @@ struct ChatView: View {
     // MARK: - 消息列表
 
     private var messageList: some View {
+      GeometryReader { outer in
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
@@ -163,17 +179,29 @@ struct ChatView: View {
                         // 整条一次性构建会在主线程同步堆出数百个嵌套视图，打开会话时直接卡死、
                         // 什么都渲染不出来。摊平后 LazyVStack 只实例化进入视口的行。
                         ForEach(Array(groupedMessageItems.enumerated()), id: \.offset) { _, row in
-                            messageItemView(row)
+                            if isPinRow(row) {
+                                messageItemView(row)
+                                    .id("user-pin")
+                                    .background(pinMetric("userTop"))
+                            } else {
+                                messageItemView(row)
+                            }
                         }
                         if store.isResponding {
                             respondingIndicator
                         }
                         Color.clear.frame(height: 1).id("chat-bottom")
+                            .background(pinMetric("bottomY"))
+                        // 钉顶占位：短回复时撑出空间，让最新用户消息能滚到视口顶端；
+                        // 长回复时高度归零。高度由 updatePinSpacer 据几何测量动态算出。
+                        Color.clear.frame(height: pinSpacerHeight)
                     }
                     .padding(.horizontal, 14)
                     .padding(.top, 12)
                     .padding(.bottom, 6)
                 }
+                .coordinateSpace(name: "chatScroll")
+                .onPreferenceChange(ChatPinMetricsKey.self) { updatePinSpacer($0) }
                 .modifier(DismissKeyboardOnDrag())
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
@@ -191,20 +219,52 @@ struct ChatView: View {
                         jumpToLatestButton(proxy)
                     }
                 }
-                .onAppear { pinToBottom(proxy) }
+                .onAppear { pinLatestUserToTop(proxy) }
                 .onReceive(store.$messages.dropFirst()) { _ in
-                    scrollToLatestIfFollowing(proxy)
+                    pinLatestUserToTop(proxy)
                 }
                 .onChange(of: store.isResponding) { _ in
-                    scrollToLatestIfFollowing(proxy)
+                    pinLatestUserToTop(proxy)
                 }
                 .onChange(of: store.loading) { loading in
-                    if !loading { pinToBottom(proxy) }
+                    if !loading { pinLatestUserToTop(proxy) }
                 }
                 .onChange(of: keyboard.lift) { lift in
-                    if lift > 0 && followsLatest { pinToBottom(proxy) }
-            }
+                    if lift > 0 && followsLatest { pinLatestUserToTop(proxy) }
+                }
         }
+        .onAppear { chatViewportHeight = outer.size.height }
+        .onChange(of: outer.size.height) { chatViewportHeight = $0 }
+      }
+    }
+
+    /// 该行是否为「最新一条用户消息」——钉顶锚点所在行。
+    private func isPinRow(_ item: MessageDisplayItem) -> Bool {
+        if case .turn(let index, let turn) = item {
+            return turn.role == "user" && index == lastUserTurnIndex
+        }
+        return false
+    }
+
+    /// 测量行在滚动坐标系内的纵向位置，喂给 ChatPinMetricsKey 计算占位高度。
+    private func pinMetric(_ key: String) -> some View {
+        GeometryReader { g in
+            Color.clear.preference(
+                key: ChatPinMetricsKey.self,
+                value: [key: g.frame(in: .named("chatScroll")).minY]
+            )
+        }
+    }
+
+    /// 据当前轮内容高度算底部占位：视口 - 顶部留白 - 当前轮高度。
+    /// 长回复（高度已够撑满视口）时占位归零，避免尾部留下大片空白。
+    private func updatePinSpacer(_ metrics: [String: CGFloat]) {
+        guard let top = metrics["userTop"], let bottom = metrics["bottomY"],
+              chatViewportHeight > 0 else { return }
+        let currentTurnHeight = max(0, bottom - top)
+        let needed = chatViewportHeight - chatPinTopInset - currentTurnHeight
+        let target = needed > 0 ? needed : 0
+        if abs(target - pinSpacerHeight) > 1 { pinSpacerHeight = target }
     }
 
     @ViewBuilder private func messageItemView(_ item: MessageDisplayItem) -> some View {
@@ -296,7 +356,7 @@ struct ChatView: View {
     private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
         Button {
             followsLatest = true
-            pinToBottom(proxy, animated: true)
+            pinLatestUserToTop(proxy, animated: true)
         } label: {
             Image(systemName: "arrow.down")
                 .font(.system(size: 15, weight: .bold))
@@ -312,32 +372,21 @@ struct ChatView: View {
         .transition(.scale(scale: 0.85).combined(with: .opacity))
     }
 
-    private func scrollToLatestIfFollowing(_ proxy: ScrollViewProxy) {
+    /// 钉顶：把最新一条用户消息滚到视口顶端，回复在其下方展开。
+    /// 流式更新会原地增高回复，首个 scrollTo 可能早于 LazyVStack 完成布局，
+    /// 故按递增延迟补几次；底部占位（pinSpacerHeight）保证短回复也能滚到最顶。
+    private func pinLatestUserToTop(_ proxy: ScrollViewProxy, animated: Bool = false) {
         guard followsLatest else { return }
-        // 流式更新会原地增高最后一条消息，首个 scrollTo 可能早于
-        // LazyVStack 完成新高度布局；补一次短延迟即可稳定贴住底部。
-        for delay in [0.0, 0.08] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard followsLatest else { return }
-                proxy.scrollTo("chat-bottom", anchor: .bottom)
-            }
-        }
-    }
-
-    /// 打开会话时把列表钉到底部。LazyVStack 首帧尚未完成布局，单次 scrollTo
-    /// 常停在半中间——立即滚一次，再按递增延迟补几次，直到布局稳定。
-    private func pinToBottom(_ proxy: ScrollViewProxy, animated: Bool = false) {
+        let scroll = { proxy.scrollTo("user-pin", anchor: .top) }
         if animated {
-            withAnimation(.easeOut(duration: 0.22)) {
-                proxy.scrollTo("chat-bottom", anchor: .bottom)
-            }
+            withAnimation(.easeOut(duration: 0.22)) { scroll() }
         } else {
-            proxy.scrollTo("chat-bottom", anchor: .bottom)
+            scroll()
         }
         for delay in [0.05, 0.15, 0.35, 0.7] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard followsLatest else { return }
-                proxy.scrollTo("chat-bottom", anchor: .bottom)
+                proxy.scrollTo("user-pin", anchor: .top)
             }
         }
     }
