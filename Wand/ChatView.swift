@@ -993,7 +993,9 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.sessionEnded
+        // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
+        // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func sendDraft() {
@@ -1003,8 +1005,8 @@ struct ChatView: View {
         followsLatest = true
         store.send(text: text)
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让 @FocusState 丢焦点、键盘收起，
-        // 用户得再点一次输入框才能继续。非语音模式且会话未结束时主动保持焦点，连续对话不断。
-        if !voiceMode && !store.sessionEnded {
+        // 用户得再点一次输入框才能继续。非语音模式下主动保持焦点，连续对话不断。
+        if !voiceMode {
             inputFocused = true
         }
     }
