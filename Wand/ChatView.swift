@@ -32,6 +32,9 @@ struct ChatView: View {
     @State private var showStopConfirm = false
     /// 排队消息气泡条是否展开成列表（默认折叠成「已排队 N 条」徽章）。
     @State private var queueBarExpanded = false
+    /// 历史折叠：记录当前被展开的那条历史摘要卡对应的边界（= 最后一条用户消息的下标）。
+    /// 发新消息后边界前移，nil != 新边界 → 历史默认重新折叠。
+    @State private var expandedHistoryBoundary: Int?
     /// 应用前后台感知：回前台做连接健康检查 + 拉最新快照，避免半死连接苦等 40s 看门狗。
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var inputFocused: Bool
@@ -249,11 +252,45 @@ struct ChatView: View {
                     && lastTurnIndex == store.messages.count - 1
                     && tools.contains { $0.result == nil }
             )
+        case .historySummary(let stats, let boundary):
+            HistorySummaryCard(
+                stats: stats,
+                expanded: expandedHistoryBoundary == boundary,
+                onToggle: {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        expandedHistoryBoundary = (expandedHistoryBoundary == boundary) ? nil : boundary
+                    }
+                }
+            )
         }
     }
 
+    /// 最后一条用户消息的下标；没有则 -1。
+    private var lastUserTurnIndex: Int {
+        for i in stride(from: store.messages.count - 1, through: 0, by: -1) where store.messages[i].role == "user" {
+            return i
+        }
+        return -1
+    }
+
     private var groupedMessageItems: [MessageDisplayItem] {
-        flattenAssistantTurns(groupExplorationTurns(store.messages))
+        let base = flattenAssistantTurns(groupExplorationTurns(store.messages))
+        let boundary = lastUserTurnIndex
+        // 至少要折叠一整轮（≥2 条历史 turn）才出摘要卡。
+        guard boundary >= 2 else { return base }
+        var history: [MessageDisplayItem] = []
+        var current: [MessageDisplayItem] = []
+        for item in base {
+            if itemTurnIndex(item) < boundary { history.append(item) } else { current.append(item) }
+        }
+        guard !history.isEmpty else { return base }
+        let expanded = expandedHistoryBoundary == boundary
+        let stats = computeHistoryStats(turns: store.messages, boundary: boundary)
+        var result: [MessageDisplayItem] = []
+        if expanded { result.append(contentsOf: history) }
+        result.append(.historySummary(stats: stats, boundary: boundary))
+        result.append(contentsOf: current)
+        return result
     }
 
     private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
@@ -1171,6 +1208,58 @@ private enum MessageDisplayItem {
     /// 摊平后的单个 assistant 内容块（见 flattenAssistantTurns / AssistantItemView）。
     case assistantItem(turnIndex: Int, item: DisplayItem)
     case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
+    /// 历史折叠摘要卡：折叠"最后一条用户消息"之前的全部历史，boundary = 该用户消息下标。
+    case historySummary(stats: HistoryStats, boundary: Int)
+}
+
+/// 被折叠历史区间的统计：轮次 / 工具调用 / 子代理 / 失败。
+struct HistoryStats {
+    let rounds: Int
+    let tools: Int
+    let agents: Int
+    let errors: Int
+}
+
+/// 取出一个 MessageDisplayItem 归属的 turn 下标，用于按历史边界分区。
+private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
+    switch item {
+    case .turn(let i, _): return i
+    case .assistantItem(let i, _): return i
+    case .explorationGroup(_, let i): return i
+    case .historySummary(_, let b): return b
+    }
+}
+
+/// 统计被折叠历史区间（turns[0..<boundary]）里的轮次 / 工具 / 子代理 / 失败数量。
+func computeHistoryStats(turns: [ConversationTurn], boundary: Int) -> HistoryStats {
+    var rounds = 0, tools = 0, errors = 0
+    var agentIds = Set<String>()
+    let upper = min(boundary, turns.count)
+    guard upper > 0 else { return HistoryStats(rounds: 0, tools: 0, agents: 0, errors: 0) }
+    for idx in 0..<upper {
+        let turn = turns[idx]
+        if turn.role == "user" { rounds += 1 }
+        for block in turn.content {
+            switch block {
+            case .toolUse(let id, let name, _, let input, let subagent):
+                tools += 1
+                if let tid = subagent?.taskId, !tid.isEmpty {
+                    agentIds.insert(tid)
+                } else if name == "Task" || name == "Agent"
+                    || (input["subagent_type"]?.stringValue?.isEmpty == false) {
+                    if !id.isEmpty { agentIds.insert(id) }
+                }
+            case .toolResult(_, _, let isError, _, let subagent):
+                if isError { errors += 1 }
+                if let tid = subagent?.taskId, !tid.isEmpty { agentIds.insert(tid) }
+            case .text(_, let subagent), .thinking(_, let subagent):
+                if let tid = subagent?.taskId, !tid.isEmpty { agentIds.insert(tid) }
+            case .unknown:
+                break
+            }
+        }
+    }
+    return HistoryStats(rounds: rounds, tools: tools, agents: agentIds.count, errors: errors)
 }
 
 private struct ExplorationToolItem {
@@ -2356,6 +2445,61 @@ private struct PermissionCard: View {
 
     private var target: String? {
         escalation?.target ?? legacy?.target
+    }
+}
+
+// MARK: - 历史折叠摘要卡
+
+/// 发新消息后，把"最后一条用户消息"之前的历史折叠成这张分隔卡。展开时它上方出现
+/// 完整历史，收起时只剩当前这一轮。点一下切换。对齐 Web / Android 同款行为。
+private struct HistorySummaryCard: View {
+    let stats: HistoryStats
+    let expanded: Bool
+    let onToggle: () -> Void
+
+    private var metaText: String {
+        var parts: [String] = ["\(stats.rounds) 轮对话"]
+        if stats.tools > 0 { parts.append("\(stats.tools) 次工具调用") }
+        if stats.agents > 0 { parts.append("\(stats.agents) 个子代理") }
+        if stats.errors > 0 { parts.append("\(stats.errors) 个失败") }
+        return parts.joined(separator: " · ")
+    }
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 10) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(expanded ? "收起历史对话" : "展开历史对话")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                    Text(metaText)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Theme.border.opacity(0.7), lineWidth: 1)
+        )
+        .frame(maxWidth: .infinity)
     }
 }
 
