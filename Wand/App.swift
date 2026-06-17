@@ -12,7 +12,25 @@ struct WandApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .onOpenURL { url in
+                    handleAppURL(url)
+                }
         }
+    }
+
+    private func handleAppURL(_ url: URL) {
+        guard url.scheme == "wand" else { return }
+        let sessionId: String?
+        if url.host == "session" {
+            sessionId = url.pathComponents.dropFirst().first
+        } else {
+            sessionId = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .first { $0.name == "sessionId" || $0.name == "session" }?
+                .value
+        }
+        guard let sessionId, !sessionId.isEmpty else { return }
+        QuickActionCoordinator.shared.enqueue(.openSession(id: sessionId))
     }
 }
 
