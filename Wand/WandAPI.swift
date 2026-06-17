@@ -446,6 +446,10 @@ final class WandAPI {
         try await request(ServerConfigInfo.self, method: "GET", path: "/api/config")
     }
 
+    func installServerUpdate() async throws {
+        _ = try await requestData(method: "POST", path: "/api/update", body: [:], timeout: 180)
+    }
+
     func updateNewSessionDefaults(mode: String? = nil, model: String? = nil, thinkingEffort: String? = nil) async throws {
         var body: [String: Any] = [:]
         if let mode { body["defaultMode"] = mode }

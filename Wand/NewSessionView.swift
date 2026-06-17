@@ -49,9 +49,9 @@ struct NewSessionView: View {
 
     private static let thinkingLevels = [
         (id: "off", label: "关闭"),
-        (id: "standard", label: "标准"),
-        (id: "deep", label: "深入"),
-        (id: "max", label: "最大"),
+        (id: "standard", label: "低"),
+        (id: "deep", label: "中"),
+        (id: "max", label: "高"),
     ]
 
     private var providerModels: [ModelInfo] {

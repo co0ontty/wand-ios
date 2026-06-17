@@ -502,6 +502,11 @@ struct WsIncoming: Decodable {
 }
 
 struct WsData: Decodable {
+    // —— system notification ——
+    let kind: String?
+    let current: String?
+    let latest: String?
+    let error: String?
     // —— 快照公共字段（init / status / ended）——
     let id: String?
     let sessionKind: String?
@@ -602,6 +607,28 @@ struct ServerConfigInfo: Decodable {
     let defaultModel: String?
     let defaultThinkingEffort: String?
     let currentVersion: String?
+    let latestVersion: String?
+    let updateAvailable: Bool?
+    let updateChannel: String?
+}
+
+/// 服务端自身 npm 包更新状态。iOS App 不能自更新，但可以提示并触发服务端更新。
+struct ServerUpdateInfo: Equatable {
+    var current: String
+    var latest: String
+    var channel: String?
+
+    var normalizedLatest: String {
+        latest.hasPrefix("v") ? String(latest.dropFirst()) : latest
+    }
+
+    var displayCurrent: String {
+        current.hasPrefix("v") ? current : "v\(current)"
+    }
+
+    var displayLatest: String {
+        latest.hasPrefix("v") ? latest : "v\(latest)"
+    }
 }
 
 // MARK: - Git 快速提交

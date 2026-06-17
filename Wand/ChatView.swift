@@ -448,13 +448,13 @@ struct ChatView: View {
                     value: Self.thinkingLabel(store.thinkingEffort),
                     icon: "brain"
                 ) {
-                    ForEach(Self.thinkingLevels, id: \.id) { level in
+                    ForEach(Self.thinkingLevels) { level in
                         Button {
                             store.setThinkingEffort(level.id)
                         } label: {
                             store.thinkingEffort == level.id
-                                ? Label(level.label, systemImage: "checkmark")
-                                : Label(level.label, systemImage: "circle")
+                                ? Label(level.menuLabel, systemImage: "checkmark")
+                                : Label(level.menuLabel, systemImage: "circle")
                         }
                     }
                 }
@@ -523,15 +523,26 @@ struct ChatView: View {
         }
     }
 
+    private struct ThinkingLevel: Identifiable {
+        let id: String
+        let label: String
+        let shortLabel: String
+        let menuLabel: String
+    }
+
     private static let thinkingLevels = [
-        (id: "off", label: "off"),
-        (id: "standard", label: "think"),
-        (id: "deep", label: "think hard"),
-        (id: "max", label: "ultrathink"),
+        ThinkingLevel(id: "off", label: "关闭", shortLabel: "关", menuLabel: "关闭"),
+        ThinkingLevel(id: "standard", label: "低", shortLabel: "低", menuLabel: "低（think）"),
+        ThinkingLevel(id: "deep", label: "中", shortLabel: "中", menuLabel: "中（think hard）"),
+        ThinkingLevel(id: "max", label: "高", shortLabel: "高", menuLabel: "高（ultrathink）"),
     ]
 
     private static func thinkingLabel(_ id: String) -> String {
-        thinkingLevels.first { $0.id == id }?.label ?? "off"
+        thinkingLevels.first { $0.id == id }?.label ?? "关闭"
+    }
+
+    private static func thinkingShortLabel(_ id: String) -> String {
+        thinkingLevels.first { $0.id == id }?.shortLabel ?? "关"
     }
 
     /// 顶栏左侧 provider 小徽标：品牌色弱底圆角方块 + 品牌 logo，标明当前 Claude / Codex。
@@ -652,6 +663,10 @@ struct ChatView: View {
             HStack(alignment: .bottom, spacing: 8) {
                 if !inputExpanded {
                     composerActionsMenu
+                    if store.isStructured {
+                        modeChip(compact: true)
+                        modelThinkingChip(compact: true)
+                    }
                 }
                 composerInputContent
                 if !inputExpanded {
@@ -707,11 +722,11 @@ struct ChatView: View {
         HStack(spacing: 8) {
             composerActionsMenu
             if store.isStructured {
-                modeChip
+                modeChip()
             }
             Spacer(minLength: 4)
             if store.isStructured {
-                modelThinkingChip
+                modelThinkingChip()
             }
             micButton
             trailingButtons
@@ -787,7 +802,7 @@ struct ChatView: View {
         (store.mode == "full-access" || store.mode == "managed") ? .orange : Theme.textSecondary
     }
 
-    private var modeChip: some View {
+    private func modeChip(compact: Bool = false) -> some View {
         let isCodex = store.snapshot?.provider == "codex"
         return Menu {
             ForEach(Self.sessionModes, id: \.id) { option in
@@ -803,13 +818,19 @@ struct ChatView: View {
                 .disabled(isCodex && option.id != "full-access")
             }
         } label: {
-            chipLabel(icon: "lock.shield", text: Self.modeLabel(store.mode), tint: modeTint)
+            chipLabel(
+                icon: "lock.shield",
+                text: Self.modeLabel(store.mode),
+                tint: modeTint,
+                showsText: !compact,
+                maxTextWidth: compact ? 0 : 140
+            )
         }
         .disabled(isCodex)
         .accessibilityLabel("执行模式")
     }
 
-    private var modelThinkingChip: some View {
+    private func modelThinkingChip(compact: Bool = false) -> some View {
         Menu {
             Section("模型") {
                 modelButton(id: nil, label: "默认")
@@ -818,55 +839,88 @@ struct ChatView: View {
                 }
             }
             Section("思考深度") {
-                ForEach(Self.thinkingLevels, id: \.id) { level in
+                ForEach(Self.thinkingLevels) { level in
                     Button {
                         store.setThinkingEffort(level.id)
                     } label: {
                         if store.thinkingEffort == level.id {
-                            Label(level.label, systemImage: "checkmark")
+                            Label(level.menuLabel, systemImage: "checkmark")
                         } else {
-                            Text(level.label)
+                            Text(level.menuLabel)
                         }
                     }
                 }
             }
         } label: {
-            chipLabel(icon: "cpu", text: modelThinkingText, tint: Theme.brand)
+            chipLabel(
+                icon: "cpu",
+                text: modelThinkingText,
+                tint: thinkingTint,
+                maxTextWidth: compact ? 94 : 140
+            )
         }
         .accessibilityLabel("模型与思考深度")
     }
 
     private var modelThinkingText: String {
         let model = shortModelLabel
-        guard store.thinkingEffort != "off" else { return model }
-        return "\(model) · \(Self.thinkingLabel(store.thinkingEffort))"
+        return "\(model) · \(Self.thinkingShortLabel(store.thinkingEffort))"
+    }
+
+    private var thinkingTint: Color {
+        switch store.thinkingEffort {
+        case "standard": return .green
+        case "deep": return .orange
+        case "max": return Theme.danger
+        default: return Theme.brand
+        }
     }
 
     /// 控制行徽标用的精简模型名：去掉「opus（最新 Opus）」这类括号补充（全角/半角都吃），只留主名。
     private var shortModelLabel: String {
         let full = launchModelLabel
+        if full == "跟随服务端默认" || full == "默认" { return "默认" }
         if let idx = full.firstIndex(where: { $0 == "（" || $0 == "(" }) {
-            return String(full[..<idx]).trimmingCharacters(in: .whitespaces)
+            return abbreviatedModelLabel(String(full[..<idx]).trimmingCharacters(in: .whitespaces))
         }
-        return full
+        return abbreviatedModelLabel(full)
+    }
+
+    private func abbreviatedModelLabel(_ value: String) -> String {
+        let clean = value.split(separator: "/").last.map(String.init) ?? value
+        let lower = clean.lowercased()
+        if lower.contains("opus") { return "Opus" }
+        if lower.contains("sonnet") { return "Sonnet" }
+        if lower.contains("haiku") { return "Haiku" }
+        if lower.contains("gpt-5") { return "GPT-5" }
+        if lower.contains("gpt-4") { return "GPT-4" }
+        return clean.count > 12 ? String(clean.prefix(10)) + "…" : clean
     }
 
     /// 控制行通用胶囊徽标：图标 + 文字 + 弱色底。
-    private func chipLabel(icon: String, text: String, tint: Color) -> some View {
+    private func chipLabel(
+        icon: String,
+        text: String,
+        tint: Color,
+        showsText: Bool = true,
+        maxTextWidth: CGFloat = 140
+    ) -> some View {
         HStack(spacing: 4) {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .semibold))
-            Text(text)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: 140)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .semibold))
-                .opacity(0.6)
+            if showsText {
+                Text(text)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: maxTextWidth)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .opacity(0.6)
+            }
         }
         .foregroundColor(tint)
-        .padding(.horizontal, 9)
+        .padding(.horizontal, showsText ? 9 : 8)
         .padding(.vertical, 6)
         .background(Capsule().fill(tint.opacity(0.10)))
         .overlay(Capsule().stroke(tint.opacity(0.22), lineWidth: 1))

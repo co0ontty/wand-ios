@@ -11,6 +11,12 @@ struct NativeRootView: View {
     @State private var phase: Phase = .authenticating
     @State private var showWebFallback = false
     @State private var showSettings = false
+    @State private var serverUpdate: ServerUpdateInfo?
+    @State private var dismissedUpdateVersion: String?
+    @State private var updateBannerMessage: String?
+    @State private var updateError: String?
+    @State private var installingUpdate = false
+    @State private var systemSocket: WandSocket?
     @ObservedObject private var quickActions = QuickActionCoordinator.shared
 
     private enum Phase: Equatable {
@@ -60,7 +66,16 @@ struct NativeRootView: View {
                     .padding(32)
                     .navigationTitle("Wand")
                 case .ready:
-                    SessionListView(api: api)
+                    VStack(spacing: 0) {
+                        if shouldShowUpdateBanner {
+                            updateBanner
+                                .padding(.horizontal, 16)
+                                .padding(.top, 8)
+                                .padding(.bottom, 6)
+                                .background(Theme.background)
+                        }
+                        SessionListView(api: api)
+                    }
                         .toolbar {
                             ToolbarItem(placement: .navigationBarLeading) {
                                 Menu {
@@ -113,14 +128,116 @@ struct NativeRootView: View {
             .environmentObject(store)
         }
         .onAppear { authenticate() }
+        .onDisappear {
+            systemSocket?.close()
+            systemSocket = nil
+        }
         // 「打开网页版」快捷操作归本视图消费；登录完成前先挂起，ready 后再接。
         .onReceive(quickActions.$pending) { _ in
             handleQuickAction()
         }
-        .onChange(of: phase) { _ in
+        .onChange(of: phase) { _, _ in
             handleQuickAction()
         }
         .task { await monitorSessionStatus() }
+    }
+
+    private var shouldShowUpdateBanner: Bool {
+        guard let info = serverUpdate else { return false }
+        return dismissedUpdateVersion != info.normalizedLatest
+    }
+
+    private var updateBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: installingUpdate ? "arrow.triangle.2.circlepath" : "arrow.up")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Theme.brand)
+                    )
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(installingUpdate ? "正在更新服务端" : "发现新版本")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                    Text(updateError ?? updateBannerMessage ?? "点击下方按钮一键更新")
+                        .font(.system(size: 12))
+                        .foregroundColor(updateError == nil ? Theme.textSecondary : Theme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    if let latest = serverUpdate?.normalizedLatest {
+                        dismissedUpdateVersion = latest
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                        .frame(width: 28, height: 28)
+                }
+                .disabled(installingUpdate)
+            }
+            if let info = serverUpdate {
+                HStack(spacing: 10) {
+                    versionPill(info.displayCurrent, filled: false)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                    versionPill(info.displayLatest, filled: true)
+                    Spacer(minLength: 0)
+                    Button {
+                        installUpdate()
+                    } label: {
+                        HStack(spacing: 6) {
+                            if installingUpdate {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(.white)
+                            }
+                            Text(installingUpdate ? "更新中" : "立即更新")
+                        }
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(installingUpdate ? Theme.brand.opacity(0.65) : Theme.brand)
+                        )
+                    }
+                    .disabled(installingUpdate)
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.surface)
+                .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        )
+    }
+
+    private func versionPill(_ text: String, filled: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            .foregroundColor(filled ? Theme.brand : Theme.textSecondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(filled ? Theme.brand.opacity(0.12) : Theme.border.opacity(0.45))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(filled ? Theme.brand.opacity(0.55) : Color.clear, lineWidth: 1)
+            )
     }
 
     private func handleQuickAction() {
@@ -139,6 +256,8 @@ struct NativeRootView: View {
                 do {
                     _ = try await api.listSessions()
                     phase = .ready
+                    startSystemSocket()
+                    await refreshServerUpdateInfo()
                 } catch {
                     phase = .failed("无法访问服务器：\(error.localizedDescription)\n如果服务器设有密码，请用「连接码」重新连接。")
                 }
@@ -150,6 +269,8 @@ struct NativeRootView: View {
                 switch result {
                 case .success:
                     phase = .ready
+                    startSystemSocket()
+                    Task { await refreshServerUpdateInfo() }
                 case .failure(let err):
                     phase = .failed(err.userMessage)
                 }
@@ -168,6 +289,71 @@ struct NativeRootView: View {
                 }
             }
             try? await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+
+    private func refreshServerUpdateInfo() async {
+        guard let config = try? await api.serverConfig(),
+              config.updateAvailable == true,
+              let latest = config.latestVersion,
+              !latest.isEmpty else { return }
+        serverUpdate = ServerUpdateInfo(
+            current: config.currentVersion ?? "?",
+            latest: latest,
+            channel: config.updateChannel
+        )
+    }
+
+    private func startSystemSocket() {
+        guard systemSocket == nil else { return }
+        let socket = WandSocket(baseURL: serverURL)
+        socket.onEvent = { incoming in
+            guard incoming.type == "notification", let data = incoming.data else { return }
+            handleSystemNotification(data)
+        }
+        socket.connect()
+        systemSocket = socket
+    }
+
+    private func handleSystemNotification(_ data: WsData) {
+        switch data.kind {
+        case "update":
+            guard let current = data.current, let latest = data.latest else { return }
+            serverUpdate = ServerUpdateInfo(current: current, latest: latest, channel: nil)
+            updateBannerMessage = "点击下方按钮一键更新"
+            updateError = nil
+        case "auto-update-start":
+            installingUpdate = true
+            if let current = data.current, let latest = data.latest {
+                serverUpdate = ServerUpdateInfo(current: current, latest: latest, channel: nil)
+            }
+            updateBannerMessage = "服务端正在下载并安装新版"
+            updateError = nil
+        case "auto-update-restart", "restart":
+            installingUpdate = false
+            updateBannerMessage = "更新完成，服务端正在重启"
+            updateError = nil
+        case "auto-update-failed":
+            installingUpdate = false
+            updateError = data.error ?? "更新失败，请到网页版设置中查看详情"
+        default:
+            break
+        }
+    }
+
+    private func installUpdate() {
+        guard !installingUpdate else { return }
+        installingUpdate = true
+        updateError = nil
+        updateBannerMessage = "服务端正在下载并安装新版"
+        Task {
+            do {
+                try await api.installServerUpdate()
+                updateBannerMessage = "更新命令已发送，服务端即将重启"
+            } catch {
+                updateError = error.localizedDescription
+            }
+            installingUpdate = false
         }
     }
 }
