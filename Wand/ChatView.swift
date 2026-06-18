@@ -50,6 +50,8 @@ struct ChatView: View {
     /// 历史折叠：记录当前被展开的那条历史摘要卡对应的边界（= 最后一条用户消息的下标）。
     /// 发新消息后边界前移，nil != 新边界 → 历史默认重新折叠。
     @State private var expandedHistoryBoundary: Int?
+    /// 当前最新 assistant 回复的尾部折叠：默认只露最近输出，点摘要行临时展开完整回复。
+    @State private var expandedCurrentReplyTurns = Set<Int>()
     /// 应用前后台感知：回前台做连接健康检查 + 拉最新快照，避免半死连接苦等 40s 看门狗。
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var inputFocused: Bool
@@ -283,6 +285,7 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
+                    expandedCurrentReplyTurns.removeAll()
                     followsLatest = true
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
@@ -301,10 +304,22 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
+                    expandedCurrentReplyTurns.removeAll()
                     followsLatest = true
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
+        case .currentReplySummary(let turnIndex, let summary, let expanded):
+            CurrentReplySummaryCard(summary: summary, expanded: expanded) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if expandedCurrentReplyTurns.contains(turnIndex) {
+                        expandedCurrentReplyTurns.remove(turnIndex)
+                        followsLatest = true
+                    } else {
+                        expandedCurrentReplyTurns.insert(turnIndex)
+                    }
+                }
+            }
         case .explorationGroup(let tools, let lastTurnIndex):
             ExplorationGroupCard(
                 tools: tools,
@@ -334,7 +349,12 @@ struct ChatView: View {
     }
 
     private var groupedMessageItems: [MessageDisplayItem] {
-        let base = flattenAssistantTurns(groupExplorationTurns(store.messages))
+        let currentReplyIndex = latestAssistantTurnIndex
+        let base = flattenAssistantTurns(
+            groupExplorationTurns(store.messages),
+            currentReplyIndex: currentReplyIndex,
+            expandedCurrentReplyTurns: expandedCurrentReplyTurns
+        )
         let boundary = lastUserTurnIndex
         // 至少要折叠一整轮（≥2 条历史 turn）才出摘要卡。
         guard boundary >= 2 else { return base }
@@ -353,8 +373,17 @@ struct ChatView: View {
         return result
     }
 
+    /// 当前轮 assistant 回复的下标；只折叠最后一条、且必须位于最后用户消息之后。
+    private var latestAssistantTurnIndex: Int? {
+        guard let last = store.messages.indices.last,
+              store.messages[last].role == "assistant",
+              last > lastUserTurnIndex else { return nil }
+        return last
+    }
+
     private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
         Button {
+            expandedCurrentReplyTurns.removeAll()
             followsLatest = true
             pinLatestUserToTop(proxy, animated: true)
         } label: {
@@ -1056,6 +1085,7 @@ struct ChatView: View {
         guard canSend else { return }
         let text = draft
         draft = ""
+        expandedCurrentReplyTurns.removeAll()
         followsLatest = true
         store.send(text: text)
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让 @FocusState 丢焦点、键盘收起，
@@ -1312,6 +1342,8 @@ private enum MessageDisplayItem {
     case turn(index: Int, ConversationTurn)
     /// 摊平后的单个 assistant 内容块（见 flattenAssistantTurns / AssistantItemView）。
     case assistantItem(turnIndex: Int, item: DisplayItem)
+    /// 当前最新回复的尾部折叠摘要行，点按可展开完整回复。
+    case currentReplySummary(turnIndex: Int, summary: String, expanded: Bool)
     case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
     /// 历史折叠摘要卡：折叠"最后一条用户消息"之前的全部历史，boundary = 该用户消息下标。
     case historySummary(stats: HistoryStats, boundary: Int)
@@ -1330,6 +1362,7 @@ private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
     switch item {
     case .turn(let i, _): return i
     case .assistantItem(let i, _): return i
+    case .currentReplySummary(let i, _, _): return i
     case .explorationGroup(_, let i): return i
     case .historySummary(_, let b): return b
     }
@@ -1408,11 +1441,21 @@ private func groupExplorationTurns(_ turns: [ConversationTurn]) -> [MessageDispl
 /// 历史问题：一条 assistant turn 可携带上百个 text/工具/diff 块，整条作为单行
 /// 由 LazyVStack 渲染时单行高度过大，滚到底部后视口落在空白区、该懒加载行迟迟不绘制
 /// （表现为打开会话白屏，主线程并不忙、CPU 为 0）；摊平成多行后按行懒加载即可。
-private func flattenAssistantTurns(_ items: [MessageDisplayItem]) -> [MessageDisplayItem] {
+private func flattenAssistantTurns(
+    _ items: [MessageDisplayItem],
+    currentReplyIndex: Int? = nil,
+    expandedCurrentReplyTurns: Set<Int> = []
+) -> [MessageDisplayItem] {
     var out: [MessageDisplayItem] = []
     for item in items {
         if case .turn(let index, let turn) = item, turn.role == "assistant" {
-            for displayItem in pairToolBlocks(turn.content) {
+            let fold = index == currentReplyIndex ? foldCurrentReplyTail(turn.content) : CurrentReplyFold(blocks: turn.content, summary: "")
+            let expanded = expandedCurrentReplyTurns.contains(index)
+            if !fold.summary.isEmpty {
+                out.append(.currentReplySummary(turnIndex: index, summary: fold.summary, expanded: expanded))
+            }
+            let visibleContent = expanded ? turn.content : fold.blocks
+            for displayItem in pairToolBlocks(visibleContent) {
                 out.append(.assistantItem(turnIndex: index, item: displayItem))
             }
         } else {
@@ -1550,6 +1593,108 @@ private func isReadImageTool(name: String, input: [String: JSONValue]) -> Bool {
 /// 探索分组判定：是探索工具，且不是 Read 读图（后者要单独显示缩略图）。
 private func isGroupableExplorationTool(name: String, input: [String: JSONValue]) -> Bool {
     isExplorationTool(name) && !isReadImageTool(name: name, input: input)
+}
+
+private let currentReplyTailUnits = 8
+
+private struct CurrentReplyFold {
+    let blocks: [ContentBlock]
+    let summary: String
+}
+
+private struct ReplyFoldUnit {
+    let blockIndex: Int
+    let text: String?
+}
+
+/// 当前最新回复的抽纸折叠：用户消息留在上方，助手正文只保留尾部。
+/// 旧段落折进摘要行，避免「回到最新」仍落在第 01 段。
+private func foldCurrentReplyTail(_ content: [ContentBlock]) -> CurrentReplyFold {
+    if content.contains(where: { block in
+        if case .toolUse(_, let name, _, _, _) = block { return name == "AskUserQuestion" }
+        return false
+    }) {
+        return CurrentReplyFold(blocks: content, summary: "")
+    }
+
+    var units: [ReplyFoldUnit] = []
+    for (blockIndex, block) in content.enumerated() {
+        switch block {
+        case .text(let text, _):
+            units.append(contentsOf: splitReplyTextUnits(text).map { ReplyFoldUnit(blockIndex: blockIndex, text: $0) })
+        case .thinking, .toolUse, .toolResult:
+            units.append(ReplyFoldUnit(blockIndex: blockIndex, text: nil))
+        case .unknown:
+            break
+        }
+    }
+
+    guard units.count > currentReplyTailUnits else {
+        return CurrentReplyFold(blocks: content, summary: "")
+    }
+
+    let keepStart = units.count - currentReplyTailUnits
+    var keepByBlock: [Int: [String]] = [:]
+    var keepWholeBlocks = Set<Int>()
+    for unit in units[keepStart...] {
+        if let text = unit.text {
+            keepByBlock[unit.blockIndex, default: []].append(text)
+        } else {
+            keepWholeBlocks.insert(unit.blockIndex)
+        }
+    }
+
+    var visible: [ContentBlock] = []
+    for (blockIndex, block) in content.enumerated() {
+        switch block {
+        case .text(_, let subagent):
+            let keptText = (keepByBlock[blockIndex] ?? []).joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !keptText.isEmpty {
+                visible.append(.text(text: keptText, subagent: subagent))
+            }
+        case .thinking, .toolUse, .toolResult:
+            if keepWholeBlocks.contains(blockIndex) { visible.append(block) }
+        case .unknown:
+            break
+        }
+    }
+
+    let hidden = keepStart
+    let latest = units.reversed().compactMap { unit -> String? in
+        guard let text = unit.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        let collapsed = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        return collapsed.count > 48 ? String(collapsed.prefix(45)) + "..." : collapsed
+    }.first ?? ""
+    let summary = latest.isEmpty ? "已收起 \(hidden) 条" : "已收起 \(hidden) 条 · 最新：\(latest)"
+    return CurrentReplyFold(blocks: visible.isEmpty ? Array(content.suffix(1)) : visible, summary: summary)
+}
+
+private func splitReplyTextUnits(_ text: String) -> [String] {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return [] }
+
+    var paragraphs: [String] = []
+    var current: [String] = []
+    for line in trimmed.components(separatedBy: .newlines) {
+        if line.trimmingCharacters(in: .whitespaces).isEmpty {
+            if !current.isEmpty {
+                paragraphs.append(current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines))
+                current.removeAll(keepingCapacity: true)
+            }
+        } else {
+            current.append(line)
+        }
+    }
+    if !current.isEmpty {
+        paragraphs.append(current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    if paragraphs.count > 1 { return paragraphs }
+
+    let lines = trimmed
+        .components(separatedBy: .newlines)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    return lines.isEmpty ? [trimmed] : lines
 }
 
 private struct TurnView: View {
@@ -2550,6 +2695,51 @@ private struct PermissionCard: View {
 
     private var target: String? {
         escalation?.target ?? legacy?.target
+    }
+}
+
+// MARK: - 当前回复尾部折叠摘要
+
+private struct CurrentReplySummaryCard: View {
+    let summary: String
+    let expanded: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 8) {
+                Image(systemName: expanded ? "text.alignleft" : "arrow.down.to.line")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Theme.brand)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Theme.brand.opacity(0.10)))
+                Text(expanded ? "正在显示完整回复" : summary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                Text(expanded ? "收起" : "查看全部")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.brand)
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Theme.brand)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Theme.brand.opacity(0.06))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Theme.brand.opacity(0.22), lineWidth: 1)
+        )
+        .accessibilityLabel(expanded ? "收起完整回复，回到最新输出" : "展开完整回复，\(summary)")
     }
 }
 
