@@ -1,6 +1,44 @@
 import SwiftUI
 import UIKit
 
+enum WandAppearanceMode: String, CaseIterable, Identifiable {
+    case light
+    case dark
+    case system
+
+    static let storageKey = "wand.appearanceMode"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .light: return "明亮"
+        case .dark: return "黑暗"
+        case .system: return "跟随系统"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .light: return "sun.max.fill"
+        case .dark: return "moon.fill"
+        case .system: return "circle.lefthalf.filled"
+        }
+    }
+
+    var interfaceStyle: UIUserInterfaceStyle {
+        switch self {
+        case .light: return .light
+        case .dark: return .dark
+        case .system: return .unspecified
+        }
+    }
+
+    static func resolved(from rawValue: String) -> WandAppearanceMode {
+        WandAppearanceMode(rawValue: rawValue) ?? .system
+    }
+}
+
 /// Claude 品牌配色与复用样式。颜色随系统明暗自适应。对称 macOS 的 Theme.swift，
 /// 把 NSColor 换成 UIColor、外观判断换成 UITraitCollection。
 /// 品牌主色取 Anthropic Claude 的珊瑚橙（#D97757），背景用暖米白（#FAF9F5）。
@@ -41,6 +79,10 @@ enum Theme {
 }
 
 extension View {
+    func wandPreferredAppearance() -> some View {
+        modifier(WandPreferredAppearanceModifier())
+    }
+
     /// 点击空白区域收起键盘。挂在滚动容器 / 背景层上：
     /// 输入框、按钮等可交互控件优先消费点击，不会被误伤；
     /// 与 scrollDismissesKeyboard 互补（滚动收起 + 点击收起）。
@@ -49,6 +91,28 @@ extension View {
             UIApplication.shared.sendAction(
                 #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil
             )
+        }
+    }
+}
+
+private struct WandPreferredAppearanceModifier: ViewModifier {
+    @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { applyAppearanceOverride() }
+            .onChange(of: appearanceModeRaw) { _, _ in applyAppearanceOverride() }
+    }
+
+    private func applyAppearanceOverride() {
+        let style = WandAppearanceMode.resolved(from: appearanceModeRaw).interfaceStyle
+        DispatchQueue.main.async {
+            for scene in UIApplication.shared.connectedScenes {
+                guard let windowScene = scene as? UIWindowScene else { continue }
+                for window in windowScene.windows {
+                    window.overrideUserInterfaceStyle = style
+                }
+            }
         }
     }
 }

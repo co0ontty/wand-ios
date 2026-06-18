@@ -1,5 +1,45 @@
 import SwiftUI
 
+struct GitChangesToolbarButton: View {
+    let status: GitStatusResult?
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                Text("~\(counts.modified)")
+                Text("-\(counts.deleted)")
+                    .foregroundColor(Theme.danger)
+                Text("+\(counts.added)")
+                    .foregroundColor(.green)
+            }
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .foregroundColor(Theme.textSecondary)
+            .frame(minWidth: 44, minHeight: 32)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel(
+            "Git 修改 \(counts.modified)，删除 \(counts.deleted)，新增 \(counts.added)"
+        )
+    }
+
+    private var counts: (modified: Int, deleted: Int, added: Int) {
+        var counts = (modified: 0, deleted: 0, added: 0)
+        for file in status?.files ?? [] {
+            let fileStatus = file.status.uppercased()
+            if fileStatus.contains("?") || fileStatus.contains("A") {
+                counts.added += 1
+            } else if fileStatus.contains("D") {
+                counts.deleted += 1
+            } else {
+                counts.modified += 1
+            }
+        }
+        return counts
+    }
+}
+
 /// 快速提交面板：交互对齐 Web 端 quick-commit 的「磁吸 dock」。
 /// Commit / Tag / Push（+ 可选 Sub）四颗气泡散落在力场里，抓任意一颗拖动，
 /// 途经其他气泡会被磁吸进队伍；丢进右侧发射区执行组合动作（commit 永远隐含），

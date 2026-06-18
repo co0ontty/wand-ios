@@ -96,7 +96,9 @@ struct ChatView: View {
             }
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .navigationBarTrailing) {
-                gitChangesButton
+                GitChangesToolbarButton(status: gitStatus) {
+                    showQuickCommit = true
+                }
             }
         }
         .safeAreaInset(edge: .bottom) { bottomBar }
@@ -105,6 +107,8 @@ struct ChatView: View {
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showQuickCommit) {
             GitQuickCommitView(sessionId: sessionId, api: api)
+                .presentationDetents([.height(620), .large])
+                .presentationDragIndicator(.visible)
         }
         .fileImporter(
             isPresented: $showFileImporter,
@@ -953,41 +957,6 @@ struct ChatView: View {
         .padding(.vertical, 6)
         .background(Capsule().fill(tint.opacity(0.10)))
         .overlay(Capsule().stroke(tint.opacity(0.22), lineWidth: 1))
-    }
-
-    private var gitChangesButton: some View {
-        Button {
-            showQuickCommit = true
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.triangle.branch")
-                Text("~\(gitChangeCounts.modified)")
-                Text("-\(gitChangeCounts.deleted)")
-                    .foregroundColor(Theme.danger)
-                Text("+\(gitChangeCounts.added)")
-                    .foregroundColor(.green)
-            }
-            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-            .foregroundColor(Theme.textSecondary)
-        }
-        .accessibilityLabel(
-            "Git 修改 \(gitChangeCounts.modified)，删除 \(gitChangeCounts.deleted)，新增 \(gitChangeCounts.added)"
-        )
-    }
-
-    private var gitChangeCounts: (modified: Int, deleted: Int, added: Int) {
-        var counts = (modified: 0, deleted: 0, added: 0)
-        for file in gitStatus?.files ?? [] {
-            let status = file.status.uppercased()
-            if status.contains("?") || status.contains("A") {
-                counts.added += 1
-            } else if status.contains("D") {
-                counts.deleted += 1
-            } else {
-                counts.modified += 1
-            }
-        }
-        return counts
     }
 
     private func refreshGitStatus() {

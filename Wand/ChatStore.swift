@@ -346,14 +346,16 @@ final class ChatStore: ObservableObject {
 
     // MARK: - 用户动作
 
-    /// 发送一条消息。PTY 会话走 chat 视图语义（结尾补换行），结构化会话直接发文本。
-    func send(text: String) {
+    /// 发送一条消息。PTY 会话走 chat 视图语义：文本和 Enter 分两次发，
+    /// 对齐 Web 端 getTerminalSubmitChunks，避免回车被并入粘贴内容。
+    func send(text: String, forcePtyChat: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let queueing = isStructured && isResponding && status == "running"
+        let structured = forcePtyChat ? false : isStructured
+        let queueing = structured && isResponding && status == "running"
         let previousMessages = messages
         let previousQueue = queuedMessages
-        if isStructured {
+        if structured {
             if queueing {
                 queuedMessages.append(trimmed)
                 toast = "已加入排队，等当前回复完成会自动发送。"
@@ -371,17 +373,17 @@ final class ChatStore: ObservableObject {
             queuedCount: queuedMessages.count
         )
         liveActivityStarted = true
-        liveActivitySawResponding = isStructured
+        liveActivitySawResponding = structured
         Task {
             do {
-                if isStructured {
+                if structured {
                     try await api.sendInput(id: sessionId, input: trimmed)
                 } else {
-                    try await api.sendInput(id: sessionId, input: trimmed + "\n", view: "chat")
+                    try await sendPtyChatInput(trimmed)
                 }
             } catch {
                 toast = error.localizedDescription
-                if isStructured {
+                if structured {
                     if queueing { queuedMessages = previousQueue }
                     else {
                         messages = previousMessages
@@ -393,6 +395,12 @@ final class ChatStore: ObservableObject {
                 liveActivitySawResponding = false
             }
         }
+    }
+
+    private func sendPtyChatInput(_ text: String) async throws {
+        try await api.sendInput(id: sessionId, input: text, view: "chat")
+        try await Task.sleep(nanoseconds: 30_000_000)
+        try await api.sendInput(id: sessionId, input: "\r", view: "chat", shortcutKey: "enter_text")
     }
 
     func setModel(_ model: String?) {
@@ -485,10 +493,10 @@ final class ChatStore: ObservableObject {
     }
 
     /// 停止当前回复：结构化会话调 stop（杀掉当前回合），PTY 发 Esc 中断。
-    func stopResponding() {
+    func stopResponding(forcePtyChat: Bool = false) {
         Task {
             do {
-                if isStructured {
+                if !forcePtyChat && isStructured {
                     try await api.stopSession(id: sessionId)
                     isResponding = false
                 } else {

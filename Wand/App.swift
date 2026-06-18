@@ -12,6 +12,7 @@ struct WandApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .wandPreferredAppearance()
                 .onOpenURL { url in
                     handleAppURL(url)
                 }

@@ -503,25 +503,229 @@ private struct SessionDestinationView: View {
 }
 
 /// PTY 会话的原生外壳：套用与 ChatView 一致的原生导航头（provider 徽章 + 标题 +
-/// cwd），中间嵌入 embed=terminal 的 WebView，只渲染终端黑窗 + 输入栏。
+/// cwd），中间嵌入 embed=terminal 的 WebView 只渲染终端黑窗，底部输入栏走原生组件。
 /// 这样 PTY 会话不再是「直接打开整张网页版」，而是和对话模式同样的原生观感，
 /// 只是内容区换成了那块黑色终端窗口。
 private struct PtySessionView: View {
     let session: SessionSnapshot
     let api: WandAPI
 
+    @StateObject private var store: ChatStore
+    @StateObject private var keyboard = KeyboardObserver()
+    @State private var draft = ""
+    @State private var showStopConfirm = false
+    @State private var showQuickCommit = false
+    @State private var gitStatus: GitStatusResult?
+    @FocusState private var inputFocused: Bool
+
+    init(session: SessionSnapshot, api: WandAPI) {
+        self.session = session
+        self.api = api
+        _store = StateObject(wrappedValue: ChatStore(sessionId: session.id, api: api))
+    }
+
     var body: some View {
-        WebContainerView(
-            serverURL: api.baseURL,
-            token: api.token,
-            sessionId: session.id,
-            embedTerminal: true
-        )
+        ZStack {
+            Theme.background.ignoresSafeArea()
+            VStack(spacing: 0) {
+                WebContainerView(
+                    serverURL: api.baseURL,
+                    token: api.token,
+                    sessionId: session.id,
+                    embedTerminal: true,
+                    embedNativeInput: true
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                bottomBar
+            }
+        }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) { providerBadge }
             ToolbarItem(placement: .principal) { titleStatus }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                GitChangesToolbarButton(status: gitStatus) {
+                    showQuickCommit = true
+                }
+            }
+        }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .sheet(isPresented: $showQuickCommit) {
+            GitQuickCommitView(sessionId: session.id, api: api)
+                .presentationDetents([.height(620), .large])
+                .presentationDragIndicator(.visible)
+        }
+        .onAppear {
+            store.start()
+            refreshGitStatus()
+        }
+        .onChange(of: showQuickCommit) { showing in
+            if !showing { refreshGitStatus() }
+        }
+        .onDisappear { store.shutdown() }
+        .overlay(alignment: .top) { connectionBanner }
+        .overlay(alignment: .top) { toastView }
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: 0) {
+            inputBar
+        }
+        .padding(.bottom, keyboard.lift)
+        .background(
+            Theme.background
+                .opacity(0.97)
+                .ignoresSafeArea(edges: .bottom)
+        )
+        .animation(.easeOut(duration: 0.2), value: keyboard.lift)
+    }
+
+    private var inputExpanded: Bool {
+        inputFocused || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var inputBar: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            if !inputExpanded {
+                Image(systemName: "terminal")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Theme.textSecondary.opacity(0.10)))
+            }
+            TextField("发消息…", text: $draft, axis: .vertical)
+                .lineLimit(1...5)
+                .font(.system(size: 16))
+                .foregroundColor(Theme.textPrimary)
+                .tint(Theme.brand)
+                .focused($inputFocused)
+                .padding(.leading, inputExpanded ? 6 : 2)
+                .padding(.trailing, 4)
+                .padding(.vertical, 4)
+                .frame(minHeight: 32)
+            trailingButtons
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(inputFocused ? Theme.brand : Theme.border, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.05), radius: 7, y: 2)
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
+        .animation(.easeInOut(duration: 0.18), value: inputExpanded)
+        .confirmationDialog(
+            "确定要停止当前正在运行的任务吗？",
+            isPresented: $showStopConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("停止", role: .destructive) { store.stopResponding(forcePtyChat: true) }
+            Button("取消", role: .cancel) {}
+        }
+    }
+
+    @ViewBuilder private var trailingButtons: some View {
+        if store.isResponding && !canSend {
+            stopButtonPrimary
+        } else {
+            if store.isResponding {
+                stopButtonSecondary
+            }
+            sendButton
+        }
+    }
+
+    private var stopButtonPrimary: some View {
+        Button { showStopConfirm = true } label: {
+            Image(systemName: "stop.fill")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.black)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(Color.white))
+                .overlay(Circle().stroke(Theme.border, lineWidth: 0.5))
+        }
+        .accessibilityLabel("停止任务")
+    }
+
+    private var stopButtonSecondary: some View {
+        Button { showStopConfirm = true } label: {
+            Image(systemName: "stop.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(Theme.danger))
+        }
+        .accessibilityLabel("停止任务")
+    }
+
+    private var sendButton: some View {
+        Button(action: sendDraft) {
+            Image(systemName: "arrow.up")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(canSend ? Theme.brand : Theme.brand.opacity(0.4)))
+        }
+        .disabled(!canSend)
+        .accessibilityLabel("发送")
+    }
+
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func sendDraft() {
+        guard canSend else { return }
+        let text = draft
+        draft = ""
+        store.send(text: text, forcePtyChat: true)
+        inputFocused = true
+    }
+
+    private func refreshGitStatus() {
+        Task {
+            gitStatus = try? await api.gitStatus(sessionId: session.id)
+        }
+    }
+
+    @ViewBuilder private var connectionBanner: some View {
+        if !store.connected {
+            HStack(spacing: 6) {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("连接已断开，正在重连…")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .foregroundColor(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background(Theme.danger)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    @ViewBuilder private var toastView: some View {
+        if let toast = store.toast {
+            Text(toast)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Capsule().fill(Color.black.opacity(0.78)))
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .onAppear {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) {
+                        if store.toast == toast { store.toast = nil }
+                    }
+                }
         }
     }
 

@@ -30,10 +30,12 @@ struct WebContainerView: View {
     let serverURL: URL
     let token: String?
     var sessionId: String? = nil
-    /// 嵌入终端模式：URL 带 ?embed=terminal，网页只渲染终端黑窗 + 输入栏。
+    /// 嵌入终端模式：URL 带 ?embed=terminal，网页只渲染终端黑窗。
     /// 用于把 PTY 会话套进原生导航头（见 PtySessionView）。此模式下不显示
     /// 壳自带的顶部返回栏与加载覆盖层逃生按钮——返回交给原生导航条。
     var embedTerminal: Bool = false
+    /// PTY 原生输入栏模式：URL 额外带 ?nativeInput=1，网页隐藏自己的 input-panel。
+    var embedNativeInput: Bool = false
     /// 「返回原生界面」回调（网页版兜底入口传入）；触发途径：网页侧边栏的
     /// 「返回App」按钮 → backToNative 消息，或加载中/出错覆盖层上的逃生按钮。
     var onRequestClose: (() -> Void)? = nil
@@ -49,9 +51,13 @@ struct WebContainerView: View {
         return serverURL.absoluteString
     }
 
+    private var containerBackground: Color {
+        embedTerminal ? Color(red: 0.090, green: 0.071, blue: 0.059) : Theme.background
+    }
+
     var body: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
+            containerBackground.ignoresSafeArea()
             webContent
             overlay
             escapeButton
@@ -62,9 +68,20 @@ struct WebContainerView: View {
     @ViewBuilder private var webContent: some View {
         if embedTerminal {
             // 嵌入终端：原生导航条已消费顶部安全区，WebView 贴在头部下沿，
-            // 只向底部 home indicator 延伸（输入栏自己消费 --input-safe-bottom）。
-            WebViewRepresentable(serverURL: serverURL, token: token, sessionId: sessionId, embedTerminal: true, model: model)
-                .ignoresSafeArea(.container, edges: .bottom)
+            // nativeInput 模式下底部由原生输入栏占位；旧模式仍向 home indicator 延伸。
+            let webView = WebViewRepresentable(
+                serverURL: serverURL,
+                token: token,
+                sessionId: sessionId,
+                embedTerminal: true,
+                embedNativeInput: embedNativeInput,
+                model: model
+            )
+            if embedNativeInput {
+                webView
+            } else {
+                webView.ignoresSafeArea(.container, edges: .bottom)
+            }
         } else if model.needsLegacyChrome, let onRequestClose {
             // 旧版网页：保留壳自带的顶部返回栏（网页里没有返回按钮）。
             VStack(spacing: 0) {
@@ -277,7 +294,9 @@ struct WebViewRepresentable: UIViewRepresentable {
     let token: String?
     let sessionId: String?
     var embedTerminal: Bool = false
+    var embedNativeInput: Bool = false
     let model: WebViewModel
+    @Environment(\.colorScheme) private var colorScheme
 
     func makeCoordinator() -> WebBridge {
         WebBridge(model: model)
@@ -331,10 +350,8 @@ struct WebViewRepresentable: UIViewRepresentable {
         webView.scrollView.bounces = false
         // 去掉键盘上方系统自带的「∧ ∨ 完成」工具栏。
         webView.wandHideKeyboardAccessoryBar()
-        webView.backgroundColor = Theme.uiBackground
-        webView.scrollView.backgroundColor = Theme.uiBackground
         webView.isOpaque = false
-        webView.underPageBackgroundColor = Theme.uiBackground
+        applyAppearance(to: webView)
 
         // UA 标记：让前端识别这是 iOS 原生壳
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
@@ -377,7 +394,21 @@ struct WebViewRepresentable: UIViewRepresentable {
         return webView
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        applyAppearance(to: uiView)
+    }
+
+    private func applyAppearance(to webView: WKWebView) {
+        let webBackground = embedTerminal
+            ? UIColor(red: 0.090, green: 0.071, blue: 0.059, alpha: 1)
+            : Theme.uiBackground
+        webView.overrideUserInterfaceStyle = embedTerminal
+            ? .dark
+            : (colorScheme == .dark ? .dark : .light)
+        webView.backgroundColor = webBackground
+        webView.scrollView.backgroundColor = webBackground
+        webView.underPageBackgroundColor = webBackground
+    }
 
     private func sessionURL() -> URL {
         guard let sessionId, !sessionId.isEmpty,
@@ -385,10 +416,13 @@ struct WebViewRepresentable: UIViewRepresentable {
             return serverURL
         }
         var items = components.queryItems ?? []
-        items.removeAll { $0.name == "session" || $0.name == "embed" }
+        items.removeAll { $0.name == "session" || $0.name == "embed" || $0.name == "nativeInput" }
         items.append(URLQueryItem(name: "session", value: sessionId))
         if embedTerminal {
             items.append(URLQueryItem(name: "embed", value: "terminal"))
+            if embedNativeInput {
+                items.append(URLQueryItem(name: "nativeInput", value: "1"))
+            }
         }
         components.queryItems = items
         return components.url ?? serverURL

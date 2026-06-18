@@ -22,6 +22,7 @@ struct ContentView: View {
         .sheet(isPresented: $showSwitchSheet) {
             ConnectView(isPresentedAsSheet: true) { showSwitchSheet = false }
                 .environmentObject(store)
+                .wandPreferredAppearance()
         }
         .onReceive(NotificationCenter.default.publisher(for: .wandRequestSwitchServer)) { _ in
             showSwitchSheet = true

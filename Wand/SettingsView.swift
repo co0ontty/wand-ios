@@ -13,6 +13,7 @@ struct SettingsView: View {
 
     @EnvironmentObject private var store: ServerStore
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
 
     @State private var serverVersion: String?
     @State private var confirmDisconnect = false
@@ -26,6 +27,7 @@ struct SettingsView: View {
         NavigationView {
             Form {
                 serverSection
+                appearanceSection
                 featureSection
                 diagnosticsSection
                 moreSection
@@ -36,12 +38,13 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("完成") { dismiss() }
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(Theme.brand)
+                        .fontWeight(.semibold)
                 }
             }
         }
         .navigationViewStyle(.stack)
+        .tint(Theme.brand)
+        .wandPreferredAppearance()
         .task {
             serverVersion = (try? await api.serverConfig())?.currentVersion
             await refreshNotificationStatus()
@@ -88,9 +91,39 @@ struct SettingsView: View {
             } label: {
                 Label("断开连接", systemImage: "xmark.circle")
                     .font(.system(size: 15))
-                    .foregroundColor(Theme.danger)
             }
         }
+    }
+
+    private var appearanceSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Label("主题", systemImage: currentAppearance.icon)
+                        .font(.system(size: 15))
+                    Spacer()
+                    Text(currentAppearance.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Picker("主题", selection: $appearanceModeRaw) {
+                    ForEach(WandAppearanceMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            .padding(.vertical, 6)
+        } header: {
+            Text("外观")
+        } footer: {
+            Text("选择明亮、黑暗，或跟随 iOS 系统外观。")
+        }
+    }
+
+    private var currentAppearance: WandAppearanceMode {
+        WandAppearanceMode.resolved(from: appearanceModeRaw)
     }
 
     private var featureSection: some View {
@@ -210,16 +243,16 @@ struct SettingsView: View {
     }
 
     private func infoRow(_ label: String, _ value: String, mono: Bool = false) -> some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .font(.system(size: 14))
-                .foregroundColor(Theme.textSecondary)
-            Spacer()
+        LabeledContent {
             Text(value)
                 .font(.system(size: 13, design: mono ? .monospaced : .default))
-                .foregroundColor(Theme.textPrimary)
+                .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+        } label: {
+            Text(label)
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
         }
     }
 }
