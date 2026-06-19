@@ -4,7 +4,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// 原生聊天视图：结构化消息渲染 + 原生输入栏 + 权限审批卡片。
-/// 输入栏放在 safeAreaInset(edge: .bottom)；键盘避让不走系统自动机制
+/// 输入栏放在底部 overlay；键盘避让不走系统自动机制
 /// （NavigationView push 页面 + 多行 TextField 组合下系统避让会漏抬、键盘盖住输入栏），
 /// 而是 .ignoresSafeArea(.keyboard) 关掉系统行为，由 KeyboardObserver
 /// 监听键盘 frame 手动抬升，行为确定。
@@ -13,6 +13,13 @@ private struct ChatPinMetricsKey: PreferenceKey {
     static var defaultValue: [String: CGFloat] = [:]
     static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
         value.merge(nextValue()) { _, new in new }
+    }
+}
+
+private struct ChatBottomBarHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -52,6 +59,9 @@ struct ChatView: View {
     @State private var expandedHistoryBoundary: Int?
     /// 当前最新 assistant 回复的尾部折叠：默认只露最近输出，点摘要行临时展开完整回复。
     @State private var expandedCurrentReplyTurns = Set<Int>()
+    /// 底部 overlay 的实际占位高度。ChatView 不使用 safeAreaInset 放输入栏，
+    /// 避免 SwiftUI 键盘避让和 KeyboardObserver 手动抬升叠加。
+    @State private var bottomBarHeight: CGFloat = 0
     /// 应用前后台感知：回前台做连接健康检查 + 拉最新快照，避免半死连接苦等 40s 看门狗。
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var inputFocused: Bool
@@ -63,24 +73,19 @@ struct ChatView: View {
     }
 
     var body: some View {
-        ZStack {
-            Theme.background.ignoresSafeArea()
-            if store.loading {
-                ProgressView().tint(Theme.brand)
-            } else if let error = store.loadError {
-                VStack(spacing: 12) {
-                    Text("加载失败").font(.headline).foregroundColor(Theme.textPrimary)
-                    Text(error).font(.footnote).foregroundColor(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(32)
-            } else if store.isStructured && store.messages.isEmpty && !store.isResponding {
-                sessionLaunchPanel
-            } else {
-                messageList
+        GeometryReader { root in
+            ZStack(alignment: .bottom) {
+                Theme.background.ignoresSafeArea()
+
+                mainContent
+                    .padding(.bottom, bottomBarHeight)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                bottomBarOverlay(safeBottom: root.safeAreaInsets.bottom)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // 点消息区任意空白处收起键盘；输入栏在 safeAreaInset 里不受影响，
+        // 点消息区任意空白处收起键盘；输入栏作为底部 overlay 不受影响，
         // 点发送 / 权限按钮不会误收。
         .dismissKeyboardOnTap()
         .navigationTitle("")
@@ -101,7 +106,6 @@ struct ChatView: View {
                 }
             }
         }
-        .safeAreaInset(edge: .bottom) { bottomBar }
         // 关掉系统键盘避让，统一交给 KeyboardObserver 手动抬升（见 bottomBar），
         // 避免「系统抬一次 + 手动抬一次」叠加或两边都不抬的不确定行为。
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -138,6 +142,23 @@ struct ChatView: View {
         .overlay(alignment: .top) { connectionBanner }
         .animation(.easeInOut(duration: 0.2), value: store.connected)
         .overlay(alignment: .top) { toastView }
+    }
+
+    @ViewBuilder private var mainContent: some View {
+        if store.loading {
+            ProgressView().tint(Theme.brand)
+        } else if let error = store.loadError {
+            VStack(spacing: 12) {
+                Text("加载失败").font(.headline).foregroundColor(Theme.textPrimary)
+                Text(error).font(.footnote).foregroundColor(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(32)
+        } else if store.isStructured && store.messages.isEmpty && !store.isResponding {
+            sessionLaunchPanel
+        } else {
+            messageList
+        }
     }
 
     // MARK: - 断线提示条
@@ -638,6 +659,30 @@ struct ChatView: View {
         return completed == todos.count ? [] : todos
     }
 
+    private func bottomBarOverlay(safeBottom: CGFloat) -> some View {
+        bottomBar
+            .padding(.bottom, safeBottom)
+            .background(
+                Theme.background
+                    .opacity(0.97)
+                    .ignoresSafeArea(edges: .bottom)
+            )
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: ChatBottomBarHeightKey.self,
+                        value: proxy.size.height
+                    )
+                }
+            )
+            .onPreferenceChange(ChatBottomBarHeightKey.self) { height in
+                if abs(height - bottomBarHeight) > 0.5 {
+                    bottomBarHeight = height
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: keyboard.lift)
+    }
+
     private var bottomBar: some View {
         VStack(spacing: 0) {
             if voicePressed || speech.isRecording {
@@ -677,11 +722,6 @@ struct ChatView: View {
         }
         // 手动键盘避让：观察器只返回键盘在底部安全区上方的高度。
         .padding(.bottom, keyboard.lift)
-        .background(
-            Theme.background
-                .opacity(0.97)
-                .ignoresSafeArea(edges: .bottom)
-        )
         .animation(.easeInOut(duration: 0.2), value: store.pendingEscalation)
     }
 
