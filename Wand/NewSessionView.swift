@@ -185,8 +185,8 @@ struct NewSessionView: View {
                                     NewSessionPreferences.setModel("", for: provider)
                                 } label: {
                                     selectedModel.isEmpty
-                                        ? Label("默认", systemImage: "checkmark")
-                                        : Label("默认", systemImage: "circle")
+                                        ? Label("默认 · \(defaultModelLabel)", systemImage: "checkmark")
+                                        : Label("默认 · \(defaultModelLabel)", systemImage: "circle")
                                 }
                                 ForEach(providerModels.filter { $0.id != "default" }) { model in
                                     Button {
@@ -318,8 +318,12 @@ struct NewSessionView: View {
     }
 
     private var selectedModelLabel: String {
-        guard !selectedModel.isEmpty, selectedModel != "default" else { return "默认" }
+        guard !selectedModel.isEmpty, selectedModel != "default" else { return defaultModelLabel }
         return providerModels.first(where: { $0.id == selectedModel })?.label ?? "默认"
+    }
+
+    private var defaultModelLabel: String {
+        providerModels.first(where: { $0.id == "default" })?.label ?? "默认"
     }
 
     private var thinkingLabel: String {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 会话列表：原生渲染 /api/sessions，下拉刷新 + 周期轮询，
 /// 对话模式进入原生聊天，PTY 模式进入嵌套网页版对应会话。
@@ -502,6 +503,70 @@ private struct SessionDestinationView: View {
     }
 }
 
+struct NativeComposerShell<CollapsedLeading: View, InputContent: View, CollapsedTrailing: View, ExpandedControls: View>: View {
+    let expanded: Bool
+    let focused: Bool
+    let onFocusInput: () -> Void
+    @ViewBuilder let collapsedLeading: () -> CollapsedLeading
+    @ViewBuilder let inputContent: () -> InputContent
+    @ViewBuilder let collapsedTrailing: () -> CollapsedTrailing
+    @ViewBuilder let expandedControls: () -> ExpandedControls
+
+    var body: some View {
+        let cornerRadius: CGFloat = expanded ? 28 : 24
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        return VStack(alignment: .leading, spacing: expanded ? 10 : 0) {
+            HStack(alignment: expanded ? .bottom : .center, spacing: 8) {
+                if !expanded {
+                    collapsedLeading()
+                }
+                inputContent()
+                if !expanded {
+                    collapsedTrailing()
+                }
+            }
+            if expanded {
+                expandedControls()
+            }
+        }
+        .padding(.horizontal, expanded ? 10 : 9)
+        .padding(.vertical, expanded ? 9 : 4)
+        .background(.ultraThinMaterial, in: shape)
+        .background {
+            shape
+                .fill(Theme.surface.opacity(expanded ? 0.58 : 0.48))
+        }
+        .overlay {
+            shape
+                .stroke(Theme.border.opacity(expanded ? 0.42 : 0.32), lineWidth: 0.8)
+        }
+        .overlay(alignment: .top) {
+            shape
+                .stroke(Color.white.opacity(expanded ? 0.36 : 0.28), lineWidth: 0.7)
+                .blendMode(.screen)
+        }
+        .overlay {
+            if focused {
+                shape
+                    .stroke(Theme.brand.opacity(0.28), lineWidth: 1)
+            }
+        }
+        .contentShape(shape)
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                onFocusInput()
+            }
+        )
+        .compositingGroup()
+        .shadow(color: Color.black.opacity(expanded ? 0.14 : 0.08), radius: expanded ? 22 : 12, x: 0, y: expanded ? 10 : 4)
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+        .padding(.bottom, 6)
+        .animation(.easeInOut(duration: 0.18), value: expanded)
+    }
+}
+
 /// PTY 会话的原生外壳：套用与 ChatView 一致的原生导航头（provider 徽章 + 标题 +
 /// cwd），中间嵌入 embed=terminal 的 WebView 只渲染终端黑窗，底部输入栏走原生组件。
 /// 这样 PTY 会话不再是「直接打开整张网页版」，而是和对话模式同样的原生观感，
@@ -512,9 +577,18 @@ private struct PtySessionView: View {
 
     @StateObject private var store: ChatStore
     @StateObject private var keyboard = KeyboardObserver()
+    @StateObject private var speech = SpeechRecognizerService()
     @State private var draft = ""
     @State private var showStopConfirm = false
     @State private var showQuickCommit = false
+    @State private var showFileImporter = false
+    @State private var showPhotoPicker = false
+    @State private var uploadingAttachments = false
+    @State private var pendingAttachments: [UploadedFile] = []
+    @State private var voicePressed = false
+    @State private var voiceCanceling = false
+    @State private var voiceMode = false
+    @State private var voiceHoldWork: DispatchWorkItem?
     @State private var gitStatus: GitStatusResult?
     @FocusState private var inputFocused: Bool
 
@@ -558,6 +632,18 @@ private struct PtySessionView: View {
                 .presentationDetents([.height(620), .large])
                 .presentationDragIndicator(.visible)
         }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true,
+            onCompletion: handlePickedAttachments
+        )
+        .sheet(isPresented: $showPhotoPicker) {
+            PhotoLibraryPicker { result in
+                showPhotoPicker = false
+                handlePickedPhotos(result)
+            }
+        }
         .onAppear {
             store.start()
             refreshGitStatus()
@@ -572,6 +658,11 @@ private struct PtySessionView: View {
 
     private func bottomBar(safeBottom: CGFloat) -> some View {
         VStack(spacing: 0) {
+            if voicePressed {
+                voiceBubble
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 6)
+            }
             inputBar
         }
         .padding(.bottom, safeBottom + keyboard.lift)
@@ -584,55 +675,133 @@ private struct PtySessionView: View {
     }
 
     private var inputExpanded: Bool {
-        inputFocused || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        inputFocused || voiceMode || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
     }
 
     private var inputBar: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            if !inputExpanded {
-                Image(systemName: "terminal")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(Theme.textSecondary.opacity(0.10)))
+        NativeComposerShell(
+            expanded: inputExpanded,
+            focused: inputFocused,
+            onFocusInput: {
+                if !voiceMode { inputFocused = true }
+            },
+            collapsedLeading: { composerActionsMenu },
+            inputContent: { ptyTextField },
+            collapsedTrailing: {
+                micButton
+                trailingButtons
+            },
+            expandedControls: {
+                HStack(spacing: 8) {
+                    composerActionsMenu
+                    terminalChip
+                    Spacer(minLength: 0)
+                    micButton
+                    trailingButtons
+                }
             }
-            TextField("发消息…", text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .font(.system(size: 16))
-                .foregroundColor(Theme.textPrimary)
-                .tint(Theme.brand)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .focused($inputFocused)
-                .padding(.leading, inputExpanded ? 6 : 2)
-                .padding(.trailing, 4)
-                .padding(.vertical, 4)
-                .frame(minHeight: 32)
-            trailingButtons
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Theme.surface)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(inputFocused ? Theme.brand : Theme.border, lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.05), radius: 7, y: 2)
-        .padding(.horizontal, 12)
-        .padding(.top, 4)
-        .padding(.bottom, 8)
-        .animation(.easeInOut(duration: 0.18), value: inputExpanded)
         .confirmationDialog(
             "确定要停止当前正在运行的任务吗？",
             isPresented: $showStopConfirm,
             titleVisibility: .visible
         ) {
-            Button("停止", role: .destructive) { store.stopResponding(forcePtyChat: true) }
+            Button("停止", role: .destructive) { stopPtyInput() }
             Button("取消", role: .cancel) {}
         }
+    }
+
+    private var composerActionsMenu: some View {
+        Menu {
+            Button {
+                showPhotoPicker = true
+            } label: {
+                Label("从相册选择", systemImage: "photo.on.rectangle")
+            }
+            .disabled(uploadingAttachments)
+
+            Button {
+                showFileImporter = true
+            } label: {
+                Label("从文件选择", systemImage: "paperclip")
+            }
+            .disabled(uploadingAttachments)
+        } label: {
+            if uploadingAttachments {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(Theme.textSecondary)
+                    .frame(width: 34, height: 34)
+            } else {
+                Image(systemName: "plus")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("更多操作")
+    }
+
+    private var terminalGlyph: some View {
+        Image(systemName: "terminal")
+            .font(.system(size: 16, weight: .medium))
+            .foregroundColor(Theme.textSecondary)
+            .frame(width: 34, height: 34)
+            .contentShape(Rectangle())
+    }
+
+    private var ptyTextField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !pendingAttachments.isEmpty && !voiceMode {
+                PendingAttachmentsPreview(
+                    baseURL: api.baseURL,
+                    attachments: pendingAttachments,
+                    onRemove: { file in
+                        pendingAttachments.removeAll { $0.savedPath == file.savedPath }
+                    }
+                )
+            }
+            if voiceMode {
+                voiceHoldField
+            } else {
+                TextField("输入到终端…", text: $draft, axis: .vertical)
+                    .lineLimit(1...5)
+                    .font(.system(size: 16))
+                    .foregroundColor(Theme.textPrimary)
+                    .tint(Theme.brand)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($inputFocused)
+                    .padding(.leading, inputExpanded ? 6 : 2)
+                    .padding(.trailing, inputExpanded ? 4 : 0)
+                    .padding(.vertical, inputExpanded ? 4 : 2)
+                    .frame(minHeight: inputExpanded ? 32 : 34)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(
+                        TapGesture().onEnded {
+                            inputFocused = true
+                        }
+                    )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var terminalChip: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "terminal")
+                .font(.system(size: 11, weight: .semibold))
+            Text("终端")
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundColor(Theme.textSecondary)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(Theme.textSecondary.opacity(0.10)))
+        .overlay(Capsule().stroke(Theme.textSecondary.opacity(0.22), lineWidth: 1))
     }
 
     @ViewBuilder private var trailingButtons: some View {
@@ -650,10 +819,10 @@ private struct PtySessionView: View {
         Button { showStopConfirm = true } label: {
             Image(systemName: "stop.fill")
                 .font(.system(size: 14, weight: .bold))
-                .foregroundColor(.black)
+                .foregroundColor(Theme.surface)
                 .frame(width: 38, height: 38)
-                .background(Circle().fill(Color.white))
-                .overlay(Circle().stroke(Theme.border, lineWidth: 0.5))
+                .background(Circle().fill(Theme.textPrimary))
+                .overlay(Circle().stroke(Theme.border.opacity(0.25), lineWidth: 0.5))
         }
         .accessibilityLabel("停止任务")
     }
@@ -673,29 +842,279 @@ private struct PtySessionView: View {
         Button(action: sendDraft) {
             Image(systemName: "arrow.up")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(canSend ? Theme.surface : Theme.textSecondary.opacity(0.55))
                 .frame(width: 38, height: 38)
-                .background(Circle().fill(canSend ? Theme.brand : Theme.brand.opacity(0.4)))
+                .background(
+                    Circle().fill(canSend ? Theme.textPrimary : Theme.textSecondary.opacity(0.16))
+                )
         }
         .disabled(!canSend)
         .accessibilityLabel("发送")
     }
 
+    private var micButton: some View {
+        Image(systemName: micButtonSymbol)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(voicePressed ? .white : Theme.brand)
+            .frame(width: 32, height: 32)
+            .background(
+                Circle().fill(
+                    voicePressed
+                        ? (voiceCanceling ? Theme.danger : Theme.brand)
+                        : Theme.brand.opacity(0.12)
+                )
+            )
+            .scaleEffect(voicePressed ? 1.1 : 1)
+            .animation(.easeInOut(duration: 0.15), value: voicePressed)
+            .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
+            .gesture(voiceTapOrHoldGesture(onTap: {
+                voiceMode.toggle()
+                if voiceMode {
+                    inputFocused = false
+                    speech.prewarm()
+                } else {
+                    DispatchQueue.main.async { inputFocused = true }
+                }
+            }))
+            .accessibilityLabel(voiceMode ? "切回键盘输入" : "轻点切语音模式，长按说话")
+    }
+
+    private var micButtonSymbol: String {
+        if speech.isRecording { return "waveform" }
+        return voiceMode && !voicePressed ? "keyboard" : "mic"
+    }
+
+    private var voiceHoldField: some View {
+        HStack {
+            if voicePressed || draft.isEmpty {
+                Spacer(minLength: 0)
+            }
+            Group {
+                if voicePressed {
+                    Text(voiceCanceling ? "松开手指，取消输入" : "松开结束 · 上滑取消")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
+                } else if draft.isEmpty {
+                    Text("按住说话")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Theme.textSecondary)
+                } else {
+                    Text(draft)
+                        .font(.system(size: 16))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
+        .frame(minHeight: 32)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(
+                    voicePressed
+                        ? (voiceCanceling ? Theme.danger.opacity(0.14) : Theme.brand.opacity(0.12))
+                        : Color.clear
+                )
+        )
+        .animation(.easeInOut(duration: 0.15), value: voicePressed)
+        .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
+        .contentShape(Rectangle())
+        .gesture(voiceTapOrHoldGesture(onTap: {
+            voiceMode = false
+            DispatchQueue.main.async { inputFocused = true }
+        }))
+        .accessibilityLabel("按住说话，轻点切回键盘输入")
+    }
+
+    private var voiceBubble: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: voiceCanceling ? "xmark.circle.fill" : "waveform.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(voiceCanceling ? "松开取消" : (speech.transcript.isEmpty ? "正在聆听…" : speech.transcript))
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(voiceCanceling ? Theme.danger : Theme.textPrimary)
+                        .lineLimit(3)
+                    Text(speech.usingOnDevice ? "端侧识别" : "语音识别")
+                        .font(.system(size: 11))
+                        .foregroundColor(Theme.textSecondary)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.surface.opacity(0.94))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke((voiceCanceling ? Theme.danger : Theme.brand).opacity(0.22), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.08), radius: 10, x: 0, y: 4)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
     }
 
     private func sendDraft() {
         guard canSend else { return }
-        let text = draft
+        let text = buildAttachmentPrompt(pendingAttachments, body: draft)
+        let restoreDraft = draft
+        let restoreAttachments = pendingAttachments
         draft = ""
-        store.send(text: text, forcePtyChat: true)
-        inputFocused = true
+        pendingAttachments.removeAll()
+        sendPtyInput(text, restoreDraft: restoreDraft, restoreAttachments: restoreAttachments)
+        if !voiceMode {
+            inputFocused = true
+        }
+    }
+
+    private func sendPtyInput(_ text: String, restoreDraft: String, restoreAttachments: [UploadedFile]) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task {
+            await MainActor.run {
+                SessionLiveActivityController.shared.start(
+                    sessionId: session.id,
+                    title: session.displayTitle,
+                    provider: session.provider,
+                    taskTitle: store.currentTaskTitle
+                )
+            }
+            do {
+                try await api.sendInput(id: session.id, input: trimmed, view: "terminal")
+                try await Task.sleep(nanoseconds: 30_000_000)
+                try await api.sendInput(id: session.id, input: "\r", view: "terminal", shortcutKey: "enter_text")
+            } catch {
+                await MainActor.run {
+                    if draft.isEmpty { draft = restoreDraft }
+                    if pendingAttachments.isEmpty { pendingAttachments = restoreAttachments }
+                    store.toast = error.localizedDescription
+                    SessionLiveActivityController.shared.end(sessionId: session.id, immediately: true)
+                }
+            }
+        }
+    }
+
+    private func stopPtyInput() {
+        Task {
+            do {
+                try await api.sendInput(id: session.id, input: "\u{1B}", view: "terminal", shortcutKey: "esc")
+            } catch {
+                await MainActor.run {
+                    store.toast = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private static let voiceCancelThreshold: CGFloat = 60
+    private static let voiceHoldThreshold: TimeInterval = 0.18
+
+    private func voiceTapOrHoldGesture(onTap: @escaping () -> Void) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if voiceHoldWork == nil && !voicePressed {
+                    let work = DispatchWorkItem {
+                        voiceHoldWork = nil
+                        startVoiceRecording()
+                    }
+                    voiceHoldWork = work
+                    DispatchQueue.main.asyncAfter(
+                        deadline: .now() + Self.voiceHoldThreshold,
+                        execute: work
+                    )
+                }
+                if voicePressed {
+                    voiceCanceling = value.translation.height < -Self.voiceCancelThreshold
+                }
+            }
+            .onEnded { _ in
+                if let work = voiceHoldWork {
+                    work.cancel()
+                    voiceHoldWork = nil
+                    onTap()
+                    return
+                }
+                let cancelled = voiceCanceling
+                voicePressed = false
+                voiceCanceling = false
+                speech.stop(cancelled: cancelled) { text in
+                    appendTranscriptToDraft(text)
+                }
+            }
+    }
+
+    private func startVoiceRecording() {
+        guard !voicePressed else { return }
+        voicePressed = true
+        voiceCanceling = false
+        speech.start { message in
+            store.toast = message
+            voicePressed = false
+            voiceCanceling = false
+        }
+    }
+
+    private func appendTranscriptToDraft(_ text: String) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        var existing = draft
+        while let last = existing.unicodeScalars.last,
+              CharacterSet.whitespacesAndNewlines.contains(last) {
+            existing.unicodeScalars.removeLast()
+        }
+        draft = existing.isEmpty ? clean : existing + " " + clean
     }
 
     private func refreshGitStatus() {
         Task {
             gitStatus = try? await api.gitStatus(sessionId: session.id)
+        }
+    }
+
+    private func handlePickedAttachments(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, !urls.isEmpty else {
+            if case .failure(let error) = result { store.toast = error.localizedDescription }
+            return
+        }
+        uploadAttachments(urls)
+    }
+
+    private func handlePickedPhotos(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result, !urls.isEmpty else {
+            if case .failure(let error) = result { store.toast = error.localizedDescription }
+            return
+        }
+        uploadAttachments(urls, cleanupAfterUpload: true)
+    }
+
+    private func uploadAttachments(_ urls: [URL], cleanupAfterUpload: Bool = false) {
+        uploadingAttachments = true
+        Task {
+            defer {
+                uploadingAttachments = false
+                if cleanupAfterUpload {
+                    for url in urls {
+                        try? FileManager.default.removeItem(at: url)
+                    }
+                }
+            }
+            do {
+                let files = try await api.uploadAttachments(id: session.id, urls: urls)
+                pendingAttachments = Array((pendingAttachments + files).suffix(5))
+                store.toast = "已上传 \(files.count) 个附件"
+            } catch {
+                store.toast = error.localizedDescription
+            }
         }
     }
 

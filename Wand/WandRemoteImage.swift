@@ -58,6 +58,12 @@ func parseUserAttachmentMessage(_ text: String) -> ParsedUserMessage {
     return ParsedUserMessage(attachmentPaths: paths, body: rest)
 }
 
+func buildAttachmentPrompt(_ attachments: [UploadedFile], body: String) -> String {
+    guard !attachments.isEmpty else { return body }
+    let paths = attachments.map(\.savedPath).joined(separator: "\n")
+    return "[附件已上传，请查看以下文件:\n\(paths)\n]\n\n\(body)"
+}
+
 // MARK: - 远程图片加载视图
 
 /// 通过 SelfSignedSession（带 session cookie + 自签证书放行）加载 `/api/file-raw`
@@ -218,6 +224,54 @@ struct WandFileChip: View {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .stroke(Theme.border, lineWidth: 1)
         )
+    }
+}
+
+struct PendingAttachmentsPreview: View {
+    let baseURL: URL
+    let attachments: [UploadedFile]
+    let onRemove: (UploadedFile) -> Void
+
+    var body: some View {
+        if !attachments.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 8) {
+                    ForEach(Array(attachments.enumerated()), id: \.offset) { _, file in
+                        attachmentItem(file)
+                    }
+                }
+                .padding(.horizontal, 2)
+                .padding(.vertical, 1)
+            }
+        }
+    }
+
+    @ViewBuilder private func attachmentItem(_ file: UploadedFile) -> some View {
+        ZStack(alignment: .topTrailing) {
+            if isImagePath(file.savedPath) {
+                WandImageThumbnail(
+                    baseURL: baseURL,
+                    path: file.savedPath,
+                    maxWidth: 96,
+                    maxHeight: 72
+                )
+            } else {
+                WandFileChip(path: file.savedPath)
+                    .frame(maxWidth: 190, alignment: .leading)
+            }
+            Button {
+                onRemove(file)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Theme.surface.opacity(0.94)))
+                    .overlay(Circle().stroke(Theme.border, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("移除附件")
+        }
     }
 }
 

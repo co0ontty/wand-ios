@@ -38,6 +38,7 @@ struct ChatView: View {
     /// 视口高度 + 占位高度由 ScrollView 几何测量驱动（见 chatPinMetrics / updatePinSpacer）。
     @State private var chatViewportHeight: CGFloat = 0
     @State private var pinSpacerHeight: CGFloat = 0
+    @State private var currentTurnHeight: CGFloat = 0
     /// 钉顶时用户消息距视口顶端的留白（对齐 web 的 PIN_TOP_OFFSET = 12）。
     private let chatPinTopInset: CGFloat = 12
     @State private var voicePressed = false
@@ -47,6 +48,7 @@ struct ChatView: View {
     @State private var showFileImporter = false
     @State private var showPhotoPicker = false
     @State private var uploadingAttachments = false
+    @State private var pendingAttachments: [UploadedFile] = []
     @State private var gitStatus: GitStatusResult?
     /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
     @State private var voiceHoldWork: DispatchWorkItem?
@@ -289,6 +291,9 @@ struct ChatView: View {
         guard let top = metrics["userTop"], let bottom = metrics["bottomY"],
               chatViewportHeight > 0 else { return }
         let currentTurnHeight = max(0, bottom - top)
+        if abs(currentTurnHeight - self.currentTurnHeight) > 1 {
+            self.currentTurnHeight = currentTurnHeight
+        }
         let needed = chatViewportHeight - chatPinTopInset - currentTurnHeight
         let target = needed > 0 ? needed : 0
         if abs(target - pinSpacerHeight) > 1 { pinSpacerHeight = target }
@@ -389,6 +394,7 @@ struct ChatView: View {
             if itemTurnIndex(item) < boundary { history.append(item) } else { current.append(item) }
         }
         guard !history.isEmpty else { return base }
+        guard shouldCollapseHistory else { return base }
         let expanded = expandedHistoryBoundary == boundary
         let stats = computeHistoryStats(turns: store.messages, boundary: boundary)
         var result: [MessageDisplayItem] = []
@@ -396,6 +402,13 @@ struct ChatView: View {
         result.append(.historySummary(stats: stats, boundary: boundary))
         result.append(contentsOf: current)
         return result
+    }
+
+    /// 历史折叠只在当前轮内容已经填满视口后启用。否则新回复还没占满一屏，
+    /// 顶部历史就先折成胶囊，会留下截图里那种大块空白。
+    private var shouldCollapseHistory: Bool {
+        guard chatViewportHeight > 0 else { return false }
+        return currentTurnHeight >= chatViewportHeight - chatPinTopInset - 1
     }
 
     /// 当前轮 assistant 回复的下标；只折叠最后一条、且必须位于最后用户消息之后。
@@ -503,7 +516,7 @@ struct ChatView: View {
             value: launchModelLabel,
             icon: "cpu"
         ) {
-            modelButton(id: nil, label: "默认")
+            modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
             ForEach(store.availableModels.filter { $0.id != "default" }) { model in
                 modelButton(id: model.id, label: model.label)
             }
@@ -530,9 +543,13 @@ struct ChatView: View {
 
     private var launchModelLabel: String {
         guard let selected = store.selectedModel, !selected.isEmpty, selected != "default" else {
-            return "默认"
+            return defaultModelLabel
         }
         return store.availableModels.first(where: { $0.id == selected })?.label ?? selected
+    }
+
+    private var defaultModelLabel: String {
+        store.availableModels.first(where: { $0.id == "default" })?.label ?? "默认"
     }
 
     private func launchOptionMenu<Content: View>(
@@ -736,57 +753,26 @@ struct ChatView: View {
     /// 输入栏是否展开成卡片态（聚焦 / 语音模式 / 有草稿）。否则收起成单行胶囊。
     /// 对齐 Codex App：默认是一条胶囊，点进去（聚焦）才长出底部控制行。
     private var inputExpanded: Bool {
-        inputFocused || voiceMode || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        inputFocused || voiceMode || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
     }
 
     private var inputBar: some View {
-        let cornerRadius: CGFloat = inputExpanded ? 28 : 24
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-
-        return VStack(alignment: .leading, spacing: inputExpanded ? 10 : 0) {
-            HStack(alignment: inputExpanded ? .bottom : .center, spacing: 8) {
-                if !inputExpanded {
-                    composerActionsMenu
+        NativeComposerShell(
+            expanded: inputExpanded,
+            focused: inputFocused,
+            onFocusInput: {
+                if !voiceMode {
+                    inputFocused = true
                 }
-                composerInputContent
-                if !inputExpanded {
-                    micButton
-                    trailingButtons
-                }
-            }
-            if inputExpanded {
-                controlRow
-            }
-        }
-        .padding(.horizontal, inputExpanded ? 10 : 9)
-        .padding(.vertical, inputExpanded ? 9 : 4)
-        .background(.ultraThinMaterial, in: shape)
-        .background {
-            shape
-                .fill(Theme.surface.opacity(inputExpanded ? 0.58 : 0.48))
-        }
-        .overlay {
-            shape
-                .stroke(Theme.border.opacity(inputExpanded ? 0.42 : 0.32), lineWidth: 0.8)
-        }
-        .overlay(alignment: .top) {
-            shape
-                .stroke(Color.white.opacity(inputExpanded ? 0.36 : 0.28), lineWidth: 0.7)
-                .blendMode(.screen)
-        }
-        .overlay {
-            if inputFocused {
-                shape
-                    .stroke(Theme.brand.opacity(0.28), lineWidth: 1)
-            }
-        }
-        .contentShape(shape)
-        .compositingGroup()
-        .shadow(color: Color.black.opacity(inputExpanded ? 0.14 : 0.08), radius: inputExpanded ? 22 : 12, x: 0, y: inputExpanded ? 10 : 4)
-        .padding(.horizontal, 12)
-        .padding(.top, 6)
-        .padding(.bottom, 10)
-        .animation(.easeInOut(duration: 0.18), value: inputExpanded)
+            },
+            collapsedLeading: { composerActionsMenu },
+            inputContent: { composerInputContent },
+            collapsedTrailing: {
+                micButton
+                trailingButtons
+            },
+            expandedControls: { controlRow }
+        )
         .confirmationDialog(
             "确定要停止当前正在运行的任务吗？",
             isPresented: $showStopConfirm,
@@ -799,22 +785,34 @@ struct ChatView: View {
 
     /// 顶部内容：键盘模式是自增高文本框，语音模式是「按住说话」面板。背景/描边交给外层卡片。
     @ViewBuilder private var composerInputContent: some View {
-        if voiceMode {
-            voiceHoldField
-        } else {
-            growingTextField
-                .focused($inputFocused)
-                .padding(.leading, inputExpanded ? 6 : 2)
-                .padding(.trailing, inputExpanded ? 4 : 0)
-                .padding(.vertical, inputExpanded ? 4 : 2)
-                .frame(minHeight: inputExpanded ? 32 : 34)
-                .contentShape(Rectangle())
-                .simultaneousGesture(
-                    TapGesture().onEnded {
-                        inputFocused = true
+        VStack(alignment: .leading, spacing: 6) {
+            if !pendingAttachments.isEmpty && !voiceMode {
+                PendingAttachmentsPreview(
+                    baseURL: api.baseURL,
+                    attachments: pendingAttachments,
+                    onRemove: { file in
+                        pendingAttachments.removeAll { $0.savedPath == file.savedPath }
                     }
                 )
+            }
+            if voiceMode {
+                voiceHoldField
+            } else {
+                growingTextField
+                    .focused($inputFocused)
+                    .padding(.leading, inputExpanded ? 6 : 2)
+                    .padding(.trailing, inputExpanded ? 4 : 0)
+                    .padding(.vertical, inputExpanded ? 4 : 2)
+                    .frame(minHeight: inputExpanded ? 32 : 34)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(
+                        TapGesture().onEnded {
+                            inputFocused = true
+                        }
+                    )
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// 展开态底部控制行：+ / 模式徽标 / 模型·思考徽标 / 话筒 / 发送·停止。
@@ -946,7 +944,7 @@ struct ChatView: View {
     private func modelThinkingChip(compact: Bool = false) -> some View {
         Menu {
             Section("模型") {
-                modelButton(id: nil, label: "默认")
+                modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
                 ForEach(store.availableModels.filter { $0.id != "default" }) { model in
                     modelButton(id: model.id, label: model.label)
                 }
@@ -1006,6 +1004,7 @@ struct ChatView: View {
         if lower.contains("opus") { return "Opus" }
         if lower.contains("sonnet") { return "Sonnet" }
         if lower.contains("haiku") { return "Haiku" }
+        if lower.contains("gpt-5.5") { return "GPT-5.5" }
         if lower.contains("gpt-5") { return "GPT-5" }
         if lower.contains("gpt-4") { return "GPT-4" }
         return clean.count > 12 ? String(clean.prefix(10)) + "…" : clean
@@ -1109,9 +1108,7 @@ struct ChatView: View {
             }
             do {
                 let files = try await api.uploadAttachments(id: sessionId, urls: urls)
-                let paths = files.map(\.savedPath).joined(separator: "\n")
-                let prefix = "[附件已上传，请查看以下文件:\n\(paths)\n]\n\n"
-                draft = prefix + draft
+                pendingAttachments = Array((pendingAttachments + files).suffix(5))
                 store.toast = "已上传 \(files.count) 个附件"
             } catch {
                 store.toast = error.localizedDescription
@@ -1133,13 +1130,14 @@ struct ChatView: View {
     private var canSend: Bool {
         // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
         // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
     }
 
     private func sendDraft() {
         guard canSend else { return }
-        let text = draft
+        let text = buildAttachmentPrompt(pendingAttachments, body: draft)
         draft = ""
+        pendingAttachments.removeAll()
         expandedCurrentReplyTurns.removeAll()
         followsLatest = true
         store.send(text: text)
@@ -1502,9 +1500,12 @@ private func flattenAssistantTurns(
     expandedCurrentReplyTurns: Set<Int> = []
 ) -> [MessageDisplayItem] {
     var out: [MessageDisplayItem] = []
+    var latestUserPreview = ""
     for item in items {
         if case .turn(let index, let turn) = item, turn.role == "assistant" {
-            let fold = index == currentReplyIndex ? foldCurrentReplyTail(turn.content) : CurrentReplyFold(blocks: turn.content, summary: "")
+            let fold = index == currentReplyIndex
+                ? foldCurrentReplyTail(turn.content, userPreview: latestUserPreview)
+                : CurrentReplyFold(blocks: turn.content, summary: "")
             let expanded = expandedCurrentReplyTurns.contains(index)
             if !fold.summary.isEmpty {
                 out.append(.currentReplySummary(turnIndex: index, summary: fold.summary, expanded: expanded))
@@ -1514,10 +1515,23 @@ private func flattenAssistantTurns(
                 out.append(.assistantItem(turnIndex: index, item: displayItem))
             }
         } else {
+            if case .turn(_, let turn) = item, turn.role == "user" {
+                latestUserPreview = userTurnPreview(turn)
+            }
             out.append(item)
         }
     }
     return out
+}
+
+private func userTurnPreview(_ turn: ConversationTurn) -> String {
+    let text = turn.content.compactMap { block -> String? in
+        guard case .text(let value, _) = block else { return nil }
+        return value
+    }
+    .joined(separator: "\n")
+    let body = parseUserAttachmentMessage(text).body
+    return compactPreviewText(body, limit: 42)
 }
 
 private func explorationToolsOnly(in turn: ConversationTurn) -> [ExplorationToolItem]? {
@@ -1664,7 +1678,7 @@ private struct ReplyFoldUnit {
 
 /// 当前最新回复的抽纸折叠：用户消息留在上方，助手正文只保留尾部。
 /// 旧段落折进摘要行，避免「回到最新」仍落在第 01 段。
-private func foldCurrentReplyTail(_ content: [ContentBlock]) -> CurrentReplyFold {
+private func foldCurrentReplyTail(_ content: [ContentBlock], userPreview: String = "") -> CurrentReplyFold {
     if content.contains(where: { block in
         if case .toolUse(_, let name, _, _, _) = block { return name == "AskUserQuestion" }
         return false
@@ -1717,11 +1731,22 @@ private func foldCurrentReplyTail(_ content: [ContentBlock]) -> CurrentReplyFold
     let hidden = keepStart
     let latest = units.reversed().compactMap { unit -> String? in
         guard let text = unit.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
-        let collapsed = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
-        return collapsed.count > 48 ? String(collapsed.prefix(45)) + "..." : collapsed
+        return compactPreviewText(text, limit: 48)
     }.first ?? ""
-    let summary = latest.isEmpty ? "已收起 \(hidden) 条" : "已收起 \(hidden) 条 · 最新：\(latest)"
+    let subject = userPreview.isEmpty ? "" : "你：\(userPreview) · "
+    let summary = latest.isEmpty
+        ? "\(subject)已收起 \(hidden) 条"
+        : "\(subject)已收起 \(hidden) 条 · 最新：\(latest)"
     return CurrentReplyFold(blocks: visible.isEmpty ? Array(content.suffix(1)) : visible, summary: summary)
+}
+
+private func compactPreviewText(_ text: String, limit: Int) -> String {
+    let collapsed = text
+        .components(separatedBy: .whitespacesAndNewlines)
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+    guard collapsed.count > limit else { return collapsed }
+    return String(collapsed.prefix(max(0, limit - 3))) + "..."
 }
 
 private func splitReplyTextUnits(_ text: String) -> [String] {
@@ -3444,7 +3469,7 @@ private struct PermissionButtonStyle: ButtonStyle {
 }
 
 /// 系统相册选择器。PHPicker 只把用户明确选择的图片交给应用，无需申请整库访问权限。
-private struct PhotoLibraryPicker: UIViewControllerRepresentable {
+struct PhotoLibraryPicker: UIViewControllerRepresentable {
     let onComplete: (Result<[URL], Error>) -> Void
 
     func makeCoordinator() -> Coordinator {
