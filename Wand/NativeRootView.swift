@@ -245,6 +245,9 @@ struct NativeRootView: View {
         if quickActions.consume(where: { $0 == .openWeb }) != nil {
             showSettings = false
             showWebFallback = true
+        } else if quickActions.consume(where: { $0 == .showSessions }) != nil {
+            showSettings = false
+            showWebFallback = false
         }
     }
 
@@ -284,8 +287,7 @@ struct NativeRootView: View {
         while !Task.isCancelled {
             if phase == .ready {
                 if let snapshots = try? await api.listSessions() {
-                    SessionLiveActivityController.shared.reconcile(snapshots: snapshots)
-                    SessionNotificationController.shared.reconcile(snapshots: snapshots)
+                    SessionPresenceController.shared.reconcile(snapshots: snapshots)
                 }
             }
             try? await Task.sleep(nanoseconds: 5_000_000_000)

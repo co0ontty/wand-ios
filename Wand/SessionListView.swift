@@ -207,7 +207,7 @@ struct SessionListView: View {
     private func handleQuickAction() {
         guard let action = quickActions.consume(where: { action in
             switch action {
-            case .newSession, .openSession: return true
+            case .newSession, .openSession, .showSessions: return true
             case .openWeb: return false
             }
         }) else { return }
@@ -224,6 +224,9 @@ struct SessionListView: View {
                     quickOpenSession = try? await api.getSession(id: id)
                 }
             }
+        case .showSessions:
+            showNewSession = false
+            quickOpenSession = nil
         case .openWeb:
             break
         }
@@ -311,7 +314,7 @@ struct SessionListView: View {
             async let codexHistory = api.listCodexHistory()
             let (loadedSessions, loadedClaudeHistory, loadedCodexHistory) = try await (active, claudeHistory, codexHistory)
             sessions = loadedSessions
-            SessionLiveActivityController.shared.reconcile(snapshots: loadedSessions)
+            SessionPresenceController.shared.reconcile(snapshots: loadedSessions)
             historySessions = loadedClaudeHistory.map { history in
                 HistorySession(
                     claudeSessionId: history.claudeSessionId,
@@ -576,6 +579,7 @@ private struct PtySessionView: View {
     let api: WandAPI
 
     @StateObject private var store: ChatStore
+    @StateObject private var terminalWebModel = WebViewModel()
     @StateObject private var keyboard = KeyboardObserver()
     @StateObject private var speech = SpeechRecognizerService()
     @State private var draft = ""
@@ -592,6 +596,10 @@ private struct PtySessionView: View {
     @State private var gitStatus: GitStatusResult?
     @FocusState private var inputFocused: Bool
 
+    private var ptyBackground: Color {
+        Color(red: 0.090, green: 0.071, blue: 0.059)
+    }
+
     init(session: SessionSnapshot, api: WandAPI) {
         self.session = session
         self.api = api
@@ -601,15 +609,23 @@ private struct PtySessionView: View {
     var body: some View {
         GeometryReader { root in
             ZStack {
-                Theme.background.ignoresSafeArea()
+                ptyBackground.ignoresSafeArea()
                 VStack(spacing: 0) {
-                    WebContainerView(
-                        serverURL: api.baseURL,
-                        token: api.token,
-                        sessionId: session.id,
-                        embedTerminal: true,
-                        embedNativeInput: true
-                    )
+                    ZStack(alignment: .topTrailing) {
+                        WebContainerView(
+                            serverURL: api.baseURL,
+                            token: api.token,
+                            sessionId: session.id,
+                            embedTerminal: true,
+                            embedNativeInput: true,
+                            webViewModel: terminalWebModel
+                        )
+                        terminalScaleControls
+                            .padding(.top, 10)
+                            .padding(.trailing, 10)
+                            .opacity(terminalWebModel.phase == .ready ? 1 : 0)
+                            .allowsHitTesting(terminalWebModel.phase == .ready)
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     bottomBar(safeBottom: root.safeAreaInsets.bottom)
                 }
@@ -618,7 +634,6 @@ private struct PtySessionView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) { providerBadge }
             ToolbarItem(placement: .principal) { titleStatus }
             ToolbarItem(placement: .navigationBarTrailing) {
                 GitChangesToolbarButton(status: gitStatus) {
@@ -626,6 +641,9 @@ private struct PtySessionView: View {
                 }
             }
         }
+        .toolbarBackground(ptyBackground, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .navigationBar)
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showQuickCommit) {
             GitQuickCommitView(sessionId: session.id, api: api)
@@ -656,6 +674,58 @@ private struct PtySessionView: View {
         .overlay(alignment: .top) { toastView }
     }
 
+    private var terminalScaleControls: some View {
+        HStack(spacing: 2) {
+            terminalScaleButton(systemName: "minus", accessibilityLabel: "缩小终端") {
+                terminalWebModel.adjustEmbeddedTerminalScale(delta: -0.25)
+            }
+            Text(terminalWebModel.terminalScaleLabel)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundColor(Color.white.opacity(0.92))
+                .frame(width: 42, height: 28)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .accessibilityLabel("终端缩放 \(terminalWebModel.terminalScaleLabel)")
+            terminalScaleButton(systemName: "plus", accessibilityLabel: "放大终端") {
+                terminalWebModel.adjustEmbeddedTerminalScale(delta: 0.25)
+            }
+            Rectangle()
+                .fill(Color.white.opacity(0.18))
+                .frame(width: 1, height: 16)
+                .padding(.horizontal, 3)
+            terminalScaleButton(systemName: "arrow.clockwise", accessibilityLabel: "刷新终端") {
+                terminalWebModel.refreshEmbeddedTerminal()
+            }
+        }
+        .padding(4)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.58))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 0.8)
+        )
+        .shadow(color: Color.black.opacity(0.22), radius: 12, x: 0, y: 6)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func terminalScaleButton(
+        systemName: String,
+        accessibilityLabel: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(Color.white.opacity(0.94))
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
     private func bottomBar(safeBottom: CGFloat) -> some View {
         VStack(spacing: 0) {
             if voicePressed {
@@ -666,11 +736,6 @@ private struct PtySessionView: View {
             inputBar
         }
         .padding(.bottom, safeBottom + keyboard.lift)
-        .background(
-            Theme.background
-                .opacity(0.97)
-                .ignoresSafeArea(edges: .bottom)
-        )
         .animation(.easeOut(duration: 0.2), value: keyboard.lift)
     }
 
@@ -982,7 +1047,7 @@ private struct PtySessionView: View {
         guard !trimmed.isEmpty else { return }
         Task {
             await MainActor.run {
-                SessionLiveActivityController.shared.start(
+                SessionPresenceController.shared.start(
                     sessionId: session.id,
                     title: session.displayTitle,
                     provider: session.provider,
@@ -998,7 +1063,7 @@ private struct PtySessionView: View {
                     if draft.isEmpty { draft = restoreDraft }
                     if pendingAttachments.isEmpty { pendingAttachments = restoreAttachments }
                     store.toast = error.localizedDescription
-                    SessionLiveActivityController.shared.end(sessionId: session.id, immediately: true)
+                    SessionPresenceController.shared.end(sessionId: session.id, immediately: true)
                 }
             }
         }
@@ -1152,37 +1217,22 @@ private struct PtySessionView: View {
         }
     }
 
-    private var providerBadge: some View {
-        let isCodex = session.provider == "codex"
-        let tint: Color = isCodex ? Theme.codex : Theme.brand
-        return ZStack {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(tint.opacity(0.13))
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(tint.opacity(0.24), lineWidth: 1)
-            BrandLogoShape(provider: session.provider)
-                .fill(tint)
-                .frame(width: 15, height: 15)
-        }
-        .frame(width: 26, height: 26)
-        .accessibilityLabel(isCodex ? "Codex" : "Claude")
-    }
-
     private var titleStatus: some View {
         VStack(spacing: 0) {
             Text(session.displayTitle)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color.white.opacity(0.88))
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(maxWidth: 190)
+                .frame(maxWidth: 205)
             Text(session.cwd?.isEmpty == false ? session.cwd! : "未设置工作目录")
-                .font(.system(size: 8, design: .monospaced))
-                .foregroundColor(Theme.textSecondary)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(Color.white.opacity(0.58))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: 190)
+                .frame(maxWidth: 205)
         }
+        .shadow(color: Color.black.opacity(0.26), radius: 3, x: 0, y: 1)
         .accessibilityElement(children: .combine)
     }
 }

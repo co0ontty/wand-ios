@@ -236,12 +236,12 @@ final class ChatStore: ObservableObject {
     /// 回复成功结束则切「已完成」短暂保留后由控制器自动移除。
     private func refreshLiveActivity() {
         if sessionEnded {
-            SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: true)
+            SessionPresenceController.shared.end(sessionId: sessionId, immediately: true)
             liveActivityStarted = false
             liveActivitySawResponding = false
         } else if permissionBlocked {
             liveActivitySawResponding = true
-            SessionLiveActivityController.shared.start(
+            SessionPresenceController.shared.start(
                 sessionId: sessionId, title: snapshot?.displayTitle ?? "Wand 会话",
                 provider: snapshot?.provider, state: .permission, taskTitle: currentTaskTitle,
                 queuedCount: queuedMessages.count
@@ -249,14 +249,14 @@ final class ChatStore: ObservableObject {
             liveActivityStarted = true
         } else if isResponding {
             liveActivitySawResponding = true
-            SessionLiveActivityController.shared.start(
+            SessionPresenceController.shared.start(
                 sessionId: sessionId, title: snapshot?.displayTitle ?? "Wand 会话",
                 provider: snapshot?.provider, taskTitle: currentTaskTitle,
                 queuedCount: queuedMessages.count
             )
             liveActivityStarted = true
         } else if liveActivitySawResponding {
-            SessionLiveActivityController.shared.end(sessionId: sessionId)
+            SessionPresenceController.shared.end(sessionId: sessionId)
             liveActivityStarted = false
             liveActivitySawResponding = false
         }
@@ -365,7 +365,7 @@ final class ChatStore: ObservableObject {
             }
         }
         // 把本会话加入灵动岛聚合长条（开关关闭 / iOS < 16.1 时是 no-op）。
-        SessionLiveActivityController.shared.start(
+        SessionPresenceController.shared.start(
             sessionId: sessionId,
             title: snapshot?.displayTitle ?? "Wand 会话",
             provider: snapshot?.provider,
@@ -390,7 +390,7 @@ final class ChatStore: ObservableObject {
                         isResponding = false
                     }
                 }
-                SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: true)
+                SessionPresenceController.shared.end(sessionId: sessionId, immediately: true)
                 liveActivityStarted = false
                 liveActivitySawResponding = false
             }

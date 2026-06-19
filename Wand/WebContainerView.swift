@@ -13,6 +13,7 @@ final class WebViewModel: ObservableObject {
     /// 旧版网页（侧边栏没有「返回原生界面」按钮）：壳回退显示自己的顶部返回栏，
     /// 避免用户被困在网页版里。由 WebBridge 在 didFinish 时检测后回填。
     @Published var needsLegacyChrome = false
+    @Published var terminalScaleLabel = "100%"
     /// WebBridge 收到 backToNative 消息时调用，由容器视图注入（关闭 fullScreenCover）。
     var requestClose: (() -> Void)?
     /// WebBridge attach 时回填，供"重试"调用 reload()。
@@ -21,6 +22,47 @@ final class WebViewModel: ObservableObject {
     func retry() {
         phase = .loading
         webView?.reload()
+    }
+
+    func adjustEmbeddedTerminalScale(delta: Double) {
+        runTerminalControlScript(clickElementId: delta < 0 ? "terminal-scale-down-top" : "terminal-scale-up-top")
+    }
+
+    func refreshEmbeddedTerminal() {
+        runTerminalControlScript(clickElementId: "page-refresh-btn")
+    }
+
+    func refreshEmbeddedTerminalScaleLabel() {
+        runTerminalControlScript(clickElementId: nil)
+    }
+
+    private func runTerminalControlScript(clickElementId: String?) {
+        let clickExpression = clickElementId.map { "'\($0)'" } ?? "null"
+        let script = """
+        (function() {
+          var clickId = \(clickExpression);
+          if (clickId) {
+            var button = document.getElementById(clickId);
+            if (button && typeof button.click === "function") button.click();
+          }
+          var label = document.getElementById("terminal-scale-label-top");
+          if (label && label.textContent) return label.textContent.trim();
+          var raw = "1";
+          try { raw = localStorage.getItem("wand-terminal-scale") || "1"; } catch (e) {}
+          var scale = Number(raw);
+          if (!Number.isFinite(scale)) scale = 1;
+          return Math.round(scale * 100) + "%";
+        })();
+        """
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let webView else { return }
+            webView.evaluateJavaScript(script) { [weak self] result, _ in
+                guard let label = result as? String, !label.isEmpty else { return }
+                DispatchQueue.main.async {
+                    self?.terminalScaleLabel = label
+                }
+            }
+        }
     }
 }
 
@@ -41,7 +83,25 @@ struct WebContainerView: View {
     var onRequestClose: (() -> Void)? = nil
 
     @EnvironmentObject private var store: ServerStore
-    @StateObject private var model = WebViewModel()
+    @StateObject private var model: WebViewModel
+
+    init(
+        serverURL: URL,
+        token: String?,
+        sessionId: String? = nil,
+        embedTerminal: Bool = false,
+        embedNativeInput: Bool = false,
+        webViewModel: WebViewModel? = nil,
+        onRequestClose: (() -> Void)? = nil
+    ) {
+        self.serverURL = serverURL
+        self.token = token
+        self.sessionId = sessionId
+        self.embedTerminal = embedTerminal
+        self.embedNativeInput = embedNativeInput
+        self.onRequestClose = onRequestClose
+        _model = StateObject(wrappedValue: webViewModel ?? WebViewModel())
+    }
 
     private var displayHost: String {
         if let host = serverURL.host {
@@ -334,6 +394,13 @@ struct WebViewRepresentable: UIViewRepresentable {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        if embedTerminal {
+            userController.addUserScript(WKUserScript(
+                source: Self.terminalNativeUserScriptSource,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: true
+            ))
+        }
         cfg.userContentController = userController
         cfg.websiteDataStore = .default()
         cfg.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -427,4 +494,86 @@ struct WebViewRepresentable: UIViewRepresentable {
         components.queryItems = items
         return components.url ?? serverURL
     }
+
+    private static let terminalNativeUserScriptSource = """
+    (function() {
+      try {
+        var root = document.documentElement;
+        root.classList.add('is-wand-app-native-insets');
+        root.style.setProperty('--app-inset-top', '0px');
+        root.style.setProperty('--app-inset-bottom', '0px');
+        root.style.setProperty('--app-inset-left', '0px');
+        root.style.setProperty('--app-inset-right', '0px');
+
+        if (!document.getElementById('wand-native-terminal-compact-style')) {
+          var style = document.createElement('style');
+          style.id = 'wand-native-terminal-compact-style';
+          style.textContent = `
+            .is-wand-embed-terminal .wand-joystick-root{z-index:120;}
+            .is-wand-embed-terminal .wand-joystick-root.visible{opacity:1!important;visibility:visible!important;}
+            .is-wand-embed-terminal .wand-joystick-ball{opacity:1!important;transform:none;}
+            .is-wand-embed-terminal .wand-joystick-panel{z-index:124;}
+            .is-wand-embed-terminal .terminal-scroll-wrap{
+              padding:8px 4px 8px!important;
+              --term-font-family:"SFMono-Regular","Menlo","Monaco","Noto Sans Symbols 2","Noto Sans Symbols",monospace!important;
+              --term-font-size:10px!important;
+              --term-row-height:15px!important;
+            }
+            .is-wand-embed-terminal .input-panel{display:none!important;}
+            .is-wand-embed-terminal .notification-bubble.update-card{display:none!important;}
+            .is-wand-embed-terminal .terminal-container{
+              margin:0!important;
+              border-left:0!important;
+              border-right:0!important;
+              border-radius:0!important;
+              box-shadow:none!important;
+            }
+          `;
+          document.head.appendChild(style);
+        }
+
+        if (!window.__wandNativeJoystickFocusGuard) {
+          window.__wandNativeJoystickFocusGuard = true;
+          function blurJoystickFocus() {
+            try {
+              var active = document.activeElement;
+              if (active && typeof active.blur === 'function') active.blur();
+              setTimeout(function() {
+                try {
+                  var next = document.activeElement;
+                  if (next && typeof next.blur === 'function') next.blur();
+                } catch (e) {}
+              }, 0);
+            } catch (e) {}
+          }
+          ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'click'].forEach(function(type) {
+            document.addEventListener(type, function(event) {
+              try {
+                var target = event.target;
+                if (target && target.closest && target.closest('.wand-joystick-root')) {
+                  blurJoystickFocus();
+                }
+              } catch (e) {}
+            }, true);
+          });
+        }
+
+        function fitTerminal() {
+          try {
+            window.dispatchEvent(new Event('resize'));
+            var output = document.getElementById('output');
+            if (output) {
+              var width = output.style.width;
+              output.style.width = 'calc(100% - 0.01px)';
+              void output.offsetWidth;
+              output.style.width = width;
+            }
+          } catch (e) {}
+        }
+        [0, 80, 220, 520].forEach(function(delay) {
+          setTimeout(fitTerminal, delay);
+        });
+      } catch (e) {}
+    })();
+    """
 }

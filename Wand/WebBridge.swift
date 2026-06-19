@@ -158,5 +158,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
             let hooked = (result as? Bool) ?? false
             self?.model.needsLegacyChrome = !hooked
         }
+        model.refreshEmbeddedTerminalScaleLabel()
     }
 }

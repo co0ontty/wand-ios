@@ -28,11 +28,22 @@ private func stateTint(_ stateRaw: String) -> Color {
     }
 }
 
+private let liveActivityURL = URL(string: "wand://live-activity")!
+
+private func sessionURL(_ id: String) -> URL {
+    var components = URLComponents()
+    components.scheme = "wand"
+    components.host = "session"
+    components.path = "/\(id)"
+    return components.url ?? liveActivityURL
+}
+
 struct SessionLiveActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: SessionActivityAttributes.self) { context in
             // 锁屏 / 通知横幅：单行长条
             LockScreenStripView(state: context.state)
+                .widgetURL(liveActivityURL)
                 .activityBackgroundTint(Color.black.opacity(0.55))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
@@ -44,23 +55,14 @@ struct SessionLiveActivityWidget: Widget {
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    if context.state.sessions.count == 1, let only = context.state.sessions.first {
-                        Text(only.statusText)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(stateTint(only.stateRaw))
-                            .padding(.trailing, 4)
-                    } else {
-                        Text("\(context.state.sessions.count) 个会话")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.white.opacity(0.65))
-                            .padding(.trailing, 4)
-                    }
+                    AggregateStatusView(state: context.state)
+                        .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     if context.state.sessions.count == 1, let only = context.state.sessions.first {
                         ConversationDetail(entry: only)
                     } else {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 7) {
                             ForEach(context.state.sessions.prefix(4), id: \.id) { entry in
                                 SessionRow(entry: entry)
                             }
@@ -75,32 +77,78 @@ struct SessionLiveActivityWidget: Widget {
                     }
                 }
             } compactLeading: {
-                Image(systemName: context.state.sessions.count == 1
-                    ? context.state.sessions[0].providerSymbol
-                    : "wand.and.stars")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(WandColor.brand)
+                CompactLeadingMark()
             } compactTrailing: {
-                HStack(spacing: 3) {
-                    Image(systemName: context.state.aggregateSymbol)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(stateTint(context.state.aggregateStateRaw))
-                    if context.state.sessions.count > 1 {
-                        Text("\(context.state.sessions.count)")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.85))
-                    } else if context.state.queuedCount > 0 {
-                        Text("+\(context.state.queuedCount)")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.85))
-                    }
-                }
+                CompactTrailingSummary(state: context.state)
             } minimal: {
-                Image(systemName: context.state.aggregateSymbol)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(stateTint(context.state.aggregateStateRaw))
+                CompactMinimalMark(state: context.state)
             }
+            .widgetURL(liveActivityURL)
             .keylineTint(WandColor.brand)
+        }
+    }
+}
+
+private struct CompactLeadingMark: View {
+    var body: some View {
+        Text("W")
+            .font(.system(size: 11, weight: .black))
+            .foregroundColor(.white)
+            .frame(width: 20, height: 20)
+            .background(Circle().fill(WandColor.brand))
+    }
+}
+
+private struct CompactTrailingSummary: View {
+    let state: SessionActivityAttributes.ContentState
+
+    var body: some View {
+        Text(summary)
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .foregroundColor(stateTint(state.aggregateStateRaw))
+            .frame(minWidth: 22, minHeight: 20)
+            .padding(.horizontal, 2)
+            .background(Capsule().fill(Color.white.opacity(0.12)))
+    }
+
+    private var summary: String {
+        if state.sessions.count > 1 { return "\(state.sessions.count)" }
+        if state.queuedCount > 0 { return "+\(state.queuedCount)" }
+        switch state.aggregateStateRaw {
+        case "permission": return "!"
+        case "done": return "OK"
+        default: return "..."
+        }
+    }
+}
+
+private struct CompactMinimalMark: View {
+    let state: SessionActivityAttributes.ContentState
+
+    var body: some View {
+        Circle()
+            .fill(stateTint(state.aggregateStateRaw))
+            .frame(width: 10, height: 10)
+    }
+}
+
+private struct AggregateStatusView: View {
+    let state: SessionActivityAttributes.ContentState
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: state.aggregateSymbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(stateTint(state.aggregateStateRaw))
+            if state.sessions.count == 1, let only = state.sessions.first {
+                Text(only.statusText)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(stateTint(only.stateRaw))
+            } else {
+                Text("\(state.sessions.count) 个会话")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.68))
+            }
         }
     }
 }
@@ -110,7 +158,7 @@ private struct ConversationDetail: View {
     let entry: SessionActivityAttributes.SessionEntry
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Label(entry.providerText, systemImage: entry.providerSymbol)
                     .font(.system(size: 10, weight: .semibold))
@@ -119,19 +167,23 @@ private struct ConversationDetail: View {
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.white)
                     .lineLimit(1)
-            }
-            HStack(spacing: 6) {
-                StatusIndicator(entry: entry, size: 11)
-                Text(detailText)
-                    .font(.system(size: 12))
-                    .foregroundColor(.white.opacity(0.68))
-                    .lineLimit(1)
                 Spacer(minLength: 4)
-                if entry.queuedCount > 0 {
-                    Label("\(entry.queuedCount) 条排队", systemImage: "tray.full")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.62))
+                StatusBadge(entry: entry)
+            }
+            Text(detailText)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.white.opacity(0.82))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                if entry.needsPermission {
+                    DetailPill(text: "待授权", systemImage: "lock.shield")
                 }
+                if entry.queuedCount > 0 {
+                    DetailPill(text: "\(entry.queuedCount) 条排队", systemImage: "tray.full")
+                }
+                Spacer(minLength: 6)
+                OpenSessionLink(entry: entry, compact: false)
             }
         }
         .padding(.horizontal, 4)
@@ -151,26 +203,33 @@ private struct SessionRow: View {
     let entry: SessionActivityAttributes.SessionEntry
 
     var body: some View {
-        HStack(spacing: 6) {
-            StatusIndicator(entry: entry, size: 11)
-            Image(systemName: entry.providerSymbol)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(WandColor.brand)
-            Text(entry.title)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.white)
-                .lineLimit(1)
-            if let task = entry.taskTitle, !task.isEmpty {
-                Text(task)
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.55))
-                    .lineLimit(1)
+        Link(destination: sessionURL(entry.id)) {
+            HStack(spacing: 7) {
+                StatusIndicator(entry: entry, size: 11)
+                Image(systemName: entry.providerSymbol)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(WandColor.brand)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                    Text(rowDetailText)
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.56))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                StatusBadge(entry: entry)
             }
-            Spacer(minLength: 4)
-            Text(entry.statusText)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(stateTint(entry.stateRaw))
         }
+        .buttonStyle(.plain)
+    }
+
+    private var rowDetailText: String {
+        if let task = entry.taskTitle, !task.isEmpty { return task }
+        if entry.queuedCount > 0 { return "\(entry.queuedCount) 条消息排队" }
+        return entry.statusText
     }
 }
 
@@ -184,30 +243,51 @@ private struct LockScreenStripView: View {
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(WandColor.brand)
             if state.sessions.count == 1, let only = state.sessions.first {
-                VStack(alignment: .leading, spacing: 3) {
-                    SessionChip(entry: only, showsStatusText: true)
-                    if let task = only.taskTitle, !task.isEmpty {
-                        Text(task)
-                            .font(.system(size: 10))
-                            .foregroundColor(.white.opacity(0.55))
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        StatusIndicator(entry: only, size: 10)
+                        Text(only.title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white)
                             .lineLimit(1)
-                            .padding(.leading, 9)
+                        Text(only.statusText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(stateTint(only.stateRaw))
+                    }
+                    Text(lockScreenDetailText(only))
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.58))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                OpenSessionLink(entry: only, compact: true)
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    AggregateStatusView(state: state)
+                    HStack(spacing: 5) {
+                        ForEach(state.sessions.prefix(3), id: \.id) { entry in
+                            SessionChip(entry: entry)
+                        }
+                        if state.sessions.count > 3 {
+                            Text("+\(state.sessions.count - 3)")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.6))
+                        }
                     }
                 }
-            } else {
-                ForEach(state.sessions.prefix(3), id: \.id) { entry in
-                    SessionChip(entry: entry)
-                }
-                if state.sessions.count > 3 {
-                    Text("+\(state.sessions.count - 3)")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.6))
-                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    private func lockScreenDetailText(_ entry: SessionActivityAttributes.SessionEntry) -> String {
+        if let task = entry.taskTitle, !task.isEmpty { return task }
+        if entry.needsPermission { return "需要确认权限请求" }
+        if entry.isDone { return "回复已完成" }
+        if entry.queuedCount > 0 { return "\(entry.queuedCount) 条消息排队" }
+        return "正在生成回复"
     }
 }
 
@@ -260,5 +340,49 @@ private struct StatusIndicator: View {
                 .font(.system(size: size, weight: .semibold))
                 .foregroundColor(stateTint(entry.stateRaw))
         }
+    }
+}
+
+private struct StatusBadge: View {
+    let entry: SessionActivityAttributes.SessionEntry
+
+    var body: some View {
+        Text(entry.statusText)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(stateTint(entry.stateRaw))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(stateTint(entry.stateRaw).opacity(0.16)))
+    }
+}
+
+private struct DetailPill: View {
+    let text: String
+    let systemImage: String
+
+    var body: some View {
+        Label(text, systemImage: systemImage)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(.white.opacity(0.66))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color.white.opacity(0.10)))
+    }
+}
+
+private struct OpenSessionLink: View {
+    let entry: SessionActivityAttributes.SessionEntry
+    var compact: Bool
+
+    var body: some View {
+        Link(destination: sessionURL(entry.id)) {
+            Label(compact ? "打开" : "打开会话", systemImage: "arrow.up.forward")
+                .font(.system(size: compact ? 10 : 11, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, compact ? 8 : 10)
+                .padding(.vertical, compact ? 5 : 6)
+                .background(Capsule().fill(WandColor.brand))
+        }
+        .buttonStyle(.plain)
     }
 }

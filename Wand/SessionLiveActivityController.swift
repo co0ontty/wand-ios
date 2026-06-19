@@ -122,6 +122,99 @@ final class SessionLiveActivityController {
         sync(allowCreate: false)
     }
 
+#if DEBUG
+    /// Simulator-only fixture hook. Launch with WAND_MOCK_LIVE_ACTIVITY=single|multi|permission|done.
+    func installMockScenario(_ scenario: String) {
+        guard enabled else {
+            logger.warning("Live Activity mock skipped because activities are disabled")
+            return
+        }
+        for task in ActivityStore.doneRemovalTasks.values { task.cancel() }
+        ActivityStore.doneRemovalTasks.removeAll()
+        switch scenario {
+        case "multi":
+            ActivityStore.entries = [
+                mockEntry(
+                    id: "mock-codex-1",
+                    title: "wand iOS 终端适配",
+                    provider: "codex",
+                    state: .responding,
+                    taskTitle: "验证 PTY 输入栏、终端缩放和灵动岛入口",
+                    queuedCount: 2
+                ),
+                mockEntry(
+                    id: "mock-claude-2",
+                    title: "发布检查清单",
+                    provider: "claude",
+                    state: .permission,
+                    taskTitle: "需要确认读取 docs/screenshots 目录",
+                    queuedCount: 0
+                ),
+                mockEntry(
+                    id: "mock-codex-3",
+                    title: "Web UI 回归",
+                    provider: "codex",
+                    state: .done,
+                    taskTitle: nil,
+                    queuedCount: 0
+                )
+            ]
+        case "permission":
+            ActivityStore.entries = [
+                mockEntry(
+                    id: "mock-permission",
+                    title: "权限确认",
+                    provider: "claude",
+                    state: .permission,
+                    taskTitle: "Codex 请求写入 iOS Widget 预览截图",
+                    queuedCount: 1
+                )
+            ]
+        case "done":
+            ActivityStore.entries = [
+                mockEntry(
+                    id: "mock-done",
+                    title: "会话已完成",
+                    provider: "codex",
+                    state: .done,
+                    taskTitle: nil,
+                    queuedCount: 0
+                )
+            ]
+        default:
+            ActivityStore.entries = [
+                mockEntry(
+                    id: "mock-single",
+                    title: "灵动岛交互检查",
+                    provider: "codex",
+                    state: .responding,
+                    taskTitle: "整理展开卡片内容，并确认点击不会直接进入会话",
+                    queuedCount: 2
+                )
+            ]
+        }
+        sync(allowCreate: true)
+    }
+
+    private func mockEntry(
+        id: String,
+        title: String,
+        provider: String,
+        state: SessionState,
+        taskTitle: String?,
+        queuedCount: Int
+    ) -> SessionActivityAttributes.SessionEntry {
+        SessionActivityAttributes.SessionEntry(
+            id: id,
+            title: String(title.prefix(Self.maxTitleLength)),
+            providerRaw: provider,
+            stateRaw: state.rawValue,
+            taskTitle: taskTitle.map { String($0.prefix(Self.maxTaskTitleLength)) },
+            queuedCount: queuedCount
+        )
+    }
+#endif
+
     // MARK: - 内部
 
     private func upsert(
@@ -210,4 +303,53 @@ final class SessionLiveActivityController {
         // App 被挂起后无法继续更新；60s 没更新就让系统把活动标记为过期（变灰）。
         Date().addingTimeInterval(60)
     }
+}
+
+/// 会话对外呈现的统一入口：调用方只报告会话状态，内部再分发到灵动岛和本地通知。
+@MainActor
+final class SessionPresenceController {
+    static let shared = SessionPresenceController()
+
+    private init() {}
+
+    func start(
+        sessionId: String,
+        title: String,
+        provider: String?,
+        state: SessionLiveActivityController.SessionState = .responding,
+        taskTitle: String?,
+        queuedCount: Int = 0
+    ) {
+        SessionLiveActivityController.shared.start(
+            sessionId: sessionId,
+            title: title,
+            provider: provider,
+            state: state,
+            taskTitle: taskTitle,
+            queuedCount: queuedCount
+        )
+    }
+
+    func sync(snapshot: SessionSnapshot) {
+        SessionLiveActivityController.shared.sync(snapshot: snapshot)
+    }
+
+    func reconcile(snapshots: [SessionSnapshot]) {
+        SessionLiveActivityController.shared.reconcile(snapshots: snapshots)
+        SessionNotificationController.shared.reconcile(snapshots: snapshots)
+    }
+
+    func end(sessionId: String, immediately: Bool = false) {
+        SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: immediately)
+    }
+
+    func endAll() {
+        SessionLiveActivityController.shared.endAll()
+    }
+
+#if DEBUG
+    func installMockScenario(_ scenario: String) {
+        SessionLiveActivityController.shared.installMockScenario(scenario)
+    }
+#endif
 }

@@ -131,7 +131,7 @@ struct SettingsView: View {
             Toggle("灵动岛 / 实时活动", isOn: $store.liveActivityEnabled)
                 .tint(Theme.brand)
                 .onChange(of: store.liveActivityEnabled) { _, enabled in
-                    if !enabled { SessionLiveActivityController.shared.endAll() }
+                    if !enabled { SessionPresenceController.shared.endAll() }
                 }
             HStack {
                 Label("系统实时活动权限", systemImage: "bolt.horizontal.circle")

@@ -16,11 +16,20 @@ struct WandApp: App {
                 .onOpenURL { url in
                     handleAppURL(url)
                 }
+#if DEBUG
+                .task {
+                    await installMockLiveActivityIfRequested()
+                }
+#endif
         }
     }
 
     private func handleAppURL(_ url: URL) {
         guard url.scheme == "wand" else { return }
+        if url.host == "live-activity" {
+            QuickActionCoordinator.shared.enqueue(.showSessions)
+            return
+        }
         let sessionId: String?
         if url.host == "session" {
             sessionId = url.pathComponents.dropFirst().first
@@ -33,6 +42,19 @@ struct WandApp: App {
         guard let sessionId, !sessionId.isEmpty else { return }
         QuickActionCoordinator.shared.enqueue(.openSession(id: sessionId))
     }
+
+#if DEBUG
+    @MainActor
+    private func installMockLiveActivityIfRequested() async {
+        let environment = ProcessInfo.processInfo.environment
+        guard let scenario = environment["WAND_MOCK_LIVE_ACTIVITY"],
+              !scenario.isEmpty,
+              scenario != "0" else { return }
+        ServerStore.shared.liveActivityEnabled = true
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        SessionPresenceController.shared.installMockScenario(scenario)
+    }
+#endif
 }
 
 extension Notification.Name {
