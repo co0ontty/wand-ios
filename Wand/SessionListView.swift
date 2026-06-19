@@ -525,18 +525,20 @@ private struct PtySessionView: View {
     }
 
     var body: some View {
-        ZStack {
-            Theme.background.ignoresSafeArea()
-            VStack(spacing: 0) {
-                WebContainerView(
-                    serverURL: api.baseURL,
-                    token: api.token,
-                    sessionId: session.id,
-                    embedTerminal: true,
-                    embedNativeInput: true
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                bottomBar
+        GeometryReader { root in
+            ZStack {
+                Theme.background.ignoresSafeArea()
+                VStack(spacing: 0) {
+                    WebContainerView(
+                        serverURL: api.baseURL,
+                        token: api.token,
+                        sessionId: session.id,
+                        embedTerminal: true,
+                        embedNativeInput: true
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    bottomBar(safeBottom: root.safeAreaInsets.bottom)
+                }
             }
         }
         .navigationTitle("")
@@ -568,11 +570,11 @@ private struct PtySessionView: View {
         .overlay(alignment: .top) { toastView }
     }
 
-    private var bottomBar: some View {
+    private func bottomBar(safeBottom: CGFloat) -> some View {
         VStack(spacing: 0) {
             inputBar
         }
-        .padding(.bottom, keyboard.lift)
+        .padding(.bottom, safeBottom + keyboard.lift)
         .background(
             Theme.background
                 .opacity(0.97)
@@ -599,6 +601,8 @@ private struct PtySessionView: View {
                 .font(.system(size: 16))
                 .foregroundColor(Theme.textPrimary)
                 .tint(Theme.brand)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
                 .focused($inputFocused)
                 .padding(.leading, inputExpanded ? 6 : 2)
                 .padding(.trailing, 4)

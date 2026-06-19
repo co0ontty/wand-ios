@@ -80,6 +80,7 @@ struct ChatView: View {
                 mainContent
                     .padding(.bottom, bottomBarHeight)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .dismissKeyboardOnTap()
 
                 bottomBarOverlay(safeBottom: root.safeAreaInsets.bottom)
             }
@@ -87,7 +88,6 @@ struct ChatView: View {
         }
         // 点消息区任意空白处收起键盘；输入栏作为底部 overlay 不受影响，
         // 点发送 / 权限按钮不会误收。
-        .dismissKeyboardOnTap()
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -476,46 +476,56 @@ struct ChatView: View {
             Text("输入消息，让它帮你完成任务")
                 .font(.system(size: 13))
                 .foregroundColor(Theme.textSecondary)
-            if let cwd = store.snapshot?.cwd, !cwd.isEmpty {
-                Text(cwd)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(Theme.textSecondary.opacity(0.85))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(Theme.surface))
-            }
-            HStack(spacing: 10) {
-                launchOptionMenu(
-                    title: "模型",
-                    value: launchModelLabel,
-                    icon: "cpu"
-                ) {
-                    modelButton(id: nil, label: "默认")
-                    ForEach(store.availableModels.filter { $0.id != "default" }) { model in
-                        modelButton(id: model.id, label: model.label)
-                    }
+            launchContextControls
+        }
+        .padding(.horizontal, 32)
+    }
+
+    @ViewBuilder private var launchContextControls: some View {
+        if store.isStructured && !inputExpanded {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    launchModelMenu
+                    launchThinkingMenu
                 }
-                launchOptionMenu(
-                    title: "思考深度",
-                    value: Self.thinkingLabel(store.thinkingEffort),
-                    icon: "brain"
-                ) {
-                    ForEach(Self.thinkingLevels) { level in
-                        Button {
-                            store.setThinkingEffort(level.id)
-                        } label: {
-                            store.thinkingEffort == level.id
-                                ? Label(level.menuLabel, systemImage: "checkmark")
-                                : Label(level.menuLabel, systemImage: "circle")
-                        }
-                    }
+                VStack(spacing: 8) {
+                    launchModelMenu
+                    launchThinkingMenu
                 }
             }
             .frame(maxWidth: 340)
         }
-        .padding(.horizontal, 32)
+    }
+
+    private var launchModelMenu: some View {
+        launchOptionMenu(
+            title: "模型",
+            value: launchModelLabel,
+            icon: "cpu"
+        ) {
+            modelButton(id: nil, label: "默认")
+            ForEach(store.availableModels.filter { $0.id != "default" }) { model in
+                modelButton(id: model.id, label: model.label)
+            }
+        }
+    }
+
+    private var launchThinkingMenu: some View {
+        launchOptionMenu(
+            title: "思考深度",
+            value: Self.thinkingLabel(store.thinkingEffort),
+            icon: "brain"
+        ) {
+            ForEach(Self.thinkingLevels) { level in
+                Button {
+                    store.setThinkingEffort(level.id)
+                } label: {
+                    store.thinkingEffort == level.id
+                        ? Label(level.menuLabel, systemImage: "checkmark")
+                        : Label(level.menuLabel, systemImage: "circle")
+                }
+            }
+        }
     }
 
     private var launchModelLabel: String {
@@ -569,7 +579,10 @@ struct ChatView: View {
         Button {
             store.setModel(id)
         } label: {
-            if store.selectedModel == id {
+            let selected = id == nil
+                ? (store.selectedModel == nil || store.selectedModel == "default")
+                : store.selectedModel == id
+            if selected {
                 Label(label, systemImage: "checkmark")
             } else {
                 Text(label)
@@ -663,11 +676,6 @@ struct ChatView: View {
         bottomBar
             .padding(.bottom, safeBottom)
             .background(
-                Theme.background
-                    .opacity(0.97)
-                    .ignoresSafeArea(edges: .bottom)
-            )
-            .background(
                 GeometryReader { proxy in
                     Color.clear.preference(
                         key: ChatBottomBarHeightKey.self,
@@ -732,14 +740,13 @@ struct ChatView: View {
     }
 
     private var inputBar: some View {
-        VStack(alignment: .leading, spacing: inputExpanded ? 10 : 0) {
-            HStack(alignment: .bottom, spacing: 8) {
+        let cornerRadius: CGFloat = inputExpanded ? 28 : 24
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        return VStack(alignment: .leading, spacing: inputExpanded ? 10 : 0) {
+            HStack(alignment: inputExpanded ? .bottom : .center, spacing: 8) {
                 if !inputExpanded {
                     composerActionsMenu
-                    if store.isStructured {
-                        modeChip(compact: true)
-                        modelThinkingChip(compact: true)
-                    }
                 }
                 composerInputContent
                 if !inputExpanded {
@@ -751,19 +758,34 @@ struct ChatView: View {
                 controlRow
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Theme.surface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Theme.border, lineWidth: 1)
-        )
+        .padding(.horizontal, inputExpanded ? 10 : 9)
+        .padding(.vertical, inputExpanded ? 9 : 4)
+        .background(.ultraThinMaterial, in: shape)
+        .background {
+            shape
+                .fill(Theme.surface.opacity(inputExpanded ? 0.58 : 0.48))
+        }
+        .overlay {
+            shape
+                .stroke(Theme.border.opacity(inputExpanded ? 0.42 : 0.32), lineWidth: 0.8)
+        }
+        .overlay(alignment: .top) {
+            shape
+                .stroke(Color.white.opacity(inputExpanded ? 0.36 : 0.28), lineWidth: 0.7)
+                .blendMode(.screen)
+        }
+        .overlay {
+            if inputFocused {
+                shape
+                    .stroke(Theme.brand.opacity(0.28), lineWidth: 1)
+            }
+        }
+        .contentShape(shape)
+        .compositingGroup()
+        .shadow(color: Color.black.opacity(inputExpanded ? 0.14 : 0.08), radius: inputExpanded ? 22 : 12, x: 0, y: inputExpanded ? 10 : 4)
         .padding(.horizontal, 12)
-        .padding(.top, 4)
-        .padding(.bottom, 8)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
         .animation(.easeInOut(duration: 0.18), value: inputExpanded)
         .confirmationDialog(
             "确定要停止当前正在运行的任务吗？",
@@ -782,10 +804,16 @@ struct ChatView: View {
         } else {
             growingTextField
                 .focused($inputFocused)
-                .padding(.leading, 6)
-                .padding(.trailing, 4)
-                .padding(.vertical, 4)
-                .frame(minHeight: 32)
+                .padding(.leading, inputExpanded ? 6 : 2)
+                .padding(.trailing, inputExpanded ? 4 : 0)
+                .padding(.vertical, inputExpanded ? 4 : 2)
+                .frame(minHeight: inputExpanded ? 32 : 34)
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    TapGesture().onEnded {
+                        inputFocused = true
+                    }
+                )
         }
     }
 
@@ -793,16 +821,25 @@ struct ChatView: View {
     /// 把原本散落在右上角的会话设置（模型 + 思考深度）+ 模式开关全部收拢到这里。
     private var controlRow: some View {
         HStack(spacing: 8) {
-            composerActionsMenu
-            if store.isStructured {
-                modeChip()
+            ViewThatFits(in: .horizontal) {
+                controlChipGroup(compact: false)
+                controlChipGroup(compact: true)
             }
-            Spacer(minLength: 4)
-            if store.isStructured {
-                modelThinkingChip()
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+
             micButton
             trailingButtons
+        }
+    }
+
+    private func controlChipGroup(compact: Bool) -> some View {
+        HStack(spacing: 8) {
+            composerActionsMenu
+            if store.isStructured {
+                modeChip(compact: compact)
+                modelThinkingChip(compact: compact)
+            }
         }
     }
 
@@ -824,10 +861,10 @@ struct ChatView: View {
         Button { showStopConfirm = true } label: {
             Image(systemName: "stop.fill")
                 .font(.system(size: 14, weight: .bold))
-                .foregroundColor(.black)
+                .foregroundColor(Theme.surface)
                 .frame(width: 38, height: 38)
-                .background(Circle().fill(Color.white))
-                .overlay(Circle().stroke(Theme.border, lineWidth: 0.5))
+                .background(Circle().fill(Theme.textPrimary))
+                .overlay(Circle().stroke(Theme.border.opacity(0.25), lineWidth: 0.5))
         }
         .accessibilityLabel("停止任务")
     }
@@ -847,9 +884,11 @@ struct ChatView: View {
         Button(action: sendDraft) {
             Image(systemName: "arrow.up")
                 .font(.system(size: 16, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(canSend ? Theme.surface : Theme.textSecondary.opacity(0.55))
                 .frame(width: 38, height: 38)
-                .background(Circle().fill(canSend ? Theme.brand : Theme.brand.opacity(0.4)))
+                .background(
+                    Circle().fill(canSend ? Theme.textPrimary : Theme.textSecondary.opacity(0.16))
+                )
         }
         .disabled(!canSend)
         .accessibilityLabel("发送")
@@ -900,6 +939,7 @@ struct ChatView: View {
             )
         }
         .disabled(isCodex)
+        .buttonStyle(.plain)
         .accessibilityLabel("执行模式")
     }
 
@@ -932,6 +972,7 @@ struct ChatView: View {
                 maxTextWidth: compact ? 94 : 140
             )
         }
+        .buttonStyle(.plain)
         .accessibilityLabel("模型与思考深度")
     }
 
@@ -1035,6 +1076,7 @@ struct ChatView: View {
                     .contentShape(Rectangle())
             }
         }
+        .buttonStyle(.plain)
         .accessibilityLabel("更多操作")
     }
 
@@ -1079,9 +1121,13 @@ struct ChatView: View {
 
     /// 多行自增高输入框（iOS 26+ 唯一支持形态）。
     private var growingTextField: some View {
-        TextField("发消息…", text: $draft, axis: .vertical)
+        TextField(composerPlaceholder, text: $draft, axis: .vertical)
             .lineLimit(1...5)
             .font(.system(size: 16))
+    }
+
+    private var composerPlaceholder: String {
+        store.messages.isEmpty ? "发消息…" : "跟进"
     }
 
     private var canSend: Bool {
