@@ -13,6 +13,7 @@ struct SettingsView: View {
 
     @EnvironmentObject private var store: ServerStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
 
     @State private var serverVersion: String?
@@ -20,6 +21,7 @@ struct SettingsView: View {
     @State private var notificationStatus = "读取中…"
     @State private var logShare: LogShareItem?
     @State private var logExportEmpty = false
+    @State private var sectionsVisible = false
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
 
@@ -27,11 +29,17 @@ struct SettingsView: View {
         NavigationView {
             Form {
                 serverSection
+                    .settingsSectionMotion(index: 0, visible: sectionsVisible, reduceMotion: reduceMotion)
                 appearanceSection
+                    .settingsSectionMotion(index: 1, visible: sectionsVisible, reduceMotion: reduceMotion)
                 featureSection
+                    .settingsSectionMotion(index: 2, visible: sectionsVisible, reduceMotion: reduceMotion)
                 diagnosticsSection
+                    .settingsSectionMotion(index: 3, visible: sectionsVisible, reduceMotion: reduceMotion)
                 moreSection
+                    .settingsSectionMotion(index: 4, visible: sectionsVisible, reduceMotion: reduceMotion)
                 aboutSection
+                    .settingsSectionMotion(index: 5, visible: sectionsVisible, reduceMotion: reduceMotion)
             }
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
@@ -46,6 +54,7 @@ struct SettingsView: View {
         .tint(Theme.brand)
         .wandPreferredAppearance()
         .task {
+            sectionsVisible = true
             serverVersion = (try? await api.serverConfig())?.currentVersion
             await refreshNotificationStatus()
         }
@@ -254,6 +263,29 @@ struct SettingsView: View {
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct SettingsSectionMotion: ViewModifier {
+    let index: Int
+    let visible: Bool
+    let reduceMotion: Bool
+
+    func body(content: Content) -> some View {
+        let shown = reduceMotion || visible
+        content
+            .opacity(shown ? 1 : 0)
+            .offset(y: shown ? 0 : 8)
+            .animation(
+                reduceMotion ? nil : .smooth(duration: 0.28, extraBounce: 0).delay(Double(index) * 0.03),
+                value: visible
+            )
+    }
+}
+
+private extension View {
+    func settingsSectionMotion(index: Int, visible: Bool, reduceMotion: Bool) -> some View {
+        modifier(SettingsSectionMotion(index: index, visible: visible, reduceMotion: reduceMotion))
     }
 }
 

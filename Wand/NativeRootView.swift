@@ -17,6 +17,9 @@ struct NativeRootView: View {
     @State private var updateError: String?
     @State private var installingUpdate = false
     @State private var systemSocket: WandSocket?
+#if DEBUG
+    @State private var didApplyDebugSettingsLaunch = false
+#endif
     @ObservedObject private var quickActions = QuickActionCoordinator.shared
 
     private enum Phase: Equatable {
@@ -137,6 +140,9 @@ struct NativeRootView: View {
             handleQuickAction()
         }
         .onChange(of: phase) { _, _ in
+#if DEBUG
+            handleDebugSettingsLaunch()
+#endif
             handleQuickAction()
         }
         .task { await monitorSessionStatus() }
@@ -250,6 +256,16 @@ struct NativeRootView: View {
             showWebFallback = false
         }
     }
+
+#if DEBUG
+    private func handleDebugSettingsLaunch() {
+        guard !didApplyDebugSettingsLaunch,
+              phase == .ready,
+              ProcessInfo.processInfo.arguments.contains("--wand-open-settings") else { return }
+        didApplyDebugSettingsLaunch = true
+        showSettings = true
+    }
+#endif
 
     private func authenticate() {
         phase = .authenticating

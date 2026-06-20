@@ -232,7 +232,7 @@ struct ChatView: View {
                         Color.clear.frame(height: scrollMode == .pinLatestTurn ? pinSpacerHeight : 0)
                     }
                     .padding(.horizontal, 14)
-                    .padding(.top, showPinnedLatestContext ? 68 : 12)
+                    .padding(.top, 12)
                     .padding(.bottom, 6)
                 }
                 .coordinateSpace(name: "chatScroll")
@@ -244,7 +244,9 @@ struct ChatView: View {
                             // 仅用户明确向下拖动、准备查看更早消息时暂停跟随。
                             // 旧逻辑任何轻微拖动都会永久关掉跟随，收键盘或触摸
                             // 列表后，新回复就只能靠右下角按钮才能看到。
-                            if value.translation.height > 18 {
+                            if expandedCurrentReplyTurnIndex != nil && value.translation.height > 42 {
+                                collapseExpandedCurrentReply(proxy)
+                            } else if value.translation.height > 18 {
                                 scrollMode = .manual
                             }
                         }
@@ -264,19 +266,6 @@ struct ChatView: View {
                         .padding(.leading, 16)
                         .padding(.bottom, 12)
                         .transition(.scale(scale: 0.9).combined(with: .opacity))
-                    }
-                }
-                .overlay(alignment: .top) {
-                    if showPinnedLatestContext {
-                        PinnedLatestContextBar(
-                            historyCount: currentHistoryStats.rounds,
-                            showHistoryChip: hasCollapsedHistory,
-                            replyPreview: turnPlainText(expandedReplyTurn),
-                            onHistoryToggle: { toggleHistory(proxy) },
-                            onReplyToggle: { collapseExpandedCurrentReply(proxy) }
-                        )
-                        .padding(.horizontal, 14)
-                        .transition(.opacity)
                     }
                 }
                 .onAppear { scrollToActiveTarget(proxy) }
@@ -335,7 +324,6 @@ struct ChatView: View {
         case .turn(let index, let turn):
             let showInlineHistory = hasCollapsedHistory
                 && !isHistoryExpanded
-                && !showPinnedLatestContext
                 && turn.role == "user"
                 && index == lastUserTurnIndex
             let turnView = TurnView(
@@ -447,17 +435,6 @@ struct ChatView: View {
         return store.messages[lastUserTurnIndex]
     }
 
-    private var expandedReplyTurn: ConversationTurn? {
-        guard let index = expandedCurrentReplyTurnIndex,
-              store.messages.indices.contains(index),
-              store.messages[index].role == "assistant" else { return nil }
-        return store.messages[index]
-    }
-
-    private var showPinnedLatestContext: Bool {
-        expandedReplyTurn != nil && latestUserTurn != nil
-    }
-
     private var groupedMessageItems: [MessageDisplayItem] {
         let currentReplyIndex = latestAssistantTurnIndex
         let base = flattenAssistantTurns(
@@ -538,8 +515,8 @@ struct ChatView: View {
     private func expandCurrentReplyToBottom(_ turnIndex: Int, proxy: ScrollViewProxy) {
         expandedCurrentReplyTurnIndex = turnIndex
         expandedHistoryBoundary = nil
-        scrollMode = .stickToBottom
-        scrollToActiveTarget(proxy)
+        scrollMode = .pinLatestTurn
+        scrollToActiveTarget(proxy, animated: true)
     }
 
     private func collapseExpandedCurrentReply(_ proxy: ScrollViewProxy) {
@@ -1920,18 +1897,6 @@ private func shouldCompactUserBody(_ text: String) -> Bool {
             .count > 2
 }
 
-private func turnPlainText(_ turn: ConversationTurn?) -> String {
-    guard let turn else { return "" }
-    return turn.content.compactMap { block -> String? in
-        guard case .text(let text, _) = block else { return nil }
-        return text
-    }
-    .joined(separator: " ")
-    .components(separatedBy: .whitespacesAndNewlines)
-    .filter { !$0.isEmpty }
-    .joined(separator: " ")
-}
-
 private struct TurnView: View {
     let turn: ConversationTurn
     var baseURL: URL? = nil
@@ -2983,71 +2948,6 @@ private struct InlineHistoryChip: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(expanded ? "收起上文" : "展开已收起的 \(count) 轮上文")
-    }
-}
-
-private struct PinnedLatestContextBar: View {
-    let historyCount: Int
-    let showHistoryChip: Bool
-    let replyPreview: String
-    let onHistoryToggle: () -> Void
-    let onReplyToggle: () -> Void
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            if showHistoryChip {
-                InlineHistoryChip(count: historyCount, onToggle: onHistoryToggle)
-            }
-            PinnedReplyHeader(preview: replyPreview, onToggle: onReplyToggle)
-                .frame(maxWidth: .infinity)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Theme.surface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Theme.border.opacity(0.72), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.08), radius: 10, y: 4)
-    }
-}
-
-private struct PinnedReplyHeader: View {
-    let preview: String
-    let onToggle: () -> Void
-
-    var body: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 8) {
-                ZStack {
-                    Circle().fill(Theme.brand.opacity(0.14))
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Theme.brand)
-                }
-                .frame(width: 24, height: 24)
-                Text("Wand")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                Text(preview.isEmpty ? "已展开全文，点此收起" : preview)
-                    .font(.system(size: 12))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.up")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(Theme.textSecondary)
-            }
-            .padding(.vertical, 3)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("收起完整回复")
     }
 }
 
