@@ -23,6 +23,12 @@ private struct ChatBottomBarHeightKey: PreferenceKey {
     }
 }
 
+private enum ChatScrollMode {
+    case pinLatestTurn
+    case stickToBottom
+    case manual
+}
+
 struct ChatView: View {
     private let sessionId: String
     private let api: WandAPI
@@ -32,7 +38,7 @@ struct ChatView: View {
     @StateObject private var speech = SpeechRecognizerService()
     @State private var draft = ""
     @State private var showQuickCommit = false
-    @State private var followsLatest = true
+    @State private var scrollMode: ChatScrollMode = .pinLatestTurn
     /// 抽纸式钉顶：发出新消息后，把最新一条用户消息钉到视口顶端，回复在其下方展开，
     /// 更早历史折进摘要卡。短回复时用底部占位撑出空间，保证用户消息能滚到最顶。
     /// 视口高度 + 占位高度由 ScrollView 几何测量驱动（见 chatPinMetrics / updatePinSpacer）。
@@ -60,7 +66,7 @@ struct ChatView: View {
     /// 发新消息后边界前移，nil != 新边界 → 历史默认重新折叠。
     @State private var expandedHistoryBoundary: Int?
     /// 当前最新 assistant 回复的尾部折叠：默认只露最近输出，点摘要行临时展开完整回复。
-    @State private var expandedCurrentReplyTurns = Set<Int>()
+    @State private var expandedCurrentReplyTurnIndex: Int?
     /// 底部 overlay 的实际占位高度。ChatView 不使用 safeAreaInset 放输入栏，
     /// 避免 SwiftUI 键盘避让和 KeyboardObserver 手动抬升叠加。
     @State private var bottomBarHeight: CGFloat = 0
@@ -209,11 +215,11 @@ struct ChatView: View {
                         // 什么都渲染不出来。摊平后 LazyVStack 只实例化进入视口的行。
                         ForEach(Array(groupedMessageItems.enumerated()), id: \.offset) { _, row in
                             if isPinRow(row) {
-                                messageItemView(row)
+                                messageItemView(row, proxy: proxy)
                                     .id("user-pin")
                                     .background(pinMetric("userTop"))
                             } else {
-                                messageItemView(row)
+                                messageItemView(row, proxy: proxy)
                             }
                         }
                         if store.isResponding {
@@ -223,10 +229,10 @@ struct ChatView: View {
                             .background(pinMetric("bottomY"))
                         // 钉顶占位：短回复时撑出空间，让最新用户消息能滚到视口顶端；
                         // 长回复时高度归零。高度由 updatePinSpacer 据几何测量动态算出。
-                        Color.clear.frame(height: pinSpacerHeight)
+                        Color.clear.frame(height: scrollMode == .pinLatestTurn ? pinSpacerHeight : 0)
                     }
                     .padding(.horizontal, 14)
-                    .padding(.top, 12)
+                    .padding(.top, showPinnedLatestContext ? 126 : 12)
                     .padding(.bottom, 6)
                 }
                 .coordinateSpace(name: "chatScroll")
@@ -239,27 +245,53 @@ struct ChatView: View {
                             // 旧逻辑任何轻微拖动都会永久关掉跟随，收键盘或触摸
                             // 列表后，新回复就只能靠右下角按钮才能看到。
                             if value.translation.height > 18 {
-                                followsLatest = false
+                                scrollMode = .manual
                             }
                         }
                 )
                 .overlay(alignment: .bottomTrailing) {
-                    if !followsLatest {
+                    if scrollMode == .manual {
                         jumpToLatestButton(proxy)
                     }
                 }
-                .onAppear { pinLatestUserToTop(proxy) }
+                .overlay(alignment: .bottomLeading) {
+                    if isHistoryExpanded && hasCollapsedHistory {
+                        InlineHistoryChip(
+                            count: currentHistoryStats.rounds,
+                            expanded: true,
+                            onToggle: { toggleHistory(proxy) }
+                        )
+                        .padding(.leading, 16)
+                        .padding(.bottom, 12)
+                        .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    }
+                }
+                .overlay(alignment: .top) {
+                    if showPinnedLatestContext {
+                        PinnedLatestContextBar(
+                            historyCount: currentHistoryStats.rounds,
+                            showHistoryChip: hasCollapsedHistory,
+                            userText: turnPlainText(latestUserTurn),
+                            replyPreview: turnPlainText(expandedReplyTurn),
+                            onHistoryToggle: { toggleHistory(proxy) },
+                            onReplyToggle: { collapseExpandedCurrentReply(proxy) }
+                        )
+                        .padding(.horizontal, 14)
+                        .transition(.opacity)
+                    }
+                }
+                .onAppear { scrollToActiveTarget(proxy) }
                 .onReceive(store.$messages.dropFirst()) { _ in
-                    pinLatestUserToTop(proxy)
+                    scrollToActiveTarget(proxy)
                 }
                 .onChange(of: store.isResponding) { _ in
-                    pinLatestUserToTop(proxy)
+                    scrollToActiveTarget(proxy)
                 }
                 .onChange(of: store.loading) { loading in
-                    if !loading { pinLatestUserToTop(proxy) }
+                    if !loading { scrollToActiveTarget(proxy) }
                 }
                 .onChange(of: keyboard.lift) { lift in
-                    if lift > 0 && followsLatest { pinLatestUserToTop(proxy) }
+                    if lift > 0 && scrollMode != .manual { scrollToActiveTarget(proxy) }
                 }
         }
         .onAppear { chatViewportHeight = outer.size.height }
@@ -299,14 +331,23 @@ struct ChatView: View {
         if abs(target - pinSpacerHeight) > 1 { pinSpacerHeight = target }
     }
 
-    @ViewBuilder private func messageItemView(_ item: MessageDisplayItem) -> some View {
+    @ViewBuilder private func messageItemView(_ item: MessageDisplayItem, proxy: ScrollViewProxy) -> some View {
         switch item {
         case .turn(let index, let turn):
-            TurnView(
+            let showInlineHistory = hasCollapsedHistory
+                && !isHistoryExpanded
+                && !showPinnedLatestContext
+                && turn.role == "user"
+                && index == lastUserTurnIndex
+            let turnView = TurnView(
                 turn: turn,
                 baseURL: store.api.baseURL,
                 isLastTurn: index == store.messages.count - 1,
                 isResponding: store.isResponding,
+                compactUser: scrollMode == .pinLatestTurn
+                    && !isHistoryExpanded
+                    && index == lastUserTurnIndex
+                    && (store.isResponding || index < store.messages.count - 1),
                 askSelections: store.askUserSelections,
                 onAskToggle: { toolUseId, qIdx, optIdx, multi in
                     store.toggleAskOption(
@@ -315,11 +356,24 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
-                    expandedCurrentReplyTurns.removeAll()
-                    followsLatest = true
+                    expandedCurrentReplyTurnIndex = nil
+                    expandedHistoryBoundary = nil
+                    scrollMode = .pinLatestTurn
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
+            if showInlineHistory {
+                HStack(alignment: .top, spacing: 8) {
+                    InlineHistoryChip(
+                        count: currentHistoryStats.rounds,
+                        onToggle: { toggleHistory(proxy) }
+                    )
+                    .padding(.top, 3)
+                    turnView
+                }
+            } else {
+                turnView
+            }
         case .assistantItem(let turnIndex, let displayItem):
             AssistantItemView(
                 item: displayItem,
@@ -334,20 +388,18 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
-                    expandedCurrentReplyTurns.removeAll()
-                    followsLatest = true
+                    expandedCurrentReplyTurnIndex = nil
+                    expandedHistoryBoundary = nil
+                    scrollMode = .pinLatestTurn
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
         case .currentReplySummary(let turnIndex, let summary, let expanded):
             CurrentReplySummaryCard(summary: summary, expanded: expanded) {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    if expandedCurrentReplyTurns.contains(turnIndex) {
-                        expandedCurrentReplyTurns.remove(turnIndex)
-                        followsLatest = true
-                    } else {
-                        expandedCurrentReplyTurns.insert(turnIndex)
-                    }
+                if expanded {
+                    collapseExpandedCurrentReply(proxy)
+                } else {
+                    expandCurrentReplyToBottom(turnIndex, proxy: proxy)
                 }
             }
         case .explorationGroup(let tools, let lastTurnIndex):
@@ -361,12 +413,9 @@ struct ChatView: View {
             HistorySummaryCard(
                 stats: stats,
                 expanded: expandedHistoryBoundary == boundary,
-                onToggle: {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        expandedHistoryBoundary = (expandedHistoryBoundary == boundary) ? nil : boundary
-                    }
-                }
+                onToggle: { toggleHistory(proxy) }
             )
+            .id("history-summary-\(boundary)")
         }
     }
 
@@ -378,12 +427,44 @@ struct ChatView: View {
         return -1
     }
 
+    private var historyBoundary: Int {
+        lastUserTurnIndex
+    }
+
+    private var hasCollapsedHistory: Bool {
+        historyBoundary >= 2
+    }
+
+    private var isHistoryExpanded: Bool {
+        expandedHistoryBoundary == historyBoundary
+    }
+
+    private var currentHistoryStats: HistoryStats {
+        computeHistoryStats(turns: store.messages, boundary: historyBoundary)
+    }
+
+    private var latestUserTurn: ConversationTurn? {
+        guard lastUserTurnIndex >= 0, store.messages.indices.contains(lastUserTurnIndex) else { return nil }
+        return store.messages[lastUserTurnIndex]
+    }
+
+    private var expandedReplyTurn: ConversationTurn? {
+        guard let index = expandedCurrentReplyTurnIndex,
+              store.messages.indices.contains(index),
+              store.messages[index].role == "assistant" else { return nil }
+        return store.messages[index]
+    }
+
+    private var showPinnedLatestContext: Bool {
+        expandedReplyTurn != nil && latestUserTurn != nil
+    }
+
     private var groupedMessageItems: [MessageDisplayItem] {
         let currentReplyIndex = latestAssistantTurnIndex
         let base = flattenAssistantTurns(
             groupExplorationTurns(store.messages),
             currentReplyIndex: currentReplyIndex,
-            expandedCurrentReplyTurns: expandedCurrentReplyTurns
+            expandedCurrentReplyTurnIndex: expandedCurrentReplyTurnIndex
         )
         let boundary = lastUserTurnIndex
         // 至少要折叠一整轮（≥2 条历史 turn）才出摘要卡。
@@ -394,21 +475,15 @@ struct ChatView: View {
             if itemTurnIndex(item) < boundary { history.append(item) } else { current.append(item) }
         }
         guard !history.isEmpty else { return base }
-        guard shouldCollapseHistory else { return base }
         let expanded = expandedHistoryBoundary == boundary
         let stats = computeHistoryStats(turns: store.messages, boundary: boundary)
         var result: [MessageDisplayItem] = []
-        if expanded { result.append(contentsOf: history) }
-        result.append(.historySummary(stats: stats, boundary: boundary))
+        if expanded {
+            result.append(contentsOf: history)
+            result.append(.historySummary(stats: stats, boundary: boundary))
+        }
         result.append(contentsOf: current)
         return result
-    }
-
-    /// 历史折叠只在当前轮内容已经填满视口后启用。否则新回复还没占满一屏，
-    /// 顶部历史就先折成胶囊，会留下截图里那种大块空白。
-    private var shouldCollapseHistory: Bool {
-        guard chatViewportHeight > 0 else { return false }
-        return currentTurnHeight >= chatViewportHeight - chatPinTopInset - 1
     }
 
     /// 当前轮 assistant 回复的下标；只折叠最后一条、且必须位于最后用户消息之后。
@@ -421,9 +496,10 @@ struct ChatView: View {
 
     private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
         Button {
-            expandedCurrentReplyTurns.removeAll()
-            followsLatest = true
-            pinLatestUserToTop(proxy, animated: true)
+            expandedCurrentReplyTurnIndex = nil
+            expandedHistoryBoundary = nil
+            scrollMode = .stickToBottom
+            scrollToActiveTarget(proxy, animated: true)
         } label: {
             Image(systemName: "arrow.down")
                 .font(.system(size: 15, weight: .bold))
@@ -433,18 +509,65 @@ struct ChatView: View {
                 .overlay(Circle().stroke(Color.white.opacity(0.2), lineWidth: 1))
                 .shadow(color: Color.black.opacity(0.22), radius: 8, y: 3)
         }
-        .accessibilityLabel("回到最新消息并继续跟随")
+        .accessibilityLabel("回到列表底部")
         .padding(.trailing, 16)
         .padding(.bottom, 12)
         .transition(.scale(scale: 0.85).combined(with: .opacity))
     }
 
-    /// 钉顶：把最新一条用户消息滚到视口顶端，回复在其下方展开。
-    /// 流式更新会原地增高回复，首个 scrollTo 可能早于 LazyVStack 完成布局，
-    /// 故按递增延迟补几次；底部占位（pinSpacerHeight）保证短回复也能滚到最顶。
-    private func pinLatestUserToTop(_ proxy: ScrollViewProxy, animated: Bool = false) {
-        guard followsLatest else { return }
-        let scroll = { proxy.scrollTo("user-pin", anchor: .top) }
+    private func toggleHistory(_ proxy: ScrollViewProxy) {
+        guard hasCollapsedHistory else { return }
+        let boundary = historyBoundary
+        let next = !isHistoryExpanded
+        expandedCurrentReplyTurnIndex = nil
+        expandedHistoryBoundary = next ? boundary : nil
+        scrollMode = next ? .manual : .pinLatestTurn
+        if next && store.canLoadEarlier {
+            store.loadEarlier()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            if next {
+                withAnimation(.easeOut(duration: 0.22)) {
+                    proxy.scrollTo("history-summary-\(boundary)", anchor: .top)
+                }
+            } else {
+                scrollToActiveTarget(proxy, animated: true)
+            }
+        }
+    }
+
+    private func expandCurrentReplyToBottom(_ turnIndex: Int, proxy: ScrollViewProxy) {
+        expandedCurrentReplyTurnIndex = turnIndex
+        expandedHistoryBoundary = nil
+        scrollMode = .stickToBottom
+        scrollToActiveTarget(proxy)
+    }
+
+    private func collapseExpandedCurrentReply(_ proxy: ScrollViewProxy) {
+        expandedCurrentReplyTurnIndex = nil
+        expandedHistoryBoundary = nil
+        scrollMode = .pinLatestTurn
+        scrollToActiveTarget(proxy, animated: true)
+    }
+
+    /// 根据当前模式同步滚动：钉住最新轮次、真正贴底，或尊重用户手动浏览。
+    private func scrollToActiveTarget(_ proxy: ScrollViewProxy, animated: Bool = false) {
+        guard scrollMode != .manual else { return }
+        let mode = scrollMode
+        let scroll = {
+            switch mode {
+            case .pinLatestTurn:
+                if lastUserTurnIndex >= 0 {
+                    proxy.scrollTo("user-pin", anchor: .top)
+                } else {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+                }
+            case .stickToBottom:
+                proxy.scrollTo("chat-bottom", anchor: .bottom)
+            case .manual:
+                break
+            }
+        }
         if animated {
             withAnimation(.easeOut(duration: 0.22)) { scroll() }
         } else {
@@ -452,8 +575,8 @@ struct ChatView: View {
         }
         for delay in [0.05, 0.15, 0.35, 0.7] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard followsLatest else { return }
-                proxy.scrollTo("user-pin", anchor: .top)
+                guard scrollMode == mode else { return }
+                scroll()
             }
         }
     }
@@ -1138,8 +1261,9 @@ struct ChatView: View {
         let text = buildAttachmentPrompt(pendingAttachments, body: draft)
         draft = ""
         pendingAttachments.removeAll()
-        expandedCurrentReplyTurns.removeAll()
-        followsLatest = true
+        expandedCurrentReplyTurnIndex = nil
+        expandedHistoryBoundary = nil
+        scrollMode = .pinLatestTurn
         store.send(text: text)
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让 @FocusState 丢焦点、键盘收起，
         // 用户得再点一次输入框才能继续。非语音模式下主动保持焦点，连续对话不断。
@@ -1497,7 +1621,7 @@ private func groupExplorationTurns(_ turns: [ConversationTurn]) -> [MessageDispl
 private func flattenAssistantTurns(
     _ items: [MessageDisplayItem],
     currentReplyIndex: Int? = nil,
-    expandedCurrentReplyTurns: Set<Int> = []
+    expandedCurrentReplyTurnIndex: Int? = nil
 ) -> [MessageDisplayItem] {
     var out: [MessageDisplayItem] = []
     var latestUserPreview = ""
@@ -1506,7 +1630,7 @@ private func flattenAssistantTurns(
             let fold = index == currentReplyIndex
                 ? foldCurrentReplyTail(turn.content, userPreview: latestUserPreview)
                 : CurrentReplyFold(blocks: turn.content, summary: "")
-            let expanded = expandedCurrentReplyTurns.contains(index)
+            let expanded = expandedCurrentReplyTurnIndex == index
             if !fold.summary.isEmpty {
                 out.append(.currentReplySummary(turnIndex: index, summary: fold.summary, expanded: expanded))
             }
@@ -1664,7 +1788,9 @@ private func isGroupableExplorationTool(name: String, input: [String: JSONValue]
     isExplorationTool(name) && !isReadImageTool(name: name, input: input)
 }
 
-private let currentReplyTailUnits = 8
+private let currentReplyTailUnits = 5
+private let currentReplyTextUnitChars = 280
+private let compactUserMinChars = 140
 
 private struct CurrentReplyFold {
     let blocks: [ContentBlock]
@@ -1768,13 +1894,49 @@ private func splitReplyTextUnits(_ text: String) -> [String] {
     if !current.isEmpty {
         paragraphs.append(current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines))
     }
-    if paragraphs.count > 1 { return paragraphs }
+    let units: [String]
+    if paragraphs.count > 1 {
+        units = paragraphs
+    } else {
+        let lines = trimmed
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        units = lines.isEmpty ? [trimmed] : lines
+    }
+    return units.flatMap(splitLongReplyUnit)
+}
 
-    let lines = trimmed
-        .components(separatedBy: .newlines)
-        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
-    return lines.isEmpty ? [trimmed] : lines
+private func splitLongReplyUnit(_ text: String) -> [String] {
+    guard text.count > currentReplyTextUnitChars else { return [text] }
+    var chunks: [String] = []
+    var start = text.startIndex
+    while start < text.endIndex {
+        let end = text.index(start, offsetBy: currentReplyTextUnitChars, limitedBy: text.endIndex) ?? text.endIndex
+        chunks.append(String(text[start..<end]))
+        start = end
+    }
+    return chunks
+}
+
+private func shouldCompactUserBody(_ text: String) -> Bool {
+    text.count > compactUserMinChars
+        || text.components(separatedBy: .newlines)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .prefix(3)
+            .count > 2
+}
+
+private func turnPlainText(_ turn: ConversationTurn?) -> String {
+    guard let turn else { return "" }
+    return turn.content.compactMap { block -> String? in
+        guard case .text(let text, _) = block else { return nil }
+        return text
+    }
+    .joined(separator: " ")
+    .components(separatedBy: .whitespacesAndNewlines)
+    .filter { !$0.isEmpty }
+    .joined(separator: " ")
 }
 
 private struct TurnView: View {
@@ -1782,9 +1944,12 @@ private struct TurnView: View {
     var baseURL: URL? = nil
     var isLastTurn = false
     var isResponding = false
+    var compactUser = false
     var askSelections: [String: AskUserSelectionState] = [:]
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
     var onAskSubmit: (String, String) -> Void = { _, _ in }
+
+    @State private var userExpanded = false
 
     var body: some View {
         if turn.role == "user" {
@@ -1809,6 +1974,8 @@ private struct TurnView: View {
 
     private var userBubble: some View {
         let parsed = parsedUser
+        let canCompact = compactUser && shouldCompactUserBody(parsed.body)
+        let collapsed = canCompact && !userExpanded
         return VStack(alignment: .trailing, spacing: 6) {
             if !parsed.attachmentPaths.isEmpty {
                 attachmentsView(parsed.attachmentPaths)
@@ -1816,16 +1983,33 @@ private struct TurnView: View {
             if !parsed.body.isEmpty {
                 HStack {
                     Spacer(minLength: 48)
-                    Text(parsed.body)
-                        .font(.system(size: 16))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(Theme.brand)
-                        )
-                        .textSelection(.enabled)
+                    VStack(alignment: .trailing, spacing: 5) {
+                        Text(parsed.body)
+                            .font(.system(size: 16))
+                            .foregroundColor(.white)
+                            .lineLimit(collapsed ? 2 : nil)
+                            .truncationMode(.tail)
+                            .textSelection(.enabled)
+                        if canCompact {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.16)) {
+                                    userExpanded.toggle()
+                                }
+                            } label: {
+                                Text(collapsed ? "展开" : "收起")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.86))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(collapsed ? "展开用户消息" : "收起用户消息")
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Theme.brand)
+                    )
                 }
             }
         }
@@ -2779,6 +2963,133 @@ private struct PermissionCard: View {
 }
 
 // MARK: - 当前回复尾部折叠摘要
+
+private struct InlineHistoryChip: View {
+    let count: Int
+    var expanded = false
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 10, weight: .bold))
+                    .rotationEffect(.degrees(expanded ? -90 : 0))
+                Text(expanded ? "收起上文" : "已收起 \(count) 轮")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundColor(Theme.textSecondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+            .frame(minHeight: 36)
+            .background(Capsule(style: .continuous).fill(Theme.surface))
+            .overlay(Capsule(style: .continuous).stroke(Theme.border, lineWidth: 1))
+            .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(expanded ? "收起上文" : "展开已收起的 \(count) 轮上文")
+    }
+}
+
+private struct PinnedLatestContextBar: View {
+    let historyCount: Int
+    let showHistoryChip: Bool
+    let userText: String
+    let replyPreview: String
+    let onHistoryToggle: () -> Void
+    let onReplyToggle: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 8) {
+                if showHistoryChip {
+                    InlineHistoryChip(count: historyCount, onToggle: onHistoryToggle)
+                        .padding(.top, 1)
+                }
+                PinnedUserBubble(text: userText)
+            }
+            PinnedReplyHeader(preview: replyPreview, onToggle: onReplyToggle)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Theme.border.opacity(0.72), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.08), radius: 10, y: 4)
+    }
+}
+
+private struct PinnedUserBubble: View {
+    let text: String
+
+    var body: some View {
+        HStack {
+            Spacer(minLength: 0)
+            Text(text.isEmpty ? "用户消息" : text)
+                .font(.system(size: 14))
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: 280, alignment: .leading)
+                .background(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 18,
+                        bottomLeadingRadius: 18,
+                        bottomTrailingRadius: 6,
+                        topTrailingRadius: 18,
+                        style: .continuous
+                    )
+                    .fill(Theme.brand)
+                )
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct PinnedReplyHeader: View {
+    let preview: String
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 8) {
+                ZStack {
+                    Circle().fill(Theme.brand.opacity(0.14))
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.brand)
+                }
+                .frame(width: 24, height: 24)
+                Text("Wand")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                Text(preview.isEmpty ? "已展开全文，点此收起" : preview)
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("收起完整回复")
+    }
+}
 
 private struct CurrentReplySummaryCard: View {
     let summary: String

@@ -28,14 +28,12 @@ private func stateTint(_ stateRaw: String) -> Color {
     }
 }
 
-private let liveActivityURL = URL(string: "wand://live-activity")!
-
 private func sessionURL(_ id: String) -> URL {
     var components = URLComponents()
     components.scheme = "wand"
     components.host = "session"
     components.path = "/\(id)"
-    return components.url ?? liveActivityURL
+    return components.url ?? URL(string: "wand://session")!
 }
 
 struct SessionLiveActivityWidget: Widget {
@@ -43,7 +41,6 @@ struct SessionLiveActivityWidget: Widget {
         ActivityConfiguration(for: SessionActivityAttributes.self) { context in
             // 锁屏 / 通知横幅：单行长条
             LockScreenStripView(state: context.state)
-                .widgetURL(liveActivityURL)
                 .activityBackgroundTint(Color.black.opacity(0.55))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
@@ -83,7 +80,6 @@ struct SessionLiveActivityWidget: Widget {
             } minimal: {
                 CompactMinimalMark(state: context.state)
             }
-            .widgetURL(liveActivityURL)
             .keylineTint(WandColor.brand)
         }
     }
@@ -115,9 +111,9 @@ private struct CompactTrailingSummary: View {
         if state.sessions.count > 1 { return "\(state.sessions.count)" }
         if state.queuedCount > 0 { return "+\(state.queuedCount)" }
         switch state.aggregateStateRaw {
-        case "permission": return "!"
-        case "done": return "OK"
-        default: return "..."
+        case "permission": return "待"
+        case "done": return "完"
+        default: return "答"
         }
     }
 }
@@ -126,9 +122,9 @@ private struct CompactMinimalMark: View {
     let state: SessionActivityAttributes.ContentState
 
     var body: some View {
-        Circle()
-            .fill(stateTint(state.aggregateStateRaw))
-            .frame(width: 10, height: 10)
+        Image(systemName: state.aggregateSymbol)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(stateTint(state.aggregateStateRaw))
     }
 }
 
@@ -145,11 +141,23 @@ private struct AggregateStatusView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(stateTint(only.stateRaw))
             } else {
-                Text("\(state.sessions.count) 个会话")
+                Text(aggregateText)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.white.opacity(0.68))
             }
         }
+    }
+
+    private var aggregateText: String {
+        let permissionCount = state.sessions.filter(\.needsPermission).count
+        let doneCount = state.sessions.filter(\.isDone).count
+        if permissionCount > 0 {
+            return "\(permissionCount) 个待授权"
+        }
+        if state.respondingCount > 0 {
+            return "\(state.respondingCount) 个回复中"
+        }
+        return "\(doneCount) 个已完成"
     }
 }
 
@@ -203,27 +211,25 @@ private struct SessionRow: View {
     let entry: SessionActivityAttributes.SessionEntry
 
     var body: some View {
-        Link(destination: sessionURL(entry.id)) {
-            HStack(spacing: 7) {
-                StatusIndicator(entry: entry, size: 11)
-                Image(systemName: entry.providerSymbol)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(WandColor.brand)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(entry.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                    Text(rowDetailText)
-                        .font(.system(size: 10))
-                        .foregroundColor(.white.opacity(0.56))
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 4)
-                StatusBadge(entry: entry)
+        HStack(spacing: 7) {
+            StatusIndicator(entry: entry, size: 11)
+            Image(systemName: entry.providerSymbol)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(WandColor.brand)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(entry.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                Text(rowDetailText)
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.56))
+                    .lineLimit(1)
             }
+            Spacer(minLength: 4)
+            StatusBadge(entry: entry)
+            OpenSessionIconLink(entry: entry)
         }
-        .buttonStyle(.plain)
     }
 
     private var rowDetailText: String {
@@ -263,7 +269,14 @@ private struct LockScreenStripView: View {
                 OpenSessionLink(entry: only, compact: true)
             } else {
                 VStack(alignment: .leading, spacing: 5) {
-                    AggregateStatusView(state: state)
+                    HStack(spacing: 6) {
+                        AggregateStatusView(state: state)
+                        if state.queuedCount > 0 {
+                            Text("\(state.queuedCount) 条排队")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.white.opacity(0.55))
+                        }
+                    }
                     HStack(spacing: 5) {
                         ForEach(state.sessions.prefix(3), id: \.id) { entry in
                             SessionChip(entry: entry)
@@ -306,6 +319,7 @@ private struct SessionChip: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(.white)
                 .lineLimit(1)
+                .frame(maxWidth: 76, alignment: .leading)
             if showsStatusText {
                 Text(entry.statusText)
                     .font(.system(size: 11, weight: .medium))
@@ -382,6 +396,21 @@ private struct OpenSessionLink: View {
                 .padding(.horizontal, compact ? 8 : 10)
                 .padding(.vertical, compact ? 5 : 6)
                 .background(Capsule().fill(WandColor.brand))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct OpenSessionIconLink: View {
+    let entry: SessionActivityAttributes.SessionEntry
+
+    var body: some View {
+        Link(destination: sessionURL(entry.id)) {
+            Image(systemName: "arrow.up.forward")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 20, height: 20)
+                .background(Circle().fill(WandColor.brand.opacity(0.85)))
         }
         .buttonStyle(.plain)
     }
