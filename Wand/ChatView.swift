@@ -232,7 +232,7 @@ struct ChatView: View {
                         Color.clear.frame(height: scrollMode == .pinLatestTurn ? pinSpacerHeight : 0)
                     }
                     .padding(.horizontal, 14)
-                    .padding(.top, showPinnedLatestContext ? 126 : 12)
+                    .padding(.top, showPinnedLatestContext ? 68 : 12)
                     .padding(.bottom, 6)
                 }
                 .coordinateSpace(name: "chatScroll")
@@ -271,7 +271,6 @@ struct ChatView: View {
                         PinnedLatestContextBar(
                             historyCount: currentHistoryStats.rounds,
                             showHistoryChip: hasCollapsedHistory,
-                            userText: turnPlainText(latestUserTurn),
                             replyPreview: turnPlainText(expandedReplyTurn),
                             onHistoryToggle: { toggleHistory(proxy) },
                             onReplyToggle: { collapseExpandedCurrentReply(proxy) }
@@ -771,7 +770,7 @@ struct ChatView: View {
 
     private var navigationStatus: some View {
         VStack(spacing: 0) {
-            Text(latestUserMessage)
+            Text(navigationStatusTitle)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
                 .lineLimit(1)
@@ -787,19 +786,13 @@ struct ChatView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var latestUserMessage: String {
-        for turn in store.messages.reversed() where turn.role == "user" {
-            let text = turn.content.compactMap { block -> String? in
-                guard case .text(let value, _) = block else { return nil }
-                return value
-            }
-            .joined(separator: " ")
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            if !text.isEmpty { return text }
+    private var navigationStatusTitle: String {
+        if store.isResponding,
+           let task = store.currentTaskTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !task.isEmpty {
+            return task
         }
-        return store.snapshot?.displayTitle ?? "对话详情"
+        return store.snapshot?.provider == "codex" ? "Codex 对话" : "Claude 对话"
     }
 
     // MARK: - 底部栏（权限卡 + 队列 + 输入框）
@@ -2996,24 +2989,20 @@ private struct InlineHistoryChip: View {
 private struct PinnedLatestContextBar: View {
     let historyCount: Int
     let showHistoryChip: Bool
-    let userText: String
     let replyPreview: String
     let onHistoryToggle: () -> Void
     let onReplyToggle: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .top, spacing: 8) {
-                if showHistoryChip {
-                    InlineHistoryChip(count: historyCount, onToggle: onHistoryToggle)
-                        .padding(.top, 1)
-                }
-                PinnedUserBubble(text: userText)
+        HStack(alignment: .center, spacing: 8) {
+            if showHistoryChip {
+                InlineHistoryChip(count: historyCount, onToggle: onHistoryToggle)
             }
             PinnedReplyHeader(preview: replyPreview, onToggle: onReplyToggle)
+                .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 9)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -3024,35 +3013,6 @@ private struct PinnedLatestContextBar: View {
                 .stroke(Theme.border.opacity(0.72), lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.08), radius: 10, y: 4)
-    }
-}
-
-private struct PinnedUserBubble: View {
-    let text: String
-
-    var body: some View {
-        HStack {
-            Spacer(minLength: 0)
-            Text(text.isEmpty ? "用户消息" : text)
-                .font(.system(size: 14))
-                .lineLimit(2)
-                .truncationMode(.tail)
-                .foregroundColor(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .frame(maxWidth: 280, alignment: .leading)
-                .background(
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: 18,
-                        bottomLeadingRadius: 18,
-                        bottomTrailingRadius: 6,
-                        topTrailingRadius: 18,
-                        style: .continuous
-                    )
-                    .fill(Theme.brand)
-                )
-        }
-        .frame(maxWidth: .infinity)
     }
 }
 
