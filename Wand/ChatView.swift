@@ -8,14 +8,6 @@ import UniformTypeIdentifiers
 /// （NavigationView push 页面 + 多行 TextField 组合下系统避让会漏抬、键盘盖住输入栏），
 /// 而是 .ignoresSafeArea(.keyboard) 关掉系统行为，由 KeyboardObserver
 /// 监听键盘 frame 手动抬升，行为确定。
-/// 钉顶占位计算用：收集锚点行在滚动坐标系内的纵向位置。
-private struct ChatPinMetricsKey: PreferenceKey {
-    static var defaultValue: [String: CGFloat] = [:]
-    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
-        value.merge(nextValue()) { _, new in new }
-    }
-}
-
 private struct ChatBottomBarHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -24,7 +16,6 @@ private struct ChatBottomBarHeightKey: PreferenceKey {
 }
 
 private enum ChatScrollMode {
-    case pinLatestTurn
     case stickToBottom
     case manual
 }
@@ -38,15 +29,7 @@ struct ChatView: View {
     @StateObject private var speech = SpeechRecognizerService()
     @State private var draft = ""
     @State private var showQuickCommit = false
-    @State private var scrollMode: ChatScrollMode = .pinLatestTurn
-    /// 抽纸式钉顶：发出新消息后，把最新一条用户消息钉到视口顶端，回复在其下方展开，
-    /// 更早历史折进摘要卡。短回复时用底部占位撑出空间，保证用户消息能滚到最顶。
-    /// 视口高度 + 占位高度由 ScrollView 几何测量驱动（见 chatPinMetrics / updatePinSpacer）。
-    @State private var chatViewportHeight: CGFloat = 0
-    @State private var pinSpacerHeight: CGFloat = 0
-    @State private var currentTurnHeight: CGFloat = 0
-    /// 钉顶时用户消息距视口顶端的留白（对齐 web 的 PIN_TOP_OFFSET = 12）。
-    private let chatPinTopInset: CGFloat = 12
+    @State private var scrollMode: ChatScrollMode = .stickToBottom
     @State private var voicePressed = false
     @State private var voiceCanceling = false
     /// 语音输入模式：轻点话筒进入，整个输入框变成「按住说话」面板。
@@ -190,7 +173,6 @@ struct ChatView: View {
     // MARK: - 消息列表
 
     private var messageList: some View {
-      GeometryReader { outer in
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
@@ -214,29 +196,17 @@ struct ChatView: View {
                         // 整条一次性构建会在主线程同步堆出数百个嵌套视图，打开会话时直接卡死、
                         // 什么都渲染不出来。摊平后 LazyVStack 只实例化进入视口的行。
                         ForEach(Array(groupedMessageItems.enumerated()), id: \.offset) { _, row in
-                            if isPinRow(row) {
-                                messageItemView(row, proxy: proxy)
-                                    .id("user-pin")
-                                    .background(pinMetric("userTop"))
-                            } else {
-                                messageItemView(row, proxy: proxy)
-                            }
+                            messageItemView(row, proxy: proxy)
                         }
                         if store.isResponding {
                             respondingIndicator
                         }
                         Color.clear.frame(height: 1).id("chat-bottom")
-                            .background(pinMetric("bottomY"))
-                        // 钉顶占位：短回复时撑出空间，让最新用户消息能滚到视口顶端；
-                        // 长回复时高度归零。高度由 updatePinSpacer 据几何测量动态算出。
-                        Color.clear.frame(height: scrollMode == .pinLatestTurn ? pinSpacerHeight : 0)
                     }
                     .padding(.horizontal, 14)
                     .padding(.top, 12)
                     .padding(.bottom, 6)
                 }
-                .coordinateSpace(name: "chatScroll")
-                .onPreferenceChange(ChatPinMetricsKey.self) { updatePinSpacer($0) }
                 .modifier(DismissKeyboardOnDrag())
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
@@ -282,41 +252,6 @@ struct ChatView: View {
                     if lift > 0 && scrollMode != .manual { scrollToActiveTarget(proxy) }
                 }
         }
-        .onAppear { chatViewportHeight = outer.size.height }
-        .onChange(of: outer.size.height) { chatViewportHeight = $0 }
-      }
-    }
-
-    /// 该行是否为「最新一条用户消息」——钉顶锚点所在行。
-    private func isPinRow(_ item: MessageDisplayItem) -> Bool {
-        if case .turn(let index, let turn) = item {
-            return turn.role == "user" && index == lastUserTurnIndex
-        }
-        return false
-    }
-
-    /// 测量行在滚动坐标系内的纵向位置，喂给 ChatPinMetricsKey 计算占位高度。
-    private func pinMetric(_ key: String) -> some View {
-        GeometryReader { g in
-            Color.clear.preference(
-                key: ChatPinMetricsKey.self,
-                value: [key: g.frame(in: .named("chatScroll")).minY]
-            )
-        }
-    }
-
-    /// 据当前轮内容高度算底部占位：视口 - 顶部留白 - 当前轮高度。
-    /// 长回复（高度已够撑满视口）时占位归零，避免尾部留下大片空白。
-    private func updatePinSpacer(_ metrics: [String: CGFloat]) {
-        guard let top = metrics["userTop"], let bottom = metrics["bottomY"],
-              chatViewportHeight > 0 else { return }
-        let currentTurnHeight = max(0, bottom - top)
-        if abs(currentTurnHeight - self.currentTurnHeight) > 1 {
-            self.currentTurnHeight = currentTurnHeight
-        }
-        let needed = chatViewportHeight - chatPinTopInset - currentTurnHeight
-        let target = needed > 0 ? needed : 0
-        if abs(target - pinSpacerHeight) > 1 { pinSpacerHeight = target }
     }
 
     @ViewBuilder private func messageItemView(_ item: MessageDisplayItem, proxy: ScrollViewProxy) -> some View {
@@ -331,10 +266,7 @@ struct ChatView: View {
                 baseURL: store.api.baseURL,
                 isLastTurn: index == store.messages.count - 1,
                 isResponding: store.isResponding,
-                compactUser: scrollMode == .pinLatestTurn
-                    && !isHistoryExpanded
-                    && index == lastUserTurnIndex
-                    && (store.isResponding || index < store.messages.count - 1),
+                compactUser: false,
                 askSelections: store.askUserSelections,
                 onAskToggle: { toolUseId, qIdx, optIdx, multi in
                     store.toggleAskOption(
@@ -345,7 +277,7 @@ struct ChatView: View {
                 onAskSubmit: { toolUseId, answerText in
                     expandedCurrentReplyTurnIndex = nil
                     expandedHistoryBoundary = nil
-                    scrollMode = .pinLatestTurn
+                    scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
@@ -377,7 +309,7 @@ struct ChatView: View {
                 onAskSubmit: { toolUseId, answerText in
                     expandedCurrentReplyTurnIndex = nil
                     expandedHistoryBoundary = nil
-                    scrollMode = .pinLatestTurn
+                    scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
@@ -497,7 +429,7 @@ struct ChatView: View {
         let next = !isHistoryExpanded
         expandedCurrentReplyTurnIndex = nil
         expandedHistoryBoundary = next ? boundary : nil
-        scrollMode = next ? .manual : .pinLatestTurn
+        scrollMode = next ? .manual : .stickToBottom
         if next && store.canLoadEarlier {
             store.loadEarlier()
         }
@@ -515,29 +447,23 @@ struct ChatView: View {
     private func expandCurrentReplyToBottom(_ turnIndex: Int, proxy: ScrollViewProxy) {
         expandedCurrentReplyTurnIndex = turnIndex
         expandedHistoryBoundary = nil
-        scrollMode = .pinLatestTurn
+        scrollMode = .stickToBottom
         scrollToActiveTarget(proxy, animated: true)
     }
 
     private func collapseExpandedCurrentReply(_ proxy: ScrollViewProxy) {
         expandedCurrentReplyTurnIndex = nil
         expandedHistoryBoundary = nil
-        scrollMode = .pinLatestTurn
+        scrollMode = .stickToBottom
         scrollToActiveTarget(proxy, animated: true)
     }
 
-    /// 根据当前模式同步滚动：钉住最新轮次、真正贴底，或尊重用户手动浏览。
+    /// 根据当前模式同步滚动：贴底跟随，或尊重用户手动浏览。
     private func scrollToActiveTarget(_ proxy: ScrollViewProxy, animated: Bool = false) {
         guard scrollMode != .manual else { return }
         let mode = scrollMode
         let scroll = {
             switch mode {
-            case .pinLatestTurn:
-                if lastUserTurnIndex >= 0 {
-                    proxy.scrollTo("user-pin", anchor: .top)
-                } else {
-                    proxy.scrollTo("chat-bottom", anchor: .bottom)
-                }
             case .stickToBottom:
                 proxy.scrollTo("chat-bottom", anchor: .bottom)
             case .manual:
@@ -715,9 +641,9 @@ struct ChatView: View {
 
     private static let thinkingLevels = [
         ThinkingLevel(id: "off", label: "关闭", shortLabel: "关", menuLabel: "关闭"),
-        ThinkingLevel(id: "standard", label: "低", shortLabel: "低", menuLabel: "低（think）"),
-        ThinkingLevel(id: "deep", label: "中", shortLabel: "中", menuLabel: "中（think hard）"),
-        ThinkingLevel(id: "max", label: "高", shortLabel: "高", menuLabel: "高（ultrathink）"),
+        ThinkingLevel(id: "standard", label: "低", shortLabel: "低", menuLabel: "低（low）"),
+        ThinkingLevel(id: "deep", label: "中", shortLabel: "中", menuLabel: "中（medium）"),
+        ThinkingLevel(id: "max", label: "高", shortLabel: "高", menuLabel: "高（max）"),
     ]
 
     private static func thinkingLabel(_ id: String) -> String {
@@ -1233,7 +1159,7 @@ struct ChatView: View {
         pendingAttachments.removeAll()
         expandedCurrentReplyTurnIndex = nil
         expandedHistoryBoundary = nil
-        scrollMode = .pinLatestTurn
+        scrollMode = .stickToBottom
         store.send(text: text)
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让 @FocusState 丢焦点、键盘收起，
         // 用户得再点一次输入框才能继续。非语音模式下主动保持焦点，连续对话不断。
