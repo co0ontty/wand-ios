@@ -50,6 +50,8 @@ struct ChatView: View {
     @State private var expandedHistoryBoundary: Int?
     /// 当前最新 assistant 回复的尾部折叠：默认只露最近输出，点摘要行临时展开完整回复。
     @State private var expandedCurrentReplyTurnIndex: Int?
+    /// 连续工具 / 思考 / 终端活动的详情 sheet。
+    @State private var activitySheet: ActivitySheetItem?
     /// 底部 overlay 的实际占位高度。ChatView 不使用 safeAreaInset 放输入栏，
     /// 避免 SwiftUI 键盘避让和 KeyboardObserver 手动抬升叠加。
     @State private var bottomBarHeight: CGFloat = 0
@@ -104,6 +106,30 @@ struct ChatView: View {
             GitQuickCommitView(sessionId: sessionId, api: api)
                 .presentationDetents([.height(620), .large])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $activitySheet) { sheet in
+            ActivityDetailSheet(
+                group: sheet.group,
+                baseURL: api.baseURL,
+                isLastTurn: sheet.turnIndex == store.messages.count - 1,
+                isResponding: store.isResponding,
+                askSelections: store.askUserSelections,
+                onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                    store.toggleAskOption(
+                        toolUseId: toolUseId, questionIndex: qIdx,
+                        optionIndex: optIdx, multiSelect: multi
+                    )
+                },
+                onAskSubmit: { toolUseId, answerText in
+                    activitySheet = nil
+                    expandedCurrentReplyTurnIndex = nil
+                    expandedHistoryBoundary = nil
+                    scrollMode = .stickToBottom
+                    store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
+                }
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
         .fileImporter(
             isPresented: $showFileImporter,
@@ -328,6 +354,10 @@ struct ChatView: View {
                     && lastTurnIndex == store.messages.count - 1
                     && tools.contains { $0.result == nil }
             )
+        case .activityGroup(let turnIndex, let group, let id):
+            ActivitySummaryRow(group: group) {
+                activitySheet = ActivitySheetItem(id: id, turnIndex: turnIndex, group: group)
+            }
         case .historySummary(let stats, let boundary):
             HistorySummaryCard(
                 stats: stats,
@@ -369,10 +399,14 @@ struct ChatView: View {
 
     private var groupedMessageItems: [MessageDisplayItem] {
         let currentReplyIndex = latestAssistantTurnIndex
-        let base = flattenAssistantTurns(
-            groupExplorationTurns(store.messages),
-            currentReplyIndex: currentReplyIndex,
-            expandedCurrentReplyTurnIndex: expandedCurrentReplyTurnIndex
+        let base = collapseActivityItems(
+            flattenAssistantTurns(
+                groupExplorationTurns(store.messages),
+                currentReplyIndex: currentReplyIndex,
+                expandedCurrentReplyTurnIndex: expandedCurrentReplyTurnIndex
+            ),
+            latestTurnIndex: latestAssistantTurnIndex ?? -1,
+            isResponding: store.isResponding
         )
         let boundary = lastUserTurnIndex
         // 至少要折叠一整轮（≥2 条历史 turn）才出摘要卡。
@@ -802,6 +836,10 @@ struct ChatView: View {
             collapsedLeading: { composerActionsMenu },
             inputContent: { composerInputContent },
             collapsedTrailing: {
+                if store.isStructured {
+                    modeChip(compact: true)
+                    modelThinkingChip(compact: true)
+                }
                 micButton
                 trailingButtons
             },
@@ -1001,6 +1039,7 @@ struct ChatView: View {
                 icon: "cpu",
                 text: modelThinkingText,
                 tint: thinkingTint,
+                showsText: !compact,
                 maxTextWidth: compact ? 94 : 140
             )
         }
@@ -1433,8 +1472,21 @@ private enum MessageDisplayItem {
     /// 当前最新回复的尾部折叠摘要行，点按可展开完整回复。
     case currentReplySummary(turnIndex: Int, summary: String, expanded: Bool)
     case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
+    case activityGroup(turnIndex: Int, group: ActivityGroup, id: String)
     /// 历史折叠摘要卡：折叠"最后一条用户消息"之前的全部历史，boundary = 该用户消息下标。
     case historySummary(stats: HistoryStats, boundary: Int)
+}
+
+private struct ActivityGroup {
+    let summary: String
+    let items: [DisplayItem]
+    let running: Bool
+}
+
+private struct ActivitySheetItem: Identifiable {
+    let id: String
+    let turnIndex: Int
+    let group: ActivityGroup
 }
 
 /// 被折叠历史区间的统计：轮次 / 工具调用 / 子代理 / 失败。
@@ -1452,6 +1504,7 @@ private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
     case .assistantItem(let i, _): return i
     case .currentReplySummary(let i, _, _): return i
     case .explorationGroup(_, let i): return i
+    case .activityGroup(let i, _, _): return i
     case .historySummary(_, let b): return b
     }
 }
@@ -1557,6 +1610,208 @@ private func flattenAssistantTurns(
         }
     }
     return out
+}
+
+private func collapseActivityItems(
+    _ items: [MessageDisplayItem],
+    latestTurnIndex: Int,
+    isResponding: Bool
+) -> [MessageDisplayItem] {
+    var out: [MessageDisplayItem] = []
+    var pending: [(turnIndex: Int, item: DisplayItem)] = []
+    var groupOrdinal = 0
+
+    func flushPending() {
+        guard !pending.isEmpty else { return }
+        let turnIndex = pending.last?.turnIndex ?? -1
+        let displayItems = pending.map(\.item)
+        let running = displayItems.contains {
+            isActivityItemRunning($0, turnIndex: turnIndex, latestTurnIndex: latestTurnIndex, isResponding: isResponding)
+        }
+        let group = ActivityGroup(
+            summary: activitySummary(displayItems, running: running),
+            items: displayItems,
+            running: running
+        )
+        out.append(.activityGroup(
+            turnIndex: turnIndex,
+            group: group,
+            id: "activity-\(turnIndex)-\(groupOrdinal)"
+        ))
+        groupOrdinal += 1
+        pending.removeAll(keepingCapacity: true)
+    }
+
+    for item in items {
+        if case .assistantItem(let turnIndex, let displayItem) = item {
+            if shouldSkipActivityItem(displayItem) {
+                continue
+            }
+            if isCollapsibleActivityItem(displayItem) {
+                if let previousTurn = pending.last?.turnIndex, previousTurn != turnIndex {
+                    flushPending()
+                }
+                pending.append((turnIndex, displayItem))
+            } else {
+                flushPending()
+                out.append(item)
+            }
+        } else {
+            flushPending()
+            out.append(item)
+        }
+    }
+    flushPending()
+    return out
+}
+
+private func shouldSkipActivityItem(_ item: DisplayItem) -> Bool {
+    guard case .tool(let id, let name, _, let input, let subagent, _) = item else { return false }
+    return subagent?.taskId == id
+        && (name == "Task" || name == "Agent" || input["subagent_type"]?.stringValue?.isEmpty == false)
+}
+
+private func isCollapsibleActivityItem(_ item: DisplayItem) -> Bool {
+    switch item {
+    case .plain(let block):
+        if case .text = block { return false }
+        if case .unknown = block { return false }
+        return true
+    case .explorationGroup:
+        return true
+    case .tool(_, let name, _, let input, _, _):
+        if name == "AskUserQuestion" { return false }
+        if name == "Read", isReadImageTool(name: name, input: input) { return false }
+        return true
+    }
+}
+
+private func isActivityItemRunning(
+    _ item: DisplayItem,
+    turnIndex: Int,
+    latestTurnIndex: Int,
+    isResponding: Bool
+) -> Bool {
+    guard isResponding, turnIndex == latestTurnIndex else { return false }
+    switch item {
+    case .tool(_, _, _, _, _, let result):
+        return result == nil
+    case .explorationGroup(let tools):
+        return tools.contains { $0.result == nil }
+    case .plain(let block):
+        if case .thinking = block { return true }
+        return false
+    }
+}
+
+private func activityTools(_ items: [DisplayItem]) -> [ExplorationToolItem] {
+    items.flatMap { item -> [ExplorationToolItem] in
+        switch item {
+        case .tool(let id, let name, let description, let input, let subagent, let result):
+            return [ExplorationToolItem(
+                id: id, name: name, description: description,
+                input: input, subagent: subagent, result: result
+            )]
+        case .explorationGroup(let tools):
+            return tools
+        case .plain:
+            return []
+        }
+    }
+}
+
+private func activitySummary(_ items: [DisplayItem], running: Bool) -> String {
+    let tools = activityTools(items)
+    if items.count == 1, let tool = tools.first, tools.count == 1 {
+        let prefix = running && tool.result == nil ? "正在" : "已"
+        let label = activityVerb(tool.name)
+        let detail = activityToolSummary(description: tool.description, input: tool.input)
+        return detail.isEmpty ? "\(prefix)\(label)" : "\(prefix)\(label) \(detail)"
+    }
+    if items.count == 1, case .plain(let block) = items[0] {
+        switch block {
+        case .thinking:
+            return running ? "正在思考" : "已思考"
+        case .toolResult(_, _, let isError, _, _):
+            return isError ? "有 1 条执行错误" : "已生成 1 条执行结果"
+        default:
+            return "已完成 1 项活动"
+        }
+    }
+
+    var read = 0, command = 0, search = 0, edit = 0, web = 0, todo = 0, other = 0
+    for tool in tools {
+        switch activityKind(tool.name) {
+        case "read": read += 1
+        case "command": command += 1
+        case "search": search += 1
+        case "edit": edit += 1
+        case "web": web += 1
+        case "todo": todo += 1
+        default: other += 1
+        }
+    }
+    let thinking = items.filter {
+        if case .plain(.thinking) = $0 { return true }
+        return false
+    }.count
+    let result = items.filter {
+        if case .plain(.toolResult) = $0 { return true }
+        return false
+    }.count
+
+    var parts: [String] = []
+    if read > 0 { parts.append("浏览 \(read) 个文件") }
+    if command > 0 { parts.append("运行 \(command) 条命令") }
+    if search > 0 { parts.append("搜索 \(search) 次") }
+    if edit > 0 { parts.append("修改 \(edit) 个文件") }
+    if web > 0 { parts.append("访问 \(web) 个网页") }
+    if todo > 0 { parts.append("更新 \(todo) 次待办") }
+    if thinking > 0 { parts.append("思考 \(thinking) 段") }
+    if result > 0 { parts.append("生成 \(result) 条结果") }
+    if other > 0 { parts.append("调用 \(other) 个工具") }
+
+    let prefix = running ? "正在" : "已"
+    return parts.isEmpty ? "\(prefix)完成 \(items.count) 项活动" : prefix + parts.joined(separator: "，")
+}
+
+private func activityVerb(_ name: String) -> String {
+    switch activityKind(name) {
+    case "read": return "浏览"
+    case "command": return "运行"
+    case "search": return "搜索代码"
+    case "edit": return "修改"
+    case "web": return "访问网页"
+    case "todo": return "更新待办"
+    default: return toolLabel(name)
+    }
+}
+
+private func activityKind(_ name: String) -> String {
+    let lower = name.lowercased()
+    if lower.hasPrefix("read") || lower.contains("notebook") { return "read" }
+    if lower == "bash" || lower.contains("command") || lower.contains("shell") { return "command" }
+    if lower.contains("grep") || lower.contains("glob") || lower.contains("search") || lower.contains("find") {
+        return "search"
+    }
+    if lower.contains("edit") || lower.contains("write") { return "edit" }
+    if lower.contains("web") || lower.contains("fetch") || lower.contains("http") { return "web" }
+    if lower.contains("todo") { return "todo" }
+    return "other"
+}
+
+private func activityToolSummary(description: String?, input: [String: JSONValue]) -> String {
+    if let description, !description.isEmpty { return description }
+    for key in ["command", "file_path", "path", "pattern", "query", "url", "prompt", "description"] {
+        if let value = input[key] {
+            let text = value.summaryText
+            if !text.isEmpty { return text }
+        }
+    }
+    if let first = input.first {
+        return "\(first.key): \(first.value.summaryText)"
+    }
+    return ""
 }
 
 private func userTurnPreview(_ turn: ConversationTurn) -> String {
@@ -1944,6 +2199,105 @@ private struct TurnView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
+
+private struct ActivitySummaryRow: View {
+    let group: ActivityGroup
+    let onOpen: () -> Void
+
+    private var tint: Color {
+        group.running ? Theme.brand : Theme.textSecondary
+    }
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 8) {
+                Image(systemName: activityIconName(group.items))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(tint)
+                    .frame(width: 20)
+                Text(group.summary)
+                    .font(.system(size: 14))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary.opacity(0.8))
+            }
+            .padding(.horizontal, 2)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ActivityDetailSheet: View {
+    let group: ActivityGroup
+    var baseURL: URL? = nil
+    var isLastTurn = false
+    var isResponding = false
+    var askSelections: [String: AskUserSelectionState] = [:]
+    var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
+    var onAskSubmit: (String, String) -> Void = { _, _ in }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Text("执行详情")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                    Spacer(minLength: 0)
+                    Text(group.summary)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Theme.background.opacity(0.7)))
+                        .frame(maxWidth: 220, alignment: .trailing)
+                }
+                ForEach(Array(group.items.enumerated()), id: \.offset) { _, item in
+                    AssistantItemView(
+                        item: item,
+                        baseURL: baseURL,
+                        isLastTurn: isLastTurn,
+                        isResponding: isResponding,
+                        askSelections: askSelections,
+                        onAskToggle: onAskToggle,
+                        onAskSubmit: onAskSubmit
+                    )
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 18)
+            .padding(.bottom, 26)
+        }
+        .background(Theme.background.ignoresSafeArea())
+    }
+}
+
+private func activityIconName(_ items: [DisplayItem]) -> String {
+    if let firstTool = activityTools(items).first {
+        let kind = activityKind(firstTool.name)
+        switch kind {
+        case "read": return "doc.text.magnifyingglass"
+        case "command": return "terminal"
+        case "search": return "magnifyingglass"
+        case "edit": return "pencil"
+        case "web": return "globe"
+        case "todo": return "checklist"
+        default: return "wrench.and.screwdriver"
+        }
+    }
+    if let first = items.first, case .plain(.thinking) = first {
+        return "brain"
+    }
+    return "wrench.and.screwdriver"
 }
 
 /// 单个 assistant 内容块（plain / 工具卡 / 探索分组）的渲染。
