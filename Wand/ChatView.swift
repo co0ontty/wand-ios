@@ -39,6 +39,8 @@ struct ChatView: View {
     @State private var uploadingAttachments = false
     @State private var pendingAttachments: [UploadedFile] = []
     @State private var gitStatus: GitStatusResult?
+    @State private var quickCommitPhase: QuickCommitToolbarPhase = .idle
+    @State private var quickCommitFeedbackToken = 0
     /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
     @State private var voiceHoldWork: DispatchWorkItem?
     /// 停止任务二次确认弹窗开关：点停止按钮先弹确认，避免误触中断正在跑的任务。
@@ -94,7 +96,7 @@ struct ChatView: View {
             }
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .navigationBarTrailing) {
-                GitChangesToolbarButton(status: gitStatus) {
+                GitChangesToolbarButton(status: gitStatus, phase: quickCommitPhase) {
                     showQuickCommit = true
                 }
             }
@@ -103,7 +105,13 @@ struct ChatView: View {
         // 避免「系统抬一次 + 手动抬一次」叠加或两边都不抬的不确定行为。
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showQuickCommit) {
-            GitQuickCommitView(sessionId: sessionId, api: api)
+            GitQuickCommitView(
+                sessionId: sessionId,
+                api: api,
+                onRunning: beginQuickCommitFeedback,
+                onCompleted: completeQuickCommitFeedback,
+                onFailed: failQuickCommitFeedback
+            )
                 .presentationDetents([.height(620), .large])
                 .presentationDragIndicator(.visible)
         }
@@ -1116,6 +1124,31 @@ struct ChatView: View {
         Task {
             gitStatus = try? await api.gitStatus(sessionId: sessionId)
         }
+    }
+
+    private func beginQuickCommitFeedback() {
+        quickCommitFeedbackToken += 1
+        quickCommitPhase = .loading
+    }
+
+    private func completeQuickCommitFeedback(_ message: String) {
+        store.toast = message
+        let token = quickCommitFeedbackToken + 1
+        quickCommitFeedbackToken = token
+        quickCommitPhase = .done
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if quickCommitFeedbackToken == token {
+                quickCommitPhase = .idle
+                refreshGitStatus()
+            }
+        }
+    }
+
+    private func failQuickCommitFeedback(_ message: String) {
+        quickCommitFeedbackToken += 1
+        quickCommitPhase = .idle
+        store.toast = message
+        refreshGitStatus()
     }
 
     private var composerActionsMenu: some View {

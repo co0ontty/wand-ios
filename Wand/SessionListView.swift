@@ -594,6 +594,8 @@ private struct PtySessionView: View {
     @State private var voiceMode = false
     @State private var voiceHoldWork: DispatchWorkItem?
     @State private var gitStatus: GitStatusResult?
+    @State private var quickCommitPhase: QuickCommitToolbarPhase = .idle
+    @State private var quickCommitFeedbackToken = 0
     @FocusState private var inputFocused: Bool
 
     private var ptyBackground: Color {
@@ -636,7 +638,7 @@ private struct PtySessionView: View {
         .toolbar {
             ToolbarItem(placement: .principal) { titleStatus }
             ToolbarItem(placement: .navigationBarTrailing) {
-                GitChangesToolbarButton(status: gitStatus) {
+                GitChangesToolbarButton(status: gitStatus, phase: quickCommitPhase) {
                     showQuickCommit = true
                 }
             }
@@ -646,7 +648,13 @@ private struct PtySessionView: View {
         .toolbarColorScheme(.dark, for: .navigationBar)
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showQuickCommit) {
-            GitQuickCommitView(sessionId: session.id, api: api)
+            GitQuickCommitView(
+                sessionId: session.id,
+                api: api,
+                onRunning: beginQuickCommitFeedback,
+                onCompleted: completeQuickCommitFeedback,
+                onFailed: failQuickCommitFeedback
+            )
                 .presentationDetents([.height(620), .large])
                 .presentationDragIndicator(.visible)
         }
@@ -1144,6 +1152,31 @@ private struct PtySessionView: View {
         Task {
             gitStatus = try? await api.gitStatus(sessionId: session.id)
         }
+    }
+
+    private func beginQuickCommitFeedback() {
+        quickCommitFeedbackToken += 1
+        quickCommitPhase = .loading
+    }
+
+    private func completeQuickCommitFeedback(_ message: String) {
+        store.toast = message
+        let token = quickCommitFeedbackToken + 1
+        quickCommitFeedbackToken = token
+        quickCommitPhase = .done
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if quickCommitFeedbackToken == token {
+                quickCommitPhase = .idle
+                refreshGitStatus()
+            }
+        }
+    }
+
+    private func failQuickCommitFeedback(_ message: String) {
+        quickCommitFeedbackToken += 1
+        quickCommitPhase = .idle
+        store.toast = message
+        refreshGitStatus()
     }
 
     private func handlePickedAttachments(_ result: Result<[URL], Error>) {

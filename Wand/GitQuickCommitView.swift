@@ -1,27 +1,78 @@
 import SwiftUI
 
+enum QuickCommitToolbarPhase: Hashable {
+    case idle
+    case loading
+    case done
+}
+
 struct GitChangesToolbarButton: View {
     let status: GitStatusResult?
+    var phase: QuickCommitToolbarPhase = .idle
     let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    @ViewBuilder
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.triangle.branch")
-                Text("~\(counts.modified)")
-                Text("-\(counts.deleted)")
-                    .foregroundColor(Theme.danger)
-                Text("+\(counts.added)")
-                    .foregroundColor(.green)
+        if shouldShow {
+            Button(action: action) {
+                Group {
+                    switch phase {
+                    case .loading:
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(Theme.brand)
+                            .accessibilityLabel("快捷提交执行中")
+                    case .done:
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .accessibilityLabel("快捷提交完成")
+                    case .idle:
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.triangle.branch")
+                            if totalChanges > 0 {
+                                Text("~\(counts.modified)")
+                                Text("-\(counts.deleted)")
+                                    .foregroundColor(Theme.danger)
+                                Text("+\(counts.added)")
+                                    .foregroundColor(.green)
+                            } else {
+                                Text("↑\(status?.ahead ?? 0)")
+                            }
+                        }
+                    }
+                }
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundColor(phase == .done ? .green : (phase == .idle ? Theme.textSecondary : Theme.brand))
+                .frame(minWidth: 44, minHeight: 32)
+                .contentShape(Rectangle())
+                .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                .id(phase)
             }
-            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-            .foregroundColor(Theme.textSecondary)
-            .frame(minWidth: 44, minHeight: 32)
-            .contentShape(Rectangle())
+            .disabled(phase != .idle)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: phase)
+            .accessibilityLabel(accessibilityLabel)
         }
-        .accessibilityLabel(
-            "Git 修改 \(counts.modified)，删除 \(counts.deleted)，新增 \(counts.added)"
-        )
+    }
+
+    private var shouldShow: Bool {
+        guard status?.isGit == true || phase != .idle else { return false }
+        return phase != .idle || totalChanges > 0 || (status?.ahead ?? 0) > 0
+    }
+
+    private var totalChanges: Int {
+        counts.modified + counts.deleted + counts.added
+    }
+
+    private var accessibilityLabel: String {
+        switch phase {
+        case .loading:
+            return "快捷提交执行中"
+        case .done:
+            return "快捷提交完成"
+        case .idle:
+            return "Git 修改 \(counts.modified)，删除 \(counts.deleted)，新增 \(counts.added)"
+        }
     }
 
     private var counts: (modified: Int, deleted: Int, added: Int) {
@@ -50,6 +101,9 @@ struct GitChangesToolbarButton: View {
 struct GitQuickCommitView: View {
     let sessionId: String
     let api: WandAPI
+    let onRunning: () -> Void
+    let onCompleted: (String) -> Void
+    let onFailed: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
@@ -89,6 +143,20 @@ struct GitQuickCommitView: View {
         var oldCommitHash: String
         var oldCommitSubject: String
         var submoduleCount: Int
+    }
+
+    init(
+        sessionId: String,
+        api: WandAPI,
+        onRunning: @escaping () -> Void = {},
+        onCompleted: @escaping (String) -> Void = { _ in },
+        onFailed: @escaping (String) -> Void = { _ in }
+    ) {
+        self.sessionId = sessionId
+        self.api = api
+        self.onRunning = onRunning
+        self.onCompleted = onCompleted
+        self.onFailed = onFailed
     }
 
     var body: some View {
@@ -475,6 +543,8 @@ struct GitQuickCommitView: View {
         let before = status
 
         committing = true
+        onRunning()
+        dismiss()
         submoduleIntent = includeSubmodule
         autoGenerating = msg.isEmpty || (withTag && userTag.isEmpty)
         errorMessage = nil
@@ -502,14 +572,15 @@ struct GitQuickCommitView: View {
                     submoduleCount: r.submoduleCommits?.count ?? 0
                 )
                 if push && o.pushError == nil {
-                    // 提交 + 推送一步到位：直接收面板。
-                    dismiss()
+                    onCompleted(summaryText(o) + "，已推送")
+                } else if let pushError = o.pushError {
+                    onFailed("推送失败：\(pushError)")
                 } else {
-                    outcome = o
-                    await loadStatus(force: true)
+                    onCompleted(summaryText(o))
                 }
             } catch {
                 errorMessage = error.localizedDescription
+                onFailed(error.localizedDescription)
             }
             committing = false
             autoGenerating = false
@@ -547,6 +618,8 @@ struct GitQuickCommitView: View {
     private func pushCommitsOnly() {
         guard !pushing else { return }
         pushing = true
+        onRunning()
+        dismiss()
         pushError = nil
         Task {
             do {
@@ -559,14 +632,23 @@ struct GitQuickCommitView: View {
                 )
                 if let err = res.error, !err.isEmpty {
                     pushError = err
+                    onFailed(err)
                 } else {
-                    dismiss()
+                    onCompleted("已推送 commits")
                 }
             } catch {
                 pushError = error.localizedDescription
+                onFailed(error.localizedDescription)
             }
             pushing = false
         }
+    }
+
+    private func summaryText(_ outcome: CommitOutcome) -> String {
+        let subPrefix = outcome.submoduleCount > 0 ? "已先提交 \(outcome.submoduleCount) 个 submodule，" : ""
+        return subPrefix + "已提交"
+            + (outcome.commitHash.isEmpty ? "" : " \(outcome.commitHash)")
+            + (outcome.tagName.isEmpty ? "" : "，已打 Tag \(outcome.tagName)")
     }
 }
 
