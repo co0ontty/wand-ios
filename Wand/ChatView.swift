@@ -695,7 +695,22 @@ struct ChatView: View {
            !task.isEmpty {
             return task
         }
-        return store.snapshot?.provider == "codex" ? "Codex 对话" : "Claude 对话"
+        return latestUserMessage
+    }
+
+    private var latestUserMessage: String {
+        for turn in store.messages.reversed() where turn.role == "user" {
+            let text = turn.content.compactMap { block -> String? in
+                guard case .text(let value, _) = block else { return nil }
+                return value
+            }
+            .joined(separator: " ")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            if !text.isEmpty { return text }
+        }
+        return store.snapshot?.displayTitle ?? "对话详情"
     }
 
     // MARK: - 底部栏（权限卡 + 队列 + 输入框）
