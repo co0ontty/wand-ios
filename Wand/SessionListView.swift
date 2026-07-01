@@ -1063,9 +1063,7 @@ private struct PtySessionView: View {
                 )
             }
             do {
-                try await api.sendInput(id: session.id, input: trimmed, view: "terminal")
-                try await Task.sleep(nanoseconds: 30_000_000)
-                try await api.sendInput(id: session.id, input: "\r", view: "terminal", shortcutKey: "enter_text")
+                try await store.sendPtyTerminalInput(trimmed)
             } catch {
                 await MainActor.run {
                     if draft.isEmpty { draft = restoreDraft }

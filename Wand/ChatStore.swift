@@ -57,6 +57,7 @@ final class ChatStore: ObservableObject {
     private let socket: WandSocket
     private var started = false
     private var queuePromotePending = false
+    private var autoResumeAttempted = false
 
     // Live Activity（灵动岛）状态：started = 本会话当前在聚合长条里有条目；
     // sawResponding 防止 PTY 会话在 isResponding 尚未变 true 时被立即收掉。
@@ -94,9 +95,11 @@ final class ChatStore: ObservableObject {
         }
 
         Task {
+            var initialSnapshot: SessionSnapshot?
             do {
                 let snap = try await api.getSession(id: sessionId)
                 apply(snapshot: snap)
+                initialSnapshot = snap
                 loading = false
                 wlog("session", "REST 快照 session=\(sessionId) msgs=\(snap.messages?.count ?? -1) status=\(snap.status ?? "?") structured=\(snap.isStructured) responding=\(snap.isResponding)")
             } catch {
@@ -107,6 +110,9 @@ final class ChatStore: ObservableObject {
             await loadModels()
             socket.connect()
             socket.subscribe(sessionId: sessionId)
+            if let initialSnapshot {
+                await autoResumeFailedPtyIfNeeded(initialSnapshot)
+            }
         }
     }
 
@@ -398,9 +404,53 @@ final class ChatStore: ObservableObject {
     }
 
     private func sendPtyChatInput(_ text: String) async throws {
-        try await api.sendInput(id: sessionId, input: text, view: "chat")
+        try await sendPtyInput(text, view: "chat")
+    }
+
+    func sendPtyTerminalInput(_ text: String) async throws {
+        try await sendPtyInput(text, view: "terminal")
+    }
+
+    private func sendPtyInput(_ text: String, view: String) async throws {
+        try await ensurePtyRunningForInput()
+        let textSnapshot = try await api.sendInput(id: sessionId, input: text, view: view)
+        apply(snapshot: textSnapshot)
         try await Task.sleep(nanoseconds: 30_000_000)
-        try await api.sendInput(id: sessionId, input: "\r", view: "chat", shortcutKey: "enter_text")
+        let enterSnapshot = try await api.sendInput(id: sessionId, input: "\r", view: view, shortcutKey: "enter_text")
+        apply(snapshot: enterSnapshot)
+    }
+
+    private func ensurePtyRunningForInput() async throws {
+        guard !isStructured, status != "running" else { return }
+        toast = "正在恢复会话…"
+        _ = try await resumeEndedPtySession(showToast: false)
+    }
+
+    private func shouldAutoResumeFailedPty(_ snap: SessionSnapshot) -> Bool {
+        guard !snap.isStructured else { return false }
+        guard snap.status == "failed" else { return false }
+        return !(snap.claudeSessionId ?? "").isEmpty
+    }
+
+    private func autoResumeFailedPtyIfNeeded(_ snap: SessionSnapshot) async {
+        guard !autoResumeAttempted, shouldAutoResumeFailedPty(snap) else { return }
+        autoResumeAttempted = true
+        toast = "正在恢复失败会话…"
+        do {
+            _ = try await resumeEndedPtySession(showToast: false)
+            toast = "会话已恢复"
+        } catch {
+            toast = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    private func resumeEndedPtySession(showToast: Bool) async throws -> SessionSnapshot {
+        let snap = try await api.resumeSession(id: sessionId)
+        apply(snapshot: snap)
+        socket.requestResync()
+        if showToast { toast = "会话已恢复" }
+        return snap
     }
 
     func setModel(_ model: String?) {
@@ -674,10 +724,7 @@ final class ChatStore: ObservableObject {
     func resume() {
         Task {
             do {
-                let snap = try await api.resumeSession(id: sessionId)
-                apply(snapshot: snap)
-                socket.requestResync()
-                toast = "会话已恢复"
+                _ = try await resumeEndedPtySession(showToast: true)
             } catch {
                 toast = error.localizedDescription
             }
