@@ -99,6 +99,7 @@ struct NewSessionView: View {
     @State private var mode = NewSessionPreferences.mode(for: NewSessionPreferences.provider)
     @State private var availableModels: [ModelInfo] = []
     @State private var codexModels: [ModelInfo] = []
+    @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil)
     @State private var selectedModel = NewSessionPreferences.model(for: NewSessionPreferences.provider)
     @State private var thinkingEffort = NewSessionPreferences.thinkingEffort
     @State private var firstMessage = ""
@@ -295,8 +296,9 @@ struct NewSessionView: View {
             } else {
                 mode = supportedMode(mode, provider: provider)
             }
+            serverDefaultModels = config?.defaultModels ?? ProviderDefaultModels(claude: config?.defaultModel, codex: config?.defaultCodexModel)
             if !NewSessionPreferences.hasModel(for: provider) {
-                selectedModel = config?.defaultModel ?? ""
+                selectedModel = ""
             }
             if !NewSessionPreferences.hasThinkingEffort {
                 thinkingEffort = config?.defaultThinkingEffort ?? "off"
@@ -323,7 +325,11 @@ struct NewSessionView: View {
     }
 
     private var defaultModelLabel: String {
-        providerModels.first(where: { $0.id == "default" })?.label ?? "默认"
+        let id = serverDefaultModel(for: provider)
+        if !id.isEmpty {
+            return providerModels.first(where: { $0.id == id })?.label ?? id
+        }
+        return providerModels.first(where: { $0.id == "default" })?.label ?? "默认"
     }
 
     private var thinkingLabel: String {
@@ -406,6 +412,10 @@ struct NewSessionView: View {
         let models = provider == "codex" ? codexModels : availableModels
         guard !models.isEmpty else { return normalized }
         return models.contains(where: { $0.id == normalized }) ? normalized : ""
+    }
+
+    private func serverDefaultModel(for provider: String) -> String {
+        provider == "codex" ? (serverDefaultModels.codex ?? "") : (serverDefaultModels.claude ?? "")
     }
 
     private var selectedModelForRequest: String? {

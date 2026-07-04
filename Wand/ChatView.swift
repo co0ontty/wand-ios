@@ -638,7 +638,10 @@ struct ChatView: View {
     }
 
     private var defaultModelLabel: String {
-        store.availableModels.first(where: { $0.id == "default" })?.label ?? "默认"
+        if let id = store.defaultModel, !id.isEmpty {
+            return store.availableModels.first(where: { $0.id == id })?.label ?? id
+        }
+        return store.availableModels.first(where: { $0.id == "default" })?.label ?? "默认"
     }
 
     private func launchOptionMenu<Content: View>(

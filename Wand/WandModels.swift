@@ -623,6 +623,15 @@ struct ModelsResponse: Decodable {
     let models: [ModelInfo]
     let codexModels: [ModelInfo]
     let defaultModel: String?
+    let defaultCodexModel: String?
+    let defaultModels: ProviderDefaultModels?
+
+    func defaultModelId(for provider: String) -> String {
+        if provider == "codex" {
+            return defaultModels?.codex ?? defaultCodexModel ?? ""
+        }
+        return defaultModels?.claude ?? defaultModel ?? ""
+    }
 }
 
 struct UploadedFile: Decodable {
@@ -659,11 +668,25 @@ struct ServerConfigInfo: Decodable {
     let defaultCwd: String?
     let defaultMode: String?
     let defaultModel: String?
+    let defaultCodexModel: String?
+    let defaultModels: ProviderDefaultModels?
     let defaultThinkingEffort: String?
     let currentVersion: String?
     let latestVersion: String?
     let updateAvailable: Bool?
     let updateChannel: String?
+
+    func defaultModelId(for provider: String) -> String {
+        if provider == "codex" {
+            return defaultModels?.codex ?? defaultCodexModel ?? ""
+        }
+        return defaultModels?.claude ?? defaultModel ?? ""
+    }
+}
+
+struct ProviderDefaultModels: Decodable {
+    let claude: String?
+    let codex: String?
 }
 
 /// 服务端自身 npm 包更新状态。iOS App 不能自更新，但可以提示并触发服务端更新。

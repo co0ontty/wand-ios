@@ -450,10 +450,18 @@ final class WandAPI {
         _ = try await requestData(method: "POST", path: "/api/update", body: [:], timeout: 180)
     }
 
-    func updateNewSessionDefaults(mode: String? = nil, model: String? = nil, thinkingEffort: String? = nil) async throws {
+    func updateNewSessionDefaults(mode: String? = nil, model: String? = nil, provider: String = "claude", thinkingEffort: String? = nil) async throws {
         var body: [String: Any] = [:]
         if let mode { body["defaultMode"] = mode }
-        if let model { body["defaultModel"] = model }
+        if let model {
+            if provider == "codex" {
+                body["defaultCodexModel"] = model
+                body["defaultModels"] = ["codex": model]
+            } else {
+                body["defaultModel"] = model
+                body["defaultModels"] = ["claude": model]
+            }
+        }
         if let thinkingEffort { body["defaultThinkingEffort"] = thinkingEffort }
         _ = try await requestData(method: "POST", path: "/api/settings/config", body: body)
     }
