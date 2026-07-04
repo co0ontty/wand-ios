@@ -347,6 +347,26 @@ struct ChatView: View {
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
+        case .subagentRole(let turnIndex, let segment):
+            SubagentRoleWindow(
+                segment: segment,
+                baseURL: store.api.baseURL,
+                isLastTurn: turnIndex == store.messages.count - 1,
+                isResponding: store.isResponding,
+                askSelections: store.askUserSelections,
+                onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                    store.toggleAskOption(
+                        toolUseId: toolUseId, questionIndex: qIdx,
+                        optionIndex: optIdx, multiSelect: multi
+                    )
+                },
+                onAskSubmit: { toolUseId, answerText in
+                    expandedCurrentReplyTurnIndex = nil
+                    expandedHistoryBoundary = nil
+                    scrollMode = .stickToBottom
+                    store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
+                }
+            )
         case .currentReplySummary(let turnIndex, let summary, let expanded):
             CurrentReplySummaryCard(summary: summary, expanded: expanded) {
                 if expanded {
@@ -1515,6 +1535,8 @@ private enum MessageDisplayItem {
     case turn(index: Int, ConversationTurn)
     /// 摊平后的单个 assistant 内容块（见 flattenAssistantTurns / AssistantItemView）。
     case assistantItem(turnIndex: Int, item: DisplayItem)
+    /// 子 Agent 作为独立角色常驻展示，不再被折成活动缩略行。
+    case subagentRole(turnIndex: Int, segment: SubagentSegment)
     /// 当前最新回复的尾部折叠摘要行，点按可展开完整回复。
     case currentReplySummary(turnIndex: Int, summary: String, expanded: Bool)
     case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
@@ -1537,6 +1559,13 @@ private struct ActivitySheetItem: Identifiable {
     let group: ActivityGroup
 }
 
+private struct SubagentSegment {
+    let id: String
+    let meta: SubagentMeta
+    let blocks: [ContentBlock]
+    let items: [DisplayItem]?
+}
+
 /// 被折叠历史区间的统计：轮次 / 工具调用 / 子代理 / 失败。
 struct HistoryStats {
     let rounds: Int
@@ -1550,6 +1579,7 @@ private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
     switch item {
     case .turn(let i, _): return i
     case .assistantItem(let i, _): return i
+    case .subagentRole(let i, _): return i
     case .currentReplySummary(let i, _, _): return i
     case .explorationGroup(_, let i): return i
     case .activityGroup(let i, _, _): return i
@@ -1648,8 +1678,23 @@ private func flattenAssistantTurns(
                 out.append(.currentReplySummary(turnIndex: index, summary: fold.summary, expanded: expanded))
             }
             let visibleContent = expanded ? turn.content : fold.blocks
-            for displayItem in pairToolBlocks(visibleContent) {
-                out.append(.assistantItem(turnIndex: index, item: displayItem))
+            for segment in splitAssistantContentBySubagent(visibleContent) {
+                switch segment {
+                case .parent(let blocks):
+                    let displayItems = pairToolBlocks(blocks)
+                    for displaySegment in splitDisplayItemsBySubagentTool(displayItems) {
+                        switch displaySegment {
+                        case .parent(let items):
+                            for displayItem in items {
+                                out.append(.assistantItem(turnIndex: index, item: displayItem))
+                            }
+                        case .subagent(let subagent):
+                            out.append(.subagentRole(turnIndex: index, segment: subagent))
+                        }
+                    }
+                case .subagent(let subagent):
+                    out.append(.subagentRole(turnIndex: index, segment: subagent))
+                }
             }
             if let usage = turn.usage, usage.hasVisibleValue {
                 out.append(.usageSummary(turnIndex: index, usage: usage))
@@ -1662,6 +1707,175 @@ private func flattenAssistantTurns(
         }
     }
     return out
+}
+
+private enum AssistantContentSegment {
+    case parent([ContentBlock])
+    case subagent(SubagentSegment)
+}
+
+/// 对齐 Claude 的 __subagent 元数据：同一个 taskId 在同一轮里聚合成一个角色窗口；
+/// 父助手内容仍按原来的块级懒加载渲染。
+private func splitAssistantContentBySubagent(_ content: [ContentBlock]) -> [AssistantContentSegment] {
+    var segments: [AssistantContentSegment] = []
+    var subagentIndexById: [String: Int] = [:]
+    var parentBlocks: [ContentBlock] = []
+
+    func flushParent() {
+        guard !parentBlocks.isEmpty else { return }
+        segments.append(.parent(parentBlocks))
+        parentBlocks.removeAll(keepingCapacity: true)
+    }
+
+    for block in content {
+        guard let meta = block.subagentMeta else {
+            parentBlocks.append(block)
+            continue
+        }
+        flushParent()
+        let id = subagentIdentity(meta)
+        if let index = subagentIndexById[id], case .subagent(let existing) = segments[index] {
+            segments[index] = .subagent(SubagentSegment(
+                id: existing.id,
+                meta: existing.meta,
+                blocks: existing.blocks + [block],
+                items: nil
+            ))
+        } else {
+            subagentIndexById[id] = segments.count
+            segments.append(.subagent(SubagentSegment(
+                id: id,
+                meta: meta,
+                blocks: [block],
+                items: nil
+            )))
+        }
+    }
+    flushParent()
+    return segments
+}
+
+private enum AssistantDisplaySegment {
+    case parent([DisplayItem])
+    case subagent(SubagentSegment)
+}
+
+/// Claude 的结构化模式里，有些子 Agent 只表现为 Task/Agent 工具调用；
+/// 这类项以前会被活动聚合器折成一行“已子任务”，现在提升成独立角色窗口。
+private func splitDisplayItemsBySubagentTool(_ items: [DisplayItem]) -> [AssistantDisplaySegment] {
+    var segments: [AssistantDisplaySegment] = []
+    var subagentIndexById: [String: Int] = [:]
+    var parentItems: [DisplayItem] = []
+
+    func flushParent() {
+        guard !parentItems.isEmpty else { return }
+        segments.append(.parent(parentItems))
+        parentItems.removeAll(keepingCapacity: true)
+    }
+
+    for item in items {
+        guard let segment = subagentToolSegment(from: item) else {
+            parentItems.append(item)
+            continue
+        }
+        flushParent()
+        if let index = subagentIndexById[segment.id], case .subagent(let existing) = segments[index] {
+            segments[index] = .subagent(SubagentSegment(
+                id: existing.id,
+                meta: existing.meta,
+                blocks: existing.blocks,
+                items: (existing.items ?? []) + (segment.items ?? [])
+            ))
+        } else {
+            subagentIndexById[segment.id] = segments.count
+            segments.append(.subagent(segment))
+        }
+    }
+    flushParent()
+    return segments
+}
+
+private func subagentToolSegment(from item: DisplayItem) -> SubagentSegment? {
+    guard case .tool(let id, let name, let description, let input, let subagent, _) = item,
+          isSubagentTool(name: name, input: input) else {
+        return nil
+    }
+    let taskId = firstText(input, keys: ["taskId", "task_id"]) ?? subagent?.taskId
+    let agentType = subagent?.agentType
+        ?? firstText(input, keys: ["subagent_type", "agent_type", "agentType", "type"])
+        ?? taskRoleName(taskId: taskId, toolName: name)
+    let taskDescription = subagent?.taskDescription
+        ?? description
+        ?? firstText(input, keys: ["description", "prompt", "task", "taskDescription", "instructions"])
+    let meta = SubagentMeta(taskId: taskId, agentType: agentType, taskDescription: taskDescription)
+    return SubagentSegment(
+        id: subagentToolIdentity(toolId: id, taskId: taskId, agentType: agentType, taskDescription: taskDescription),
+        meta: meta,
+        blocks: [],
+        items: [item]
+    )
+}
+
+private func isSubagentTool(name: String, input: [String: JSONValue]) -> Bool {
+    let lower = name.lowercased()
+    if lower == "task" || lower.hasPrefix("task") || lower.contains("agent") {
+        return true
+    }
+    return input["subagent_type"]?.stringValue?.isEmpty == false
+        || input["agent_type"]?.stringValue?.isEmpty == false
+        || input["agentType"]?.stringValue?.isEmpty == false
+}
+
+private func taskRoleName(taskId: String?, toolName: String) -> String {
+    let task = taskId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !task.isEmpty { return "子任务 \(task)" }
+    return toolLabel(toolName)
+}
+
+private func subagentToolIdentity(
+    toolId: String,
+    taskId: String?,
+    agentType: String,
+    taskDescription: String?
+) -> String {
+    let task = taskId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !task.isEmpty { return "task:\(task)" }
+    if !toolId.isEmpty { return "tool:\(toolId)" }
+    let description = taskDescription?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !description.isEmpty { return "desc:\(description)" }
+    return "type:\(agentType)"
+}
+
+private func firstText(_ input: [String: JSONValue], keys: [String]) -> String? {
+    for key in keys {
+        guard let value = input[key] else { continue }
+        let text = (value.stringValue ?? value.summaryText)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty { return text }
+    }
+    return nil
+}
+
+private func subagentIdentity(_ meta: SubagentMeta?) -> String {
+    guard let meta else { return "__parent" }
+    if let taskId = meta.taskId, !taskId.isEmpty { return "task:\(taskId)" }
+    if let agentType = meta.agentType, !agentType.isEmpty { return "type:\(agentType)" }
+    if let description = meta.taskDescription, !description.isEmpty { return "desc:\(description)" }
+    return "__subagent"
+}
+
+private extension ContentBlock {
+    var subagentMeta: SubagentMeta? {
+        switch self {
+        case .text(_, let subagent),
+             .thinking(_, let subagent),
+             .toolUse(_, _, _, _, let subagent),
+             .toolResult(_, _, _, _, let subagent):
+            return subagent
+        case .unknown:
+            return nil
+        }
+    }
 }
 
 private func collapseActivityItems(
@@ -2024,6 +2238,9 @@ private struct ReplyFoldUnit {
 /// 当前最新回复的抽纸折叠：用户消息留在上方，助手正文只保留尾部。
 /// 旧段落折进摘要行，避免「回到最新」仍落在第 01 段。
 private func foldCurrentReplyTail(_ content: [ContentBlock], userPreview: String = "") -> CurrentReplyFold {
+    if content.contains(where: { $0.subagentMeta != nil }) {
+        return CurrentReplyFold(blocks: content, summary: "")
+    }
     if content.contains(where: { block in
         if case .toolUse(_, let name, _, _, _) = block { return name == "AskUserQuestion" }
         return false
@@ -2425,6 +2642,155 @@ private func activityIconName(_ items: [DisplayItem]) -> String {
     return "wrench.and.screwdriver"
 }
 
+private let subagentWindowContentHeight: CGFloat = 280
+
+private struct SubagentRoleWindow: View {
+    let segment: SubagentSegment
+    var baseURL: URL? = nil
+    var isLastTurn = false
+    var isResponding = false
+    var askSelections: [String: AskUserSelectionState] = [:]
+    var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
+    var onAskSubmit: (String, String) -> Void = { _, _ in }
+
+    private var displayItems: [DisplayItem] {
+        if let items = segment.items {
+            return items
+        }
+        return pairToolBlocks(segment.blocks)
+    }
+
+    private func running(_ items: [DisplayItem]) -> Bool {
+        guard isLastTurn && isResponding else { return false }
+        return items.contains(where: isSubagentDisplayItemRunning)
+    }
+
+    private var title: String {
+        catPrefixedRoleName(segment.meta.agentType)
+    }
+
+    private var subtitle: String {
+        let text = segment.meta.taskDescription?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !text.isEmpty { return text }
+        return "子 Agent 输出"
+    }
+
+    var body: some View {
+        let items = displayItems
+        HStack(alignment: .top, spacing: 9) {
+            avatar(running: running(items))
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 0) {
+                header(items: items)
+                Divider().overlay(Theme.border.opacity(0.7))
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 9) {
+                        if items.isEmpty {
+                            Text("等待子 Agent 输出…")
+                                .font(.system(size: 13))
+                                .foregroundColor(Theme.textSecondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 8)
+                        } else {
+                            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                                AssistantItemView(
+                                    item: item,
+                                    baseURL: baseURL,
+                                    isLastTurn: isLastTurn,
+                                    isResponding: isResponding,
+                                    askSelections: askSelections,
+                                    onAskToggle: onAskToggle,
+                                    onAskSubmit: onAskSubmit,
+                                    showSubagentTags: false,
+                                    preferExpandedToolBodies: true
+                                )
+                            }
+                        }
+                    }
+                    .padding(10)
+                }
+                .frame(height: subagentWindowContentHeight)
+                .background(Theme.background.opacity(0.45))
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Theme.surface)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Theme.codex.opacity(0.28), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.04), radius: 8, y: 2)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(title)，\(subtitle)")
+    }
+
+    private func avatar(running: Bool) -> some View {
+        ZStack {
+            Circle().fill(Theme.codex.opacity(running ? 0.18 : 0.13))
+            if running {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(Theme.codex)
+            } else {
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Theme.codex)
+            }
+        }
+        .frame(width: 34, height: 34)
+    }
+
+    private func header(items: [DisplayItem]) -> some View {
+        let isRunning = running(items)
+        return HStack(alignment: .center, spacing: 9) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            Text(isRunning ? "处理中" : "\(items.count) 条内容")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(isRunning ? Theme.brand : Theme.codex)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(Capsule().fill((isRunning ? Theme.brand : Theme.codex).opacity(0.10)))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+}
+
+private func catPrefixedRoleName(_ raw: String?) -> String {
+    let name = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if name.isEmpty { return "猫猫子 Agent" }
+    if name.hasPrefix("猫猫") { return name }
+    return "猫猫 \(name)"
+}
+
+private func isSubagentDisplayItemRunning(_ item: DisplayItem) -> Bool {
+    switch item {
+    case .tool(_, _, _, _, _, let result):
+        return result == nil
+    case .explorationGroup(let tools):
+        return tools.contains { $0.result == nil }
+    case .plain(let block):
+        if case .thinking = block { return true }
+        return false
+    }
+}
+
 /// 单个 assistant 内容块（plain / 工具卡 / 探索分组）的渲染。
 /// 抽成独立视图，让主列表能把一条 assistant turn 的每个块摊平成顶层 LazyVStack
 /// 的独立行——单条 turn 携带上百个块时，避免整条 turn 一次性构建数百个嵌套视图
@@ -2437,14 +2803,16 @@ private struct AssistantItemView: View {
     var askSelections: [String: AskUserSelectionState] = [:]
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
     var onAskSubmit: (String, String) -> Void = { _, _ in }
+    var showSubagentTags = true
+    var preferExpandedToolBodies = false
 
     var body: some View {
         switch item {
         case .plain(let block):
-            BlockView(block: block)
+            BlockView(block: block, showSubagentTags: showSubagentTags)
         case .tool(let id, let name, let description, let input, let subagent, let result):
             VStack(alignment: .leading, spacing: 4) {
-                subagentTag(subagent)
+                if showSubagentTags { subagentTag(subagent) }
                 toolView(
                     id: id, name: name, description: description,
                     input: input, result: result
@@ -2475,14 +2843,20 @@ private struct AssistantItemView: View {
                 onSubmit: { answerText in onAskSubmit(id, answerText) }
             )
         } else if name == "Edit" || name == "Write" || name == "MultiEdit" {
-            DiffCard(toolName: name, input: input, result: result)
+            DiffCard(toolName: name, input: input, result: result, initiallyExpanded: preferExpandedToolBodies)
         } else if name == "Bash" {
-            TerminalCard(input: input, result: result, running: result == nil && isLastTurn && isResponding)
+            TerminalCard(
+                input: input,
+                result: result,
+                running: result == nil && isLastTurn && isResponding,
+                initiallyExpanded: preferExpandedToolBodies
+            )
         } else {
             ToolUseCard(
                 name: name, description: description, input: input,
                 result: result, running: result == nil && isLastTurn && isResponding,
-                baseURL: baseURL
+                baseURL: baseURL,
+                initiallyExpanded: preferExpandedToolBodies
             )
         }
     }
@@ -2504,13 +2878,14 @@ private struct AssistantItemView: View {
 
 private struct BlockView: View {
     let block: ContentBlock
+    var showSubagentTags = true
 
     var body: some View {
         switch block {
         case .text(let text, let subagent):
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    subagentTag(subagent)
+                    if showSubagentTags { subagentTag(subagent) }
                     MarkdownText(text: text)
                 }
             }
@@ -2532,7 +2907,7 @@ private struct BlockView: View {
         case .toolUse(_, let name, let description, let input, let subagent):
             // 兜底：正常路径已在 TurnView 配对分流，这里处理极端的落单 ToolUse。
             VStack(alignment: .leading, spacing: 4) {
-                subagentTag(subagent)
+                if showSubagentTags { subagentTag(subagent) }
                 ToolUseCard(name: name, description: description, input: input, result: nil, running: false)
             }
         case .toolResult(_, let text, let isError, let truncated, _):
@@ -3048,8 +3423,10 @@ private struct ToolUseCard: View {
     var result: ToolResultInfo?
     var running = false
     var baseURL: URL? = nil
+    var initiallyExpanded = false
 
     @State private var expanded = false
+    @State private var appliedInitialExpansion = false
 
     /// Read 读到的图片路径（用于卡片内常驻缩略图，对齐 Web 端 inline-tool-image）。
     private var imagePath: String? {
@@ -3103,6 +3480,16 @@ private struct ToolUseCard: View {
         )
         .shadow(color: Color.black.opacity(0.035), radius: 7, y: 2)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onAppear {
+            guard !appliedInitialExpansion else { return }
+            expanded = initiallyExpanded && hasBody
+            appliedInitialExpansion = true
+        }
+        .onChange(of: result != nil) { _ in
+            if initiallyExpanded && hasBody {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded = true }
+            }
+        }
     }
 
     private var header: some View {
@@ -3724,6 +4111,7 @@ private struct DiffCard: View {
     let toolName: String
     let input: [String: JSONValue]
     let result: ToolResultInfo?
+    var initiallyExpanded = false
 
     @State private var expanded = false
     @State private var initialized = false
@@ -3788,13 +4176,15 @@ private struct DiffCard: View {
         .onAppear {
             // 默认展开态对齐 Web：执行中展开，已完成折叠。只在首次出现时定初值。
             if !initialized {
-                expanded = result == nil
+                expanded = initiallyExpanded || result == nil
                 initialized = true
             }
         }
         .onChange(of: result != nil) { hasResult in
             // 结果到达后自动收起（对齐 Android / Web 行为；手动点开不受影响）。
-            if hasResult { withAnimation(.easeInOut(duration: 0.15)) { expanded = false } }
+            if hasResult && !initiallyExpanded {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded = false }
+            }
         }
     }
 
@@ -3863,8 +4253,10 @@ private struct TerminalCard: View {
     let input: [String: JSONValue]
     let result: ToolResultInfo?
     var running = false
+    var initiallyExpanded = false
 
     @State private var expanded = false
+    @State private var appliedInitialExpansion = false
 
     private var command: String {
         input["command"]?.stringValue ?? input["cmd"]?.stringValue ?? ""
@@ -3907,6 +4299,16 @@ private struct TerminalCard: View {
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onAppear {
+            guard !appliedInitialExpansion else { return }
+            expanded = initiallyExpanded || running
+            appliedInitialExpansion = true
+        }
+        .onChange(of: result != nil) { _ in
+            if initiallyExpanded {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded = true }
+            }
+        }
     }
 
     private var header: some View {
