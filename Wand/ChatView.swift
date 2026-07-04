@@ -366,6 +366,8 @@ struct ChatView: View {
             ActivitySummaryRow(group: group) {
                 activitySheet = ActivitySheetItem(id: id, turnIndex: turnIndex, group: group)
             }
+        case .usageSummary(_, let usage):
+            UsageSummaryRow(usage: usage)
         case .historySummary(let stats, let boundary):
             HistorySummaryCard(
                 stats: stats,
@@ -987,13 +989,24 @@ struct ChatView: View {
         sessionModes.first { $0.id == id }?.label ?? "标准"
     }
 
+    private static func modeIcon(_ id: String) -> String {
+        switch id {
+        case "managed": return "sparkles"
+        case "full-access": return "lock.open.fill"
+        case "auto-edit": return "pencil"
+        case "native": return "terminal"
+        default: return "lock"
+        }
+    }
+
     /// 高权限模式（托管 / 全权限）用橙色提示，其余用次要色。
     private var modeTint: Color {
         (store.mode == "full-access" || store.mode == "managed") ? .orange : Theme.textSecondary
     }
 
-    private func modeChip(compact: Bool = false) -> some View {
+    private func modeChip(compact _: Bool = false) -> some View {
         let isCodex = store.snapshot?.provider == "codex"
+        let currentModeLabel = Self.modeLabel(store.mode)
         return Menu {
             ForEach(Self.sessionModes, id: \.id) { option in
                 Button {
@@ -1009,16 +1022,16 @@ struct ChatView: View {
             }
         } label: {
             chipLabel(
-                icon: "lock.shield",
-                text: Self.modeLabel(store.mode),
+                icon: Self.modeIcon(store.mode),
+                text: currentModeLabel,
                 tint: modeTint,
-                showsText: !compact,
-                maxTextWidth: compact ? 0 : 140
+                showsText: false,
+                maxTextWidth: 0
             )
         }
         .disabled(isCodex)
         .buttonStyle(.plain)
-        .accessibilityLabel("执行模式")
+        .accessibilityLabel("执行模式：\(currentModeLabel)")
     }
 
     private func modelThinkingChip(compact: Bool = false) -> some View {
@@ -1506,6 +1519,8 @@ private enum MessageDisplayItem {
     case currentReplySummary(turnIndex: Int, summary: String, expanded: Bool)
     case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
     case activityGroup(turnIndex: Int, group: ActivityGroup, id: String)
+    /// 当前 assistant turn 的 token / cost 摘要。
+    case usageSummary(turnIndex: Int, usage: TurnUsage)
     /// 历史折叠摘要卡：折叠"最后一条用户消息"之前的全部历史，boundary = 该用户消息下标。
     case historySummary(stats: HistoryStats, boundary: Int)
 }
@@ -1538,6 +1553,7 @@ private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
     case .currentReplySummary(let i, _, _): return i
     case .explorationGroup(_, let i): return i
     case .activityGroup(let i, _, _): return i
+    case .usageSummary(let i, _): return i
     case .historySummary(_, let b): return b
     }
 }
@@ -1635,6 +1651,9 @@ private func flattenAssistantTurns(
             for displayItem in pairToolBlocks(visibleContent) {
                 out.append(.assistantItem(turnIndex: index, item: displayItem))
             }
+            if let usage = turn.usage, usage.hasVisibleValue {
+                out.append(.usageSummary(turnIndex: index, usage: usage))
+            }
         } else {
             if case .turn(_, let turn) = item, turn.role == "user" {
                 latestUserPreview = userTurnPreview(turn)
@@ -1708,6 +1727,7 @@ private func isCollapsibleActivityItem(_ item: DisplayItem) -> Bool {
     switch item {
     case .plain(let block):
         if case .text = block { return false }
+        if case .thinking = block { return false }
         if case .unknown = block { return false }
         return true
     case .explorationGroup:
@@ -2234,6 +2254,78 @@ private struct TurnView: View {
     }
 }
 
+private struct UsageSummaryRow: View {
+    let usage: TurnUsage
+
+    private var chips: [(String, String)] {
+        var result: [(String, String)] = []
+        if let input = usage.inputTokens, input > 0 {
+            result.append(("输入", compactTokenCount(input)))
+        }
+        if let cache = usage.cacheReadInputTokens, cache > 0 {
+            result.append(("缓存", compactTokenCount(cache)))
+        }
+        if let output = usage.outputTokens, output > 0 {
+            result.append(("输出", compactTokenCount(output)))
+        }
+        if let reasoning = usage.reasoningOutputTokens, reasoning > 0 {
+            result.append(("推理", compactTokenCount(reasoning)))
+        }
+        if let cost = usage.totalCostUsd, cost > 0 {
+            result.append(("费用", formatUsd(cost)))
+        }
+        return result
+    }
+
+    var body: some View {
+        if !chips.isEmpty {
+            HStack(spacing: 7) {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
+                    HStack(spacing: 3) {
+                        Text(chip.0)
+                        Text(chip.1)
+                            .fontWeight(.semibold)
+                    }
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(Theme.textSecondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Theme.surface.opacity(0.75)))
+                    .overlay(Capsule().stroke(Theme.border.opacity(0.75), lineWidth: 1))
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 2)
+            .padding(.top, -4)
+            .accessibilityLabel("本轮用量 \(chips.map { "\($0.0) \($0.1)" }.joined(separator: "，"))")
+        }
+    }
+}
+
+private func compactTokenCount(_ value: Int) -> String {
+    if value >= 1_000_000 {
+        return String(format: "%.1fM", Double(value) / 1_000_000)
+    }
+    if value >= 10_000 {
+        return "\(value / 1_000)K"
+    }
+    if value >= 1_000 {
+        let rounded = Double(value) / 1_000
+        return rounded >= 10 ? "\(Int(rounded.rounded()))K" : String(format: "%.1fK", rounded)
+    }
+    return "\(value)"
+}
+
+private func formatUsd(_ value: Double) -> String {
+    if value >= 0.01 {
+        return String(format: "$%.2f", value)
+    }
+    return String(format: "$%.4f", value)
+}
+
 private struct ActivitySummaryRow: View {
     let group: ActivityGroup
     let onOpen: () -> Void
@@ -2427,7 +2519,8 @@ private struct BlockView: View {
                 CollapsibleSection(
                     icon: "brain",
                     title: "思考过程",
-                    tint: Theme.textSecondary
+                    tint: Theme.textSecondary,
+                    initiallyExpanded: true
                 ) {
                     Text(thinking)
                         .font(.system(size: 13))
@@ -3127,14 +3220,28 @@ private struct ToolResultBody: View {
     }
 }
 
-/// 可折叠区块（thinking / tool_result 共用），默认折叠。
+/// 可折叠区块（thinking / tool_result 共用）。工具结果默认折叠，思考过程默认展开。
 private struct CollapsibleSection<Content: View>: View {
     let icon: String
     let title: String
     let tint: Color
     @ViewBuilder let content: () -> Content
 
-    @State private var expanded = false
+    @State private var expanded: Bool
+
+    init(
+        icon: String,
+        title: String,
+        tint: Color,
+        initiallyExpanded: Bool = false,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.icon = icon
+        self.title = title
+        self.tint = tint
+        self.content = content
+        _expanded = State(initialValue: initiallyExpanded)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

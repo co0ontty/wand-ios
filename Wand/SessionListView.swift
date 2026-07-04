@@ -18,18 +18,15 @@ struct SessionListView: View {
     @State private var showNewSession = false
     @State private var scope: SessionScope = .active
     @State private var showClearHistoryConfirmation = false
-    /// 待确认的删除：拦截所有删除入口（滑动 / 多选 / 取消选择等），
-    /// 在用户二次确认后才真正调用 API；防误触清掉正在用的会话。
+    /// 待确认的删除：单条会话删除由左滑按钮直接执行；这里仅保留历史/多选等入口。
     @State private var pendingDelete: PendingDelete?
 
     private enum PendingDelete: Identifiable {
-        case session(SessionSnapshot)
         case history(HistorySession)
         case sessions([SessionSnapshot])
 
         var id: String {
             switch self {
-            case .session(let s): return "session-\(s.id)"
             case .history(let h): return "history-\(h.id)"
             case .sessions(let arr): return "sessions-\(arr.map(\.id).joined(separator: ","))"
             }
@@ -37,7 +34,6 @@ struct SessionListView: View {
 
         var dialogTitle: String {
             switch self {
-            case .session: return "删除会话"
             case .history: return "删除历史会话"
             case .sessions(let arr): return "删除 \(arr.count) 个会话"
             }
@@ -45,7 +41,6 @@ struct SessionListView: View {
 
         var dialogMessage: String {
             switch self {
-            case .session: return "此操作无法撤销，确定要删除这个会话吗？"
             case .history: return "此操作无法撤销，确定要删除这条历史会话吗？"
             case .sessions: return "此操作无法撤销，确定要删除选中的会话吗？"
             }
@@ -279,7 +274,7 @@ struct SessionListView: View {
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
-                            pendingDelete = .session(session)
+                            deleteSession(session)
                         } label: {
                             Label("删除", systemImage: "trash")
                         }
@@ -291,7 +286,7 @@ struct SessionListView: View {
                             Label("多选会话", systemImage: "checkmark.circle")
                         }
                         Button(role: .destructive) {
-                            pendingDelete = .session(session)
+                            deleteSession(session)
                         } label: {
                             Label("删除", systemImage: "trash")
                         }
@@ -410,9 +405,6 @@ struct SessionListView: View {
         guard let pending = pendingDelete else { return }
         pendingDelete = nil
         switch pending {
-        case .session(let s):
-            sessions.removeAll { $0.id == s.id }
-            Task { try? await api.deleteSession(id: s.id) }
         case .history(let h):
             historySessions.removeAll { $0.id == h.id }
             Task { try? await api.deleteHistory(h) }
@@ -423,6 +415,14 @@ struct SessionListView: View {
                 for s in arr { try? await api.deleteSession(id: s.id) }
             }
         }
+    }
+
+    private func deleteSession(_ session: SessionSnapshot) {
+        sessions.removeAll { $0.id == session.id }
+        if quickOpenSession?.id == session.id {
+            quickOpenSession = nil
+        }
+        Task { try? await api.deleteSession(id: session.id) }
     }
 
     private func clearAllHistory() {

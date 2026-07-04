@@ -253,6 +253,57 @@ struct SubagentMeta: Decodable {
     let taskDescription: String?
 }
 
+/// 单轮 assistant 的用量统计。服务端当前下发 camelCase；这里也兼容 snake_case，
+/// 方便以后直接透传上游 usage 时 iOS 不丢字段。
+struct TurnUsage: Decodable {
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let cacheReadInputTokens: Int?
+    let cacheCreationInputTokens: Int?
+    let reasoningOutputTokens: Int?
+    let totalCostUsd: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case inputTokens
+        case outputTokens
+        case cacheReadInputTokens
+        case cacheCreationInputTokens
+        case reasoningOutputTokens
+        case totalCostUsd
+        case inputTokensSnake = "input_tokens"
+        case outputTokensSnake = "output_tokens"
+        case cacheReadInputTokensSnake = "cache_read_input_tokens"
+        case cacheCreationInputTokensSnake = "cache_creation_input_tokens"
+        case reasoningOutputTokensSnake = "reasoning_output_tokens"
+        case totalCostUsdSnake = "total_cost_usd"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        inputTokens = (try? c.decode(Int.self, forKey: .inputTokens))
+            ?? (try? c.decode(Int.self, forKey: .inputTokensSnake))
+        outputTokens = (try? c.decode(Int.self, forKey: .outputTokens))
+            ?? (try? c.decode(Int.self, forKey: .outputTokensSnake))
+        cacheReadInputTokens = (try? c.decode(Int.self, forKey: .cacheReadInputTokens))
+            ?? (try? c.decode(Int.self, forKey: .cacheReadInputTokensSnake))
+        cacheCreationInputTokens = (try? c.decode(Int.self, forKey: .cacheCreationInputTokens))
+            ?? (try? c.decode(Int.self, forKey: .cacheCreationInputTokensSnake))
+        reasoningOutputTokens = (try? c.decode(Int.self, forKey: .reasoningOutputTokens))
+            ?? (try? c.decode(Int.self, forKey: .reasoningOutputTokensSnake))
+        totalCostUsd = (try? c.decode(Double.self, forKey: .totalCostUsd))
+            ?? (try? c.decode(Double.self, forKey: .totalCostUsdSnake))
+    }
+
+    var hasVisibleValue: Bool {
+        (inputTokens ?? 0) > 0
+            || (outputTokens ?? 0) > 0
+            || (cacheReadInputTokens ?? 0) > 0
+            || (cacheCreationInputTokens ?? 0) > 0
+            || (reasoningOutputTokens ?? 0) > 0
+            || (totalCostUsd ?? 0) > 0
+    }
+}
+
 /// ConversationTurn.content 里的一个块。types.ts: ContentBlock 四种变体 + 容错。
 enum ContentBlock: Decodable {
     case text(text: String, subagent: SubagentMeta?)
@@ -322,17 +373,20 @@ enum ContentBlock: Decodable {
 struct ConversationTurn: Decodable {
     let role: String
     let content: [ContentBlock]
+    let usage: TurnUsage?
 
-    private enum CodingKeys: String, CodingKey { case role, content }
+    private enum CodingKeys: String, CodingKey { case role, content, usage }
 
-    init(role: String, content: [ContentBlock]) {
+    init(role: String, content: [ContentBlock], usage: TurnUsage? = nil) {
         self.role = role
         self.content = content
+        self.usage = usage
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         role = (try? c.decode(String.self, forKey: .role)) ?? "assistant"
+        usage = try? c.decode(TurnUsage.self, forKey: .usage)
         // 逐块容错：单个块解析失败不拖垮整条消息。
         var blocks: [ContentBlock] = []
         if var arr = try? c.nestedUnkeyedContainer(forKey: .content) {
