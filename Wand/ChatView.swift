@@ -386,8 +386,8 @@ struct ChatView: View {
             ActivitySummaryRow(group: group) {
                 activitySheet = ActivitySheetItem(id: id, turnIndex: turnIndex, group: group)
             }
-        case .usageSummary(_, let usage):
-            UsageSummaryRow(usage: usage)
+        case .usageSummary(_, let usage, let isLive):
+            UsageSummaryRow(usage: usage, isLive: isLive)
         case .historySummary(let stats, let boundary):
             HistorySummaryCard(
                 stats: stats,
@@ -433,7 +433,8 @@ struct ChatView: View {
             flattenAssistantTurns(
                 groupExplorationTurns(store.messages),
                 currentReplyIndex: currentReplyIndex,
-                expandedCurrentReplyTurnIndex: expandedCurrentReplyTurnIndex
+                expandedCurrentReplyTurnIndex: expandedCurrentReplyTurnIndex,
+                liveTurnIndex: store.isResponding ? currentReplyIndex : nil
             ),
             latestTurnIndex: latestAssistantTurnIndex ?? -1,
             isResponding: store.isResponding
@@ -1545,7 +1546,7 @@ private enum MessageDisplayItem {
     case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
     case activityGroup(turnIndex: Int, group: ActivityGroup, id: String)
     /// 当前 assistant turn 的 token / cost 摘要。
-    case usageSummary(turnIndex: Int, usage: TurnUsage)
+    case usageSummary(turnIndex: Int, usage: TurnUsage?, isLive: Bool)
     /// 历史折叠摘要卡：折叠"最后一条用户消息"之前的全部历史，boundary = 该用户消息下标。
     case historySummary(stats: HistoryStats, boundary: Int)
 }
@@ -1586,7 +1587,7 @@ private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
     case .currentReplySummary(let i, _, _): return i
     case .explorationGroup(_, let i): return i
     case .activityGroup(let i, _, _): return i
-    case .usageSummary(let i, _): return i
+    case .usageSummary(let i, _, _): return i
     case .historySummary(_, let b): return b
     }
 }
@@ -1667,7 +1668,8 @@ private func groupExplorationTurns(_ turns: [ConversationTurn]) -> [MessageDispl
 private func flattenAssistantTurns(
     _ items: [MessageDisplayItem],
     currentReplyIndex: Int? = nil,
-    expandedCurrentReplyTurnIndex: Int? = nil
+    expandedCurrentReplyTurnIndex: Int? = nil,
+    liveTurnIndex: Int? = nil
 ) -> [MessageDisplayItem] {
     var out: [MessageDisplayItem] = []
     var latestUserPreview = ""
@@ -1699,8 +1701,9 @@ private func flattenAssistantTurns(
                     out.append(.subagentRole(turnIndex: index, segment: subagent))
                 }
             }
-            if let usage = turn.usage, usage.hasVisibleValue {
-                out.append(.usageSummary(turnIndex: index, usage: usage))
+            let usageIsLive = index == liveTurnIndex
+            if usageIsLive || turn.usage?.hasVisibleValue == true {
+                out.append(.usageSummary(turnIndex: index, usage: turn.usage, isLive: usageIsLive))
             }
         } else {
             if case .turn(_, let turn) = item, turn.role == "user" {
@@ -2475,10 +2478,12 @@ private struct TurnView: View {
 }
 
 private struct UsageSummaryRow: View {
-    let usage: TurnUsage
+    let usage: TurnUsage?
+    let isLive: Bool
 
     private var chips: [(String, String)] {
         var result: [(String, String)] = []
+        guard let usage else { return result }
         if let input = usage.inputTokens, input > 0 {
             result.append(("输入", compactTokenCount(input)))
         }
@@ -2486,10 +2491,10 @@ private struct UsageSummaryRow: View {
             result.append(("缓存", compactTokenCount(cache)))
         }
         if let output = usage.outputTokens, output > 0 {
-            result.append(("输出", compactTokenCount(output)))
+            result.append(("输出", "\(usage.estimated == true ? "≈" : "")\(compactTokenCount(output))"))
         }
         if let reasoning = usage.reasoningOutputTokens, reasoning > 0 {
-            result.append(("推理", compactTokenCount(reasoning)))
+            result.append(("推理", "\(usage.estimated == true ? "≈" : "")\(compactTokenCount(reasoning))"))
         }
         if let cost = usage.totalCostUsd, cost > 0 {
             result.append(("费用", formatUsd(cost)))
@@ -2498,29 +2503,37 @@ private struct UsageSummaryRow: View {
     }
 
     var body: some View {
-        if !chips.isEmpty {
+        if !chips.isEmpty || isLive || usage?.estimated == true {
             HStack(spacing: 7) {
                 Image(systemName: "chart.bar.xaxis")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(Theme.textSecondary)
-                ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
-                    HStack(spacing: 3) {
-                        Text(chip.0)
-                        Text(chip.1)
-                            .fontWeight(.semibold)
+                if chips.isEmpty {
+                    Text("正在统计用量…")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(Theme.textSecondary)
+                } else {
+                    ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
+                        HStack(spacing: 3) {
+                            Text(chip.0)
+                            Text(chip.1)
+                                .fontWeight(.semibold)
+                        }
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(Theme.textSecondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Theme.surface.opacity(0.75)))
+                        .overlay(Capsule().stroke(Theme.border.opacity(0.75), lineWidth: 1))
                     }
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(Theme.textSecondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Theme.surface.opacity(0.75)))
-                    .overlay(Capsule().stroke(Theme.border.opacity(0.75), lineWidth: 1))
                 }
                 Spacer(minLength: 0)
             }
             .padding(.leading, 2)
             .padding(.top, -4)
-            .accessibilityLabel("本轮用量 \(chips.map { "\($0.0) \($0.1)" }.joined(separator: "，"))")
+            .accessibilityLabel(chips.isEmpty
+                ? "正在统计本轮用量"
+                : "本轮用量 \(chips.map { "\($0.0) \($0.1)" }.joined(separator: "，"))")
         }
     }
 }
@@ -2705,7 +2718,7 @@ private struct SubagentRoleWindow: View {
                                     onAskToggle: onAskToggle,
                                     onAskSubmit: onAskSubmit,
                                     showSubagentTags: false,
-                                    preferExpandedToolBodies: true
+                                    preferExpandedToolBodies: false
                                 )
                             }
                         }
@@ -4177,16 +4190,10 @@ private struct DiffCard: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .onAppear {
-            // 默认展开态对齐 Web：执行中展开，已完成折叠。只在首次出现时定初值。
+            // 默认只显示摘要行；运行状态不再强制展开具体 diff。
             if !initialized {
-                expanded = initiallyExpanded || result == nil
+                expanded = initiallyExpanded
                 initialized = true
-            }
-        }
-        .onChange(of: result != nil) { hasResult in
-            // 结果到达后自动收起（对齐 Android / Web 行为；手动点开不受影响）。
-            if hasResult && !initiallyExpanded {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded = false }
             }
         }
     }
@@ -4304,7 +4311,7 @@ private struct TerminalCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .onAppear {
             guard !appliedInitialExpansion else { return }
-            expanded = initiallyExpanded || running
+            expanded = initiallyExpanded
             appliedInitialExpansion = true
         }
         .onChange(of: result != nil) { _ in

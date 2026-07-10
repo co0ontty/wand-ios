@@ -262,6 +262,7 @@ struct TurnUsage: Decodable {
     let cacheCreationInputTokens: Int?
     let reasoningOutputTokens: Int?
     let totalCostUsd: Double?
+    let estimated: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case inputTokens
@@ -270,6 +271,7 @@ struct TurnUsage: Decodable {
         case cacheCreationInputTokens
         case reasoningOutputTokens
         case totalCostUsd
+        case estimated
         case inputTokensSnake = "input_tokens"
         case outputTokensSnake = "output_tokens"
         case cacheReadInputTokensSnake = "cache_read_input_tokens"
@@ -292,6 +294,7 @@ struct TurnUsage: Decodable {
             ?? (try? c.decode(Int.self, forKey: .reasoningOutputTokensSnake))
         totalCostUsd = (try? c.decode(Double.self, forKey: .totalCostUsd))
             ?? (try? c.decode(Double.self, forKey: .totalCostUsdSnake))
+        estimated = try? c.decode(Bool.self, forKey: .estimated)
     }
 
     var hasVisibleValue: Bool {
