@@ -4,9 +4,38 @@ import UniformTypeIdentifiers
 /// 会话列表：原生渲染 /api/sessions，下拉刷新 + 周期轮询，
 /// 对话模式进入原生聊天，PTY 模式进入嵌套网页版对应会话。
 struct SessionListView: View {
-    private enum SessionScope: String {
-        case active
-        case history
+    private enum ListEntry: Identifiable {
+        case session(SessionSnapshot)
+        case recoverable(HistorySession)
+
+        var id: String {
+            switch self {
+            case .session(let session): return "session-\(session.id)"
+            case .recoverable(let session): return "recoverable-\(session.id)"
+            }
+        }
+
+        var sortTimestamp: Double {
+            switch self {
+            case .session(let session):
+                return Self.parseISO8601(session.startedAt)?.timeIntervalSince1970 ?? 0
+            case .recoverable(let session):
+                if let mtimeMs = session.mtimeMs { return mtimeMs / 1000 }
+                return Self.parseISO8601(session.timestamp)?.timeIntervalSince1970 ?? 0
+            }
+        }
+
+        private static func parseISO8601(_ value: String?) -> Date? {
+            guard let value, !value.isEmpty else { return nil }
+            return fractionalFormatter.date(from: value) ?? isoFormatter.date(from: value)
+        }
+
+        private static let fractionalFormatter: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }()
+        private static let isoFormatter = ISO8601DateFormatter()
     }
 
     let api: WandAPI
@@ -16,8 +45,6 @@ struct SessionListView: View {
     @State private var loading = true
     @State private var loadError: String?
     @State private var showNewSession = false
-    @State private var scope: SessionScope = .active
-    @State private var showClearHistoryConfirmation = false
     /// 待确认的删除：单条会话删除由左滑按钮直接执行；这里仅保留历史/多选等入口。
     @State private var pendingDelete: PendingDelete?
 
@@ -34,14 +61,14 @@ struct SessionListView: View {
 
         var dialogTitle: String {
             switch self {
-            case .history: return "删除历史会话"
+            case .history: return "删除会话"
             case .sessions(let arr): return "删除 \(arr.count) 个会话"
             }
         }
 
         var dialogMessage: String {
             switch self {
-            case .history: return "此操作无法撤销，确定要删除这条历史会话吗？"
+            case .history: return "此操作无法撤销，确定要删除这条会话吗？"
             case .sessions: return "此操作无法撤销，确定要删除选中的会话吗？"
             }
         }
@@ -58,10 +85,10 @@ struct SessionListView: View {
     @State private var listVisible = false
 
     private var visibleSessions: [SessionSnapshot] {
-        sessions.filter { !($0.archived ?? false) }
+        sessions
     }
 
-    private var visibleHistorySessions: [HistorySession] {
+    private var recoverableSessions: [HistorySession] {
         let managedIds = Set(sessions.compactMap(\.claudeSessionId))
         return historySessions
             .filter {
@@ -72,6 +99,11 @@ struct SessionListView: View {
             .sorted {
                 ($0.mtimeMs ?? 0) > ($1.mtimeMs ?? 0)
             }
+    }
+
+    private var listEntries: [ListEntry] {
+        (visibleSessions.map(ListEntry.session) + recoverableSessions.map(ListEntry.recoverable))
+            .sorted { $0.sortTimestamp > $1.sortTimestamp }
     }
 
     var body: some View {
@@ -105,29 +137,23 @@ struct SessionListView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(Theme.textPrimary)
                 } else {
-                    Picker("会话范围", selection: $scope) {
-                        Text("进行中").tag(SessionScope.active)
-                        Text("历史会话").tag(SessionScope.history)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 190)
+                    Text("会话")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     if isSelecting {
                         endSelection()
-                    } else if scope == .history {
-                        showClearHistoryConfirmation = true
                     } else {
                         showNewSession = true
                     }
                 } label: {
                     Image(systemName: trailingToolbarIcon)
                         .font(.system(size: 20))
-                        .foregroundColor(scope == .history && !isSelecting ? .red : Theme.brand)
+                        .foregroundColor(Theme.brand)
                 }
-                .disabled(scope == .history && visibleHistorySessions.isEmpty)
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -156,22 +182,6 @@ struct SessionListView: View {
         .onReceive(NotificationCenter.default.publisher(for: .wandBeginSessionSelection)) { _ in
             isSelecting = true
         }
-        .onChange(of: scope) { _ in
-            endSelection()
-            Task { await load(silent: true) }
-        }
-        .confirmationDialog(
-            "确认清空全部历史会话？",
-            isPresented: $showClearHistoryConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("清空全部 \(visibleHistorySessions.count) 条历史会话", role: .destructive) {
-                clearAllHistory()
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("这会删除本机 Claude 和 Codex 的历史会话文件，无法撤销。")
-        }
         .confirmationDialog(
             pendingDelete?.dialogTitle ?? "",
             isPresented: Binding(
@@ -189,7 +199,7 @@ struct SessionListView: View {
 
     private var trailingToolbarIcon: String {
         if isSelecting { return "xmark.circle.fill" }
-        return scope == .history ? "trash.circle.fill" : "plus.circle.fill"
+        return "plus.circle.fill"
     }
 
     private var quickOpenActive: Binding<Bool> {
@@ -243,9 +253,7 @@ struct SessionListView: View {
                     .buttonStyle(WandSecondaryButtonStyle())
             }
             .padding(32)
-        } else if scope == .history {
-            historyContent
-        } else if visibleSessions.isEmpty {
+        } else if listEntries.isEmpty {
             VStack(spacing: 14) {
                 WandBrandMark(size: 52)
                 Text("还没有会话")
@@ -258,42 +266,13 @@ struct SessionListView: View {
             }
         } else {
             List {
-                ForEach(visibleSessions) { session in
-                    SessionRow(
-                        session: session,
-                        selecting: isSelecting,
-                        selected: selectedSessionIds.contains(session.id)
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if isSelecting {
-                            toggleSelection(session.id)
-                        } else {
-                            quickOpenSession = session
-                        }
+                ForEach(listEntries) { entry in
+                    switch entry {
+                    case .session(let session):
+                        managedSessionRow(session)
+                    case .recoverable(let session):
+                        recoverableSessionRow(session)
                     }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) {
-                            deleteSession(session)
-                        } label: {
-                            Label("删除", systemImage: "trash")
-                        }
-                    }
-                    .contextMenu {
-                        Button {
-                            beginSelection(with: session.id)
-                        } label: {
-                            Label("多选会话", systemImage: "checkmark.circle")
-                        }
-                        Button(role: .destructive) {
-                            deleteSession(session)
-                        } label: {
-                            Label("删除", systemImage: "trash")
-                        }
-                    }
-                    .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
-                    .listRowBackground(Theme.background)
-                    .listRowSeparator(.hidden)
                 }
             }
             .listStyle(.plain)
@@ -333,53 +312,69 @@ struct SessionListView: View {
         loading = false
     }
 
-    @ViewBuilder private var historyContent: some View {
-        if visibleHistorySessions.isEmpty {
-            VStack(spacing: 14) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 42, weight: .light))
-                    .foregroundColor(Theme.textSecondary)
-                Text("没有历史会话")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-                Text("Claude 和 Codex 的本地历史会话会显示在这里")
-                    .font(.footnote)
-                    .foregroundColor(Theme.textSecondary)
-                    .multilineTextAlignment(.center)
+    private func managedSessionRow(_ session: SessionSnapshot) -> some View {
+        SessionRow(
+            session: session,
+            selecting: isSelecting,
+            selected: selectedSessionIds.contains(session.id)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isSelecting {
+                toggleSelection(session.id)
+            } else {
+                quickOpenSession = session
             }
-            .padding(32)
-        } else {
-            List {
-                ForEach(visibleHistorySessions) { history in
-                    Button {
-                        resume(history)
-                    } label: {
-                        HistorySessionRow(history: history)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(historyActionInProgress)
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button(role: .destructive) {
-                            pendingDelete = .history(history)
-                        } label: {
-                            Label("删除", systemImage: "trash")
-                        }
-                    }
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            pendingDelete = .history(history)
-                        } label: {
-                            Label("删除", systemImage: "trash")
-                        }
-                    }
-                    .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
-                    .listRowBackground(Theme.background)
-                    .listRowSeparator(.hidden)
-                }
-            }
-            .listStyle(.plain)
-            .refreshable { await load(silent: true) }
         }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                deleteSession(session)
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+        .contextMenu {
+            Button {
+                beginSelection(with: session.id)
+            } label: {
+                Label("多选会话", systemImage: "checkmark.circle")
+            }
+            Button(role: .destructive) {
+                deleteSession(session)
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+        .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
+        .listRowBackground(Theme.background)
+        .listRowSeparator(.hidden)
+    }
+
+    private func recoverableSessionRow(_ session: HistorySession) -> some View {
+        Button {
+            resume(session)
+        } label: {
+            HistorySessionRow(history: session)
+        }
+        .buttonStyle(.plain)
+        .disabled(historyActionInProgress || isSelecting)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                pendingDelete = .history(session)
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+        .contextMenu {
+            Button(role: .destructive) {
+                pendingDelete = .history(session)
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+        .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
+        .listRowBackground(Theme.background)
+        .listRowSeparator(.hidden)
     }
 
     private func resume(_ history: HistorySession) {
@@ -423,18 +418,6 @@ struct SessionListView: View {
             quickOpenSession = nil
         }
         Task { try? await api.deleteSession(id: session.id) }
-    }
-
-    private func clearAllHistory() {
-        let targets = visibleHistorySessions
-        guard !targets.isEmpty else { return }
-        historySessions.removeAll { history in targets.contains { $0.id == history.id } }
-        Task {
-            let claudeIds = targets.filter { $0.provider != "codex" }.map(\.id)
-            let codexIds = targets.filter { $0.provider == "codex" }.map(\.id)
-            try? await api.deleteHistoryBatch(provider: "claude", ids: claudeIds)
-            try? await api.deleteHistoryBatch(provider: "codex", ids: codexIds)
-        }
     }
 
     private var selectionBar: some View {
@@ -1431,7 +1414,7 @@ private struct HistorySessionRow: View {
                             endPoint: .bottomTrailing
                         )
                     )
-                Image(systemName: "clock.arrow.circlepath")
+                Image(systemName: "bubble.left.and.text.bubble.right")
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundColor(providerTint)
             }
