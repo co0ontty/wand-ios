@@ -637,7 +637,7 @@ struct ThinkingEffortOption: Identifiable {
     let menuLabel: String
 }
 
-func thinkingEffortOptions(provider: String, selectedModel: String?, models: [ModelInfo]) -> [ThinkingEffortOption] {
+func thinkingEffortOptions(provider: String, selectedModel: String?, defaultModel: String?, models: [ModelInfo]) -> [ThinkingEffortOption] {
     let legacy = [
         ThinkingEffortOption(id: "off", label: "关闭", shortLabel: "关", menuLabel: "关闭"),
         ThinkingEffortOption(id: "standard", label: "低", shortLabel: "低", menuLabel: "低（low）"),
@@ -645,7 +645,9 @@ func thinkingEffortOptions(provider: String, selectedModel: String?, models: [Mo
         ThinkingEffortOption(id: "max", label: "高", shortLabel: "高", menuLabel: "高（max）"),
     ]
     guard provider == "codex" else { return legacy }
-    let modelID = (selectedModel?.isEmpty == false && selectedModel != "default") ? selectedModel! : "default"
+    let modelID = selectedModel.flatMap { !$0.isEmpty && $0 != "default" ? $0 : nil }
+        ?? defaultModel.flatMap { !$0.isEmpty && $0 != "default" ? $0 : nil }
+        ?? "default"
     guard let levels = (models.first { $0.id == modelID } ?? models.first { $0.id == "default" })?.reasoningEfforts,
           !levels.isEmpty else { return legacy }
     let dynamic = levels.map { level -> ThinkingEffortOption in

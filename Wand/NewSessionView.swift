@@ -133,7 +133,12 @@ struct NewSessionView: View {
     }
 
     private var thinkingLevels: [ThinkingEffortOption] {
-        thinkingEffortOptions(provider: provider, selectedModel: selectedModel, models: providerModels)
+        thinkingEffortOptions(
+            provider: provider,
+            selectedModel: selectedModel,
+            defaultModel: serverDefaultModel(for: provider),
+            models: providerModels
+        )
     }
 
     /// codex 仅支持 full-access，对齐 Web getSupportedModes。
@@ -299,6 +304,10 @@ struct NewSessionView: View {
             if let response = try? await api.models() {
                 availableModels = response.models
                 codexModels = response.codexModels
+                serverDefaultModels = response.defaultModels ?? ProviderDefaultModels(
+                    claude: response.defaultModel,
+                    codex: response.defaultCodexModel
+                )
                 selectedModel = normalizedModel(selectedModel, provider: provider)
             }
             recentPaths = (try? await api.recentPaths()) ?? []
