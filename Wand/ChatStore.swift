@@ -32,6 +32,8 @@ final class ChatStore: ObservableObject {
     @Published var defaultModel: String?
     @Published var selectedModel: String?
     @Published var thinkingEffort = "off"
+    /// 服务端全局卡片默认展开偏好；旧服务端缺字段时安全回退为全部收起。
+    @Published var cardDefaults = CardExpandDefaults()
     /// 当前执行模式（managed / full-access / auto-edit / default / native）。
     /// 输入栏的模式徽标读它，可中途切换（结构化会话下一轮生效）。
     @Published var mode = "default"
@@ -101,14 +103,14 @@ final class ChatStore: ObservableObject {
                 let snap = try await api.getSession(id: sessionId)
                 apply(snapshot: snap)
                 initialSnapshot = snap
-                loading = false
                 wlog("session", "REST 快照 session=\(sessionId) msgs=\(snap.messages?.count ?? -1) status=\(snap.status ?? "?") structured=\(snap.isStructured) responding=\(snap.isResponding)")
             } catch {
-                loading = false
                 loadError = error.localizedDescription
                 wlog("session", "REST 快照失败 session=\(sessionId): \(error.localizedDescription)")
             }
             await loadModels()
+            await loadCardDefaults()
+            loading = false
             socket.connect()
             socket.subscribe(sessionId: sessionId)
             if let initialSnapshot {
@@ -360,6 +362,10 @@ final class ChatStore: ObservableObject {
         guard !trimmed.isEmpty else { return }
         let structured = forcePtyChat ? false : isStructured
         let queueing = structured && isResponding && status == "running"
+        if queueing, lastSubmittedStructuredInput() == trimmed {
+            toast = "与上一条消息相同，已忽略，不会加入排队。"
+            return
+        }
         let previousMessages = messages
         let previousQueue = queuedMessages
         if structured {
@@ -402,6 +408,27 @@ final class ChatStore: ObservableObject {
                 liveActivitySawResponding = false
             }
         }
+    }
+
+    private func lastSubmittedStructuredInput() -> String? {
+        if let queued = queuedMessages.reversed()
+            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { !$0.isEmpty }) {
+            return queued
+        }
+        guard let lastUser = messages.reversed().first(where: { $0.role == "user" }) else { return nil }
+        let text = lastUser.content.compactMap { block -> String? in
+            if case .text(let value, _) = block { return value }
+            return nil
+        }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty { return text }
+        for block in lastUser.content {
+            if case .toolResult(_, let value, _, _, _) = block {
+                let result = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return result.isEmpty ? nil : result
+            }
+        }
+        return nil
     }
 
     private func sendPtyChatInput(_ text: String) async throws {
@@ -502,6 +529,14 @@ final class ChatStore: ObservableObject {
         let provider = snapshot?.provider ?? "claude"
         availableModels = provider == "codex" ? response.codexModels : response.models
         defaultModel = response.defaultModelId(for: provider)
+    }
+
+    private func loadCardDefaults() async {
+        guard let config = try? await api.serverConfig() else {
+            cardDefaults = CardExpandDefaults()
+            return
+        }
+        cardDefaults = config.cardDefaults ?? CardExpandDefaults()
     }
 
     // MARK: - AskUserQuestion 交互（对齐 Web 端 __askSelect / __askSubmit）

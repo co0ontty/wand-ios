@@ -20,6 +20,17 @@ private enum ChatScrollMode {
     case manual
 }
 
+private struct CardExpandDefaultsEnvironmentKey: EnvironmentKey {
+    static let defaultValue = CardExpandDefaults()
+}
+
+private extension EnvironmentValues {
+    var cardExpandDefaults: CardExpandDefaults {
+        get { self[CardExpandDefaultsEnvironmentKey.self] }
+        set { self[CardExpandDefaultsEnvironmentKey.self] = newValue }
+    }
+}
+
 struct ChatView: View {
     private let sessionId: String
     private let api: WandAPI
@@ -167,6 +178,7 @@ struct ChatView: View {
         .overlay(alignment: .top) { connectionBanner }
         .animation(.easeInOut(duration: 0.2), value: store.connected)
         .overlay(alignment: .top) { toastView }
+        .environment(\.cardExpandDefaults, store.cardDefaults)
     }
 
     @ViewBuilder private var mainContent: some View {
@@ -378,13 +390,40 @@ struct ChatView: View {
         case .explorationGroup(let tools, let lastTurnIndex):
             ExplorationGroupCard(
                 tools: tools,
+                baseURL: store.api.baseURL,
                 running: store.isResponding
                     && lastTurnIndex == store.messages.count - 1
                     && tools.contains { $0.result == nil }
             )
         case .activityGroup(let turnIndex, let group, let id):
-            ActivitySummaryRow(group: group) {
-                activitySheet = ActivitySheetItem(id: id, turnIndex: turnIndex, group: group)
+            if store.cardDefaults.toolGroup {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(group.items.enumerated()), id: \.offset) { _, item in
+                        AssistantItemView(
+                            item: item,
+                            baseURL: store.api.baseURL,
+                            isLastTurn: turnIndex == store.messages.count - 1,
+                            isResponding: store.isResponding,
+                            askSelections: store.askUserSelections,
+                            onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                                store.toggleAskOption(
+                                    toolUseId: toolUseId, questionIndex: qIdx,
+                                    optionIndex: optIdx, multiSelect: multi
+                                )
+                            },
+                            onAskSubmit: { toolUseId, answerText in
+                                expandedCurrentReplyTurnIndex = nil
+                                expandedHistoryBoundary = nil
+                                scrollMode = .stickToBottom
+                                store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
+                            }
+                        )
+                    }
+                }
+            } else {
+                ActivitySummaryRow(group: group) {
+                    activitySheet = ActivitySheetItem(id: id, turnIndex: turnIndex, group: group)
+                }
             }
         case .usageSummary(_, let usage, let isLive):
             UsageSummaryRow(usage: usage, isLive: isLive)
@@ -2717,8 +2756,7 @@ private struct SubagentRoleWindow: View {
                                     askSelections: askSelections,
                                     onAskToggle: onAskToggle,
                                     onAskSubmit: onAskSubmit,
-                                    showSubagentTags: false,
-                                    preferExpandedToolBodies: false
+                                    showSubagentTags: false
                                 )
                             }
                         }
@@ -2812,6 +2850,8 @@ private func isSubagentDisplayItemRunning(_ item: DisplayItem) -> Bool {
 /// 的独立行——单条 turn 携带上百个块时，避免整条 turn 一次性构建数百个嵌套视图
 /// （会卡死/白屏），改由 LazyVStack 仅实例化进入视口的块。
 private struct AssistantItemView: View {
+    @Environment(\.cardExpandDefaults) private var cardDefaults
+
     let item: DisplayItem
     var baseURL: URL? = nil
     var isLastTurn = false
@@ -2820,7 +2860,6 @@ private struct AssistantItemView: View {
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
     var onAskSubmit: (String, String) -> Void = { _, _ in }
     var showSubagentTags = true
-    var preferExpandedToolBodies = false
 
     var body: some View {
         switch item {
@@ -2837,6 +2876,7 @@ private struct AssistantItemView: View {
         case .explorationGroup(let tools):
             ExplorationGroupCard(
                 tools: tools,
+                baseURL: baseURL,
                 running: isLastTurn && isResponding && tools.contains { $0.result == nil }
             )
         }
@@ -2859,20 +2899,20 @@ private struct AssistantItemView: View {
                 onSubmit: { answerText in onAskSubmit(id, answerText) }
             )
         } else if name == "Edit" || name == "Write" || name == "MultiEdit" {
-            DiffCard(toolName: name, input: input, result: result, initiallyExpanded: preferExpandedToolBodies)
+            DiffCard(toolName: name, input: input, result: result, initiallyExpanded: cardDefaults.editCards)
         } else if name == "Bash" {
             TerminalCard(
                 input: input,
                 result: result,
                 running: result == nil && isLastTurn && isResponding,
-                initiallyExpanded: preferExpandedToolBodies
+                initiallyExpanded: cardDefaults.terminal
             )
         } else {
             ToolUseCard(
                 name: name, description: description, input: input,
                 result: result, running: result == nil && isLastTurn && isResponding,
                 baseURL: baseURL,
-                initiallyExpanded: preferExpandedToolBodies
+                initiallyExpanded: cardDefaults.shouldExpandTool(name)
             )
         }
     }
@@ -2893,6 +2933,8 @@ private struct AssistantItemView: View {
 // MARK: - 内容块渲染
 
 private struct BlockView: View {
+    @Environment(\.cardExpandDefaults) private var cardDefaults
+
     let block: ContentBlock
     var showSubagentTags = true
 
@@ -2911,7 +2953,7 @@ private struct BlockView: View {
                     icon: "brain",
                     title: "思考过程",
                     tint: Theme.textSecondary,
-                    initiallyExpanded: true
+                    initiallyExpanded: cardDefaults.thinking
                 ) {
                     Text(thinking)
                         .font(.system(size: 13))
@@ -2924,14 +2966,22 @@ private struct BlockView: View {
             // 兜底：正常路径已在 TurnView 配对分流，这里处理极端的落单 ToolUse。
             VStack(alignment: .leading, spacing: 4) {
                 if showSubagentTags { subagentTag(subagent) }
-                ToolUseCard(name: name, description: description, input: input, result: nil, running: false)
+                ToolUseCard(
+                    name: name,
+                    description: description,
+                    input: input,
+                    result: nil,
+                    running: false,
+                    initiallyExpanded: cardDefaults.shouldExpandTool(name)
+                )
             }
         case .toolResult(_, let text, let isError, let truncated, _):
             if !text.isEmpty {
                 CollapsibleSection(
                     icon: isError ? "xmark.octagon" : "doc.text",
                     title: isError ? "执行出错" : "执行结果",
-                    tint: isError ? Theme.danger : Theme.textSecondary
+                    tint: isError ? Theme.danger : Theme.textSecondary,
+                    initiallyExpanded: cardDefaults.editCards
                 ) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(text.count > 4000 ? String(text.prefix(4000)) + "\n…（已截断）" : text)
@@ -3274,7 +3324,10 @@ private func toolLabel(_ name: String) -> String {
 
 /// 连续只读探索操作的紧凑进度卡。默认折叠，避免探索阶段淹没对话。
 private struct ExplorationGroupCard: View {
+    @Environment(\.cardExpandDefaults) private var cardDefaults
+
     let tools: [ExplorationToolItem]
+    var baseURL: URL? = nil
     let running: Bool
 
     @State private var expanded = false
@@ -3354,21 +3407,15 @@ private struct ExplorationGroupCard: View {
                     .padding(.horizontal, 12)
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(tools.enumerated()), id: \.offset) { _, tool in
-                        HStack(spacing: 8) {
-                            Image(systemName: toolStatusIcon(tool))
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(toolStatusColor(tool))
-                                .frame(width: 14)
-                            Text(toolLabel(tool.name))
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundColor(Theme.textPrimary)
-                                .frame(width: 54, alignment: .leading)
-                            Text(toolSummary(tool))
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(Theme.textSecondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
+                        ToolUseCard(
+                            name: tool.name,
+                            description: tool.description,
+                            input: tool.input,
+                            result: tool.result,
+                            running: tool.result == nil && running,
+                            baseURL: baseURL,
+                            initiallyExpanded: cardDefaults.inlineTools
+                        )
                     }
                 }
                 .padding(.horizontal, 12)
@@ -3385,6 +3432,9 @@ private struct ExplorationGroupCard: View {
         )
         .shadow(color: Color.black.opacity(0.035), radius: 7, y: 2)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onAppear {
+            if cardDefaults.toolGroup { expanded = true }
+        }
     }
 
     private var activitySummary: String {
@@ -3405,29 +3455,6 @@ private struct ExplorationGroupCard: View {
         return "搜索"
     }
 
-    private func toolSummary(_ tool: ExplorationToolItem) -> String {
-        for key in ["file_path", "path", "pattern", "query", "url", "file", "filename"] {
-            if let value = tool.input[key] {
-                let text = value.summaryText
-                if !text.isEmpty { return text }
-            }
-        }
-        return tool.description
-            ?? tool.input.first.map { "\($0.key): \($0.value.summaryText)" }
-            ?? "无参数"
-    }
-
-    private func toolStatusIcon(_ tool: ExplorationToolItem) -> String {
-        if tool.result?.isError == true { return "xmark.circle.fill" }
-        if tool.result != nil { return "checkmark.circle.fill" }
-        return "circle.dotted"
-    }
-
-    private func toolStatusColor(_ tool: ExplorationToolItem) -> Color {
-        if tool.result?.isError == true { return Theme.danger }
-        if tool.result != nil { return chatSuccess }
-        return Theme.brand
-    }
 }
 
 /// 工具调用卡片：图标 + 中文工具名 + 参数摘要 + 可折叠结果区。

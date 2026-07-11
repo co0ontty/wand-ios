@@ -674,6 +674,7 @@ struct ServerConfigInfo: Decodable {
     let defaultCodexModel: String?
     let defaultModels: ProviderDefaultModels?
     let defaultThinkingEffort: String?
+    let cardDefaults: CardExpandDefaults?
     let currentVersion: String?
     let latestVersion: String?
     let updateAvailable: Bool?
@@ -690,6 +691,56 @@ struct ServerConfigInfo: Decodable {
 struct ProviderDefaultModels: Decodable {
     let claude: String?
     let codex: String?
+}
+
+/// 结构化聊天卡片的全局默认展开状态（由服务端 /api/config.cardDefaults 下发）。
+struct CardExpandDefaults: Decodable, Equatable {
+    var editCards = false
+    var inlineTools = false
+    var terminal = false
+    var thinking = false
+    var toolGroup = false
+
+    init(
+        editCards: Bool = false,
+        inlineTools: Bool = false,
+        terminal: Bool = false,
+        thinking: Bool = false,
+        toolGroup: Bool = false
+    ) {
+        self.editCards = editCards
+        self.inlineTools = inlineTools
+        self.terminal = terminal
+        self.thinking = thinking
+        self.toolGroup = toolGroup
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case editCards, inlineTools, terminal, thinking, toolGroup
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        editCards = try values.decodeIfPresent(Bool.self, forKey: .editCards) ?? false
+        inlineTools = try values.decodeIfPresent(Bool.self, forKey: .inlineTools) ?? false
+        terminal = try values.decodeIfPresent(Bool.self, forKey: .terminal) ?? false
+        thinking = try values.decodeIfPresent(Bool.self, forKey: .thinking) ?? false
+        toolGroup = try values.decodeIfPresent(Bool.self, forKey: .toolGroup) ?? false
+    }
+
+    func shouldExpandTool(_ toolName: String) -> Bool {
+        switch toolName {
+        case "Read", "Glob", "Grep", "WebFetch", "WebSearch", "TodoRead":
+            return inlineTools
+        case "Bash":
+            return terminal
+        case "Edit", "Write", "MultiEdit":
+            return editCards
+        default:
+            // 与 Web 通用工具卡保持一致：未单独分类的工具沿用 editCards。
+            return editCards
+        }
+    }
 }
 
 /// 服务端自身 npm 包更新状态。iOS App 不能自更新，但可以提示并触发服务端更新。
