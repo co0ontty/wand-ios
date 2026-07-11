@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// wand 服务端 REST / WebSocket 协议的 Codable 模型。
 /// 字段名与 src/types.ts 一一对应；全部 optional 化 + 容错解码，
@@ -620,6 +621,137 @@ struct ModelInfo: Decodable, Identifiable {
     let id: String
     let label: String
     let alias: Bool?
+    let reasoningEfforts: [ReasoningEffortInfo]?
+    let defaultReasoningEffort: String?
+}
+
+struct ReasoningEffortInfo: Decodable {
+    let effort: String
+    let description: String?
+}
+
+struct ThinkingEffortOption: Identifiable {
+    let id: String
+    let label: String
+    let shortLabel: String
+    let menuLabel: String
+}
+
+func thinkingEffortOptions(provider: String, selectedModel: String?, models: [ModelInfo]) -> [ThinkingEffortOption] {
+    let legacy = [
+        ThinkingEffortOption(id: "off", label: "关闭", shortLabel: "关", menuLabel: "关闭"),
+        ThinkingEffortOption(id: "standard", label: "低", shortLabel: "低", menuLabel: "低（low）"),
+        ThinkingEffortOption(id: "deep", label: "中", shortLabel: "中", menuLabel: "中（medium）"),
+        ThinkingEffortOption(id: "max", label: "高", shortLabel: "高", menuLabel: "高（max）"),
+    ]
+    guard provider == "codex" else { return legacy }
+    let modelID = (selectedModel?.isEmpty == false && selectedModel != "default") ? selectedModel! : "default"
+    guard let levels = (models.first { $0.id == modelID } ?? models.first { $0.id == "default" })?.reasoningEfforts,
+          !levels.isEmpty else { return legacy }
+    let dynamic = levels.map { level -> ThinkingEffortOption in
+        let effort = level.effort.lowercased()
+        let id = effort == "low" ? "standard" : effort == "medium" ? "deep" : effort == "xhigh" ? "max" : "codex:\(effort)"
+        let label: String
+        switch effort {
+        case "low": label = "低"
+        case "medium": label = "中"
+        case "high": label = "高"
+        case "xhigh": label = "超高"
+        case "max": label = "极高"
+        case "ultra": label = "极限"
+        default: label = effort
+        }
+        return ThinkingEffortOption(id: id, label: label, shortLabel: label, menuLabel: "\(label)（\(effort)）")
+    }
+    return [ThinkingEffortOption(id: "off", label: "自动", shortLabel: "自", menuLabel: "自动（模型默认）")] + dynamic
+}
+
+struct ThinkingEffortSlider: View {
+    let options: [ThinkingEffortOption]
+    let selection: String
+    let accent: Color
+    let onSelect: (String) -> Void
+
+    @State private var previewIndex: Int?
+
+    private var selectedIndex: Int {
+        options.firstIndex { $0.id == selection } ?? 0
+    }
+
+    private var currentIndex: Int {
+        min(max(previewIndex ?? selectedIndex, 0), max(options.count - 1, 0))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Label("思考深度", systemImage: "brain")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                Spacer(minLength: 8)
+                Text(options.indices.contains(currentIndex) ? options[currentIndex].menuLabel : "自动")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundColor(accent)
+                    .lineLimit(1)
+            }
+            GeometryReader { proxy in
+                let inset: CGFloat = 9
+                let trackWidth = max(0, proxy.size.width - inset * 2)
+                let denominator = max(options.count - 1, 1)
+                let progress = CGFloat(currentIndex) / CGFloat(denominator)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.secondary.opacity(0.20)).frame(height: 4)
+                    Capsule()
+                        .fill(accent)
+                        .frame(height: 4)
+                        .scaleEffect(x: progress, anchor: .leading)
+                    ForEach(options.indices, id: \.self) { index in
+                        let x = CGFloat(index) / CGFloat(denominator) * trackWidth
+                        Circle()
+                            .fill(index <= currentIndex ? accent : Color.secondary.opacity(0.34))
+                            .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 1.5))
+                            .frame(width: 8, height: 8)
+                            .offset(x: x - 4)
+                    }
+                    Circle()
+                        .fill(accent)
+                        .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
+                        .shadow(color: accent.opacity(0.25), radius: 2, y: 1)
+                        .frame(width: 18, height: 18)
+                        .offset(x: progress * trackWidth - 9)
+                }
+                .frame(height: 44)
+                .padding(.horizontal, inset)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            previewIndex = nearestIndex(x: value.location.x - inset, width: trackWidth)
+                        }
+                        .onEnded { value in
+                            let index = nearestIndex(x: value.location.x - inset, width: trackWidth)
+                            previewIndex = nil
+                            if options.indices.contains(index) { onSelect(options[index].id) }
+                        }
+                )
+            }
+            .frame(height: 44)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("思考深度")
+        .accessibilityValue(options.indices.contains(currentIndex) ? options[currentIndex].menuLabel : "自动")
+        .accessibilityAdjustableAction { direction in
+            let delta = direction == .increment ? 1 : -1
+            let index = min(max(selectedIndex + delta, 0), max(options.count - 1, 0))
+            if options.indices.contains(index) { onSelect(options[index].id) }
+        }
+    }
+
+    private func nearestIndex(x: CGFloat, width: CGFloat) -> Int {
+        guard options.count > 1, width > 0 else { return 0 }
+        let progress = min(max(x / width, 0), 1)
+        return Int((progress * CGFloat(options.count - 1)).rounded())
+    }
 }
 
 struct ModelsResponse: Decodable {

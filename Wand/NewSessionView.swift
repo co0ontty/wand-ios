@@ -128,15 +128,12 @@ struct NewSessionView: View {
         SessionMode(id: "native", label: "原生", desc: "原生结构化输出"),
     ]
 
-    private static let thinkingLevels = [
-        (id: "off", label: "关闭"),
-        (id: "standard", label: "低"),
-        (id: "deep", label: "中"),
-        (id: "max", label: "高"),
-    ]
-
     private var providerModels: [ModelInfo] {
         provider == "codex" ? codexModels : availableModels
+    }
+
+    private var thinkingLevels: [ThinkingEffortOption] {
+        thinkingEffortOptions(provider: provider, selectedModel: selectedModel, models: providerModels)
     }
 
     /// codex 仅支持 full-access，对齐 Web getSupportedModes。
@@ -200,22 +197,18 @@ struct NewSessionView: View {
                                     }
                                 }
                             }
-                            optionMenuCard(
-                                title: "思考深度",
-                                value: thinkingLabel,
-                                icon: "brain"
-                            ) {
-                                ForEach(Self.thinkingLevels, id: \.id) { level in
-                                    Button {
-                                        thinkingEffort = level.id
-                                        NewSessionPreferences.setThinkingEffort(level.id)
-                                    } label: {
-                                        thinkingEffort == level.id
-                                            ? Label(level.label, systemImage: "checkmark")
-                                            : Label(level.label, systemImage: "circle")
-                                    }
-                                }
+                            ThinkingEffortSlider(
+                                options: thinkingLevels,
+                                selection: thinkingEffort,
+                                accent: Theme.brand
+                            ) { effort in
+                                thinkingEffort = effort
+                                NewSessionPreferences.setThinkingEffort(effort)
                             }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(cardBackground(selected: false))
+                            .frame(maxWidth: .infinity)
                         }
 
                         sectionHeader("模式")
@@ -330,10 +323,6 @@ struct NewSessionView: View {
             return providerModels.first(where: { $0.id == id })?.label ?? id
         }
         return providerModels.first(where: { $0.id == "default" })?.label ?? "默认"
-    }
-
-    private var thinkingLabel: String {
-        Self.thinkingLevels.first(where: { $0.id == thinkingEffort })?.label ?? "关闭"
     }
 
     // MARK: - 区块组件

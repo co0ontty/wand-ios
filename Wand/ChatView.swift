@@ -47,6 +47,7 @@ struct ChatView: View {
     @State private var voiceMode = false
     @State private var showFileImporter = false
     @State private var showPhotoPicker = false
+    @State private var showModelThinkingPanel = false
     @State private var uploadingAttachments = false
     @State private var pendingAttachments: [UploadedFile] = []
     @State private var gitStatus: GitStatusResult?
@@ -245,7 +246,12 @@ struct ChatView: View {
                             messageItemView(row, proxy: proxy)
                         }
                         if store.isResponding {
-                            respondingIndicator
+                            LiveTurnStatusRow(
+                                usage: store.messages.last?.role == "assistant"
+                                    ? store.messages.last?.usage
+                                    : nil,
+                                taskTitle: store.currentTaskTitle
+                            )
                         }
                         Color.clear.frame(height: 1).id("chat-bottom")
                     }
@@ -587,17 +593,6 @@ struct ChatView: View {
         }
     }
 
-    private var respondingIndicator: some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small).tint(Theme.brand)
-            Text(store.currentTaskTitle ?? "正在思考…")
-                .font(.system(size: 13))
-                .foregroundColor(Theme.textSecondary)
-                .lineLimit(1)
-        }
-        .padding(.vertical, 4)
-    }
-
     // MARK: - 顶部状态
 
     private var sessionLaunchPanel: some View {
@@ -653,21 +648,16 @@ struct ChatView: View {
     }
 
     private var launchThinkingMenu: some View {
-        launchOptionMenu(
-            title: "思考深度",
-            value: Self.thinkingLabel(store.thinkingEffort),
-            icon: "brain"
-        ) {
-            ForEach(Self.thinkingLevels) { level in
-                Button {
-                    store.setThinkingEffort(level.id)
-                } label: {
-                    store.thinkingEffort == level.id
-                        ? Label(level.menuLabel, systemImage: "checkmark")
-                        : Label(level.menuLabel, systemImage: "circle")
-                }
-            }
-        }
+        ThinkingEffortSlider(
+            options: thinkingLevels,
+            selection: store.thinkingEffort,
+            accent: thinkingTint,
+            onSelect: store.setThinkingEffort
+        )
+        .padding(.horizontal, 11)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.border, lineWidth: 1))
     }
 
     private var launchModelLabel: String {
@@ -739,25 +729,15 @@ struct ChatView: View {
         }
     }
 
-    private struct ThinkingLevel: Identifiable {
-        let id: String
-        let label: String
-        let shortLabel: String
-        let menuLabel: String
+    private var thinkingLevels: [ThinkingEffortOption] {
+        thinkingEffortOptions(
+            provider: store.snapshot?.provider ?? "claude",
+            selectedModel: store.selectedModel,
+            models: store.availableModels
+        )
     }
 
-    private static let thinkingLevels = [
-        ThinkingLevel(id: "off", label: "关闭", shortLabel: "关", menuLabel: "关闭"),
-        ThinkingLevel(id: "standard", label: "低", shortLabel: "低", menuLabel: "低（low）"),
-        ThinkingLevel(id: "deep", label: "中", shortLabel: "中", menuLabel: "中（medium）"),
-        ThinkingLevel(id: "max", label: "高", shortLabel: "高", menuLabel: "高（max）"),
-    ]
-
-    private static func thinkingLabel(_ id: String) -> String {
-        thinkingLevels.first { $0.id == id }?.label ?? "关闭"
-    }
-
-    private static func thinkingShortLabel(_ id: String) -> String {
+    private func thinkingShortLabel(_ id: String) -> String {
         thinkingLevels.first { $0.id == id }?.shortLabel ?? "关"
     }
 
@@ -1098,26 +1078,8 @@ struct ChatView: View {
     }
 
     private func modelThinkingChip(compact: Bool = false) -> some View {
-        Menu {
-            Section("模型") {
-                modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
-                ForEach(store.availableModels.filter { $0.id != "default" }) { model in
-                    modelButton(id: model.id, label: model.label)
-                }
-            }
-            Section("思考深度") {
-                ForEach(Self.thinkingLevels) { level in
-                    Button {
-                        store.setThinkingEffort(level.id)
-                    } label: {
-                        if store.thinkingEffort == level.id {
-                            Label(level.menuLabel, systemImage: "checkmark")
-                        } else {
-                            Text(level.menuLabel)
-                        }
-                    }
-                }
-            }
+        Button {
+            showModelThinkingPanel = true
         } label: {
             chipLabel(
                 icon: "cpu",
@@ -1129,11 +1091,44 @@ struct ChatView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("模型与思考深度")
+        .popover(isPresented: $showModelThinkingPanel, arrowEdge: .bottom) {
+            modelThinkingPanel
+                .presentationCompactAdaptation(.popover)
+        }
+    }
+
+    private var modelThinkingPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Menu {
+                modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
+                ForEach(store.availableModels.filter { $0.id != "default" }) { model in
+                    modelButton(id: model.id, label: model.label)
+                }
+            } label: {
+                HStack {
+                    Label("模型", systemImage: "cpu")
+                    Spacer()
+                    Text(shortModelLabel).font(.system(.caption, design: .monospaced))
+                    Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                }
+                .foregroundColor(Theme.textPrimary)
+                .contentShape(Rectangle())
+            }
+            Divider()
+            ThinkingEffortSlider(
+                options: thinkingLevels,
+                selection: store.thinkingEffort,
+                accent: thinkingTint,
+                onSelect: store.setThinkingEffort
+            )
+        }
+        .padding(14)
+        .frame(width: 286)
     }
 
     private var modelThinkingText: String {
         let model = shortModelLabel
-        return "\(model) · \(Self.thinkingShortLabel(store.thinkingEffort))"
+        return "\(model) · \(thinkingShortLabel(store.thinkingEffort))"
     }
 
     private var thinkingTint: Color {
@@ -1741,8 +1736,10 @@ private func flattenAssistantTurns(
                 }
             }
             let usageIsLive = index == liveTurnIndex
-            if usageIsLive || turn.usage?.hasVisibleValue == true {
-                out.append(.usageSummary(turnIndex: index, usage: turn.usage, isLive: usageIsLive))
+            // 流式用量与「正在思考」合并到底部 LiveTurnStatusRow；结束后再把
+            // 完整用量作为回复尾部的一行保留下来。
+            if !usageIsLive, turn.usage?.hasVisibleValue == true {
+                out.append(.usageSummary(turnIndex: index, usage: turn.usage, isLive: false))
             }
         } else {
             if case .turn(_, let turn) = item, turn.role == "user" {
@@ -2574,6 +2571,68 @@ private struct UsageSummaryRow: View {
                 ? "正在统计本轮用量"
                 : "本轮用量 \(chips.map { "\($0.0) \($0.1)" }.joined(separator: "，"))")
         }
+    }
+}
+
+/// 运行中的稳定单行状态：用量在左，当前思考/任务在右；两侧独立截断以适配窄屏。
+private struct LiveTurnStatusRow: View {
+    let usage: TurnUsage?
+    let taskTitle: String?
+
+    private var usageText: String {
+        var parts: [String] = []
+        if let input = usage?.inputTokens, input > 0 {
+            parts.append("输入 \(compactTokenCount(input))")
+        }
+        if let cache = usage?.cacheReadInputTokens, cache > 0 {
+            parts.append("缓存 \(compactTokenCount(cache))")
+        }
+        if let output = usage?.outputTokens, output > 0 {
+            parts.append("输出 \(usage?.estimated == true ? "≈" : "")\(compactTokenCount(output))")
+        }
+        if let reasoning = usage?.reasoningOutputTokens, reasoning > 0 {
+            parts.append("推理 \(usage?.estimated == true ? "≈" : "")\(compactTokenCount(reasoning))")
+        }
+        if let cost = usage?.totalCostUsd, cost > 0 {
+            parts.append("费用 \(formatUsd(cost))")
+        }
+        return parts.isEmpty ? "正在统计用量…" : parts.joined(separator: " · ")
+    }
+
+    private var activityText: String {
+        let trimmed = taskTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "正在思考…" : trimmed
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(usageText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundColor(Theme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(Theme.brand)
+                Text(activityText)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundColor(Theme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.leading, 2)
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("本轮用量 \(usageText)，\(activityText)")
     }
 }
 
