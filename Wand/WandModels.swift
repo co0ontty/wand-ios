@@ -803,6 +803,8 @@ struct RecentPath: Decodable, Identifiable {
 /// GET /api/config 的客户端子集。
 struct ServerConfigInfo: Decodable {
     let defaultCwd: String?
+    let defaultProvider: String?
+    let defaultSessionKind: String?
     let defaultMode: String?
     let defaultModel: String?
     let defaultCodexModel: String?

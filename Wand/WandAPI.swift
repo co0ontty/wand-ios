@@ -450,7 +450,14 @@ final class WandAPI {
         _ = try await requestData(method: "POST", path: "/api/update", body: [:], timeout: 180)
     }
 
-    func updateNewSessionDefaults(mode: String? = nil, model: String? = nil, provider: String = "claude", thinkingEffort: String? = nil) async throws {
+    func updateNewSessionDefaults(
+        mode: String? = nil,
+        model: String? = nil,
+        provider: String = "claude",
+        thinkingEffort: String? = nil,
+        defaultProvider: String? = nil,
+        defaultSessionKind: String? = nil
+    ) async throws {
         var body: [String: Any] = [:]
         if let mode { body["defaultMode"] = mode }
         if let model {
@@ -463,6 +470,8 @@ final class WandAPI {
             }
         }
         if let thinkingEffort { body["defaultThinkingEffort"] = thinkingEffort }
+        if let defaultProvider { body["defaultProvider"] = defaultProvider }
+        if let defaultSessionKind { body["defaultSessionKind"] = defaultSessionKind }
         _ = try await requestData(method: "POST", path: "/api/settings/config", body: body)
     }
 }

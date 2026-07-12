@@ -1,85 +1,5 @@
 import SwiftUI
 
-private enum NewSessionPreferences {
-    private static let defaults = UserDefaults.standard
-    private static let providerKey = "wand.ios.newSession.provider"
-    private static let isStructuredKey = "wand.ios.newSession.isStructured"
-    private static let claudeModeKey = "wand.ios.newSession.claude.mode"
-    private static let codexModeKey = "wand.ios.newSession.codex.mode"
-    private static let claudeModelKey = "wand.ios.newSession.claude.model"
-    private static let codexModelKey = "wand.ios.newSession.codex.model"
-    private static let thinkingEffortKey = "wand.ios.newSession.thinkingEffort"
-
-    static var hasProvider: Bool {
-        defaults.object(forKey: providerKey) != nil
-    }
-
-    static var hasIsStructured: Bool {
-        defaults.object(forKey: isStructuredKey) != nil
-    }
-
-    static func hasMode(for provider: String) -> Bool {
-        defaults.object(forKey: modeKey(for: provider)) != nil
-    }
-
-    static func hasModel(for provider: String) -> Bool {
-        defaults.object(forKey: modelKey(for: provider)) != nil
-    }
-
-    static var hasThinkingEffort: Bool {
-        defaults.object(forKey: thinkingEffortKey) != nil
-    }
-
-    static var provider: String {
-        defaults.string(forKey: providerKey) == "codex" ? "codex" : "claude"
-    }
-
-    static func setProvider(_ value: String) {
-        defaults.set(value == "codex" ? "codex" : "claude", forKey: providerKey)
-    }
-
-    static var isStructured: Bool {
-        guard hasIsStructured else { return true }
-        return defaults.bool(forKey: isStructuredKey)
-    }
-
-    static func setIsStructured(_ value: Bool) {
-        defaults.set(value, forKey: isStructuredKey)
-    }
-
-    static func mode(for provider: String) -> String {
-        defaults.string(forKey: modeKey(for: provider)) ?? (provider == "codex" ? "full-access" : "managed")
-    }
-
-    static func setMode(_ value: String, for provider: String) {
-        defaults.set(value, forKey: modeKey(for: provider))
-    }
-
-    static func model(for provider: String) -> String {
-        defaults.string(forKey: modelKey(for: provider)) ?? ""
-    }
-
-    static func setModel(_ value: String, for provider: String) {
-        defaults.set(value, forKey: modelKey(for: provider))
-    }
-
-    static var thinkingEffort: String {
-        defaults.string(forKey: thinkingEffortKey) ?? "off"
-    }
-
-    static func setThinkingEffort(_ value: String) {
-        defaults.set(value, forKey: thinkingEffortKey)
-    }
-
-    private static func modeKey(for provider: String) -> String {
-        provider == "codex" ? codexModeKey : claudeModeKey
-    }
-
-    private static func modelKey(for provider: String) -> String {
-        provider == "codex" ? codexModelKey : claudeModelKey
-    }
-}
-
 /// 新建会话 —— 选项与区块顺序对齐 Web 端「新对话」弹窗（renderSessionModal）：
 /// Provider（Claude / Codex，品牌 logo 卡）→ 会话类型（结构化 / PTY）→ 模式
 /// （托管 / 全权限 / 自动编辑 / 标准 / 原生，codex 锁定全权限）→ 工作目录
@@ -93,15 +13,15 @@ struct NewSessionView: View {
 
     @State private var cwd = ""
     @State private var recentPaths: [RecentPath] = []
-    @State private var provider = NewSessionPreferences.provider
-    @State private var isStructured = NewSessionPreferences.isStructured
+    @State private var provider = "claude"
+    @State private var isStructured = true
     // 默认托管模式（claude 全自动完成）；codex 切换时 clamp 成全权限。
-    @State private var mode = NewSessionPreferences.mode(for: NewSessionPreferences.provider)
+    @State private var mode = "managed"
     @State private var availableModels: [ModelInfo] = []
     @State private var codexModels: [ModelInfo] = []
     @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil)
-    @State private var selectedModel = NewSessionPreferences.model(for: NewSessionPreferences.provider)
-    @State private var thinkingEffort = NewSessionPreferences.thinkingEffort
+    @State private var selectedModel = ""
+    @State private var thinkingEffort = "off"
     @State private var firstMessage = ""
     @State private var creating = false
     @State private var errorMessage: String?
@@ -158,11 +78,9 @@ struct NewSessionView: View {
                             Text("Codex").tag("codex")
                         }
                         .pickerStyle(.segmented)
-                        .onChange(of: provider) { oldProvider, newProvider in
-                            persistSelection(provider: oldProvider)
-                            NewSessionPreferences.setProvider(newProvider)
-                            mode = supportedMode(NewSessionPreferences.mode(for: newProvider), provider: newProvider)
-                            selectedModel = normalizedModel(NewSessionPreferences.model(for: newProvider), provider: newProvider)
+                        .onChange(of: provider) { _, newProvider in
+                            mode = supportedMode(mode, provider: newProvider)
+                            selectedModel = ""
                         }
 
                         sectionHeader("会话类型")
@@ -171,9 +89,6 @@ struct NewSessionView: View {
                             Text("PTY").tag(false)
                         }
                         .pickerStyle(.segmented)
-                        .onChange(of: isStructured) { _, newValue in
-                            NewSessionPreferences.setIsStructured(newValue)
-                        }
                         fieldHint(Self.sessionKindHint(provider: provider, structured: isStructured))
 
                         sectionHeader("模型与思考")
@@ -185,7 +100,6 @@ struct NewSessionView: View {
                             ) {
                                 Button {
                                     selectedModel = ""
-                                    NewSessionPreferences.setModel("", for: provider)
                                 } label: {
                                     selectedModel.isEmpty
                                         ? Label("默认 · \(defaultModelLabel)", systemImage: "checkmark")
@@ -194,7 +108,6 @@ struct NewSessionView: View {
                                 ForEach(providerModels.filter { $0.id != "default" }) { model in
                                     Button {
                                         selectedModel = model.id
-                                        NewSessionPreferences.setModel(model.id, for: provider)
                                     } label: {
                                         selectedModel == model.id
                                             ? Label(model.label, systemImage: "checkmark")
@@ -208,7 +121,6 @@ struct NewSessionView: View {
                                 accent: Theme.brand
                             ) { effort in
                                 thinkingEffort = effort
-                                NewSessionPreferences.setThinkingEffort(effort)
                             }
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
@@ -289,18 +201,17 @@ struct NewSessionView: View {
         .navigationViewStyle(.stack)
         .task {
             let config = try? await api.serverConfig()
-            if !NewSessionPreferences.hasMode(for: provider) {
-                mode = supportedMode(config?.defaultMode ?? mode, provider: provider)
-            } else {
-                mode = supportedMode(mode, provider: provider)
+            // 服务端是跨客户端的新建偏好唯一真源；请求失败时保留页面初始默认。
+            if let configuredProvider = config?.defaultProvider {
+                provider = configuredProvider == "codex" ? "codex" : "claude"
             }
+            if let defaultSessionKind = config?.defaultSessionKind {
+                isStructured = defaultSessionKind != "pty"
+            }
+            mode = supportedMode(config?.defaultMode ?? mode, provider: provider)
             serverDefaultModels = config?.defaultModels ?? ProviderDefaultModels(claude: config?.defaultModel, codex: config?.defaultCodexModel)
-            if !NewSessionPreferences.hasModel(for: provider) {
-                selectedModel = ""
-            }
-            if !NewSessionPreferences.hasThinkingEffort {
-                thinkingEffort = config?.defaultThinkingEffort ?? "off"
-            }
+            selectedModel = ""
+            thinkingEffort = config?.defaultThinkingEffort ?? thinkingEffort
             if let response = try? await api.models() {
                 availableModels = response.models
                 codexModels = response.codexModels
@@ -422,22 +333,12 @@ struct NewSessionView: View {
         return providerModels.contains(where: { $0.id == normalized }) ? normalized : nil
     }
 
-    private func persistSelection(provider targetProvider: String? = nil) {
-        let targetProvider = targetProvider ?? provider
-        NewSessionPreferences.setProvider(provider)
-        NewSessionPreferences.setIsStructured(isStructured)
-        NewSessionPreferences.setMode(supportedMode(mode, provider: targetProvider), for: targetProvider)
-        NewSessionPreferences.setModel(normalizedModel(selectedModel, provider: targetProvider), for: targetProvider)
-        NewSessionPreferences.setThinkingEffort(thinkingEffort)
-    }
-
     /// 模式卡（两列网格单元，标签 + 一句话说明），不支持的模式降透明度且不可点。
     private func modeCard(_ option: SessionMode) -> some View {
         let selected = mode == option.id
         let enabled = supportedModes.contains(option.id)
         return Button {
             mode = option.id
-            NewSessionPreferences.setMode(option.id, for: provider)
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(option.label)
@@ -618,9 +519,18 @@ struct NewSessionView: View {
         // codex 仅支持 full-access，对齐 Web getSafeModeForTool 的 clamp。
         let effectiveMode = provider == "codex" ? "full-access" : mode
         let effectiveModel = selectedModelForRequest
-        persistSelection()
         Task {
             do {
+                // 创建前等待完整偏好落到服务端，让 Web / Android / macOS
+                // 下次新建时读取到同一组选项。
+                try await api.updateNewSessionDefaults(
+                    mode: effectiveMode,
+                    model: selectedModel.isEmpty ? nil : selectedModel,
+                    provider: provider,
+                    thinkingEffort: thinkingEffort,
+                    defaultProvider: provider,
+                    defaultSessionKind: isStructured ? "structured" : "pty"
+                )
                 let snapshot: SessionSnapshot
                 if isStructured {
                     snapshot = try await api.createStructuredSession(
