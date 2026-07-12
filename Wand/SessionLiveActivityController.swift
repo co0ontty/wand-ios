@@ -151,9 +151,9 @@ final class SessionLiveActivityController {
                     queuedCount: 0
                 ),
                 mockEntry(
-                    id: "mock-codex-3",
-                    title: "Web UI 回归",
-                    provider: "codex",
+                    id: "mock-opencode-3",
+                    title: "OpenCode 回归",
+                    provider: "opencode",
                     state: .done,
                     taskTitle: nil,
                     queuedCount: 0

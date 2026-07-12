@@ -1,0 +1,202 @@
+import Foundation
+import XCTest
+@testable import Wand
+
+final class WandProtocolTests: XCTestCase {
+    func testProviderNormalizationTitlesAndRunners() {
+        XCTAssertEqual(WandProvider.normalize(nil), "claude")
+        XCTAssertEqual(WandProvider.normalize("  CODEX\n"), "codex")
+        XCTAssertEqual(WandProvider.normalize("Open-Code"), "opencode")
+        XCTAssertEqual(WandProvider.normalize("open_code"), "opencode")
+        XCTAssertEqual(WandProvider.normalize("future-provider"), "claude")
+
+        XCTAssertEqual(WandProvider.claude.title, "Claude")
+        XCTAssertEqual(WandProvider.codex.title, "Codex")
+        XCTAssertEqual(WandProvider.opencode.title, "OpenCode")
+
+        XCTAssertEqual(WandProvider.claude.structuredRunner, "claude-cli-print")
+        XCTAssertEqual(WandProvider.codex.structuredRunner, "codex-cli-exec")
+        XCTAssertEqual(WandProvider.opencode.structuredRunner, "opencode-cli-run")
+    }
+
+    func testProviderModeClampUsesSupportedFallbackAndSafeDefault() {
+        XCTAssertEqual(WandProvider.claude.clamp(mode: " AUTO-EDIT "), "auto-edit")
+        XCTAssertEqual(WandProvider.claude.clamp(mode: "unsupported", fallback: "native"), "native")
+        XCTAssertEqual(WandProvider.codex.clamp(mode: "managed"), "full-access")
+        XCTAssertEqual(WandProvider.codex.clamp(mode: nil, fallback: "full-access"), "full-access")
+        XCTAssertEqual(WandProvider.opencode.clamp(mode: "default"), "default")
+        XCTAssertEqual(WandProvider.opencode.clamp(mode: "native", fallback: "full-access"), "full-access")
+        XCTAssertEqual(WandProvider.opencode.clamp(mode: "native", fallback: "auto-edit"), "default")
+        XCTAssertEqual(WandProvider.claude.clamp(mode: "future-auto-mode"), "default")
+    }
+
+    func testLegacyModelsResponseWithoutOpenCodeFieldsDecodesAsEmpty() throws {
+        let response = try decode(
+            ModelsResponse.self,
+            from: #"""
+            {
+              "models": [{"id": "claude-sonnet", "label": "Claude Sonnet"}],
+              "codexModels": [{"id": "gpt-5-codex", "label": "GPT-5 Codex"}],
+              "defaultModel": "claude-sonnet",
+              "defaultCodexModel": "gpt-5-codex"
+            }
+            """#
+        )
+
+        XCTAssertEqual(response.models.map(\.id), ["claude-sonnet"])
+        XCTAssertEqual(response.codexModels.map(\.id), ["gpt-5-codex"])
+        XCTAssertTrue(response.opencodeModels.isEmpty)
+        XCTAssertNil(response.defaultOpenCodeModel)
+        XCTAssertEqual(response.models(for: "opencode").map(\.id), [])
+        XCTAssertEqual(response.defaultModelId(for: "opencode"), "")
+    }
+
+    func testCurrentModelsResponseDecodesOpenCodeModelsAndDefaults() throws {
+        let response = try decode(
+            ModelsResponse.self,
+            from: #"""
+            {
+              "models": [],
+              "codexModels": [],
+              "opencodeModels": [
+                {"id": "anthropic/claude-sonnet-4", "label": "Claude Sonnet 4"},
+                {"id": "openai/gpt-5", "label": "GPT-5", "alias": true}
+              ],
+              "defaultOpenCodeModel": "legacy/opencode-default",
+              "defaultModels": {
+                "claude": "claude-current",
+                "codex": "codex-current",
+                "opencode": "openai/gpt-5"
+              }
+            }
+            """#
+        )
+
+        XCTAssertEqual(
+            response.models(for: WandProvider.opencode).map(\.id),
+            ["anthropic/claude-sonnet-4", "openai/gpt-5"]
+        )
+        XCTAssertEqual(response.defaultOpenCodeModel, "legacy/opencode-default")
+        XCTAssertEqual(response.defaultModels?.opencode, "openai/gpt-5")
+        XCTAssertEqual(response.defaultModelId(for: "opencode"), "openai/gpt-5")
+    }
+
+    func testLegacyServerConfigWithoutOpenCodeFieldsDecodes() throws {
+        let config = try decode(
+            ServerConfigInfo.self,
+            from: #"{"defaultProvider":"claude","defaultModel":"claude-sonnet"}"#
+        )
+
+        XCTAssertEqual(config.defaultProvider, "claude")
+        XCTAssertNil(config.defaultOpenCodeModel)
+        XCTAssertNil(config.defaultModels)
+        XCTAssertEqual(config.defaultModelId(for: "opencode"), "")
+    }
+
+    func testCurrentServerConfigDecodesOpenCodeFields() throws {
+        let config = try decode(
+            ServerConfigInfo.self,
+            from: #"""
+            {
+              "defaultProvider": "opencode",
+              "defaultOpenCodeModel": "legacy/opencode-default",
+              "defaultModels": {
+                "claude": "claude-current",
+                "codex": "codex-current",
+                "opencode": "openai/gpt-5"
+              }
+            }
+            """#
+        )
+
+        XCTAssertEqual(config.defaultProvider, "opencode")
+        XCTAssertEqual(config.defaultOpenCodeModel, "legacy/opencode-default")
+        XCTAssertEqual(config.defaultModels?.opencode, "openai/gpt-5")
+        XCTAssertEqual(config.defaultModelId(for: "opencode"), "openai/gpt-5")
+    }
+
+    func testToolResultExtractsTextFromStructuredContentParts() throws {
+        let block = try decode(
+            ContentBlock.self,
+            from: #"""
+            {
+              "type": "tool_result",
+              "tool_use_id": "tool-42",
+              "is_error": true,
+              "_truncated": true,
+              "content": [
+                {"type": "text", "text": "plain text"},
+                {"type": "output_text", "output_text": "response output"},
+                {"type": "message", "message": {"text": "nested message"}},
+                {"type": "input_text", "input_text": "input part"},
+                {"summary": "summary part"}
+              ]
+            }
+            """#
+        )
+
+        guard case .toolResult(let toolUseID, let text, let isError, let truncated, _) = block else {
+            return XCTFail("Expected tool_result block")
+        }
+        XCTAssertEqual(toolUseID, "tool-42")
+        XCTAssertEqual(
+            text,
+            "plain text\nresponse output\nnested message\ninput part\nsummary part"
+        )
+        XCTAssertTrue(isError)
+        XCTAssertTrue(truncated)
+    }
+
+    func testUnknownBlockRetainsTypeAndRedactedPayload() throws {
+        let block = try decode(
+            ContentBlock.self,
+            from: #"""
+            {
+              "type": "future_protocol_block",
+              "title": "safe title",
+              "token": "top-level-secret",
+              "nested": {
+                "api_key": "nested-secret",
+                "Authorization": "Bearer hidden",
+                "message": "safe message"
+              },
+              "debug": "Authorization: Bearer embedded-secret-value",
+              "args": ["OPENAI_API_KEY=sk-embedded-secret-value"],
+              "url": "https://example.test/path?access_token=query-secret-value&safe=1"
+            }
+            """#
+        )
+
+        guard case .unknown(let type, let payload) = block else {
+            return XCTFail("Expected unknown block")
+        }
+        XCTAssertEqual(type, "future_protocol_block")
+        XCTAssertTrue(payload.contains("safe title"))
+        XCTAssertTrue(payload.contains("safe message"))
+        XCTAssertTrue(payload.contains("••••••"))
+        XCTAssertFalse(payload.contains("top-level-secret"))
+        XCTAssertFalse(payload.contains("nested-secret"))
+        XCTAssertFalse(payload.contains("Bearer hidden"))
+        XCTAssertFalse(payload.contains("embedded-secret-value"))
+        XCTAssertFalse(payload.contains("query-secret-value"))
+    }
+
+    func testStructuredToolContentDoesNotApplyUnknownPayloadSummaryLimit() throws {
+        let longValue = String(repeating: "x", count: 12_000) + "-tail"
+        let data = try JSONSerialization.data(withJSONObject: [
+            "tool_use_id": "tool-full",
+            "content": ["raw": longValue],
+            "is_error": false,
+        ])
+        let response = try JSONDecoder().decode(ToolContentResponse.self, from: data)
+
+        XCTAssertEqual(response.toolUseId, "tool-full")
+        XCTAssertTrue(response.text.contains("-tail"))
+        XCTAssertFalse(response.text.contains("载荷已截断"))
+        XCTAssertGreaterThan(response.text.count, 12_000)
+    }
+
+    private func decode<T: Decodable>(_ type: T.Type, from json: String) throws -> T {
+        try JSONDecoder().decode(type, from: XCTUnwrap(json.data(using: .utf8)))
+    }
+}

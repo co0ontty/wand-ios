@@ -526,8 +526,8 @@ final class ChatStore: ObservableObject {
 
     private func loadModels() async {
         guard let response = try? await api.models() else { return }
-        let provider = snapshot?.provider ?? "claude"
-        availableModels = provider == "codex" ? response.codexModels : response.models
+        let provider = WandProvider(normalizing: snapshot?.provider).rawValue
+        availableModels = response.models(for: provider)
         defaultModel = response.defaultModelId(for: provider)
     }
 

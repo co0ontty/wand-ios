@@ -114,6 +114,14 @@ final class WandAPI {
         value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
     }
 
+    /// 路径参数不能使用 urlPathAllowed（其包含 `/`），否则 tool use id 中的
+    /// 分隔符可能改变 endpoint 路径层级。
+    private func percentEncodePathComponent(_ value: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#[]@!$&'()*+,;=:%")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
     // MARK: - 会话
 
     func listSessions() async throws -> [SessionSnapshot] {
@@ -138,6 +146,15 @@ final class WandAPI {
     func fetchEarlierBlocks(id: String, turn: Int, blockOffset: Int, blockLimit: Int) async throws -> BlocksPage {
         try await request(BlocksPage.self, method: "GET",
                           path: "/api/sessions/\(id)/messages?turn=\(turn)&blockOffset=\(blockOffset)&blockLimit=\(blockLimit)")
+    }
+
+    /// 按需取回被消息窗口截断的完整 tool_result 内容。
+    func fetchToolContent(id: String, toolUseId: String) async throws -> ToolContentResponse {
+        try await request(
+            ToolContentResponse.self,
+            method: "GET",
+            path: "/api/sessions/\(percentEncodePathComponent(id))/tool-content/\(percentEncodePathComponent(toolUseId))"
+        )
     }
 
     func models() async throws -> ModelsResponse {
@@ -334,9 +351,10 @@ final class WandAPI {
         thinkingEffort: String?,
         prompt: String?
     ) async throws -> SessionSnapshot {
+        let normalizedProvider = WandProvider(normalizing: provider)
         var body: [String: Any] = [
-            "provider": provider,
-            "runner": provider == "codex" ? "codex-cli-exec" : "claude-cli-print",
+            "provider": normalizedProvider.rawValue,
+            "runner": normalizedProvider.structuredRunner,
             "cwd": cwd,
         ]
         if let mode, !mode.isEmpty { body["mode"] = mode }
@@ -356,7 +374,8 @@ final class WandAPI {
         thinkingEffort: String?,
         initialInput: String?
     ) async throws -> SessionSnapshot {
-        var body: [String: Any] = ["command": provider, "provider": provider, "cwd": cwd]
+        let normalizedProvider = WandProvider(normalizing: provider).rawValue
+        var body: [String: Any] = ["command": normalizedProvider, "provider": normalizedProvider, "cwd": cwd]
         if let mode, !mode.isEmpty { body["mode"] = mode }
         if let model, !model.isEmpty { body["model"] = model }
         if let thinkingEffort, !thinkingEffort.isEmpty { body["thinkingEffort"] = thinkingEffort }
@@ -461,10 +480,14 @@ final class WandAPI {
         var body: [String: Any] = [:]
         if let mode { body["defaultMode"] = mode }
         if let model {
-            if provider == "codex" {
+            switch WandProvider(normalizing: provider) {
+            case .codex:
                 body["defaultCodexModel"] = model
                 body["defaultModels"] = ["codex": model]
-            } else {
+            case .opencode:
+                body["defaultOpenCodeModel"] = model
+                body["defaultModels"] = ["opencode": model]
+            case .claude:
                 body["defaultModel"] = model
                 body["defaultModels"] = ["claude": model]
             }

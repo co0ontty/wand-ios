@@ -1,6 +1,7 @@
 import Combine
 import PhotosUI
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// 原生聊天视图：结构化消息渲染 + 原生输入栏 + 权限审批卡片。
@@ -28,6 +29,26 @@ private extension EnvironmentValues {
     var cardExpandDefaults: CardExpandDefaults {
         get { self[CardExpandDefaultsEnvironmentKey.self] }
         set { self[CardExpandDefaultsEnvironmentKey.self] = newValue }
+    }
+}
+
+private struct ChatAPIEnvironmentKey: EnvironmentKey {
+    static let defaultValue: WandAPI? = nil
+}
+
+private struct ChatSessionIDEnvironmentKey: EnvironmentKey {
+    static let defaultValue = ""
+}
+
+private extension EnvironmentValues {
+    var chatAPI: WandAPI? {
+        get { self[ChatAPIEnvironmentKey.self] }
+        set { self[ChatAPIEnvironmentKey.self] = newValue }
+    }
+
+    var chatSessionID: String {
+        get { self[ChatSessionIDEnvironmentKey.self] }
+        set { self[ChatSessionIDEnvironmentKey.self] = newValue }
     }
 }
 
@@ -180,6 +201,8 @@ struct ChatView: View {
         .animation(.easeInOut(duration: 0.2), value: store.connected)
         .overlay(alignment: .top) { toastView }
         .environment(\.cardExpandDefaults, store.cardDefaults)
+        .environment(\.chatAPI, api)
+        .environment(\.chatSessionID, sessionId)
     }
 
     @ViewBuilder private var mainContent: some View {
@@ -242,8 +265,8 @@ struct ChatView: View {
                         // 急加载 VStack）：一条 assistant 消息可能携带上百个 text/工具/diff 块，
                         // 整条一次性构建会在主线程同步堆出数百个嵌套视图，打开会话时直接卡死、
                         // 什么都渲染不出来。摊平后 LazyVStack 只实例化进入视口的行。
-                        ForEach(Array(groupedMessageItems.enumerated()), id: \.offset) { _, row in
-                            messageItemView(row, proxy: proxy)
+                        ForEach(identifiedMessageItems(groupedMessageItems, turnOffset: store.loadedOffset)) { row in
+                            messageItemView(row.item, proxy: proxy)
                         }
                         if store.isResponding {
                             LiveTurnStatusRow(
@@ -404,9 +427,9 @@ struct ChatView: View {
         case .activityGroup(let turnIndex, let group, let id):
             if store.cardDefaults.toolGroup {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(group.items.enumerated()), id: \.offset) { _, item in
+                    ForEach(identifiedDisplayItems(group.items)) { identified in
                         AssistantItemView(
-                            item: item,
+                            item: identified.item,
                             baseURL: store.api.baseURL,
                             isLastTurn: turnIndex == store.messages.count - 1,
                             isResponding: store.isResponding,
@@ -595,9 +618,20 @@ struct ChatView: View {
 
     // MARK: - 顶部状态
 
+    private var currentProvider: WandProvider {
+        WandProvider(normalizing: store.snapshot?.provider)
+    }
+
+    private var providerTint: Color {
+        switch currentProvider {
+        case .codex: return Theme.codex
+        case .claude, .opencode: return Theme.brand
+        }
+    }
+
     private var sessionLaunchPanel: some View {
-        let isCodex = store.snapshot?.provider == "codex"
-        let tint: Color = isCodex ? Theme.codex : Theme.brand
+        let provider = currentProvider
+        let tint = providerTint
         return VStack(spacing: 14) {
             ZStack {
                 Circle()
@@ -607,7 +641,7 @@ struct ChatView: View {
                     .fill(tint)
                     .frame(width: 32, height: 32)
             }
-            Text("开始新的\(isCodex ? " Codex" : " Claude") 对话")
+            Text("开始新的 \(provider.title) 对话")
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Text("输入消息，让它帮你完成任务")
@@ -742,10 +776,10 @@ struct ChatView: View {
         thinkingLevels.first { $0.id == id }?.shortLabel ?? "关"
     }
 
-    /// 顶栏左侧 provider 小徽标：品牌色弱底圆角方块 + 品牌 logo，标明当前 Claude / Codex。
+    /// 顶栏左侧 provider 小徽标：品牌色弱底圆角方块 + 品牌 logo。
     private var providerBadge: some View {
-        let isCodex = store.snapshot?.provider == "codex"
-        let tint: Color = isCodex ? Theme.codex : Theme.brand
+        let provider = currentProvider
+        let tint = providerTint
         return ZStack {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(tint.opacity(0.13))
@@ -756,7 +790,7 @@ struct ChatView: View {
                 .frame(width: 15, height: 15)
         }
         .frame(width: 26, height: 26)
-        .accessibilityLabel(isCodex ? "Codex" : "Claude")
+        .accessibilityLabel(provider.title)
     }
 
     private var navigationStatus: some View {
@@ -1020,7 +1054,8 @@ struct ChatView: View {
 
     // MARK: - 控制行徽标（模式 / 模型·思考）
 
-    /// 执行模式选项（与 NewSessionView.sessionModes 一致）。codex 锁 full-access。
+    /// 执行模式选项（与 NewSessionView.sessionModes 一致）。Codex 锁 full-access；
+    /// OpenCode 仅支持 default / full-access / managed。
     private static let sessionModes = [
         (id: "managed", label: "托管"),
         (id: "full-access", label: "全权限"),
@@ -1049,10 +1084,12 @@ struct ChatView: View {
     }
 
     private func modeChip(compact _: Bool = false) -> some View {
-        let isCodex = store.snapshot?.provider == "codex"
+        let provider = currentProvider
+        let isCodex = provider == .codex
+        let supportedModeIDs = provider.supportedModeIDs
         let currentModeLabel = Self.modeLabel(store.mode)
         return Menu {
-            ForEach(Self.sessionModes, id: \.id) { option in
+            ForEach(Self.sessionModes.filter { supportedModeIDs.contains($0.id) }, id: \.id) { option in
                 Button {
                     store.setMode(option.id)
                 } label: {
@@ -1062,7 +1099,6 @@ struct ChatView: View {
                         Text(option.label)
                     }
                 }
-                .disabled(isCodex && option.id != "full-access")
             }
         } label: {
             chipLabel(
@@ -1075,7 +1111,11 @@ struct ChatView: View {
         }
         .disabled(isCodex)
         .buttonStyle(.plain)
-        .accessibilityLabel("执行模式：\(currentModeLabel)")
+        .accessibilityLabel(
+            isCodex
+                ? "执行模式：\(currentModeLabel)，Codex 会话固定"
+                : "执行模式：\(currentModeLabel)"
+        )
     }
 
     private func modelThinkingChip(compact: Bool = false) -> some View {
@@ -1584,6 +1624,105 @@ private enum MessageDisplayItem {
     case usageSummary(turnIndex: Int, usage: TurnUsage?, isLive: Bool)
     /// 历史折叠摘要卡：折叠"最后一条用户消息"之前的全部历史，boundary = 该用户消息下标。
     case historySummary(stats: HistoryStats, boundary: Int)
+}
+
+/// LazyVStack/ForEach 不能用当前数组 offset 当身份：历史 prepend 会让所有
+/// offset 平移，流式重分组也会改变位置，从而把上一张工具卡的 @State
+/// 复用给下一张。这里用绝对 turn 位置 + toolUseId/语义 key 生成稳定身份。
+private struct IdentifiedMessageDisplayItem: Identifiable {
+    let id: String
+    let item: MessageDisplayItem
+}
+
+private struct IdentifiedDisplayItem: Identifiable {
+    let id: String
+    let item: DisplayItem
+}
+
+private struct IdentifiedExplorationTool: Identifiable {
+    let id: String
+    let item: ExplorationToolItem
+}
+
+private func identifiedMessageItems(
+    _ items: [MessageDisplayItem],
+    turnOffset: Int
+) -> [IdentifiedMessageDisplayItem] {
+    identified(items, baseID: { messageDisplayIdentity($0, turnOffset: turnOffset) })
+        .map { IdentifiedMessageDisplayItem(id: $0.id, item: $0.value) }
+}
+
+private func identifiedDisplayItems(_ items: [DisplayItem]) -> [IdentifiedDisplayItem] {
+    identified(items, baseID: displayItemIdentity)
+        .map { IdentifiedDisplayItem(id: $0.id, item: $0.value) }
+}
+
+private func identifiedExplorationTools(_ items: [ExplorationToolItem]) -> [IdentifiedExplorationTool] {
+    identified(items) { tool in
+        let key = !tool.id.isEmpty ? tool.id : (tool.result?.toolUseId ?? "")
+        return key.isEmpty ? "tool:\(tool.name)" : "tool:\(key)"
+    }
+    .map { IdentifiedExplorationTool(id: $0.id, item: $0.value) }
+}
+
+private func identified<Value>(
+    _ values: [Value],
+    baseID: (Value) -> String
+) -> [(id: String, value: Value)] {
+    var occurrences: [String: Int] = [:]
+    return values.map { value in
+        let base = baseID(value)
+        let occurrence = occurrences[base, default: 0]
+        occurrences[base] = occurrence + 1
+        return (occurrence == 0 ? base : "\(base)#\(occurrence)", value)
+    }
+}
+
+private func messageDisplayIdentity(_ item: MessageDisplayItem, turnOffset: Int) -> String {
+    let absoluteTurn = turnOffset + itemTurnIndex(item)
+    switch item {
+    case .turn:
+        return "turn:\(absoluteTurn)"
+    case .assistantItem(_, let displayItem):
+        return "assistant:\(absoluteTurn):\(displayItemIdentity(displayItem))"
+    case .subagentRole(_, let segment):
+        return "subagent:\(absoluteTurn):\(segment.id)"
+    case .currentReplySummary:
+        return "reply-summary:\(absoluteTurn)"
+    case .explorationGroup(let tools, _):
+        let keys = tools.map { !$0.id.isEmpty ? $0.id : ($0.result?.toolUseId ?? $0.name) }
+        return "exploration:\(keys.joined(separator: "|"))"
+    case .activityGroup(_, let group, _):
+        return "activity:\(absoluteTurn):\(group.items.map(displayItemIdentity).joined(separator: "|"))"
+    case .usageSummary:
+        return "usage:\(absoluteTurn)"
+    case .historySummary:
+        return "history-summary:\(absoluteTurn)"
+    }
+}
+
+private func displayItemIdentity(_ item: DisplayItem) -> String {
+    switch item {
+    case .tool(let id, let name, _, _, _, let result):
+        let key = !id.isEmpty ? id : (result?.toolUseId ?? "")
+        return key.isEmpty ? "tool:\(name)" : "tool:\(key)"
+    case .explorationGroup(let tools):
+        let keys = tools.map { !$0.id.isEmpty ? $0.id : ($0.result?.toolUseId ?? $0.name) }
+        return "exploration:\(keys.joined(separator: "|"))"
+    case .plain(let block):
+        switch block {
+        case .toolUse(let id, let name, _, _, _):
+            return id.isEmpty ? "tool-use:\(name)" : "tool-use:\(id)"
+        case .toolResult(let id, _, _, _, _):
+            return id.isEmpty ? "tool-result" : "tool-result:\(id)"
+        case .text(let text, _):
+            return "text:\(text.hashValue)"
+        case .thinking(let text, _):
+            return "thinking:\(text.hashValue)"
+        case .unknown(let type, let payload):
+            return "unknown:\(type):\(payload.hashValue)"
+        }
+    }
 }
 
 private struct ActivityGroup {
@@ -2156,6 +2295,7 @@ private func explorationToolsOnly(in turn: ConversationTurn) -> [ExplorationTool
 
 /// 配对后挂在工具卡上的结果。
 struct ToolResultInfo {
+    let toolUseId: String
     let text: String
     let isError: Bool
     let truncated: Bool
@@ -2193,9 +2333,14 @@ private func pairToolBlocks(_ content: [ContentBlock]) -> [DisplayItem] {
             }
         }
         var result: ToolResultInfo?
-        if resultIndex >= 0, case .toolResult(_, let text, let isError, let truncated, _) = content[resultIndex] {
+        if resultIndex >= 0, case .toolResult(let resultID, let text, let isError, let truncated, _) = content[resultIndex] {
             consumed.insert(resultIndex)
-            result = ToolResultInfo(text: text, isError: isError, truncated: truncated)
+            result = ToolResultInfo(
+                toolUseId: resultID.isEmpty ? id : resultID,
+                text: text,
+                isError: isError,
+                truncated: truncated
+            )
         }
         paired.append(.tool(
             id: id, name: name, description: description,
@@ -2241,11 +2386,13 @@ private func collapseConsecutiveExplorationTools(_ paired: [DisplayItem]) -> [Di
 
 private func isExplorationTool(_ name: String) -> Bool {
     let lower = name.lowercased()
-    return lower.hasPrefix("read")
-        || lower.hasPrefix("grep")
-        || lower.hasPrefix("glob")
-        || lower.hasPrefix("search")
-        || lower.hasPrefix("find")
+    let operation = lower.components(separatedBy: "__").last ?? lower
+    return operation.hasPrefix("read")
+        || operation.hasPrefix("grep")
+        || operation.hasPrefix("glob")
+        || operation.hasPrefix("search")
+        || operation.hasPrefix("find")
+        || lower == "tool_search"
         || lower.contains("websearch")
         || lower.contains("webfetch")
         || lower == "todoread"
@@ -2296,10 +2443,8 @@ private func foldCurrentReplyTail(_ content: [ContentBlock], userPreview: String
         switch block {
         case .text(let text, _):
             units.append(contentsOf: splitReplyTextUnits(text).map { ReplyFoldUnit(blockIndex: blockIndex, text: $0) })
-        case .thinking, .toolUse, .toolResult:
+        case .thinking, .toolUse, .toolResult, .unknown:
             units.append(ReplyFoldUnit(blockIndex: blockIndex, text: nil))
-        case .unknown:
-            break
         }
     }
 
@@ -2326,10 +2471,8 @@ private func foldCurrentReplyTail(_ content: [ContentBlock], userPreview: String
             if !keptText.isEmpty {
                 visible.append(.text(text: keptText, subagent: subagent))
             }
-        case .thinking, .toolUse, .toolResult:
+        case .thinking, .toolUse, .toolResult, .unknown:
             if keepWholeBlocks.contains(blockIndex) { visible.append(block) }
-        case .unknown:
-            break
         }
     }
 
@@ -2501,9 +2644,9 @@ private struct TurnView: View {
     /// LazyVStack，避免单条 turn 携带上百块时一次性构建数百视图。
     private var assistantBlocks: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(pairToolBlocks(turn.content).enumerated()), id: \.offset) { _, item in
+            ForEach(identifiedDisplayItems(pairToolBlocks(turn.content))) { identified in
                 AssistantItemView(
-                    item: item, baseURL: baseURL,
+                    item: identified.item, baseURL: baseURL,
                     isLastTurn: isLastTurn, isResponding: isResponding,
                     askSelections: askSelections,
                     onAskToggle: onAskToggle, onAskSubmit: onAskSubmit
@@ -2525,7 +2668,10 @@ private struct UsageSummaryRow: View {
             result.append(("输入", compactTokenCount(input)))
         }
         if let cache = usage.cacheReadInputTokens, cache > 0 {
-            result.append(("缓存", compactTokenCount(cache)))
+            result.append(("缓存命中", compactTokenCount(cache)))
+        }
+        if let cacheWrite = usage.cacheCreationInputTokens, cacheWrite > 0 {
+            result.append(("缓存写入", compactTokenCount(cacheWrite)))
         }
         if let output = usage.outputTokens, output > 0 {
             result.append(("输出", "\(usage.estimated == true ? "≈" : "")\(compactTokenCount(output))"))
@@ -2586,7 +2732,10 @@ private struct LiveTurnStatusRow: View {
             parts.append("输入 \(compactTokenCount(input))")
         }
         if let cache = usage?.cacheReadInputTokens, cache > 0 {
-            parts.append("缓存 \(compactTokenCount(cache))")
+            parts.append("缓存命中 \(compactTokenCount(cache))")
+        }
+        if let cacheWrite = usage?.cacheCreationInputTokens, cacheWrite > 0 {
+            parts.append("缓存写入 \(compactTokenCount(cacheWrite))")
         }
         if let output = usage?.outputTokens, output > 0 {
             parts.append("输出 \(usage?.estimated == true ? "≈" : "")\(compactTokenCount(output))")
@@ -2718,9 +2867,9 @@ private struct ActivityDetailSheet: View {
                         .background(Capsule().fill(Theme.background.opacity(0.7)))
                         .frame(maxWidth: 220, alignment: .trailing)
                 }
-                ForEach(Array(group.items.enumerated()), id: \.offset) { _, item in
+                ForEach(identifiedDisplayItems(group.items)) { identified in
                     AssistantItemView(
-                        item: item,
+                        item: identified.item,
                         baseURL: baseURL,
                         isLastTurn: isLastTurn,
                         isResponding: isResponding,
@@ -2807,9 +2956,9 @@ private struct SubagentRoleWindow: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.vertical, 8)
                         } else {
-                            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                            ForEach(identifiedDisplayItems(items)) { identified in
                                 AssistantItemView(
-                                    item: item,
+                                    item: identified.item,
                                     baseURL: baseURL,
                                     isLastTurn: isLastTurn,
                                     isResponding: isResponding,
@@ -3035,29 +3184,24 @@ private struct BlockView: View {
                     initiallyExpanded: cardDefaults.shouldExpandTool(name)
                 )
             }
-        case .toolResult(_, let text, let isError, let truncated, _):
-            if !text.isEmpty {
+        case .toolResult(let toolUseId, let text, let isError, let truncated, _):
+            if !text.isEmpty || truncated {
                 CollapsibleSection(
                     icon: isError ? "xmark.octagon" : "doc.text",
                     title: isError ? "执行出错" : "执行结果",
                     tint: isError ? Theme.danger : Theme.textSecondary,
                     initiallyExpanded: cardDefaults.editCards
                 ) {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(text.count > 4000 ? String(text.prefix(4000)) + "\n…（已截断）" : text)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(isError ? Theme.danger : Theme.textPrimary)
-                            .textSelection(.enabled)
-                    }
-                    if truncated {
-                        Text("内容过长，已截断")
-                            .font(.system(size: 11))
-                            .foregroundColor(Theme.textSecondary)
-                    }
+                    ToolResultBody(result: ToolResultInfo(
+                        toolUseId: toolUseId,
+                        text: text,
+                        isError: isError,
+                        truncated: truncated
+                    ))
                 }
             }
-        case .unknown:
-            EmptyView()
+        case .unknown(let type, let payload):
+            UnknownBlockCard(type: type, payload: payload)
         }
     }
 
@@ -3071,6 +3215,38 @@ private struct BlockView: View {
             }
             .foregroundColor(Theme.brandStrong)
         }
+    }
+}
+
+/// 服务端新增内容块的显式兜底。默认折叠，保留类型和已脱敏、限长的原始载荷，
+/// 便于诊断协议演进，同时避免未知内容静默消失。
+private struct UnknownBlockCard: View {
+    let type: String
+    let payload: String
+
+    private var displayType: String {
+        let value = type.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "未声明类型" : value
+    }
+
+    var body: some View {
+        CollapsibleSection(
+            icon: "questionmark.diamond",
+            title: "未知内容 · \(displayType)",
+            tint: .orange
+        ) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("类型  \(displayType)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(Theme.textSecondary)
+                Text(payload.isEmpty ? "无可显示载荷" : payload)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(Theme.textPrimary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .accessibilityLabel("未知内容块，类型 \(displayType)")
     }
 }
 
@@ -3368,6 +3544,18 @@ private struct MarkdownText: View {
 /// 工具名 → 中文标签；未识别的工具显示原名（对齐 Web 端 toolDisplayName）。
 private func toolLabel(_ name: String) -> String {
     let lower = name.lowercased()
+    if lower.hasPrefix("codex/") {
+        switch String(lower.dropFirst("codex/".count)) {
+        case "spawn_agent": return "启动子代理"
+        case "send_input", "send_message": return "发送子任务消息"
+        case "wait", "wait_agent": return "等待子代理"
+        case "close_agent": return "关闭子代理"
+        default: return "多 Agent 协作"
+        }
+    }
+    if lower == "tool_search" || lower.contains("toolsearch") { return "查找可用工具" }
+    if lower.contains("apply_patch") || lower.contains("patch_apply") { return "应用补丁" }
+    if lower.contains("view_image") || lower.contains("imagegen") { return "处理图片" }
     if lower.contains("todo") { return "更新待办" }
     if lower.contains("websearch") { return "网页搜索" }
     if lower.contains("webfetch") || lower.contains("fetch") { return "网页获取" }
@@ -3378,8 +3566,39 @@ private func toolLabel(_ name: String) -> String {
     if lower.hasPrefix("grep") { return "搜索内容" }
     if lower.hasPrefix("glob") { return "查找文件" }
     if lower == "bash" || lower.contains("command") || lower.contains("shell") { return "执行命令" }
+    if lower.hasPrefix("opencode/") {
+        return humanizeToolName(String(name.dropFirst("OpenCode/".count)))
+    }
+    if lower.hasPrefix("node_repl") { return "运行 REPL" }
+    if name.contains("__") {
+        return humanizeToolName(name.components(separatedBy: "__").last ?? name)
+    }
+    if lower == "skill" { return "加载技能" }
     if lower.hasPrefix("task") || lower.contains("agent") { return "子任务" }
     return name
+}
+
+private func humanizeToolName(_ name: String) -> String {
+    name
+        .replacingOccurrences(of: "-", with: " ")
+        .replacingOccurrences(of: "_", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .capitalized
+}
+
+/// 将 Provider / MCP server 信息放在独立来源标签里，不挤占工具主标题。
+private func toolSourceLabel(_ name: String) -> String? {
+    let lower = name.lowercased()
+    if lower.hasPrefix("codex/") { return "Codex" }
+    if lower.hasPrefix("opencode/") { return "OpenCode" }
+    if lower.hasPrefix("node_repl") { return "REPL" }
+    if name.contains("__") {
+        let parts = name.components(separatedBy: "__")
+        let source = parts.first?.lowercased() == "mcp" ? parts.dropFirst().first : parts.first
+        let trimmed = source?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "MCP" : String(trimmed.prefix(18))
+    }
+    return nil
 }
 
 /// 连续只读探索操作的紧凑进度卡。默认折叠，避免探索阶段淹没对话。
@@ -3466,7 +3685,8 @@ private struct ExplorationGroupCard: View {
                     .overlay(Theme.border.opacity(0.7))
                     .padding(.horizontal, 12)
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(tools.enumerated()), id: \.offset) { _, tool in
+                    ForEach(identifiedExplorationTools(tools)) { identified in
+                        let tool = identified.item
                         ToolUseCard(
                             name: tool.name,
                             description: tool.description,
@@ -3540,7 +3760,10 @@ private struct ToolUseCard: View {
 
     private var isError: Bool { result?.isError == true }
     private var isSuccess: Bool { result != nil && !isError }
-    private var hasBody: Bool { !(result?.text.isEmpty ?? true) }
+    private var hasBody: Bool {
+        guard let result else { return false }
+        return !result.text.isEmpty || result.truncated
+    }
     private var statusColor: Color {
         if isError { return Theme.danger }
         if running { return Theme.brand }
@@ -3621,9 +3844,21 @@ private struct ToolUseCard: View {
                     .frame(width: 34, height: 34)
                 }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(toolLabel(name))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(isError ? Theme.danger : Theme.textPrimary)
+                    HStack(spacing: 6) {
+                        Text(toolLabel(name))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(isError ? Theme.danger : Theme.textPrimary)
+                            .lineLimit(1)
+                        if let source = toolSourceLabel(name) {
+                            Text(source)
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(Theme.codex)
+                                .lineLimit(1)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Theme.codex.opacity(0.10)))
+                        }
+                    }
                     if !summary.isEmpty {
                         Text(summary)
                             .font(.system(size: 11, design: .monospaced))
@@ -3659,10 +3894,13 @@ private struct ToolUseCard: View {
     private var iconName: String {
         let lower = name.lowercased()
         if lower.contains("bash") || lower.contains("command") { return "terminal" }
+        if lower.contains("apply_patch") || lower.contains("patch_apply") { return "doc.badge.gearshape" }
+        if lower.contains("view_image") || lower.contains("imagegen") { return "photo" }
         if lower.contains("edit") || lower.contains("write") { return "pencil" }
         if lower.contains("read") { return "doc.text.magnifyingglass" }
         if lower.contains("grep") || lower.contains("glob") || lower.contains("search") { return "magnifyingglass" }
         if lower.contains("web") || lower.contains("fetch") { return "globe" }
+        if lower == "skill" { return "wand.and.stars" }
         if lower.contains("task") || lower.contains("agent") { return "person.2" }
         return "wrench.and.screwdriver"
     }
@@ -3684,30 +3922,166 @@ private struct ToolUseCard: View {
     }
 }
 
-/// 工具结果正文：次级底色代码框 + 4000 字截断。
+/// 工具结果正文：保留移动端展示上限；服务端截断时可按需加载并复制完整内容。
 private struct ToolResultBody: View {
+    @Environment(\.chatAPI) private var api
+    @Environment(\.chatSessionID) private var sessionID
+
     let result: ToolResultInfo
+
+    @State private var fullText: String
+    @State private var truncated: Bool
+    @State private var loading = false
+    @State private var loadError: String?
+    @State private var loadTask: Task<Void, Never>?
+    @State private var activeRequestID: UUID?
+    @State private var activeRequestKey = ""
+
+    private let displayLimit = 24_000
+
+    init(result: ToolResultInfo) {
+        self.result = result
+        _fullText = State(initialValue: result.text)
+        _truncated = State(initialValue: result.truncated)
+    }
+
+    private var formattedText: String { prettyStructuredToolText(fullText) }
+
+    private var displayText: String {
+        guard formattedText.count > displayLimit else { return formattedText }
+        return String(formattedText.prefix(displayLimit)) + "\n…（本页仅展示前 \(displayLimit) 字）"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(result.text.count > 4000 ? String(result.text.prefix(4000)) + "\n…（已截断）" : result.text)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(result.isError ? Theme.danger : Theme.textPrimary)
-                    .textSelection(.enabled)
-                    .padding(10)
+            if !displayText.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(displayText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(result.isError ? Theme.danger : Theme.textPrimary)
+                        .textSelection(.enabled)
+                        .padding(10)
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Theme.background.opacity(0.6))
+                )
             }
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Theme.background.opacity(0.6))
-            )
-            if result.truncated {
-                Text("内容过长，已截断")
+            if truncated {
+                fullContentRow
+            } else if displayText.isEmpty {
+                Text(result.isError ? "工具执行失败，未返回错误详情" : "工具已完成，没有文本输出")
                     .font(.system(size: 11))
-                    .foregroundColor(Theme.textSecondary)
+                    .foregroundColor(result.isError ? Theme.danger : Theme.textSecondary)
+            }
+            if !fullText.isEmpty {
+                Button {
+                    UIPasteboard.general.string = fullText
+                } label: {
+                    Label("复制", systemImage: "doc.on.doc")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(Theme.textSecondary)
+                .accessibilityLabel("复制完整工具输出")
+            }
+        }
+        .onChange(of: result.text) { _, text in
+            cancelLoad()
+            fullText = text
+            truncated = result.truncated
+            loadError = nil
+        }
+        .onChange(of: result.toolUseId) { _, _ in
+            cancelLoad()
+            fullText = result.text
+            truncated = result.truncated
+            loadError = nil
+        }
+        .onDisappear { cancelLoad() }
+    }
+
+    private var fullContentRow: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text(loadError ?? "服务端为保证传输速度省略了部分内容")
+                .font(.system(size: 11))
+                .foregroundColor(loadError == nil ? Theme.textSecondary : Theme.danger)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: loadFullContent) {
+                if loading {
+                    ProgressView().controlSize(.small).tint(Theme.brand)
+                } else {
+                    Text(loadError == nil ? "加载完整内容" : "重试")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(Theme.brand)
+            .disabled(loading)
+        }
+    }
+
+    private func loadFullContent() {
+        guard let api, !sessionID.isEmpty, !result.toolUseId.isEmpty else {
+            loadError = "无法加载完整内容"
+            return
+        }
+        loadTask?.cancel()
+        let requestID = UUID()
+        let toolUseID = result.toolUseId
+        let requestKey = "\(sessionID)\u{1F}\(toolUseID)"
+        activeRequestID = requestID
+        activeRequestKey = requestKey
+        loading = true
+        loadError = nil
+        loadTask = Task { @MainActor in
+            defer {
+                if activeRequestID == requestID {
+                    loading = false
+                    activeRequestID = nil
+                    activeRequestKey = ""
+                    loadTask = nil
+                }
+            }
+            do {
+                let loaded = try await api.fetchToolContent(id: sessionID, toolUseId: toolUseID)
+                try Task.checkCancellation()
+                guard activeRequestID == requestID, activeRequestKey == requestKey else { return }
+                guard loaded.toolUseId.isEmpty || loaded.toolUseId == toolUseID else {
+                    loadError = "服务端返回了不匹配的工具结果"
+                    return
+                }
+                fullText = loaded.text
+                truncated = false
+            } catch {
+                guard !Task.isCancelled,
+                      activeRequestID == requestID,
+                      activeRequestKey == requestKey else { return }
+                loadError = error.localizedDescription.isEmpty ? "加载失败，请重试" : error.localizedDescription
             }
         }
     }
+
+    private func cancelLoad() {
+        loadTask?.cancel()
+        loadTask = nil
+        activeRequestID = nil
+        activeRequestKey = ""
+        loading = false
+    }
+}
+
+private func prettyStructuredToolText(_ text: String) -> String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let first = trimmed.first, first == "{" || first == "[",
+          let data = trimmed.data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data),
+          JSONSerialization.isValidJSONObject(object),
+          let formatted = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+          let output = String(data: formatted, encoding: .utf8) else {
+        return text
+    }
+    return output
 }
 
 /// 可折叠区块（thinking / tool_result 共用）。工具结果默认折叠，思考过程默认展开。
@@ -4226,10 +4600,34 @@ private struct DiffCard: View {
         let name = (path as NSString).lastPathComponent
         return name.isEmpty ? path : name
     }
-    private var isWrite: Bool { toolName == "Write" || toolName == "MultiEdit" }
+    private var isWrite: Bool { toolName == "Write" }
+    private var isMultiEdit: Bool { toolName == "MultiEdit" }
     private var oldText: String { input["old_string"]?.stringValue ?? "" }
     private var newText: String {
         input["new_string"]?.stringValue ?? input["content"]?.stringValue ?? ""
+    }
+    private var unifiedDiff: String { input["unified_diff"]?.stringValue ?? "" }
+    private var kind: String {
+        (input["kind"]?.stringValue ?? (isWrite ? "add" : "update")).lowercased()
+    }
+    private var multiEdits: [(old: String, new: String)] {
+        guard isMultiEdit else { return [] }
+        return (jsonArrayField(input, "edits") ?? []).compactMap { value in
+            guard let edit = value.objectValue else { return nil }
+            let old = edit["old_string"]?.stringValue ?? ""
+            let new = edit["new_string"]?.stringValue ?? ""
+            return old.isEmpty && new.isEmpty ? nil : (old, new)
+        }
+    }
+    private var movePath: String { input["move_path"]?.stringValue ?? "" }
+    private var diffUnavailableReason: String? {
+        let reason = (input["diff_unavailable_reason"]?.stringValue ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return reason.isEmpty ? nil : reason
+    }
+    private var hasDiffBody: Bool {
+        !oldText.isEmpty || !newText.isEmpty || !multiEdits.isEmpty
+            || !unifiedDiff.isEmpty || !movePath.isEmpty
     }
 
     private var statusText: String {
@@ -4238,6 +4636,9 @@ private struct DiffCard: View {
             let text = result.text
             return (text.contains("haven't granted") || text.contains("permission")) ? "等待授权" : "失败"
         }
+        if kind == "add" { return "已新增" }
+        if kind == "delete" { return "已删除" }
+        if !movePath.isEmpty { return "已移动" }
         return "已修改"
     }
     private var statusColor: Color {
@@ -4255,6 +4656,45 @@ private struct DiffCard: View {
                     }
                     if !newText.isEmpty {
                         diffColumn(label: isWrite ? "" : "新", text: newText, prefix: "+ ", tint: chatSuccess)
+                    }
+                    ForEach(Array(multiEdits.enumerated()), id: \.offset) { index, edit in
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("第 \(index + 1) 处修改")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(Theme.textSecondary)
+                            if !edit.old.isEmpty {
+                                diffColumn(label: "旧", text: edit.old, prefix: "- ", tint: Theme.danger)
+                            }
+                            if !edit.new.isEmpty {
+                                diffColumn(label: "新", text: edit.new, prefix: "+ ", tint: chatSuccess)
+                            }
+                        }
+                    }
+                    if !unifiedDiff.isEmpty {
+                        unifiedDiffBlock(unifiedDiff)
+                    }
+                    if !movePath.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("移动到")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(Theme.textSecondary)
+                            Text(movePath)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(Theme.codex)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .fill(Theme.codex.opacity(0.08))
+                                )
+                        }
+                    }
+                    if !hasDiffBody, let result, !result.isError {
+                        Text(diffUnavailableReason ?? "Codex 已返回文件变更状态，但本次事件未包含差异正文。")
+                            .font(.system(size: 11))
+                            .foregroundColor(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if let result, result.isError, !result.text.isEmpty {
                         Text(result.text.count > 600 ? String(result.text.prefix(600)) + "…" : result.text)
@@ -4342,11 +4782,58 @@ private struct DiffCard: View {
             )
         }
     }
+
+    private func unifiedDiffBlock(_ diff: String) -> some View {
+        let clipped = diff.count > 16_000
+            ? String(diff.prefix(16_000)) + "\n…（差异已截断）"
+            : diff
+        return VStack(alignment: .leading, spacing: 3) {
+            Text("统一差异")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(Theme.textSecondary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(coloredUnifiedDiff(clipped))
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(8)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Theme.background.opacity(0.6))
+            )
+        }
+    }
+
+    private func coloredUnifiedDiff(_ diff: String) -> AttributedString {
+        let lines = diff.components(separatedBy: .newlines)
+        var output = AttributedString()
+        for (index, line) in lines.enumerated() {
+            var value = AttributedString(line)
+            if line.hasPrefix("@@") {
+                value.foregroundColor = Theme.codex
+            } else if line.hasPrefix("+++") || line.hasPrefix("---") {
+                value.foregroundColor = Theme.textSecondary
+            } else if line.hasPrefix("+") {
+                value.foregroundColor = chatSuccess
+            } else if line.hasPrefix("-") {
+                value.foregroundColor = Theme.danger
+            } else {
+                value.foregroundColor = Theme.textPrimary
+            }
+            output.append(value)
+            if index < lines.count - 1 { output.append(AttributedString("\n")) }
+        }
+        return output
+    }
 }
 
 // MARK: - 终端卡片（Bash，对齐 Web 端 inline-terminal）
 
 private struct TerminalCard: View {
+    @Environment(\.chatAPI) private var api
+    @Environment(\.chatSessionID) private var sessionID
+
     let input: [String: JSONValue]
     let result: ToolResultInfo?
     var running = false
@@ -4354,6 +4841,27 @@ private struct TerminalCard: View {
 
     @State private var expanded = false
     @State private var appliedInitialExpansion = false
+    @State private var outputText: String
+    @State private var truncated: Bool
+    @State private var loadingFullOutput = false
+    @State private var outputLoadError: String?
+    @State private var fullOutputTask: Task<Void, Never>?
+    @State private var activeOutputRequestID: UUID?
+    @State private var activeOutputRequestKey = ""
+
+    init(
+        input: [String: JSONValue],
+        result: ToolResultInfo?,
+        running: Bool = false,
+        initiallyExpanded: Bool = false
+    ) {
+        self.input = input
+        self.result = result
+        self.running = running
+        self.initiallyExpanded = initiallyExpanded
+        _outputText = State(initialValue: result?.text ?? "")
+        _truncated = State(initialValue: result?.truncated == true)
+    }
 
     private var command: String {
         input["command"]?.stringValue ?? input["cmd"]?.stringValue ?? ""
@@ -4377,13 +4885,28 @@ private struct TerminalCard: View {
                             .foregroundColor(termText)
                             .textSelection(.enabled)
                     }
-                    if let result, !result.text.isEmpty {
+                    if let result, !outputText.isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
-                            Text(result.text.count > 4000 ? String(result.text.prefix(4000)) + "\n…（已截断）" : result.text)
+                            Text(outputText.count > 12_000
+                                 ? String(outputText.prefix(12_000)) + "\n…（本页仅展示前 12000 字）"
+                                 : outputText)
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundColor(result.isError ? Color(red: 0.95, green: 0.55, blue: 0.5) : termText.opacity(0.85))
                                 .textSelection(.enabled)
                         }
+                    }
+                    if truncated, result != nil {
+                        fullOutputRow
+                    }
+                    if !outputText.isEmpty {
+                        Button {
+                            UIPasteboard.general.string = outputText
+                        } label: {
+                            Label("复制输出", systemImage: "doc.on.doc")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(termText.opacity(0.65))
                     }
                 }
                 .padding(.horizontal, 12)
@@ -4406,6 +4929,91 @@ private struct TerminalCard: View {
                 withAnimation(.easeInOut(duration: 0.15)) { expanded = true }
             }
         }
+        .onChange(of: result?.text) { _, text in
+            cancelFullOutputLoad()
+            outputText = text ?? ""
+            truncated = result?.truncated == true
+            outputLoadError = nil
+        }
+        .onChange(of: result?.toolUseId) { _, _ in
+            cancelFullOutputLoad()
+            outputText = result?.text ?? ""
+            truncated = result?.truncated == true
+            outputLoadError = nil
+        }
+        .onDisappear { cancelFullOutputLoad() }
+    }
+
+    private var fullOutputRow: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text(outputLoadError ?? "输出过长，服务端已省略部分内容")
+                .font(.system(size: 10))
+                .foregroundColor(outputLoadError == nil
+                    ? termText.opacity(0.60)
+                    : Color(red: 0.95, green: 0.55, blue: 0.5))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: loadFullOutput) {
+                if loadingFullOutput {
+                    ProgressView().controlSize(.small).tint(termText)
+                } else {
+                    Text(outputLoadError == nil ? "加载完整输出" : "重试")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(termText)
+            .disabled(loadingFullOutput)
+        }
+    }
+
+    private func loadFullOutput() {
+        guard let api, let result, !sessionID.isEmpty, !result.toolUseId.isEmpty else {
+            outputLoadError = "无法加载完整输出"
+            return
+        }
+        fullOutputTask?.cancel()
+        let requestID = UUID()
+        let toolUseID = result.toolUseId
+        let requestKey = "\(sessionID)\u{1F}\(toolUseID)"
+        activeOutputRequestID = requestID
+        activeOutputRequestKey = requestKey
+        loadingFullOutput = true
+        outputLoadError = nil
+        fullOutputTask = Task { @MainActor in
+            defer {
+                if activeOutputRequestID == requestID {
+                    loadingFullOutput = false
+                    activeOutputRequestID = nil
+                    activeOutputRequestKey = ""
+                    fullOutputTask = nil
+                }
+            }
+            do {
+                let loaded = try await api.fetchToolContent(id: sessionID, toolUseId: toolUseID)
+                try Task.checkCancellation()
+                guard activeOutputRequestID == requestID,
+                      activeOutputRequestKey == requestKey else { return }
+                guard loaded.toolUseId.isEmpty || loaded.toolUseId == toolUseID else {
+                    outputLoadError = "服务端返回了不匹配的工具结果"
+                    return
+                }
+                outputText = loaded.text
+                truncated = false
+            } catch {
+                guard !Task.isCancelled,
+                      activeOutputRequestID == requestID,
+                      activeOutputRequestKey == requestKey else { return }
+                outputLoadError = error.localizedDescription.isEmpty ? "加载失败，请重试" : error.localizedDescription
+            }
+        }
+    }
+
+    private func cancelFullOutputLoad() {
+        fullOutputTask?.cancel()
+        fullOutputTask = nil
+        activeOutputRequestID = nil
+        activeOutputRequestKey = ""
+        loadingFullOutput = false
     }
 
     private var header: some View {
@@ -4488,6 +5096,9 @@ struct TodoProgressBar: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("待办进度，已完成 \(completed) 项，共 \(todos.count) 项，当前：\(activeTask)")
+            .accessibilityHint(expanded ? "轻点收起待办列表" : "轻点展开待办列表")
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(todos.enumerated()), id: \.offset) { _, todo in
@@ -4549,6 +5160,16 @@ struct TodoProgressBar: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(todo.status == "in_progress" ? Theme.brand.opacity(0.1) : Color.clear)
         )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(todoStatusLabel(todo.status))：\(todo.content)")
+    }
+
+    private func todoStatusLabel(_ status: String) -> String {
+        switch status {
+        case "completed": return "已完成"
+        case "in_progress": return "进行中"
+        default: return "待处理"
+        }
     }
 }
 

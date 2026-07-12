@@ -10,7 +10,7 @@ struct SessionActivityAttributes: ActivityAttributes {
         var id: String
         /// 缩略标题（目录名或摘要，控制器侧已截断）。
         var title: String
-        /// claude / codex，用于快速区分并发会话。
+        /// claude / codex / opencode，用于快速区分并发会话。
         var providerRaw: String
         /// responding / permission / done
         var stateRaw: String
@@ -31,10 +31,20 @@ extension SessionActivityAttributes.SessionEntry {
     var needsPermission: Bool { stateRaw == "permission" }
     var isDone: Bool { stateRaw == "done" }
 
-    var providerText: String { providerRaw == "codex" ? "Codex" : "Claude" }
+    var providerText: String {
+        switch providerRaw.lowercased() {
+        case "codex": return "Codex"
+        case "opencode": return "OpenCode"
+        default: return "Claude"
+        }
+    }
 
     var providerSymbol: String {
-        providerRaw == "codex" ? "chevron.left.forwardslash.chevron.right" : "sparkles"
+        switch providerRaw.lowercased() {
+        case "codex": return "chevron.left.forwardslash.chevron.right"
+        case "opencode": return "terminal"
+        default: return "sparkles"
+        }
     }
 
     var statusText: String {

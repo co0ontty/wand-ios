@@ -41,6 +41,7 @@
 		B2000000000000000000AC05 /* WandWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC05 /* WandWidgetsBundle.swift */; };
 		B2000000000000000000AC06 /* WandWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B2000000000000000000F101 /* WandWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B2000000000000000000AC0A /* LocalNetworkPermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC0A /* LocalNetworkPermission.swift */; };
+		C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3000000000000000000BC01 /* WandProtocolTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -50,6 +51,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = B2000000000000000000F701;
 			remoteInfo = WandWidgets;
+		};
+		C3000000000000000000C101 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000FA00 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1000000000000000000F700;
+			remoteInfo = Wand;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -104,6 +112,8 @@
 		A100000000000000000000D1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A100000000000000000000E1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A100000000000000000000F1 /* Wand.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Wand.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C3000000000000000000BC01 /* WandProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandProtocolTests.swift; sourceTree = "<group>"; };
+		C3000000000000000000F101 /* WandTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WandTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -121,6 +131,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C3000000000000000000F301 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -129,6 +146,7 @@
 			children = (
 				A1000000000000000000F500 /* Wand */,
 				B2000000000000000000F501 /* WandWidgets */,
+				C3000000000000000000F501 /* WandTests */,
 				A1000000000000000000F600 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -177,6 +195,7 @@
 			children = (
 				A100000000000000000000F1 /* Wand.app */,
 				B2000000000000000000F101 /* WandWidgets.appex */,
+				C3000000000000000000F101 /* WandTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -188,6 +207,14 @@
 				B2000000000000000000BC06 /* Info.plist */,
 			);
 			path = WandWidgets;
+			sourceTree = "<group>";
+		};
+		C3000000000000000000F501 /* WandTests */ = {
+			isa = PBXGroup;
+			children = (
+				C3000000000000000000BC01 /* WandProtocolTests.swift */,
+			);
+			path = WandTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -230,6 +257,24 @@
 			productReference = B2000000000000000000F101 /* WandWidgets.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		C3000000000000000000F701 /* WandTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C3000000000000000000FB01 /* Build configuration list for PBXNativeTarget "WandTests" */;
+			buildPhases = (
+				C3000000000000000000F801 /* Sources */,
+				C3000000000000000000F301 /* Frameworks */,
+				C3000000000000000000F901 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C3000000000000000000D101 /* PBXTargetDependency */,
+			);
+			name = WandTests;
+			productName = WandTests;
+			productReference = C3000000000000000000F101 /* WandTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -245,6 +290,10 @@
 					};
 					B2000000000000000000F701 = {
 						CreatedOnToolsVersion = 15.0;
+					};
+					C3000000000000000000F701 = {
+						CreatedOnToolsVersion = 15.0;
+						TestTargetID = A1000000000000000000F700;
 					};
 				};
 			};
@@ -264,6 +313,7 @@
 			targets = (
 				A1000000000000000000F700 /* Wand */,
 				B2000000000000000000F701 /* WandWidgets */,
+				C3000000000000000000F701 /* WandTests */,
 			);
 		};
 /* End PBXProject section */
@@ -278,6 +328,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		B2000000000000000000F901 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C3000000000000000000F901 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -352,6 +409,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C3000000000000000000F801 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -359,6 +424,11 @@
 			isa = PBXTargetDependency;
 			target = B2000000000000000000F701 /* WandWidgets */;
 			targetProxy = B2000000000000000000C101 /* PBXContainerItemProxy */;
+		};
+		C3000000000000000000D101 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1000000000000000000F700 /* Wand */;
+			targetProxy = C3000000000000000000C101 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -535,6 +605,56 @@
 			};
 			name = Release;
 		};
+		C3000000000000000000D401 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.wand.app.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Wand.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Wand";
+			};
+			name = Debug;
+		};
+		C3000000000000000000D501 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.wand.app.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Wand.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Wand";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -552,6 +672,15 @@
 			buildConfigurations = (
 				B2000000000000000000D401 /* Debug */,
 				B2000000000000000000D501 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C3000000000000000000FB01 /* Build configuration list for PBXNativeTarget "WandTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C3000000000000000000D401 /* Debug */,
+				C3000000000000000000D501 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

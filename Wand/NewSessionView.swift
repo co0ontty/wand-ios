@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// 新建会话 —— 选项与区块顺序对齐 Web 端「新对话」弹窗（renderSessionModal）：
-/// Provider（Claude / Codex，品牌 logo 卡）→ 会话类型（结构化 / PTY）→ 模式
-/// （托管 / 全权限 / 自动编辑 / 标准 / 原生，codex 锁定全权限）→ 工作目录
+/// Provider（Claude / Codex / OpenCode）→ 会话类型（结构化 / PTY）→ 模式
+/// （托管 / 全权限 / 自动编辑 / 标准 / 原生；各 Provider 只开放自身支持项）→ 工作目录
 /// （最近路径 / 内置目录浏览器）；iOS 额外保留「首条消息」快捷输入。
 /// 创建成功后回调给列表页直接进入会话。
 struct NewSessionView: View {
@@ -15,17 +15,26 @@ struct NewSessionView: View {
     @State private var recentPaths: [RecentPath] = []
     @State private var provider = "claude"
     @State private var isStructured = true
-    // 默认托管模式（claude 全自动完成）；codex 切换时 clamp 成全权限。
+    // 默认托管模式（Claude / OpenCode 全自动完成）；Codex 切换时 clamp 成全权限。
     @State private var mode = "managed"
     @State private var availableModels: [ModelInfo] = []
     @State private var codexModels: [ModelInfo] = []
-    @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil)
+    @State private var opencodeModels: [ModelInfo] = []
+    @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil, opencode: nil)
     @State private var selectedModel = ""
+    /// Provider -> 用户在本页触碰过的模型。空字符串表示显式恢复
+    /// Provider 默认；缺少 key 表示不改服务端现值。保留跨 Provider 待保存值，
+    /// 避免快速切换时后一次 debounce 丢掉前一个 Provider 的模型选择。
+    @State private var pendingModelDefaults: [String: String] = [:]
     @State private var thinkingEffort = "off"
     @State private var firstMessage = ""
     @State private var creating = false
     @State private var errorMessage: String?
     @State private var showBrowser = false
+    /// 选择变化的保存任务。新任务会取消并等待旧任务完全退出，再发最终完整状态，
+    /// 避免快速切换时旧请求晚到、覆盖较新的默认值。
+    @State private var defaultsSaveTask: Task<Void, Never>?
+    @State private var didLoadDefaults = false
     @FocusState private var focusedField: InputField?
 
     private enum InputField: Hashable {
@@ -48,8 +57,16 @@ struct NewSessionView: View {
         SessionMode(id: "native", label: "原生", desc: "原生结构化输出"),
     ]
 
+    private var selectedProvider: WandProvider {
+        WandProvider(normalizing: provider)
+    }
+
     private var providerModels: [ModelInfo] {
-        provider == "codex" ? codexModels : availableModels
+        switch selectedProvider {
+        case .codex: codexModels
+        case .opencode: opencodeModels
+        case .claude: availableModels
+        }
     }
 
     private var thinkingLevels: [ThinkingEffortOption] {
@@ -61,9 +78,9 @@ struct NewSessionView: View {
         )
     }
 
-    /// codex 仅支持 full-access，对齐 Web getSupportedModes。
+    /// Provider 能力来自统一协议模型，避免页面内继续散落二元判断。
     private var supportedModes: Set<String> {
-        provider == "codex" ? ["full-access"] : Set(Self.sessionModes.map { $0.id })
+        selectedProvider.supportedModeIDs
     }
 
     var body: some View {
@@ -76,11 +93,13 @@ struct NewSessionView: View {
                         Picker("Provider", selection: $provider) {
                             Text("Claude").tag("claude")
                             Text("Codex").tag("codex")
+                            Text("OpenCode").tag("opencode")
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: provider) { _, newProvider in
                             mode = supportedMode(mode, provider: newProvider)
-                            selectedModel = ""
+                            selectedModel = pendingModelDefaults[WandProvider.normalize(newProvider)] ?? ""
+                            scheduleDefaultsSave()
                         }
 
                         sectionHeader("会话类型")
@@ -89,6 +108,9 @@ struct NewSessionView: View {
                             Text("PTY").tag(false)
                         }
                         .pickerStyle(.segmented)
+                        .onChange(of: isStructured) { _, _ in
+                            scheduleDefaultsSave()
+                        }
                         fieldHint(Self.sessionKindHint(provider: provider, structured: isStructured))
 
                         sectionHeader("模型与思考")
@@ -99,7 +121,7 @@ struct NewSessionView: View {
                                 icon: "cpu"
                             ) {
                                 Button {
-                                    selectedModel = ""
+                                    selectModel("")
                                 } label: {
                                     selectedModel.isEmpty
                                         ? Label("默认 · \(defaultModelLabel)", systemImage: "checkmark")
@@ -107,7 +129,7 @@ struct NewSessionView: View {
                                 }
                                 ForEach(providerModels.filter { $0.id != "default" }) { model in
                                     Button {
-                                        selectedModel = model.id
+                                        selectModel(model.id)
                                     } label: {
                                         selectedModel == model.id
                                             ? Label(model.label, systemImage: "checkmark")
@@ -199,28 +221,46 @@ struct NewSessionView: View {
             }
         }
         .navigationViewStyle(.stack)
+        .onChange(of: thinkingEffort) { _, _ in
+            scheduleDefaultsSave()
+        }
+        .onChange(of: mode) { _, _ in
+            scheduleDefaultsSave()
+        }
         .task {
             let config = try? await api.serverConfig()
             // 服务端是跨客户端的新建偏好唯一真源；请求失败时保留页面初始默认。
             if let configuredProvider = config?.defaultProvider {
-                provider = configuredProvider == "codex" ? "codex" : "claude"
+                provider = WandProvider(normalizing: configuredProvider).rawValue
             }
             if let defaultSessionKind = config?.defaultSessionKind {
                 isStructured = defaultSessionKind != "pty"
             }
             mode = supportedMode(config?.defaultMode ?? mode, provider: provider)
-            serverDefaultModels = config?.defaultModels ?? ProviderDefaultModels(claude: config?.defaultModel, codex: config?.defaultCodexModel)
+            if let config {
+                // defaultModelId 同时兼容 defaultModels 映射和三套旧版独立字段。
+                serverDefaultModels = ProviderDefaultModels(
+                    claude: config.defaultModelId(for: WandProvider.claude.rawValue),
+                    codex: config.defaultModelId(for: WandProvider.codex.rawValue),
+                    opencode: config.defaultModelId(for: WandProvider.opencode.rawValue)
+                )
+            }
             selectedModel = ""
             thinkingEffort = config?.defaultThinkingEffort ?? thinkingEffort
             if let response = try? await api.models() {
-                availableModels = response.models
-                codexModels = response.codexModels
-                serverDefaultModels = response.defaultModels ?? ProviderDefaultModels(
-                    claude: response.defaultModel,
-                    codex: response.defaultCodexModel
+                availableModels = response.models(for: WandProvider.claude.rawValue)
+                codexModels = response.models(for: WandProvider.codex.rawValue)
+                opencodeModels = response.models(for: WandProvider.opencode.rawValue)
+                serverDefaultModels = ProviderDefaultModels(
+                    claude: response.defaultModelId(for: WandProvider.claude.rawValue),
+                    codex: response.defaultModelId(for: WandProvider.codex.rawValue),
+                    opencode: response.defaultModelId(for: WandProvider.opencode.rawValue)
                 )
                 selectedModel = normalizedModel(selectedModel, provider: provider)
             }
+            // Provider / 类型 / 模式 / 模型偏好已完成 hydration；目录请求不应继续
+            // 阻塞用户选择的即时保存。
+            didLoadDefaults = true
             recentPaths = (try? await api.recentPaths()) ?? []
             if cwd.isEmpty {
                 if let first = recentPaths.first {
@@ -311,26 +351,40 @@ struct NewSessionView: View {
     }
 
     private func supportedMode(_ value: String, provider: String) -> String {
-        if provider == "codex" { return "full-access" }
-        return Self.sessionModes.contains(where: { $0.id == value }) ? value : "managed"
+        WandProvider(normalizing: provider).clamp(mode: value)
     }
 
     private func normalizedModel(_ value: String, provider: String) -> String {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty, normalized != "default" else { return "" }
-        let models = provider == "codex" ? codexModels : availableModels
+        let models: [ModelInfo]
+        switch WandProvider(normalizing: provider) {
+        case .codex: models = codexModels
+        case .opencode: models = opencodeModels
+        case .claude: models = availableModels
+        }
         guard !models.isEmpty else { return normalized }
         return models.contains(where: { $0.id == normalized }) ? normalized : ""
     }
 
     private func serverDefaultModel(for provider: String) -> String {
-        provider == "codex" ? (serverDefaultModels.codex ?? "") : (serverDefaultModels.claude ?? "")
+        switch WandProvider(normalizing: provider) {
+        case .codex: serverDefaultModels.codex ?? ""
+        case .opencode: serverDefaultModels.opencode ?? ""
+        case .claude: serverDefaultModels.claude ?? ""
+        }
     }
 
     private var selectedModelForRequest: String? {
         let normalized = normalizedModel(selectedModel, provider: provider)
         guard !normalized.isEmpty else { return nil }
         return providerModels.contains(where: { $0.id == normalized }) ? normalized : nil
+    }
+
+    private func selectModel(_ model: String) {
+        selectedModel = model
+        pendingModelDefaults[selectedProvider.rawValue] = model
+        scheduleDefaultsSave()
     }
 
     /// 模式卡（两列网格单元，标签 + 一句话说明），不支持的模式降透明度且不可点。
@@ -481,19 +535,37 @@ struct NewSessionView: View {
     /// 会话类型动态说明，文案对齐 Web getSessionKindHint。
     private static func sessionKindHint(provider: String, structured: Bool) -> String {
         if structured {
-            return provider == "codex"
-                ? "Codex JSONL 结构化聊天界面，支持多轮对话和工具调用展示。"
-                : "结构化聊天界面，支持多轮对话、流式输出和工具调用展示。"
+            switch WandProvider(normalizing: provider) {
+            case .codex:
+                return "Codex JSONL 结构化聊天界面，支持多轮对话和工具调用展示。"
+            case .opencode:
+                return "OpenCode JSON 结构化聊天界面，支持多轮对话和工具调用展示。"
+            case .claude:
+                return "结构化聊天界面，支持多轮对话、流式输出和工具调用展示。"
+            }
         }
-        return provider == "codex"
-            ? "Codex PTY 终端会话；terminal 是原始输出，chat 是解析后的阅读视图。"
-            : "原始 PTY 终端会话，支持持续交互、终端视图和权限流。"
+        switch WandProvider(normalizing: provider) {
+        case .codex:
+            return "Codex PTY 终端会话；terminal 是原始输出，chat 是解析后的阅读视图。"
+        case .opencode:
+            return "OpenCode TUI 终端会话，支持持续交互和终端视图。"
+        case .claude:
+            return "原始 PTY 终端会话，支持持续交互、终端视图和权限流。"
+        }
     }
 
     /// 模式动态说明，文案对齐 Web getToolModeHint。
     private static func modeHint(provider: String, mode: String) -> String {
-        if provider == "codex" {
+        switch WandProvider(normalizing: provider) {
+        case .codex:
             return "Codex 支持 PTY 终端与结构化（JSONL）两种会话，结构化模式按 full-access 启动。"
+        case .opencode:
+            if mode == "full-access" || mode == "managed" {
+                return "OpenCode 将自动批准未显式拒绝的权限；支持 TUI 与 JSON 结构化会话。"
+            }
+            return "OpenCode 使用自身权限配置；结构化模式会自动拒绝未批准的权限请求。"
+        case .claude:
+            break
         }
         switch mode {
         case "full-access": return "自动确认权限请求与高权限操作，适合你确认环境安全后的连续修改。"
@@ -510,44 +582,127 @@ struct NewSessionView: View {
         !cwd.trimmingCharacters(in: .whitespaces).isEmpty && !creating
     }
 
+    /// 保存的是当前完整选择，而不是单字段补丁。即使前一次请求已经开始，新任务也会先
+    /// 取消并等待它结束；最后一次完整写入因此总是获胜。
+    private func scheduleDefaultsSave() {
+        guard didLoadDefaults, !creating else { return }
+        let values = currentDefaults
+        let previous = defaultsSaveTask
+        previous?.cancel()
+        defaultsSaveTask = Task {
+            _ = await previous?.result
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+                try Task.checkCancellation()
+                try await persistDefaults(values)
+                commitPersistedDefaults(values)
+            } catch is CancellationError {
+                // 快速连续选择时的正常合并路径。
+            } catch {
+                // WandAPI 会把 URLSession 的取消包装成 network error；任务本身的取消
+                // 仍可辨认，不能把正常 debounce 当成失败提示给用户。
+                if !Task.isCancelled {
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private struct DefaultsSnapshot {
+        let provider: String
+        let sessionKind: String
+        let mode: String
+        let modelUpdates: [String: String]
+        let thinkingEffort: String
+    }
+
+    private var currentDefaults: DefaultsSnapshot {
+        let normalizedProvider = selectedProvider.rawValue
+        return DefaultsSnapshot(
+            provider: normalizedProvider,
+            sessionKind: isStructured ? "structured" : "pty",
+            mode: supportedMode(mode, provider: normalizedProvider),
+            modelUpdates: pendingModelDefaults,
+            thinkingEffort: thinkingEffort
+        )
+    }
+
+    private func persistDefaults(_ values: DefaultsSnapshot) async throws {
+        // 通用默认项一次写入；模型按 Provider 单独写，使 defaultModels 的
+        // 部分更新语义与 Android/Web 保持一致。
+        try await api.updateNewSessionDefaults(
+            mode: values.mode,
+            model: nil,
+            provider: values.provider,
+            thinkingEffort: values.thinkingEffort,
+            defaultProvider: values.provider,
+            defaultSessionKind: values.sessionKind
+        )
+        for provider in values.modelUpdates.keys.sorted() {
+            try Task.checkCancellation()
+            guard let model = values.modelUpdates[provider] else { continue }
+            // 空字符串会明确下发，表示恢复该 Provider 默认模型。
+            try await api.updateNewSessionDefaults(model: model, provider: provider)
+        }
+    }
+
+    /// 只清理与该次快照仍一致的 pending 值；若请求期间用户又选了
+    /// 新模型，新值会继续留待下一次保存。同步本地默认供切回 Provider 时立即显示。
+    private func commitPersistedDefaults(_ values: DefaultsSnapshot) {
+        var claude = serverDefaultModels.claude
+        var codex = serverDefaultModels.codex
+        var opencode = serverDefaultModels.opencode
+        for (provider, model) in values.modelUpdates {
+            switch WandProvider(normalizing: provider) {
+            case .claude: claude = model
+            case .codex: codex = model
+            case .opencode: opencode = model
+            }
+            if pendingModelDefaults[provider] == model {
+                pendingModelDefaults.removeValue(forKey: provider)
+            }
+        }
+        serverDefaultModels = ProviderDefaultModels(
+            claude: claude,
+            codex: codex,
+            opencode: opencode
+        )
+    }
+
     private func create() {
         guard canCreate else { return }
         creating = true
         errorMessage = nil
         let path = cwd.trimmingCharacters(in: .whitespaces)
         let prompt = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        // codex 仅支持 full-access，对齐 Web getSafeModeForTool 的 clamp。
-        let effectiveMode = provider == "codex" ? "full-access" : mode
+        let defaults = currentDefaults
+        let effectiveMode = defaults.mode
         let effectiveModel = selectedModelForRequest
+        let pendingDefaultsSave = defaultsSaveTask
+        pendingDefaultsSave?.cancel()
         Task {
             do {
-                // 创建前等待完整偏好落到服务端，让 Web / Android / macOS
-                // 下次新建时读取到同一组选项。
-                try await api.updateNewSessionDefaults(
-                    mode: effectiveMode,
-                    model: selectedModel.isEmpty ? nil : selectedModel,
-                    provider: provider,
-                    thinkingEffort: thinkingEffort,
-                    defaultProvider: provider,
-                    defaultSessionKind: isStructured ? "structured" : "pty"
-                )
+                // 先等即时保存任务完全退出，再以点击创建时的完整快照兜底写一次。
+                _ = await pendingDefaultsSave?.result
+                try await persistDefaults(defaults)
+                commitPersistedDefaults(defaults)
                 let snapshot: SessionSnapshot
-                if isStructured {
+                if defaults.sessionKind == "structured" {
                     snapshot = try await api.createStructuredSession(
-                        provider: provider,
+                        provider: defaults.provider,
                         cwd: path,
                         mode: effectiveMode,
                         model: effectiveModel,
-                        thinkingEffort: thinkingEffort,
+                        thinkingEffort: defaults.thinkingEffort,
                         prompt: prompt.isEmpty ? nil : prompt
                     )
                 } else {
                     snapshot = try await api.createPtySession(
-                        provider: provider,
+                        provider: defaults.provider,
                         cwd: path,
                         mode: effectiveMode,
                         model: effectiveModel,
-                        thinkingEffort: thinkingEffort,
+                        thinkingEffort: defaults.thinkingEffort,
                         initialInput: prompt.isEmpty ? nil : prompt
                     )
                 }

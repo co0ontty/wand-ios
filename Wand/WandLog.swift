@@ -50,10 +50,12 @@ final class WandLog {
         let stamp = Self.lineFormatter
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        let buildStamp = Bundle.main.object(forInfoDictionaryKey: "WandBuildStamp") as? String
 
         var lines: [String] = []
         lines.append("Wand iOS 日志导出")
-        lines.append("App 版本: v\(appVersion) (\(build))")
+        let displayVersion = buildStamp.flatMap { $0.isEmpty ? nil : "\(appVersion)+\($0)" } ?? appVersion
+        lines.append("App 版本: v\(displayVersion) (\(build))")
         lines.append("系统: iOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
         lines.append("导出时间: \(Self.headerFormatter.string(from: Date()))")
         lines.append("时间窗口: 最近 \(minutes) 分钟，共 \(recent.count) 条")

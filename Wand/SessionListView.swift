@@ -1232,22 +1232,38 @@ private struct PtySessionView: View {
     }
 
     private var titleStatus: some View {
-        VStack(spacing: 0) {
-            Text(session.displayTitle)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(Color.white.opacity(0.88))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: 205)
-            Text(session.cwd?.isEmpty == false ? session.cwd! : "未设置工作目录")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundColor(Color.white.opacity(0.58))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 205)
+        HStack(spacing: 8) {
+            let provider = store.snapshot?.provider ?? session.provider
+            let providerInfo = WandProvider(normalizing: provider)
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(providerInfo == .codex ? Theme.codex.opacity(0.24) : Theme.brand.opacity(0.22))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.white.opacity(0.16), lineWidth: 0.8)
+                BrandLogoShape(provider: provider)
+                    .fill(Color.white.opacity(0.9))
+                    .frame(width: 14, height: 14)
+            }
+            .frame(width: 26, height: 26)
+
+            VStack(spacing: 0) {
+                Text(session.displayTitle)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Color.white.opacity(0.88))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 175)
+                Text(session.cwd?.isEmpty == false ? session.cwd! : "未设置工作目录")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(Color.white.opacity(0.58))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 175)
+            }
         }
         .shadow(color: Color.black.opacity(0.26), radius: 3, x: 0, y: 1)
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(WandProvider(normalizing: store.snapshot?.provider ?? session.provider).title)，\(session.displayTitle)")
     }
 }
 
@@ -1359,7 +1375,7 @@ private struct SessionRow: View {
     }
 
     private var providerTint: Color {
-        session.provider == "codex" ? Theme.codex : Theme.brand
+        WandProvider(normalizing: session.provider) == .codex ? Theme.codex : Theme.brand
     }
 
     private static let isoFormatter = ISO8601DateFormatter()
@@ -1457,7 +1473,7 @@ private struct HistorySessionRow: View {
     }
 
     private var providerTint: Color {
-        history.provider == "codex" ? Theme.codex : Theme.brand
+        WandProvider(normalizing: history.provider) == .codex ? Theme.codex : Theme.brand
     }
 
     // 复用单例 formatter：构造 ISO8601DateFormatter / RelativeDateTimeFormatter 很贵，

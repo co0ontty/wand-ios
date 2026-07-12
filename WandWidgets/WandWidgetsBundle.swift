@@ -4,8 +4,7 @@ import ActivityKit
 
 /// WandWidgets 扩展：会话 Live Activity（灵动岛 + 锁屏长条）。
 /// 所有活跃会话聚合在同一条活动里，条内逐会话显示缩略标题 + 状态。
-/// 扩展 deployment target 是 iOS 16.1，无需再做可用性守卫；
-/// 主 App（iOS 15）侧的守卫在 SessionLiveActivityController 里。
+/// 扩展与主 App 的 deployment target 均为 iOS 26，无需再做旧系统可用性守卫。
 @main
 struct WandWidgetsBundle: WidgetBundle {
     var body: some Widget {

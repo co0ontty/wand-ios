@@ -5,6 +5,81 @@ import SwiftUI
 /// 字段名与 src/types.ts 一一对应；全部 optional 化 + 容错解码，
 /// 服务端新增字段或个别字段形状变化时客户端不至于整体解析失败。
 
+// MARK: - Provider 能力
+
+/// Wand 支持的 CLI provider。与 provider 相关的名称、runner 和模式约束
+/// 集中在这里，避免 UI 各自维护 Claude/Codex 二分判断而漏掉 OpenCode。
+enum WandProvider: String, CaseIterable, Identifiable {
+    case claude
+    case codex
+    case opencode
+
+    var id: String { rawValue }
+
+    /// 对旧数据、大小写与未知 provider 做安全归一；未知值按 Claude 处理。
+    init(normalizing value: String?) {
+        let raw = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        switch raw {
+        case Self.codex.rawValue:
+            self = .codex
+        case Self.opencode.rawValue, "open-code", "open_code":
+            self = .opencode
+        default:
+            self = .claude
+        }
+    }
+
+    /// 给仍使用 String 状态的界面/API 一个统一的归一入口。
+    static func normalize(_ value: String?) -> String {
+        WandProvider(normalizing: value).rawValue
+    }
+
+    var title: String {
+        switch self {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .opencode: return "OpenCode"
+        }
+    }
+
+    var structuredRunner: String {
+        switch self {
+        case .claude: return "claude-cli-print"
+        case .codex: return "codex-cli-exec"
+        case .opencode: return "opencode-cli-run"
+        }
+    }
+
+    /// 与 Web `getSupportedModes` / Android `supportedModeIds` 保持一致。
+    var supportedModeIDs: Set<String> {
+        switch self {
+        case .claude:
+            return ["default", "full-access", "auto-edit", "native", "managed"]
+        case .codex:
+            return ["full-access"]
+        case .opencode:
+            return ["default", "full-access", "managed"]
+        }
+    }
+
+    /// 将持久化的模式 clamp 到 provider 的有效集合。
+    /// 优先使用当前值，其次使用服务端 fallback，最后使用 provider 安全默认。
+    func clamp(mode value: String?, fallback: String? = nil) -> String {
+        let requested = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if supportedModeIDs.contains(requested) { return requested }
+
+        let configured = fallback?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if supportedModeIDs.contains(configured) { return configured }
+
+        // 与 Web getSafeModeForTool 一致：无效配置必须回落到权限最保守的
+        // supported[0]。不能把未知/未来模式静默升级成 managed 自动执行。
+        if self == .codex { return "full-access" }
+        return "default"
+    }
+}
+
 // MARK: - 任意 JSON 值
 
 /// 工具调用的 input 是任意 JSON 对象（types.ts: Record<string, unknown>），
@@ -67,6 +142,131 @@ enum JSONValue: Decodable {
     var objectValue: [String: JSONValue]? {
         if case .object(let o) = self { return o }
         return nil
+    }
+
+    /// 用于未知协议块和不认识的结构化 content part。限制深度、条数、
+    /// 单字符串和最终长度，并遮罩常见敏感键，避免把密钥或无界载荷直接铺到 UI。
+    fileprivate func safePayloadText(maxCharacters: Int = 32_768) -> String {
+        let object = safeFoundationObject(depth: 0)
+        let text = Self.serializedText(object)
+        guard text.count > maxCharacters else { return text }
+        return String(text.prefix(maxCharacters)) + "\n…[载荷已截断]"
+    }
+
+    /// tool_result 本身就是用户可查看/复制的输出，不能复用未知块的 8K/32K
+    /// 安全摘要上限。展示层自己限长，这里保留完整文本供复制。
+    fileprivate func fullPayloadText() -> String {
+        Self.serializedText(fullFoundationObject())
+    }
+
+    private static func serializedText(_ object: Any) -> String {
+        if JSONSerialization.isValidJSONObject(object),
+           let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+           let encoded = String(data: data, encoding: .utf8) {
+            return encoded
+        }
+        if let string = object as? String { return string }
+        return String(describing: object)
+    }
+
+    private func fullFoundationObject() -> Any {
+        switch self {
+        case .string(let value): return value
+        case .number(let value): return value.isFinite ? value : String(value)
+        case .bool(let value): return value
+        case .null: return NSNull()
+        case .array(let values): return values.map { $0.fullFoundationObject() }
+        case .object(let values):
+            return values.mapValues { $0.fullFoundationObject() }
+        }
+    }
+
+    private func safeFoundationObject(depth: Int) -> Any {
+        guard depth < 10 else { return "[已达最大深度]" }
+        switch self {
+        case .string(let value):
+            let value = Self.redactSensitiveText(value)
+            let limit = 8_192
+            return value.count > limit ? String(value.prefix(limit)) + "…[已截断]" : value
+        case .number(let value):
+            return value.isFinite ? value : String(value)
+        case .bool(let value):
+            return value
+        case .null:
+            return NSNull()
+        case .array(let values):
+            let limit = 128
+            var result = values.prefix(limit).map { $0.safeFoundationObject(depth: depth + 1) }
+            if values.count > limit { result.append("…[其余 \(values.count - limit) 项已省略]") }
+            return result
+        case .object(let values):
+            let limit = 128
+            var result: [String: Any] = [:]
+            for key in values.keys.sorted().prefix(limit) {
+                if Self.isSensitiveKey(key) {
+                    result[key] = "••••••"
+                } else if let value = values[key] {
+                    result[key] = value.safeFoundationObject(depth: depth + 1)
+                }
+            }
+            if values.count > limit { result["_wand_truncated"] = "\(values.count - limit) 个字段已省略" }
+            return result
+        }
+    }
+
+    private static func isSensitiveKey(_ key: String) -> Bool {
+        let normalized = key.lowercased().filter { $0.isLetter || $0.isNumber }
+        return ["password", "passwd", "secret", "token", "authorization", "cookie", "credential", "privatekey", "apikey"]
+            .contains { normalized.contains($0) }
+    }
+
+    /// 未知块中的敏感值不一定放在同名 key 下，也可能藏在 debug/args/URL
+    /// 字符串中。在有界摘要入 UI 前再扫一遍常见 credential 形状。
+    private static func redactSensitiveText(_ value: String) -> String {
+        var output = value
+        let rules: [(pattern: String, replacement: String)] = [
+            (#"(?i)\b(?:Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{6,}"#, "Credential ••••••"),
+            (#"(?i)\b((?:[A-Z0-9]+[_-])*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|COOKIE|CREDENTIAL|PRIVATE[_-]?KEY)(?:[_-][A-Z0-9]+)*)\s*([:=])\s*([^\s,&;\]\}\"]+)"#, "$1$2••••••"),
+            (#"(?i)([?&](?:access_token|api[_-]?key|token|secret|password|credential)=)[^&#\s]+"#, "$1••••••"),
+            (#"(?i)\b(?:sk-(?:ant-)?|gh[pousr]_|xox[baprs]-)[A-Za-z0-9._-]{8,}"#, "••••••"),
+            (#"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"#, "••••••"),
+        ]
+        for rule in rules {
+            guard let regex = try? NSRegularExpression(pattern: rule.pattern) else { continue }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = regex.stringByReplacingMatches(
+                in: output,
+                range: range,
+                withTemplate: rule.replacement
+            )
+        }
+        return output
+    }
+}
+
+/// tool_result.content 兼容纯字符串、Responses/OpenCode/MCP content parts 及嵌套对象。
+/// 对象优先抽取常见文本键；无已知文本键时保留完整 JSON 文本。
+private func structuredContentText(_ value: JSONValue) -> String {
+    switch value {
+    case .null:
+        return ""
+    case .string(let text):
+        return text
+    case .number, .bool:
+        return value.summaryText
+    case .array(let values):
+        return values
+            .lazy
+            .map(structuredContentText)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n")
+    case .object(let object):
+        for key in ["text", "output_text", "input_text", "message", "summary"] {
+            guard let nested = object[key] else { continue }
+            let extracted = structuredContentText(nested)
+            if !extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return extracted }
+        }
+        return value.fullPayloadText()
     }
 }
 
@@ -314,7 +514,8 @@ enum ContentBlock: Decodable {
     case thinking(thinking: String, subagent: SubagentMeta?)
     case toolUse(id: String, name: String, description: String?, input: [String: JSONValue], subagent: SubagentMeta?)
     case toolResult(toolUseId: String, text: String, isError: Bool, truncated: Bool, subagent: SubagentMeta?)
-    case unknown
+    /// 协议升级兜底：保留类型和有界、脱敏的原始载荷，UI 可明确告知用户。
+    case unknown(type: String, payload: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, text, thinking, id, name, description, input, content
@@ -348,28 +549,22 @@ enum ContentBlock: Decodable {
                 subagent: subagent
             )
         case "tool_result":
-            // content: string | Array<{type, text?, ...}> —— 数组时抽取所有 text 拼接。
-            var text = ""
-            if let s = try? c.decode(String.self, forKey: .content) {
-                text = s
-            } else if let parts = try? c.decode([JSONValue].self, forKey: .content) {
-                var pieces: [String] = []
-                for part in parts {
-                    if case .object(let obj) = part, case .string(let t)? = obj["text"] {
-                        pieces.append(t)
-                    }
-                }
-                text = pieces.joined(separator: "\n")
-            }
+            // content: string | content parts | object。兼容 Responses/OpenCode/MCP 的常见文本键。
+            let content = (try? c.decode(JSONValue.self, forKey: .content)) ?? .null
             self = .toolResult(
                 toolUseId: (try? c.decode(String.self, forKey: .toolUseId)) ?? "",
-                text: text,
+                text: structuredContentText(content),
                 isError: (try? c.decode(Bool.self, forKey: .isError)) ?? false,
                 truncated: (try? c.decode(Bool.self, forKey: .truncated)) ?? false,
                 subagent: subagent
             )
         default:
-            self = .unknown
+            let rawPayload = (try? JSONValue(from: decoder)) ?? .null
+            let normalizedType = type.trimmingCharacters(in: .whitespacesAndNewlines)
+            self = .unknown(
+                type: String((normalizedType.isEmpty ? "unknown" : normalizedType).prefix(128)),
+                payload: rawPayload.safePayloadText()
+            )
         }
     }
 }
@@ -485,7 +680,7 @@ struct SessionSnapshot: Decodable, Identifiable {
     let autoApprovePermissions: Bool?
 
     var isStructured: Bool { (sessionKind ?? "pty") == "structured" }
-    var providerLabel: String { provider == "codex" ? "Codex" : "Claude" }
+    var providerLabel: String { WandProvider(normalizing: provider).title }
 
     /// 列表标题：摘要 > 当前任务 > cwd 末段。
     var displayTitle: String {
@@ -526,6 +721,38 @@ struct BlocksPage: Decodable {
     let blocks: [ContentBlock]
     let blockOffset: Int
     let blockTotal: Int
+}
+
+/// GET /api/sessions/:id/tool-content/:toolUseId 的完整工具结果。
+/// 服务端返回的 `content` 可为字符串或结构化 content parts，模型层统一为 text。
+struct ToolContentResponse: Decodable {
+    let toolUseId: String
+    let text: String
+    let isError: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case content
+        case toolUseId = "tool_use_id"
+        case isError = "is_error"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        toolUseId = (try? container.decode(String.self, forKey: .toolUseId)) ?? ""
+        isError = (try? container.decode(Bool.self, forKey: .isError)) ?? false
+        let content = (try? container.decode(JSONValue.self, forKey: .content)) ?? .null
+        text = structuredContentText(content)
+    }
+
+    var contentBlock: ContentBlock {
+        .toolResult(
+            toolUseId: toolUseId,
+            text: text,
+            isError: isError,
+            truncated: false,
+            subagent: nil
+        )
+    }
 }
 
 // MARK: - 历史会话
@@ -759,15 +986,51 @@ struct ThinkingEffortSlider: View {
 struct ModelsResponse: Decodable {
     let models: [ModelInfo]
     let codexModels: [ModelInfo]
+    let opencodeModels: [ModelInfo]
     let defaultModel: String?
     let defaultCodexModel: String?
+    let defaultOpenCodeModel: String?
     let defaultModels: ProviderDefaultModels?
 
-    func defaultModelId(for provider: String) -> String {
-        if provider == "codex" {
-            return defaultModels?.codex ?? defaultCodexModel ?? ""
+    private enum CodingKeys: String, CodingKey {
+        case models, codexModels, opencodeModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultModels
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // 旧服务端可能没有 Codex/OpenCode 列表，单个 provider 形状异常也不应
+        // 让整个 /api/models 失败。
+        models = (try? container.decode([ModelInfo].self, forKey: .models)) ?? []
+        codexModels = (try? container.decode([ModelInfo].self, forKey: .codexModels)) ?? []
+        opencodeModels = (try? container.decode([ModelInfo].self, forKey: .opencodeModels)) ?? []
+        defaultModel = try? container.decode(String.self, forKey: .defaultModel)
+        defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)
+        defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
+        defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
+    }
+
+    func models(for provider: String) -> [ModelInfo] {
+        models(for: WandProvider(normalizing: provider))
+    }
+
+    func models(for provider: WandProvider) -> [ModelInfo] {
+        switch provider {
+        case .claude: return models
+        case .codex: return codexModels
+        case .opencode: return opencodeModels
         }
-        return defaultModels?.claude ?? defaultModel ?? ""
+    }
+
+    func defaultModelId(for provider: String) -> String {
+        switch WandProvider(normalizing: provider) {
+        case .claude:
+            return defaultModels?.claude ?? defaultModel ?? ""
+        case .codex:
+            return defaultModels?.codex ?? defaultCodexModel ?? ""
+        case .opencode:
+            return defaultModels?.opencode ?? defaultOpenCodeModel ?? ""
+        }
     }
 }
 
@@ -808,6 +1071,7 @@ struct ServerConfigInfo: Decodable {
     let defaultMode: String?
     let defaultModel: String?
     let defaultCodexModel: String?
+    let defaultOpenCodeModel: String?
     let defaultModels: ProviderDefaultModels?
     let defaultThinkingEffort: String?
     let cardDefaults: CardExpandDefaults?
@@ -816,17 +1080,70 @@ struct ServerConfigInfo: Decodable {
     let updateAvailable: Bool?
     let updateChannel: String?
 
+    private enum CodingKeys: String, CodingKey {
+        case defaultCwd, defaultProvider, defaultSessionKind, defaultMode
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultModels
+        case defaultThinkingEffort, cardDefaults
+        case currentVersion, latestVersion, updateAvailable, updateChannel
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        defaultCwd = try? container.decode(String.self, forKey: .defaultCwd)
+        defaultProvider = try? container.decode(String.self, forKey: .defaultProvider)
+        defaultSessionKind = try? container.decode(String.self, forKey: .defaultSessionKind)
+        defaultMode = try? container.decode(String.self, forKey: .defaultMode)
+        defaultModel = try? container.decode(String.self, forKey: .defaultModel)
+        defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)
+        defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
+        defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
+        defaultThinkingEffort = try? container.decode(String.self, forKey: .defaultThinkingEffort)
+        cardDefaults = try? container.decode(CardExpandDefaults.self, forKey: .cardDefaults)
+        currentVersion = try? container.decode(String.self, forKey: .currentVersion)
+        latestVersion = try? container.decode(String.self, forKey: .latestVersion)
+        updateAvailable = try? container.decode(Bool.self, forKey: .updateAvailable)
+        updateChannel = try? container.decode(String.self, forKey: .updateChannel)
+    }
+
     func defaultModelId(for provider: String) -> String {
-        if provider == "codex" {
+        switch WandProvider(normalizing: provider) {
+        case .claude:
+            return defaultModels?.claude ?? defaultModel ?? ""
+        case .codex:
             return defaultModels?.codex ?? defaultCodexModel ?? ""
+        case .opencode:
+            return defaultModels?.opencode ?? defaultOpenCodeModel ?? ""
         }
-        return defaultModels?.claude ?? defaultModel ?? ""
     }
 }
 
 struct ProviderDefaultModels: Decodable {
     let claude: String?
     let codex: String?
+    let opencode: String?
+
+    private enum CodingKeys: String, CodingKey { case claude, codex, opencode }
+
+    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil) {
+        self.claude = claude
+        self.codex = codex
+        self.opencode = opencode
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        claude = try? container.decode(String.self, forKey: .claude)
+        codex = try? container.decode(String.self, forKey: .codex)
+        opencode = try? container.decode(String.self, forKey: .opencode)
+    }
+
+    func modelId(for provider: String) -> String? {
+        switch WandProvider(normalizing: provider) {
+        case .claude: return claude
+        case .codex: return codex
+        case .opencode: return opencode
+        }
+    }
 }
 
 /// 结构化聊天卡片的全局默认展开状态（由服务端 /api/config.cardDefaults 下发）。

@@ -5,12 +5,16 @@ import SwiftUI
 // SwiftUI Path 命令（圆弧已展开为贝塞尔曲线）。填充色由调用方 .fill(color) 决定。
 // 用法：BrandLogoShape(provider: session.provider).fill(tint).frame(width: 21, height: 21)
 
-/// 按 provider 渲染品牌 logo：claude 星芒（Anthropic）/ codex 六角结（OpenAI）。
+/// 按 provider 渲染品牌 logo：Claude 星芒 / Codex 六角结 / OpenCode 终端代码标记。
 struct BrandLogoShape: Shape {
     let provider: String?
 
     func path(in rect: CGRect) -> Path {
-        provider == "codex" ? Self.codexPath(in: rect) : Self.claudePath(in: rect)
+        switch WandProvider(normalizing: provider) {
+        case .claude: return Self.claudePath(in: rect)
+        case .codex: return Self.codexPath(in: rect)
+        case .opencode: return Self.openCodePath(in: rect)
+        }
     }
 
     /// Claude（Anthropic 星芒）。
@@ -269,6 +273,33 @@ struct BrandLogoShape: Shape {
         p.addLine(to: CGPoint(x: 12.0156 * w, y: 14.9967 * h))
         p.addLine(to: CGPoint(x: 9.4089 * w, y: 13.497 * h))
         p.closeSubpath()
+        return p
+    }
+
+    /// OpenCode（终端代码标记），与 Android BrandLogos 的 24x24 路径一致。
+    private static func openCodePath(in rect: CGRect) -> Path {
+        let w = rect.width / 24.0
+        let h = rect.height / 24.0
+        var p = Path()
+
+        // 终端外框（使用 even-odd 形状时才能挖空）。这里直接画四条边，
+        // 保证调用方沿用 Shape.fill 时中心仍为透明。
+        p.addRect(CGRect(x: 3 * w, y: 4 * h, width: 18 * w, height: 2 * h))
+        p.addRect(CGRect(x: 3 * w, y: 18 * h, width: 18 * w, height: 2 * h))
+        p.addRect(CGRect(x: 3 * w, y: 6 * h, width: 2 * w, height: 12 * h))
+        p.addRect(CGRect(x: 19 * w, y: 6 * h, width: 2 * w, height: 12 * h))
+
+        // `>` 提示符。
+        p.move(to: CGPoint(x: 7 * w, y: 9 * h))
+        p.addLine(to: CGPoint(x: 10 * w, y: 12 * h))
+        p.addLine(to: CGPoint(x: 7 * w, y: 15 * h))
+        p.addLine(to: CGPoint(x: 8.4 * w, y: 16.4 * h))
+        p.addLine(to: CGPoint(x: 12.8 * w, y: 12 * h))
+        p.addLine(to: CGPoint(x: 8.4 * w, y: 7.6 * h))
+        p.closeSubpath()
+
+        // 输入光标。
+        p.addRect(CGRect(x: 13 * w, y: 13 * h, width: 4 * w, height: 2 * h))
         return p
     }
 }

@@ -234,7 +234,11 @@ struct SettingsView: View {
 
     private var appVersion: String {
         let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        return "v\(short)"
+        guard let stamp = Bundle.main.object(forInfoDictionaryKey: "WandBuildStamp") as? String,
+              !stamp.isEmpty else {
+            return "v\(short)"
+        }
+        return "v\(short)+\(stamp)"
     }
 
     private func refreshNotificationStatus() async {
