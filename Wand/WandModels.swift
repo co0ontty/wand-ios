@@ -1,5 +1,4 @@
 import Foundation
-import SwiftUI
 
 /// wand 服务端 REST / WebSocket 协议的 Codable 模型。
 /// 字段名与 src/types.ts 一一对应；全部 optional 化 + 容错解码，
@@ -333,6 +332,15 @@ struct TodoItem {
     let content: String
     let status: String
     let activeForm: String?
+
+    /// 协议明确标记 in_progress 时优先使用；只有 pending/completed 二态时，
+    /// 把首个 pending 推导为正在执行，供两种协议保持一致的展示语义。
+    static func activeIndex(in todos: [TodoItem]) -> Int? {
+        if let explicit = todos.firstIndex(where: { $0.status == "in_progress" }) {
+            return explicit
+        }
+        return todos.firstIndex(where: { $0.status == "pending" })
+    }
 
     static func parse(input: [String: JSONValue]) -> [TodoItem] {
         guard let items = jsonArrayField(input, "todos") else { return [] }
@@ -866,7 +874,7 @@ struct ThinkingEffortOption: Identifiable {
 
 func thinkingEffortOptions(provider: String, selectedModel: String?, defaultModel: String?, models: [ModelInfo]) -> [ThinkingEffortOption] {
     let legacy = [
-        ThinkingEffortOption(id: "off", label: "关闭", shortLabel: "关", menuLabel: "关闭"),
+        ThinkingEffortOption(id: "off", label: "自动", shortLabel: "自", menuLabel: "自动（模型默认）"),
         ThinkingEffortOption(id: "standard", label: "低", shortLabel: "低", menuLabel: "低（low）"),
         ThinkingEffortOption(id: "deep", label: "中", shortLabel: "中", menuLabel: "中（medium）"),
         ThinkingEffortOption(id: "max", label: "高", shortLabel: "高", menuLabel: "高（max）"),
@@ -893,94 +901,6 @@ func thinkingEffortOptions(provider: String, selectedModel: String?, defaultMode
         return ThinkingEffortOption(id: id, label: label, shortLabel: label, menuLabel: "\(label)（\(effort)）")
     }
     return [ThinkingEffortOption(id: "off", label: "自动", shortLabel: "自", menuLabel: "自动（模型默认）")] + dynamic
-}
-
-struct ThinkingEffortSlider: View {
-    let options: [ThinkingEffortOption]
-    let selection: String
-    let accent: Color
-    let onSelect: (String) -> Void
-
-    @State private var previewIndex: Int?
-
-    private var selectedIndex: Int {
-        options.firstIndex { $0.id == selection } ?? 0
-    }
-
-    private var currentIndex: Int {
-        min(max(previewIndex ?? selectedIndex, 0), max(options.count - 1, 0))
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 8) {
-                Label("思考深度", systemImage: "brain")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
-                Spacer(minLength: 8)
-                Text(options.indices.contains(currentIndex) ? options[currentIndex].menuLabel : "自动")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundColor(accent)
-                    .lineLimit(1)
-            }
-            GeometryReader { proxy in
-                let inset: CGFloat = 9
-                let trackWidth = max(0, proxy.size.width - inset * 2)
-                let denominator = max(options.count - 1, 1)
-                let progress = CGFloat(currentIndex) / CGFloat(denominator)
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.secondary.opacity(0.20)).frame(height: 4)
-                    Capsule()
-                        .fill(accent)
-                        .frame(height: 4)
-                        .scaleEffect(x: progress, anchor: .leading)
-                    ForEach(options.indices, id: \.self) { index in
-                        let x = CGFloat(index) / CGFloat(denominator) * trackWidth
-                        Circle()
-                            .fill(index <= currentIndex ? accent : Color.secondary.opacity(0.34))
-                            .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 1.5))
-                            .frame(width: 8, height: 8)
-                            .offset(x: x - 4)
-                    }
-                    Circle()
-                        .fill(accent)
-                        .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
-                        .shadow(color: accent.opacity(0.25), radius: 2, y: 1)
-                        .frame(width: 18, height: 18)
-                        .offset(x: progress * trackWidth - 9)
-                }
-                .frame(height: 44)
-                .padding(.horizontal, inset)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            previewIndex = nearestIndex(x: value.location.x - inset, width: trackWidth)
-                        }
-                        .onEnded { value in
-                            let index = nearestIndex(x: value.location.x - inset, width: trackWidth)
-                            previewIndex = nil
-                            if options.indices.contains(index) { onSelect(options[index].id) }
-                        }
-                )
-            }
-            .frame(height: 44)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("思考深度")
-        .accessibilityValue(options.indices.contains(currentIndex) ? options[currentIndex].menuLabel : "自动")
-        .accessibilityAdjustableAction { direction in
-            let delta = direction == .increment ? 1 : -1
-            let index = min(max(selectedIndex + delta, 0), max(options.count - 1, 0))
-            if options.indices.contains(index) { onSelect(options[index].id) }
-        }
-    }
-
-    private func nearestIndex(x: CGFloat, width: CGFloat) -> Int {
-        guard options.count > 1, width > 0 else { return 0 }
-        let progress = min(max(x / width, 0), 1)
-        return Int((progress * CGFloat(options.count - 1)).rounded())
-    }
 }
 
 struct ModelsResponse: Decodable {

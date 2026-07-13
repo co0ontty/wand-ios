@@ -35,6 +35,7 @@ struct NewSessionView: View {
     /// 避免快速切换时旧请求晚到、覆盖较新的默认值。
     @State private var defaultsSaveTask: Task<Void, Never>?
     @State private var didLoadDefaults = false
+    @State private var didLoadModels = false
     @FocusState private var focusedField: InputField?
 
     private enum InputField: Hashable {
@@ -99,6 +100,7 @@ struct NewSessionView: View {
                         .onChange(of: provider) { _, newProvider in
                             mode = supportedMode(mode, provider: newProvider)
                             selectedModel = pendingModelDefaults[WandProvider.normalize(newProvider)] ?? ""
+                            normalizeThinkingEffortIfNeeded()
                             scheduleDefaultsSave()
                         }
 
@@ -137,17 +139,21 @@ struct NewSessionView: View {
                                     }
                                 }
                             }
-                            ThinkingEffortSlider(
-                                options: thinkingLevels,
-                                selection: thinkingEffort,
-                                accent: Theme.brand
-                            ) { effort in
-                                thinkingEffort = effort
+                            optionMenuCard(
+                                title: "思考深度",
+                                value: thinkingLabel,
+                                icon: "brain"
+                            ) {
+                                ForEach(thinkingLevels) { level in
+                                    Button {
+                                        thinkingEffort = level.id
+                                    } label: {
+                                        effectiveThinkingOption?.id == level.id
+                                            ? Label(level.menuLabel, systemImage: "checkmark")
+                                            : Label(level.menuLabel, systemImage: "circle")
+                                    }
+                                }
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(cardBackground(selected: false))
-                            .frame(maxWidth: .infinity)
                         }
 
                         sectionHeader("模式")
@@ -251,6 +257,7 @@ struct NewSessionView: View {
                 availableModels = response.models(for: WandProvider.claude.rawValue)
                 codexModels = response.models(for: WandProvider.codex.rawValue)
                 opencodeModels = response.models(for: WandProvider.opencode.rawValue)
+                didLoadModels = true
                 serverDefaultModels = ProviderDefaultModels(
                     claude: response.defaultModelId(for: WandProvider.claude.rawValue),
                     codex: response.defaultModelId(for: WandProvider.codex.rawValue),
@@ -258,9 +265,13 @@ struct NewSessionView: View {
                 )
                 selectedModel = normalizedModel(selectedModel, provider: provider)
             }
+            let normalizedThinkingEffort = normalizeThinkingEffortIfNeeded()
             // Provider / 类型 / 模式 / 模型偏好已完成 hydration；目录请求不应继续
             // 阻塞用户选择的即时保存。
             didLoadDefaults = true
+            if normalizedThinkingEffort {
+                scheduleDefaultsSave()
+            }
             recentPaths = (try? await api.recentPaths()) ?? []
             if cwd.isEmpty {
                 if let first = recentPaths.first {
@@ -283,6 +294,14 @@ struct NewSessionView: View {
             return providerModels.first(where: { $0.id == id })?.label ?? id
         }
         return providerModels.first(where: { $0.id == "default" })?.label ?? "默认"
+    }
+
+    private var effectiveThinkingOption: ThinkingEffortOption? {
+        thinkingLevels.first { $0.id == thinkingEffort } ?? thinkingLevels.first
+    }
+
+    private var thinkingLabel: String {
+        effectiveThinkingOption?.label ?? "自动"
     }
 
     // MARK: - 区块组件
@@ -345,9 +364,13 @@ struct NewSessionView: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
+            .frame(minHeight: 44)
             .background(cardBackground(selected: false))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
+        .accessibilityHint("轻点选择\(title)")
     }
 
     private func supportedMode(_ value: String, provider: String) -> String {
@@ -384,7 +407,19 @@ struct NewSessionView: View {
     private func selectModel(_ model: String) {
         selectedModel = model
         pendingModelDefaults[selectedProvider.rawValue] = model
+        normalizeThinkingEffortIfNeeded()
         scheduleDefaultsSave()
+    }
+
+    /// 模型/Provider 改变后，旧档位可能不在新的能力列表里。此时真实选择必须
+    /// 收敛为协议的 off（自动），不能只让标签看起来回落到第一个选项。
+    @discardableResult
+    private func normalizeThinkingEffortIfNeeded() -> Bool {
+        // Codex 动态档位必须等模型目录成功返回，否则 legacy 回退会误伤有效值。
+        if selectedProvider == .codex && !didLoadModels { return false }
+        guard !thinkingLevels.contains(where: { $0.id == thinkingEffort }) else { return false }
+        thinkingEffort = "off"
+        return true
     }
 
     /// 模式卡（两列网格单元，标签 + 一句话说明），不支持的模式降透明度且不可点。

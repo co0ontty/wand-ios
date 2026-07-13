@@ -68,7 +68,6 @@ struct ChatView: View {
     @State private var voiceMode = false
     @State private var showFileImporter = false
     @State private var showPhotoPicker = false
-    @State private var showModelThinkingPanel = false
     @State private var uploadingAttachments = false
     @State private var pendingAttachments: [UploadedFile] = []
     @State private var gitStatus: GitStatusResult?
@@ -83,8 +82,6 @@ struct ChatView: View {
     /// 历史折叠：记录当前被展开的那条历史摘要卡对应的边界（= 最后一条用户消息的下标）。
     /// 发新消息后边界前移，nil != 新边界 → 历史默认重新折叠。
     @State private var expandedHistoryBoundary: Int?
-    /// 当前最新 assistant 回复的尾部折叠：默认只露最近输出，点摘要行临时展开完整回复。
-    @State private var expandedCurrentReplyTurnIndex: Int?
     /// 连续工具 / 思考 / 终端活动的详情 sheet。
     @State private var activitySheet: ActivitySheetItem?
     /// 底部 overlay 的实际占位高度。ChatView 不使用 safeAreaInset 放输入栏，
@@ -163,7 +160,6 @@ struct ChatView: View {
                 },
                 onAskSubmit: { toolUseId, answerText in
                     activitySheet = nil
-                    expandedCurrentReplyTurnIndex = nil
                     expandedHistoryBoundary = nil
                     scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
@@ -289,9 +285,7 @@ struct ChatView: View {
                             // 仅用户明确向下拖动、准备查看更早消息时暂停跟随。
                             // 旧逻辑任何轻微拖动都会永久关掉跟随，收键盘或触摸
                             // 列表后，新回复就只能靠右下角按钮才能看到。
-                            if expandedCurrentReplyTurnIndex != nil && value.translation.height > 42 {
-                                collapseExpandedCurrentReply(proxy)
-                            } else if value.translation.height > 18 {
+                            if value.translation.height > 18 {
                                 scrollMode = .manual
                             }
                         }
@@ -350,7 +344,6 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
-                    expandedCurrentReplyTurnIndex = nil
                     expandedHistoryBoundary = nil
                     scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
@@ -382,7 +375,6 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
-                    expandedCurrentReplyTurnIndex = nil
                     expandedHistoryBoundary = nil
                     scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
@@ -402,20 +394,11 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
-                    expandedCurrentReplyTurnIndex = nil
                     expandedHistoryBoundary = nil
                     scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
-        case .currentReplySummary(let turnIndex, let summary, let expanded):
-            CurrentReplySummaryCard(summary: summary, expanded: expanded) {
-                if expanded {
-                    collapseExpandedCurrentReply(proxy)
-                } else {
-                    expandCurrentReplyToBottom(turnIndex, proxy: proxy)
-                }
-            }
         case .explorationGroup(let tools, let lastTurnIndex):
             ExplorationGroupCard(
                 tools: tools,
@@ -441,7 +424,6 @@ struct ChatView: View {
                                 )
                             },
                             onAskSubmit: { toolUseId, answerText in
-                                expandedCurrentReplyTurnIndex = nil
                                 expandedHistoryBoundary = nil
                                 scrollMode = .stickToBottom
                                 store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
@@ -496,13 +478,10 @@ struct ChatView: View {
     }
 
     private var groupedMessageItems: [MessageDisplayItem] {
-        let currentReplyIndex = latestAssistantTurnIndex
         let base = collapseActivityItems(
             flattenAssistantTurns(
                 groupExplorationTurns(store.messages),
-                currentReplyIndex: currentReplyIndex,
-                expandedCurrentReplyTurnIndex: expandedCurrentReplyTurnIndex,
-                liveTurnIndex: store.isResponding ? currentReplyIndex : nil
+                liveTurnIndex: store.isResponding ? latestAssistantTurnIndex : nil
             ),
             latestTurnIndex: latestAssistantTurnIndex ?? -1,
             isResponding: store.isResponding
@@ -527,7 +506,7 @@ struct ChatView: View {
         return result
     }
 
-    /// 当前轮 assistant 回复的下标；只折叠最后一条、且必须位于最后用户消息之后。
+    /// 当前轮 assistant 回复的下标；用于流式状态和活动分组判断。
     private var latestAssistantTurnIndex: Int? {
         guard let last = store.messages.indices.last,
               store.messages[last].role == "assistant",
@@ -537,7 +516,6 @@ struct ChatView: View {
 
     private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
         Button {
-            expandedCurrentReplyTurnIndex = nil
             expandedHistoryBoundary = nil
             scrollMode = .stickToBottom
             scrollToActiveTarget(proxy, animated: true)
@@ -560,7 +538,6 @@ struct ChatView: View {
         guard hasCollapsedHistory else { return }
         let boundary = historyBoundary
         let next = !isHistoryExpanded
-        expandedCurrentReplyTurnIndex = nil
         expandedHistoryBoundary = next ? boundary : nil
         scrollMode = next ? .manual : .stickToBottom
         if next && store.canLoadEarlier {
@@ -575,20 +552,6 @@ struct ChatView: View {
                 scrollToActiveTarget(proxy, animated: true)
             }
         }
-    }
-
-    private func expandCurrentReplyToBottom(_ turnIndex: Int, proxy: ScrollViewProxy) {
-        expandedCurrentReplyTurnIndex = turnIndex
-        expandedHistoryBoundary = nil
-        scrollMode = .stickToBottom
-        scrollToActiveTarget(proxy, animated: true)
-    }
-
-    private func collapseExpandedCurrentReply(_ proxy: ScrollViewProxy) {
-        expandedCurrentReplyTurnIndex = nil
-        expandedHistoryBoundary = nil
-        scrollMode = .stickToBottom
-        scrollToActiveTarget(proxy, animated: true)
     }
 
     /// 根据当前模式同步滚动：贴底跟随，或尊重用户手动浏览。
@@ -682,16 +645,23 @@ struct ChatView: View {
     }
 
     private var launchThinkingMenu: some View {
-        ThinkingEffortSlider(
-            options: thinkingLevels,
-            selection: store.thinkingEffort,
-            accent: thinkingTint,
-            onSelect: store.setThinkingEffort
-        )
-        .padding(.horizontal, 11)
-        .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.surface))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.border, lineWidth: 1))
+        launchOptionMenu(
+            title: "思考深度",
+            value: thinkingLabel(store.thinkingEffort),
+            icon: "brain"
+        ) {
+            ForEach(thinkingLevels) { level in
+                Button {
+                    store.setThinkingEffort(level.id)
+                } label: {
+                    if effectiveThinkingOption?.id == level.id {
+                        Label(level.menuLabel, systemImage: "checkmark")
+                    } else {
+                        Text(level.menuLabel)
+                    }
+                }
+            }
+        }
     }
 
     private var launchModelLabel: String {
@@ -736,6 +706,7 @@ struct ChatView: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 11)
             .padding(.vertical, 9)
+            .frame(minHeight: 44)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Theme.surface)
@@ -746,15 +717,19 @@ struct ChatView: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
+        .accessibilityHint("轻点选择\(title)")
     }
 
     private func modelButton(id: String?, label: String) -> some View {
         Button {
             store.setModel(id)
         } label: {
+            let currentModel = store.selectedModel
             let selected = id == nil
-                ? (store.selectedModel == nil || store.selectedModel == "default")
-                : store.selectedModel == id
+                ? (currentModel == nil || currentModel?.isEmpty == true || currentModel == "default")
+                : currentModel == id
             if selected {
                 Label(label, systemImage: "checkmark")
             } else {
@@ -772,8 +747,16 @@ struct ChatView: View {
         )
     }
 
+    private var effectiveThinkingOption: ThinkingEffortOption? {
+        thinkingLevels.first { $0.id == store.thinkingEffort } ?? thinkingLevels.first
+    }
+
+    private func thinkingLabel(_ id: String) -> String {
+        (thinkingLevels.first { $0.id == id } ?? thinkingLevels.first)?.label ?? "自动"
+    }
+
     private func thinkingShortLabel(_ id: String) -> String {
-        thinkingLevels.first { $0.id == id }?.shortLabel ?? "关"
+        (thinkingLevels.first { $0.id == id } ?? thinkingLevels.first)?.shortLabel ?? "自"
     }
 
     /// 顶栏左侧 provider 小徽标：品牌色弱底圆角方块 + 品牌 logo。
@@ -1119,8 +1102,26 @@ struct ChatView: View {
     }
 
     private func modelThinkingChip(compact: Bool = false) -> some View {
-        Button {
-            showModelThinkingPanel = true
+        Menu {
+            Section("模型") {
+                modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
+                ForEach(store.availableModels.filter { $0.id != "default" }) { model in
+                    modelButton(id: model.id, label: model.label)
+                }
+            }
+            Section("思考深度") {
+                ForEach(thinkingLevels) { level in
+                    Button {
+                        store.setThinkingEffort(level.id)
+                    } label: {
+                        if effectiveThinkingOption?.id == level.id {
+                            Label(level.menuLabel, systemImage: "checkmark")
+                        } else {
+                            Text(level.menuLabel)
+                        }
+                    }
+                }
+            }
         } label: {
             chipLabel(
                 icon: "cpu",
@@ -1132,39 +1133,8 @@ struct ChatView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("模型与思考深度")
-        .popover(isPresented: $showModelThinkingPanel, arrowEdge: .bottom) {
-            modelThinkingPanel
-                .presentationCompactAdaptation(.popover)
-        }
-    }
-
-    private var modelThinkingPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Menu {
-                modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
-                ForEach(store.availableModels.filter { $0.id != "default" }) { model in
-                    modelButton(id: model.id, label: model.label)
-                }
-            } label: {
-                HStack {
-                    Label("模型", systemImage: "cpu")
-                    Spacer()
-                    Text(shortModelLabel).font(.system(.caption, design: .monospaced))
-                    Image(systemName: "chevron.up.chevron.down").font(.caption2)
-                }
-                .foregroundColor(Theme.textPrimary)
-                .contentShape(Rectangle())
-            }
-            Divider()
-            ThinkingEffortSlider(
-                options: thinkingLevels,
-                selection: store.thinkingEffort,
-                accent: thinkingTint,
-                onSelect: store.setThinkingEffort
-            )
-        }
-        .padding(14)
-        .frame(width: 286)
+        .accessibilityValue("模型 \(shortModelLabel)，思考深度 \(thinkingLabel(store.thinkingEffort))")
+        .accessibilityHint("轻点选择模型或思考深度")
     }
 
     private var modelThinkingText: String {
@@ -1356,7 +1326,6 @@ struct ChatView: View {
         let text = buildAttachmentPrompt(pendingAttachments, body: draft)
         draft = ""
         pendingAttachments.removeAll()
-        expandedCurrentReplyTurnIndex = nil
         expandedHistoryBoundary = nil
         scrollMode = .stickToBottom
         store.send(text: text)
@@ -1616,8 +1585,6 @@ private enum MessageDisplayItem {
     case assistantItem(turnIndex: Int, item: DisplayItem)
     /// 子 Agent 作为独立角色常驻展示，不再被折成活动缩略行。
     case subagentRole(turnIndex: Int, segment: SubagentSegment)
-    /// 当前最新回复的尾部折叠摘要行，点按可展开完整回复。
-    case currentReplySummary(turnIndex: Int, summary: String, expanded: Bool)
     case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
     case activityGroup(turnIndex: Int, group: ActivityGroup, id: String)
     /// 当前 assistant turn 的 token / cost 摘要。
@@ -1687,8 +1654,6 @@ private func messageDisplayIdentity(_ item: MessageDisplayItem, turnOffset: Int)
         return "assistant:\(absoluteTurn):\(displayItemIdentity(displayItem))"
     case .subagentRole(_, let segment):
         return "subagent:\(absoluteTurn):\(segment.id)"
-    case .currentReplySummary:
-        return "reply-summary:\(absoluteTurn)"
     case .explorationGroup(let tools, _):
         let keys = tools.map { !$0.id.isEmpty ? $0.id : ($0.result?.toolUseId ?? $0.name) }
         return "exploration:\(keys.joined(separator: "|"))"
@@ -1758,7 +1723,6 @@ private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
     case .turn(let i, _): return i
     case .assistantItem(let i, _): return i
     case .subagentRole(let i, _): return i
-    case .currentReplySummary(let i, _, _): return i
     case .explorationGroup(_, let i): return i
     case .activityGroup(let i, _, _): return i
     case .usageSummary(let i, _, _): return i
@@ -1841,23 +1805,12 @@ private func groupExplorationTurns(_ turns: [ConversationTurn]) -> [MessageDispl
 /// （表现为打开会话白屏，主线程并不忙、CPU 为 0）；摊平成多行后按行懒加载即可。
 private func flattenAssistantTurns(
     _ items: [MessageDisplayItem],
-    currentReplyIndex: Int? = nil,
-    expandedCurrentReplyTurnIndex: Int? = nil,
     liveTurnIndex: Int? = nil
 ) -> [MessageDisplayItem] {
     var out: [MessageDisplayItem] = []
-    var latestUserPreview = ""
     for item in items {
         if case .turn(let index, let turn) = item, turn.role == "assistant" {
-            let fold = index == currentReplyIndex
-                ? foldCurrentReplyTail(turn.content, userPreview: latestUserPreview)
-                : CurrentReplyFold(blocks: turn.content, summary: "")
-            let expanded = expandedCurrentReplyTurnIndex == index
-            if !fold.summary.isEmpty {
-                out.append(.currentReplySummary(turnIndex: index, summary: fold.summary, expanded: expanded))
-            }
-            let visibleContent = expanded ? turn.content : fold.blocks
-            for segment in splitAssistantContentBySubagent(visibleContent) {
+            for segment in splitAssistantContentBySubagent(turn.content) {
                 switch segment {
                 case .parent(let blocks):
                     let displayItems = pairToolBlocks(blocks)
@@ -1882,9 +1835,6 @@ private func flattenAssistantTurns(
                 out.append(.usageSummary(turnIndex: index, usage: turn.usage, isLive: false))
             }
         } else {
-            if case .turn(_, let turn) = item, turn.role == "user" {
-                latestUserPreview = userTurnPreview(turn)
-            }
             out.append(item)
         }
     }
@@ -2263,16 +2213,6 @@ private func activityToolSummary(description: String?, input: [String: JSONValue
     return ""
 }
 
-private func userTurnPreview(_ turn: ConversationTurn) -> String {
-    let text = turn.content.compactMap { block -> String? in
-        guard case .text(let value, _) = block else { return nil }
-        return value
-    }
-    .joined(separator: "\n")
-    let body = parseUserAttachmentMessage(text).body
-    return compactPreviewText(body, limit: 42)
-}
-
 private func explorationToolsOnly(in turn: ConversationTurn) -> [ExplorationToolItem]? {
     guard turn.role == "assistant" else { return nil }
     var tools: [ExplorationToolItem] = []
@@ -2411,135 +2351,7 @@ private func isGroupableExplorationTool(name: String, input: [String: JSONValue]
     isExplorationTool(name) && !isReadImageTool(name: name, input: input)
 }
 
-private let currentReplyTailUnits = 5
-private let currentReplyTextUnitChars = 280
 private let compactUserMinChars = 140
-
-private struct CurrentReplyFold {
-    let blocks: [ContentBlock]
-    let summary: String
-}
-
-private struct ReplyFoldUnit {
-    let blockIndex: Int
-    let text: String?
-}
-
-/// 当前最新回复的抽纸折叠：用户消息留在上方，助手正文只保留尾部。
-/// 旧段落折进摘要行，避免「回到最新」仍落在第 01 段。
-private func foldCurrentReplyTail(_ content: [ContentBlock], userPreview: String = "") -> CurrentReplyFold {
-    if content.contains(where: { $0.subagentMeta != nil }) {
-        return CurrentReplyFold(blocks: content, summary: "")
-    }
-    if content.contains(where: { block in
-        if case .toolUse(_, let name, _, _, _) = block { return name == "AskUserQuestion" }
-        return false
-    }) {
-        return CurrentReplyFold(blocks: content, summary: "")
-    }
-
-    var units: [ReplyFoldUnit] = []
-    for (blockIndex, block) in content.enumerated() {
-        switch block {
-        case .text(let text, _):
-            units.append(contentsOf: splitReplyTextUnits(text).map { ReplyFoldUnit(blockIndex: blockIndex, text: $0) })
-        case .thinking, .toolUse, .toolResult, .unknown:
-            units.append(ReplyFoldUnit(blockIndex: blockIndex, text: nil))
-        }
-    }
-
-    guard units.count > currentReplyTailUnits else {
-        return CurrentReplyFold(blocks: content, summary: "")
-    }
-
-    let keepStart = units.count - currentReplyTailUnits
-    var keepByBlock: [Int: [String]] = [:]
-    var keepWholeBlocks = Set<Int>()
-    for unit in units[keepStart...] {
-        if let text = unit.text {
-            keepByBlock[unit.blockIndex, default: []].append(text)
-        } else {
-            keepWholeBlocks.insert(unit.blockIndex)
-        }
-    }
-
-    var visible: [ContentBlock] = []
-    for (blockIndex, block) in content.enumerated() {
-        switch block {
-        case .text(_, let subagent):
-            let keptText = (keepByBlock[blockIndex] ?? []).joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !keptText.isEmpty {
-                visible.append(.text(text: keptText, subagent: subagent))
-            }
-        case .thinking, .toolUse, .toolResult, .unknown:
-            if keepWholeBlocks.contains(blockIndex) { visible.append(block) }
-        }
-    }
-
-    let hidden = keepStart
-    let latest = units.reversed().compactMap { unit -> String? in
-        guard let text = unit.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
-        return compactPreviewText(text, limit: 48)
-    }.first ?? ""
-    let subject = userPreview.isEmpty ? "" : "你：\(userPreview) · "
-    let summary = latest.isEmpty
-        ? "\(subject)已收起 \(hidden) 条"
-        : "\(subject)已收起 \(hidden) 条 · 最新：\(latest)"
-    return CurrentReplyFold(blocks: visible.isEmpty ? Array(content.suffix(1)) : visible, summary: summary)
-}
-
-private func compactPreviewText(_ text: String, limit: Int) -> String {
-    let collapsed = text
-        .components(separatedBy: .whitespacesAndNewlines)
-        .filter { !$0.isEmpty }
-        .joined(separator: " ")
-    guard collapsed.count > limit else { return collapsed }
-    return String(collapsed.prefix(max(0, limit - 3))) + "..."
-}
-
-private func splitReplyTextUnits(_ text: String) -> [String] {
-    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return [] }
-
-    var paragraphs: [String] = []
-    var current: [String] = []
-    for line in trimmed.components(separatedBy: .newlines) {
-        if line.trimmingCharacters(in: .whitespaces).isEmpty {
-            if !current.isEmpty {
-                paragraphs.append(current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines))
-                current.removeAll(keepingCapacity: true)
-            }
-        } else {
-            current.append(line)
-        }
-    }
-    if !current.isEmpty {
-        paragraphs.append(current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-    let units: [String]
-    if paragraphs.count > 1 {
-        units = paragraphs
-    } else {
-        let lines = trimmed
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        units = lines.isEmpty ? [trimmed] : lines
-    }
-    return units.flatMap(splitLongReplyUnit)
-}
-
-private func splitLongReplyUnit(_ text: String) -> [String] {
-    guard text.count > currentReplyTextUnitChars else { return [text] }
-    var chunks: [String] = []
-    var start = text.startIndex
-    while start < text.endIndex {
-        let end = text.index(start, offsetBy: currentReplyTextUnitChars, limitedBy: text.endIndex) ?? text.endIndex
-        chunks.append(String(text[start..<end]))
-        start = end
-    }
-    return chunks
-}
 
 private func shouldCompactUserBody(_ text: String) -> Bool {
     text.count > compactUserMinChars
@@ -4219,7 +4031,7 @@ private struct PermissionCard: View {
     }
 }
 
-// MARK: - 当前回复尾部折叠摘要
+// MARK: - 历史折叠入口
 
 private struct InlineHistoryChip: View {
     let count: Int
@@ -4247,49 +4059,6 @@ private struct InlineHistoryChip: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(expanded ? "收起上文" : "展开已收起的 \(count) 轮上文")
-    }
-}
-
-private struct CurrentReplySummaryCard: View {
-    let summary: String
-    let expanded: Bool
-    let onToggle: () -> Void
-
-    var body: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 8) {
-                Image(systemName: expanded ? "text.alignleft" : "arrow.down.to.line")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(Theme.brand)
-                    .frame(width: 22, height: 22)
-                    .background(Circle().fill(Theme.brand.opacity(0.10)))
-                Text(expanded ? "正在显示完整回复" : summary)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 8)
-                Text(expanded ? "收起" : "查看全部")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(Theme.brand)
-                Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(Theme.brand)
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(
-            Capsule(style: .continuous)
-                .fill(Theme.brand.opacity(0.06))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .stroke(Theme.brand.opacity(0.22), lineWidth: 1)
-        )
-        .accessibilityLabel(expanded ? "收起完整回复，回到最新输出" : "展开完整回复，\(summary)")
     }
 }
 
@@ -5045,26 +4814,20 @@ private struct TerminalCard: View {
 
 // MARK: - 待办进度条（TodoWrite，对齐 Web 端 todo-progress）
 
-/// 输入栏上方的悬浮进度条：环形进度 + N/M + 当前任务，点击展开任务列表。
+/// 输入栏上方的悬浮任务状态：执行中 + 第 N/M 步 + 当前任务，点击展开任务列表。
 struct TodoProgressBar: View {
     let todos: [TodoItem]
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded = false
 
     private var completed: Int { todos.filter { $0.status == "completed" }.count }
-    /// 1-indexed「正在干第 N 个」：completed+1 封顶（对齐 Web currentStep）。
-    private var currentStep: Int { min(completed + 1, todos.count) }
-    /// 右侧当前步骤描述：优先取首个 in_progress 的 activeForm / content；
-    /// 没有进行中项时（模型已标完上一步、还没标下一步 in_progress），回退到首个
-    /// pending 任务的描述；都没有再兜底「准备中…」——保证右侧空白区始终有内容
-    /// （对齐 Web / macOS fallback）。
+    private var activeIndex: Int? { TodoItem.activeIndex(in: todos) }
+    private var currentStep: Int { activeIndex.map { $0 + 1 } ?? min(completed + 1, todos.count) }
     private var activeTask: String {
-        if let active = todos.first(where: { $0.status == "in_progress" }) {
+        if let activeIndex {
+            let active = todos[activeIndex]
             let label = (active.activeForm?.isEmpty == false) ? active.activeForm! : active.content
-            if !label.isEmpty { return label }
-        }
-        if let pending = todos.first(where: { $0.status == "pending" }) {
-            let label = (pending.activeForm?.isEmpty == false) ? pending.activeForm! : pending.content
             if !label.isEmpty { return label }
         }
         return "准备中…"
@@ -5073,11 +4836,13 @@ struct TodoProgressBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
-                withAnimation(.easeInOut(duration: 0.18)) { expanded.toggle() }
+                withAnimation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0)) {
+                    expanded.toggle()
+                }
             } label: {
                 HStack(spacing: 8) {
-                    progressRing
-                    Text("\(currentStep)/\(todos.count)")
+                    TodoRunningLabel()
+                    Text("· 第 \(currentStep)/\(todos.count) 步")
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundColor(Theme.brand)
                     Text(activeTask)
@@ -5097,12 +4862,14 @@ struct TodoProgressBar: View {
             }
             .buttonStyle(.plain)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("待办进度，已完成 \(completed) 项，共 \(todos.count) 项，当前：\(activeTask)")
+            .accessibilityLabel(
+                "任务执行中，已完成 \(completed) 项，共 \(todos.count) 项，正在执行第 \(currentStep) 步：\(activeTask)"
+            )
             .accessibilityHint(expanded ? "轻点收起待办列表" : "轻点展开待办列表")
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(todos.enumerated()), id: \.offset) { _, todo in
-                        todoRow(todo)
+                    ForEach(Array(todos.enumerated()), id: \.offset) { index, todo in
+                        todoRow(todo, isActive: index == activeIndex)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -5120,35 +4887,27 @@ struct TodoProgressBar: View {
         )
     }
 
-    private var progressRing: some View {
-        ZStack {
-            Circle()
-                .stroke(Theme.border, lineWidth: 3)
-            Circle()
-                .trim(from: 0, to: CGFloat(currentStep) / CGFloat(max(todos.count, 1)))
-                .stroke(Theme.brand, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-        }
-        .frame(width: 18, height: 18)
-    }
-
-    @ViewBuilder private func todoRow(_ todo: TodoItem) -> some View {
+    @ViewBuilder private func todoRow(_ todo: TodoItem, isActive: Bool) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Group {
-                switch todo.status {
-                case "completed":
-                    Text("✓").foregroundColor(chatSuccess)
-                case "in_progress":
-                    Text("›").foregroundColor(Theme.brand)
-                default:
-                    Text("○").foregroundColor(Theme.textSecondary)
+            ZStack {
+                if todo.status == "completed" {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(chatSuccess)
+                } else if isActive {
+                    Circle()
+                        .fill(Theme.brand)
+                        .frame(width: 7, height: 7)
+                } else {
+                    Circle()
+                        .stroke(Theme.textSecondary, lineWidth: 1)
+                        .frame(width: 7, height: 7)
                 }
             }
-            .font(.system(size: 12, weight: .bold, design: .monospaced))
-            .frame(width: 14)
+            .frame(width: 14, height: 17)
             Text(todo.content)
                 .font(.system(size: 12))
-                .foregroundColor(todo.status == "in_progress" ? Theme.textPrimary : Theme.textSecondary)
+                .foregroundColor(isActive ? Theme.textPrimary : Theme.textSecondary)
                 .strikethrough(todo.status == "completed", color: Theme.textSecondary.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -5158,18 +4917,45 @@ struct TodoProgressBar: View {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(todo.status == "in_progress" ? Theme.brand.opacity(0.1) : Color.clear)
+                .fill(isActive ? Theme.brand.opacity(0.1) : Color.clear)
         )
+        .animation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0), value: isActive)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0), value: todo.status)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(todoStatusLabel(todo.status))：\(todo.content)")
+        .accessibilityLabel("\(todoStatusLabel(todo.status, isActive: isActive))：\(todo.content)")
     }
 
-    private func todoStatusLabel(_ status: String) -> String {
-        switch status {
-        case "completed": return "已完成"
-        case "in_progress": return "进行中"
-        default: return "待处理"
+    private func todoStatusLabel(_ status: String, isActive: Bool) -> String {
+        if status == "completed" { return "已完成" }
+        return isActive ? "进行中" : "待处理"
+    }
+}
+
+private struct TodoRunningLabel: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        if reduceMotion {
+            label(opacity: 1)
+        } else {
+            PhaseAnimator([false, true]) { dimmed in
+                label(opacity: dimmed ? 0.72 : 1)
+            } animation: { _ in
+                .smooth(duration: 1.2, extraBounce: 0)
+            }
         }
+    }
+
+    private func label(opacity: Double) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(Theme.brand)
+                .frame(width: 7, height: 7)
+            Text("执行中")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Theme.brand)
+        }
+        .opacity(opacity)
     }
 }
 

@@ -61,6 +61,18 @@ final class ChatStore: ObservableObject {
     private var started = false
     private var queuePromotePending = false
     private var autoResumeAttempted = false
+    /// 模型、思考与模式设置各自只接受最后一次请求的回包。三个接口都会返回完整
+    /// SessionSnapshot，不能让较早回包通过 apply(snapshot:) 覆盖另一项的新选择。
+    private var modelUpdateRevision = 0
+    private var thinkingUpdateRevision = 0
+    private var modeUpdateRevision = 0
+    /// 模型、思考与模式共用同一条服务端 mutation 尾队列。revision 只能防旧回包改 UI，
+    /// 串行队列进一步保证服务端按用户调用顺序处理，最终落盘不会 A/B 反序。
+    private var settingsMutationTail: Task<Void, Never>?
+    /// 模型切换把不支持的档位收敛为 off 后，等模型请求成功再串行提交思考设置。
+    /// 快速再次切模型时由最新模型请求接管这次同步。
+    private var thinkingEffortNeedsSync = false
+    private var modelsLoaded = false
 
     // Live Activity（灵动岛）状态：started = 本会话当前在聚合长条里有条目；
     // sawResponding 防止 PTY 会话在 isResponding 尚未变 true 时被立即收掉。
@@ -482,14 +494,61 @@ final class ChatStore: ObservableObject {
     }
 
     func setModel(_ model: String?) {
-        let previous = selectedModel
+        let previousModel = selectedModel
+        let previousThinkingEffort = thinkingEffort
+        let previouslyNeededThinkingSync = thinkingEffortNeedsSync
+
+        modelUpdateRevision &+= 1
+        let modelRevision = modelUpdateRevision
         selectedModel = model
-        Task {
+
+        let initialThinkingRevision = claimThinkingResetIfNeeded(model: model)
+        enqueueSettingsMutation { [self] in
+            let modelSnapshot: SessionSnapshot
             do {
-                let snap = try await api.setModel(id: sessionId, model: model)
-                apply(snapshot: snap)
+                modelSnapshot = try await api.setModel(id: sessionId, model: model)
             } catch {
-                selectedModel = previous
+                guard modelRevision == modelUpdateRevision else { return }
+                selectedModel = previousModel
+                var retryPendingAutoReset = false
+                if let initialThinkingRevision,
+                   initialThinkingRevision == thinkingUpdateRevision {
+                    thinkingEffort = previousThinkingEffort
+                    thinkingEffortNeedsSync = previouslyNeededThinkingSync
+                    retryPendingAutoReset = previouslyNeededThinkingSync
+                }
+                toast = error.localizedDescription
+                if retryPendingAutoReset
+                    || !supportsThinkingEffort(thinkingEffort, model: previousModel) {
+                    setThinkingEffort("off")
+                }
+                return
+            }
+
+            guard modelRevision == modelUpdateRevision else { return }
+            // 此接口只确认模型字段；完整快照里的 thinkingEffort 可能已落后。
+            selectedModel = modelSnapshot.selectedModel
+
+            let thinkingRevision = initialThinkingRevision
+                ?? claimThinkingResetIfNeeded(model: modelSnapshot.selectedModel)
+            guard let thinkingRevision,
+                  thinkingRevision == thinkingUpdateRevision else { return }
+
+            do {
+                let effortSnapshot = try await api.setThinkingEffort(
+                    id: sessionId,
+                    thinkingEffort: "off"
+                )
+                guard modelRevision == modelUpdateRevision,
+                      thinkingRevision == thinkingUpdateRevision else { return }
+                thinkingEffort = effortSnapshot.thinkingEffort ?? "off"
+                thinkingEffortNeedsSync = false
+            } catch {
+                guard modelRevision == modelUpdateRevision,
+                      thinkingRevision == thinkingUpdateRevision else { return }
+                // 模型已由服务端接受，不能把它回滚成只存在于本地的旧值。
+                thinkingEffort = modelSnapshot.thinkingEffort ?? previousThinkingEffort
+                thinkingEffortNeedsSync = true
                 toast = error.localizedDescription
             }
         }
@@ -497,27 +556,74 @@ final class ChatStore: ObservableObject {
 
     func setThinkingEffort(_ effort: String) {
         let previous = thinkingEffort
+        let previouslyNeededSync = thinkingEffortNeedsSync
+
+        thinkingUpdateRevision &+= 1
+        let revision = thinkingUpdateRevision
+        thinkingEffortNeedsSync = false
         thinkingEffort = effort
-        Task {
+        enqueueSettingsMutation { [self] in
             do {
                 let snap = try await api.setThinkingEffort(id: sessionId, thinkingEffort: effort)
-                apply(snapshot: snap)
+                guard revision == thinkingUpdateRevision else { return }
+                // 此接口只确认思考字段；完整快照里的 selectedModel 可能已落后。
+                thinkingEffort = snap.thinkingEffort ?? effort
             } catch {
+                guard revision == thinkingUpdateRevision else { return }
                 thinkingEffort = previous
+                thinkingEffortNeedsSync = previouslyNeededSync
                 toast = error.localizedDescription
             }
         }
     }
 
+    private func enqueueSettingsMutation(
+        _ mutation: @escaping @MainActor () async -> Void
+    ) {
+        let previous = settingsMutationTail
+        settingsMutationTail = Task { @MainActor in
+            _ = await previous?.result
+            await mutation()
+        }
+    }
+
+    /// 返回本次自动 off 同步所拥有的 revision；nil 表示当前档位有效且无需补写。
+    private func claimThinkingResetIfNeeded(model: String?) -> Int? {
+        if !supportsThinkingEffort(thinkingEffort, model: model) {
+            thinkingEffort = "off"
+            thinkingEffortNeedsSync = true
+        }
+        guard thinkingEffortNeedsSync else { return nil }
+        thinkingUpdateRevision &+= 1
+        return thinkingUpdateRevision
+    }
+
+    private func supportsThinkingEffort(_ effort: String, model: String?) -> Bool {
+        let provider = WandProvider(normalizing: snapshot?.provider).rawValue
+        // Codex 档位依赖模型目录；目录还没回来时不能拿 legacy 回退误判动态档位。
+        if provider == WandProvider.codex.rawValue && !modelsLoaded { return true }
+        return thinkingEffortOptions(
+            provider: provider,
+            selectedModel: model,
+            defaultModel: defaultModel,
+            models: availableModels
+        ).contains { $0.id == effort }
+    }
+
     /// 中途切换执行模式（乐观更新，失败回滚）。codex 会话固定 full-access，调用方负责拦。
     func setMode(_ newMode: String) {
         let previous = mode
+        modeUpdateRevision &+= 1
+        let revision = modeUpdateRevision
         mode = newMode
-        Task {
+        enqueueSettingsMutation { [self] in
             do {
                 let snap = try await api.setMode(id: sessionId, mode: newMode)
-                apply(snapshot: snap)
+                guard revision == modeUpdateRevision else { return }
+                // 此接口只确认模式字段，避免完整快照覆盖模型或思考的新选择。
+                mode = snap.mode ?? newMode
             } catch {
+                guard revision == modeUpdateRevision else { return }
                 mode = previous
                 toast = error.localizedDescription
             }
@@ -529,6 +635,10 @@ final class ChatStore: ObservableObject {
         let provider = WandProvider(normalizing: snapshot?.provider).rawValue
         availableModels = response.models(for: provider)
         defaultModel = response.defaultModelId(for: provider)
+        modelsLoaded = true
+        if !supportsThinkingEffort(thinkingEffort, model: selectedModel) {
+            setThinkingEffort("off")
+        }
     }
 
     private func loadCardDefaults() async {

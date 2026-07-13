@@ -196,6 +196,36 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertGreaterThan(response.text.count, 12_000)
     }
 
+    func testTodoActiveIndexPrefersExplicitInProgressTask() {
+        let todos = [
+            todo(status: "pending"),
+            todo(status: "in_progress"),
+            todo(status: "pending"),
+        ]
+
+        XCTAssertEqual(TodoItem.activeIndex(in: todos), 1)
+    }
+
+    func testTodoActiveIndexInfersFirstPendingTaskForBinaryStatusProtocol() {
+        let todos = [
+            todo(status: "completed"),
+            todo(status: "completed"),
+            todo(status: "pending"),
+        ]
+
+        XCTAssertEqual(TodoItem.activeIndex(in: todos), 2)
+    }
+
+    func testTodoActiveIndexIsNilWhenEveryTaskIsCompleted() {
+        let todos = [todo(status: "completed"), todo(status: "completed")]
+
+        XCTAssertNil(TodoItem.activeIndex(in: todos))
+    }
+
+    private func todo(status: String) -> TodoItem {
+        TodoItem(content: "Task", status: status, activeForm: nil)
+    }
+
     private func decode<T: Decodable>(_ type: T.Type, from json: String) throws -> T {
         try JSONDecoder().decode(type, from: XCTUnwrap(json.data(using: .utf8)))
     }
