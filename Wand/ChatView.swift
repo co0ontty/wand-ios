@@ -900,7 +900,12 @@ struct ChatView: View {
     // MARK: - 底部栏（权限卡 + 队列 + 输入框）
 
     /// 输入栏上方悬浮的待办进度条数据：当前 turn 的 todos，全部完成后隐藏（对齐 Web）。
+    /// 会话不再 running（turn 已结束、idle/exited/archived）时也直接收起：模型经常
+    /// 漏发最后一条全 completed 的 TodoWrite，否则进度条会卡在最后一项 in_progress
+    /// 直到下一次发消息才被刷新，看着像「永远执行中」（对齐 Web updateTodoProgress
+    /// 用 session.status 而不是 inFlight 判定，避免流式间隙闪烁）。
     private var visibleTodos: [TodoItem] {
+        guard store.status == "running" else { return [] }
         let todos = TodoItem.currentTodos(in: store.messages)
         guard !todos.isEmpty else { return [] }
         let completed = todos.filter { $0.status == "completed" }.count

@@ -21,6 +21,11 @@ struct NativeRootView: View {
     @State private var didApplyDebugSettingsLaunch = false
 #endif
     @ObservedObject private var quickActions = QuickActionCoordinator.shared
+    /// 当前选中的会话身份 + 完整快照：由 SessionListView 写入，驱动 SplitView detail 栏
+    /// / NavigationStack push。提升到根视图是因为 detail 内容由根容器直接承载，
+    /// 不再走隐藏 NavigationLink（在 .columns 双栏下不可靠）。
+    @State private var selectedSessionID: String?
+    @State private var selectedSnapshot: SessionSnapshot?
 
     private enum Phase: Equatable {
         case authenticating
@@ -33,85 +38,11 @@ struct NativeRootView: View {
     }
 
     var body: some View {
-        AdaptiveNavigationContainer {
-            ZStack {
-                Theme.background.ignoresSafeArea()
-                switch phase {
-                case .authenticating:
-                    VStack(spacing: 16) {
-                        WandBrandMark(size: 52)
-                        ProgressView().tint(Theme.brand)
-                        Text("正在登录…")
-                            .font(.system(size: 14))
-                            .foregroundColor(Theme.textSecondary)
-                    }
-                    .navigationTitle("Wand")
-                case .failed(let message):
-                    VStack(spacing: 14) {
-                        Image(systemName: "lock.slash")
-                            .font(.system(size: 30))
-                            .foregroundColor(Theme.danger)
-                        Text(message)
-                            .font(.footnote)
-                            .foregroundColor(Theme.textSecondary)
-                            .multilineTextAlignment(.center)
-                        Button("重试") { authenticate() }
-                            .buttonStyle(WandPrimaryButtonStyle())
-                        if LocalNetworkPermission.isLikelyLanHost(serverURL.host) {
-                            Button("打开 Wand 设置") {
-                                LocalNetworkPermission.openSettings()
-                            }
-                            .buttonStyle(WandSecondaryButtonStyle())
-                        }
-                        Button("重新连接") { store.disconnect() }
-                            .buttonStyle(WandSecondaryButtonStyle())
-                    }
-                    .padding(32)
-                    .navigationTitle("Wand")
-                case .ready:
-                    VStack(spacing: 0) {
-                        if shouldShowUpdateBanner {
-                            updateBanner
-                                .padding(.horizontal, 16)
-                                .padding(.top, 8)
-                                .padding(.bottom, 6)
-                                .background(Theme.background)
-                        }
-                        SessionListView(api: api)
-                    }
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Menu {
-                                    Button {
-                                        NotificationCenter.default.post(name: .wandBeginSessionSelection, object: nil)
-                                    } label: {
-                                        Label("多选会话", systemImage: "checkmark.circle")
-                                    }
-                                    Button {
-                                        showSettings = true
-                                    } label: {
-                                        Label("设置", systemImage: "gearshape")
-                                    }
-                                    Button {
-                                        showWebFallback = true
-                                    } label: {
-                                        Label("打开网页版", systemImage: "safari")
-                                    }
-                                    Button {
-                                        NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
-                                    } label: {
-                                        Label("切换服务器", systemImage: "server.rack")
-                                    }
-                                } label: {
-                                    Image(systemName: "ellipsis.circle")
-                                        .font(.system(size: 18))
-                                        .foregroundColor(Theme.textSecondary)
-                                }
-                            }
-                        }
-                }
-            }
-        }
+        AdaptiveNavigationContainer(
+            selection: $selectedSessionID,
+            sidebar: { sidebarContent },
+            detail: { detailContent }
+        )
         .fullScreenCover(isPresented: $showWebFallback) {
             // 网页版兜底：不再套壳顶栏，返回入口在网页侧边栏（「返回App」按钮）。
             // 旧版网页 / 加载中 / 出错时 WebContainerView 内部自带回退返回方式。
@@ -145,6 +76,118 @@ struct NativeRootView: View {
             handleQuickAction()
         }
         .task { await monitorSessionStatus() }
+    }
+
+    /// 侧边栏：登录/失败/就绪三种阶段共用同一栏。ready 时承载会话列表及其 toolbar。
+    @ViewBuilder private var sidebarContent: some View {
+        ZStack {
+            Theme.background.ignoresSafeArea()
+            switch phase {
+            case .authenticating:
+                VStack(spacing: 16) {
+                    WandBrandMark(size: 52)
+                    ProgressView().tint(Theme.brand)
+                    Text("正在登录…")
+                        .font(.system(size: 14))
+                        .foregroundColor(Theme.textSecondary)
+                }
+                .navigationTitle("Wand")
+            case .failed(let message):
+                VStack(spacing: 14) {
+                    Image(systemName: "lock.slash")
+                        .font(.system(size: 30))
+                        .foregroundColor(Theme.danger)
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundColor(Theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                    Button("重试") { authenticate() }
+                        .buttonStyle(WandPrimaryButtonStyle())
+                    if LocalNetworkPermission.isLikelyLanHost(serverURL.host) {
+                        Button("打开 Wand 设置") {
+                            LocalNetworkPermission.openSettings()
+                        }
+                        .buttonStyle(WandSecondaryButtonStyle())
+                    }
+                    Button("重新连接") { store.disconnect() }
+                        .buttonStyle(WandSecondaryButtonStyle())
+                }
+                .padding(32)
+                .navigationTitle("Wand")
+            case .ready:
+                VStack(spacing: 0) {
+                    if shouldShowUpdateBanner {
+                        updateBanner
+                            .padding(.horizontal, 16)
+                            .padding(.top, 8)
+                            .padding(.bottom, 6)
+                            .background(Theme.background)
+                    }
+                    SessionListView(
+                        api: api,
+                        selection: $selectedSessionID,
+                        selectedSnapshot: $selectedSnapshot
+                    )
+                }
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Menu {
+                            Button {
+                                NotificationCenter.default.post(name: .wandBeginSessionSelection, object: nil)
+                            } label: {
+                                Label("多选会话", systemImage: "checkmark.circle")
+                            }
+                            Button {
+                                showSettings = true
+                            } label: {
+                                Label("设置", systemImage: "gearshape")
+                            }
+                            Button {
+                                showWebFallback = true
+                            } label: {
+                                Label("打开网页版", systemImage: "safari")
+                            }
+                            Button {
+                                NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
+                            } label: {
+                                Label("切换服务器", systemImage: "server.rack")
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 18))
+                                .foregroundColor(Theme.textSecondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 详情内容：选中会话后渲染聊天/终端；未选中或快照未到时显示占位。
+    /// 快照可能在异步拉取中（长按图标打开非列表内会话），先给身份再回填，
+    /// 此期间显示加载态。
+    @ViewBuilder private var detailContent: some View {
+        if let session = selectedSnapshot {
+            // 所有会话共用 detail 入口，按 session.id 绑定身份：避免 SwiftUI 复用上一个会话的
+            // ChatStore（其 @StateObject 只在首次身份创建时求值，导致串数据）。
+            SessionDestinationView(session: session, api: api)
+                .id(session.id)
+        } else if selectedSessionID != nil {
+            ProgressView().tint(Theme.brand)
+        } else {
+            emptyDetailPlaceholder
+        }
+    }
+
+    private var emptyDetailPlaceholder: some View {
+        VStack(spacing: 12) {
+            WandBrandMark(size: 48)
+            Text("选择一个会话")
+                .font(.system(size: 14))
+                .foregroundColor(Theme.textSecondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.background.ignoresSafeArea())
     }
 
     private var shouldShowUpdateBanner: Bool {
@@ -377,19 +420,49 @@ struct NativeRootView: View {
 
 /// iPhone、窄分屏保持单栏返回栈；iPad 横屏和足够大的自由窗口使用系统双栏导航。
 /// 只依据当前可用尺寸，旋转和 Stage Manager 改窗后会自动重新选择布局。
-private struct AdaptiveNavigationContainer<Content: View>: View {
-    @ViewBuilder let content: () -> Content
+///
+/// 宽屏用 NavigationSplitView(selection:)：selection 绑定驱动 detail 栏，选中即显示，
+/// 这是双栏下可靠的程序化跳转方式（旧实现用 .columns + 隐藏 NavigationLink 在 iPad 上失效）。
+/// 窄屏用 NavigationStack + navigationDestination(isPresented:)：点行 push 详情页。
+private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
+    @Binding var selection: String?
+    @ViewBuilder let sidebar: () -> Sidebar
+    @ViewBuilder let detail: () -> Detail
 
     var body: some View {
         GeometryReader { geometry in
             if usesWideListDetail(width: geometry.size.width, height: geometry.size.height) {
-                NavigationView { content() }
-                    .navigationViewStyle(.columns)
+                wideLayout
             } else {
-                NavigationView { content() }
-                    .navigationViewStyle(.stack)
+                narrowLayout
             }
         }
+    }
+
+    private var wideLayout: some View {
+        NavigationSplitView {
+            sidebar()
+        } detail: {
+            detail()
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    private var narrowLayout: some View {
+        NavigationStack {
+            sidebar()
+                .navigationDestination(isPresented: isDetailPresented) {
+                    detail()
+                }
+        }
+    }
+
+    /// NavigationStack 的呈现绑定：selection 有值即 push detail，置空即 pop。
+    private var isDetailPresented: Binding<Bool> {
+        Binding(
+            get: { selection != nil },
+            set: { presented in if !presented { selection = nil } }
+        )
     }
 }
 

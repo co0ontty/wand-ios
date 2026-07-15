@@ -41,6 +41,13 @@ struct SessionListView: View {
 
     let api: WandAPI
 
+    /// 当前被选中的会话身份（供外层 NavigationSplitView/NavigationStack 驱动 detail 栏）。
+    /// 由本视图写入：点行 / 恢复历史 / 新建完成回跳 / 长按图标快捷打开。
+    @Binding var selection: String?
+    /// 选中会话的完整快照：外层 detail 栏渲染 SessionDestinationView 需要它，
+    /// 而外层拿不到本视图私有的 sessions 列表，所以选中时一并回传。
+    @Binding var selectedSnapshot: SessionSnapshot?
+
     @State private var sessions: [SessionSnapshot] = []
     @State private var historySessions: [HistorySession] = []
     @State private var loading = true
@@ -78,8 +85,6 @@ struct SessionListView: View {
     @State private var restoringHistoryID: String?
     @State private var selectedSessionIds: Set<String> = []
     @State private var isSelecting = false
-    /// 长按图标快捷操作 / 新建完成后的程序化跳转目标。
-    @State private var quickOpenSession: SessionSnapshot?
     @ObservedObject private var quickActions = QuickActionCoordinator.shared
 
     private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
@@ -117,22 +122,6 @@ struct SessionListView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            // 根容器当前是 NavigationView（宽屏时使用 columns，窄屏时使用 stack）。
-            // navigationDestination 只会被 NavigationStack/NavigationSplitView 消费，
-            // 放在这里会导致点击仅更新 state、但没有任何页面响应。
-            NavigationLink(isActive: quickOpenActive) {
-                if let session = quickOpenSession {
-                    // 所有会话共用这个程序化入口，必须显式绑定 session 身份，
-                    // 否则 SwiftUI 可能复用上一个会话的 ChatStore。
-                    SessionDestinationView(session: session, api: api)
-                        .id(session.id)
-                } else {
-                    EmptyView()
-                }
-            } label: {
-                EmptyView()
-            }
-            .hidden()
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -170,7 +159,7 @@ struct SessionListView: View {
                 showNewSession = false
                 sessions.insert(newSession, at: 0)
                 DispatchQueue.main.async {
-                    quickOpenSession = newSession
+                    selectSession(id: newSession.id, newSession)
                 }
             }
         }
@@ -208,11 +197,11 @@ struct SessionListView: View {
         return "plus.circle.fill"
     }
 
-    private var quickOpenActive: Binding<Bool> {
-        Binding(
-            get: { quickOpenSession != nil },
-            set: { if !$0 { quickOpenSession = nil } }
-        )
+    /// 统一的「打开会话」入口：同时写 selection 身份和完整快照，
+    /// 外层 detail 栈/栏据此渲染。快照可能来自异步拉取，先置身份再回填快照。
+    private func selectSession(id: String?, _ snapshot: SessionSnapshot?) {
+        selection = id
+        selectedSnapshot = snapshot
     }
 
     private func handleQuickAction() {
@@ -224,20 +213,25 @@ struct SessionListView: View {
         }) else { return }
         switch action {
         case .newSession:
-            quickOpenSession = nil
+            selectSession(id: nil, nil)
             showNewSession = true
         case .openSession(let id):
             showNewSession = false
             if let session = sessions.first(where: { $0.id == id }) {
-                quickOpenSession = session
+                selectSession(id: id, session)
             } else {
+                // 先占住身份，外层 detail 栈推入占位视图，拿到快照后再回填内容。
+                selectSession(id: id, nil)
                 Task {
-                    quickOpenSession = try? await api.getSession(id: id)
+                    let snapshot = try? await api.getSession(id: id)
+                    if selection == id {
+                        selectedSnapshot = snapshot
+                    }
                 }
             }
         case .showSessions:
             showNewSession = false
-            quickOpenSession = nil
+            selectSession(id: nil, nil)
         case .openWeb:
             break
         }
@@ -334,7 +328,7 @@ struct SessionListView: View {
             if isSelecting {
                 toggleSelection(session.id)
             } else {
-                quickOpenSession = session
+                selectSession(id: session.id, session)
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -406,7 +400,7 @@ struct SessionListView: View {
                 let resumed = try await api.resumeHistory(history)
                 historySessions.removeAll { $0.id == history.id }
                 sessions.insert(resumed, at: 0)
-                quickOpenSession = resumed
+                selectSession(id: resumed.id, resumed)
                 loadError = nil
             } catch {
                 loadError = error.localizedDescription
@@ -437,8 +431,8 @@ struct SessionListView: View {
 
     private func deleteSession(_ session: SessionSnapshot) {
         sessions.removeAll { $0.id == session.id }
-        if quickOpenSession?.id == session.id {
-            quickOpenSession = nil
+        if selection == session.id {
+            selectSession(id: nil, nil)
         }
         Task { try? await api.deleteSession(id: session.id) }
     }
@@ -518,7 +512,7 @@ private extension HistorySession {
     }
 }
 
-private struct SessionDestinationView: View {
+struct SessionDestinationView: View {
     let session: SessionSnapshot
     let api: WandAPI
 
