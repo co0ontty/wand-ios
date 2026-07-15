@@ -79,16 +79,21 @@ struct ChatView: View {
     @State private var showStopConfirm = false
     /// 排队消息气泡条是否展开成列表（默认折叠成「已排队 N 条」徽章）。
     @State private var queueBarExpanded = false
-    /// 历史折叠：记录当前被展开的那条历史摘要卡对应的边界（= 最后一条用户消息的下标）。
-    /// 发新消息后边界前移，nil != 新边界 → 历史默认重新折叠。
-    @State private var expandedHistoryBoundary: Int?
+    /// 历史折叠记录绝对 turn 下标。prepend 更早页会同时改变 loadedOffset 和局部下标，
+    /// 但两者之和不变，因此分页不会把用户刚展开的历史重新收起。
+    @State private var expandedHistoryBoundaryAbsolute: Int?
+    /// 用户手动收起的助手回复，使用绝对 turn 下标避免历史 prepend 后串状态。
+    @State private var collapsedAssistantTurns: Set<Int> = []
     /// 连续工具 / 思考 / 终端活动的详情 sheet。
     @State private var activitySheet: ActivitySheetItem?
     /// 底部 overlay 的实际占位高度。ChatView 不使用 safeAreaInset 放输入栏，
     /// 避免 SwiftUI 键盘避让和 KeyboardObserver 手动抬升叠加。
     @State private var bottomBarHeight: CGFloat = 0
+    /// 每次贴底请求递增；较旧的下一帧任务看到代次变化后自行退出，避免连续事件抢滚动。
+    @State private var scrollRequestGeneration = 0
     /// 应用前后台感知：回前台做连接健康检查 + 拉最新快照，避免半死连接苦等 40s 看门狗。
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var inputFocused: Bool
 
     init(sessionId: String, api: WandAPI) {
@@ -160,13 +165,14 @@ struct ChatView: View {
                 },
                 onAskSubmit: { toolUseId, answerText in
                     activitySheet = nil
-                    expandedHistoryBoundary = nil
+                    expandedHistoryBoundaryAbsolute = nil
                     scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.hidden)
+            .interactiveDismissDisabled()
         }
         .fileImporter(
             isPresented: $showFileImporter,
@@ -184,11 +190,11 @@ struct ChatView: View {
             store.start()
             refreshGitStatus()
         }
-        .onChange(of: showQuickCommit) { showing in
+        .onChange(of: showQuickCommit) { _, showing in
             if !showing { refreshGitStatus() }
         }
         .onDisappear { store.shutdown() }
-        .onChange(of: scenePhase) { newPhase in
+        .onChange(of: scenePhase) { _, newPhase in
             wlog("session", "scenePhase=\(newPhase) session=\(sessionId)")
             if newPhase == .active { store.handleEnterForeground() }
             else if newPhase == .background { store.handleEnterBackground() }
@@ -242,26 +248,43 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                        // 窗口化：顶部还有更早消息时放一个哨兵行。用户上滑到顶、它进入视口即
-                        // 自动拉下一页（prepend）。初始视图固定在底部，哨兵不在视口，不会误触发。
-                        if store.canLoadEarlier {
-                            HStack(spacing: 8) {
-                                Spacer()
-                                ProgressView().controlSize(.small).tint(Theme.brand)
-                                Text("加载更早的消息…")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(Theme.textSecondary)
-                                Spacer()
+                        // 历史折叠时不让顶部哨兵因布局变短而自动连翻多页；展开历史后，或尾窗
+                        // 根本没有 user turn 时，提供明确的 44pt 分页入口，始终保证更早消息可达。
+                        if shouldShowLoadEarlierControl(
+                            historyExpanded: isHistoryExpanded,
+                            hasCollapsedHistory: hasCollapsedHistory,
+                            canLoadEarlier: store.canLoadEarlier
+                        ) {
+                            Button {
+                                store.loadEarlier()
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Spacer()
+                                    if store.loadingEarlier {
+                                        ProgressView().controlSize(.small).tint(Theme.brand)
+                                    } else {
+                                        Image(systemName: "arrow.up.circle")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundColor(Theme.brand)
+                                    }
+                                    Text(store.loadingEarlier ? "正在加载更早消息…" : "加载更早的消息")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(Theme.textSecondary)
+                                    Spacer()
+                                }
+                                .frame(minHeight: 44)
+                                .contentShape(Rectangle())
                             }
-                            .padding(.vertical, 8)
-                            .onAppear { store.loadEarlier() }
+                            .buttonStyle(.plain)
+                            .disabled(store.loadingEarlier)
+                            .accessibilityLabel(store.loadingEarlier ? "正在加载更早消息" : "加载更早的消息")
                             .id("chat-top")
                         }
                         // 把每个 assistant turn 摊平成独立的 LazyVStack 行（而非整条 turn 一个
                         // 急加载 VStack）：一条 assistant 消息可能携带上百个 text/工具/diff 块，
                         // 整条一次性构建会在主线程同步堆出数百个嵌套视图，打开会话时直接卡死、
                         // 什么都渲染不出来。摊平后 LazyVStack 只实例化进入视口的行。
-                        ForEach(identifiedMessageItems(groupedMessageItems, turnOffset: store.loadedOffset)) { row in
+                        ForEach(identifiedMessageItems(presentedMessageItems, turnOffset: store.loadedOffset)) { row in
                             messageItemView(row.item, proxy: proxy)
                         }
                         if store.isResponding {
@@ -311,20 +334,41 @@ struct ChatView: View {
                 .onReceive(store.$messages.dropFirst()) { _ in
                     scrollToActiveTarget(proxy)
                 }
-                .onChange(of: store.isResponding) { _ in
+                .onChange(of: store.isResponding) {
                     scrollToActiveTarget(proxy)
                 }
-                .onChange(of: store.loading) { loading in
+                .onChange(of: store.loading) { _, loading in
                     if !loading { scrollToActiveTarget(proxy) }
                 }
-                .onChange(of: keyboard.lift) { lift in
-                    if lift > 0 && scrollMode != .manual { scrollToActiveTarget(proxy) }
+                .onChange(of: keyboard.lift) {
+                    scrollToActiveTarget(proxy)
+                }
+                .onChange(of: bottomBarHeight) {
+                    // 聚焦、语音模式、附件和权限卡都会改变输入区高度。
+                    scrollToActiveTarget(proxy)
                 }
         }
     }
 
     @ViewBuilder private func messageItemView(_ item: MessageDisplayItem, proxy: ScrollViewProxy) -> some View {
         switch item {
+        case .assistantHeader(let turnIndex, let preview):
+            let absoluteTurn = absoluteTurnIndex(
+                localIndex: turnIndex,
+                loadedOffset: store.loadedOffset
+            )
+            let collapsed = collapsedAssistantTurns.contains(absoluteTurn)
+            AssistantReplyDisclosure(
+                preview: preview,
+                collapsed: collapsed,
+                onToggle: {
+                    if collapsed {
+                        collapsedAssistantTurns.remove(absoluteTurn)
+                    } else {
+                        collapsedAssistantTurns.insert(absoluteTurn)
+                    }
+                }
+            )
         case .turn(let index, let turn):
             let showInlineHistory = hasCollapsedHistory
                 && !isHistoryExpanded
@@ -335,7 +379,7 @@ struct ChatView: View {
                 baseURL: store.api.baseURL,
                 isLastTurn: index == store.messages.count - 1,
                 isResponding: store.isResponding,
-                compactUser: false,
+                compactUser: index < lastUserTurnIndex,
                 askSelections: store.askUserSelections,
                 onAskToggle: { toolUseId, qIdx, optIdx, multi in
                     store.toggleAskOption(
@@ -344,7 +388,7 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
-                    expandedHistoryBoundary = nil
+                    expandedHistoryBoundaryAbsolute = nil
                     scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
@@ -375,7 +419,7 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
-                    expandedHistoryBoundary = nil
+                    expandedHistoryBoundaryAbsolute = nil
                     scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
@@ -394,7 +438,7 @@ struct ChatView: View {
                     )
                 },
                 onAskSubmit: { toolUseId, answerText in
-                    expandedHistoryBoundary = nil
+                    expandedHistoryBoundaryAbsolute = nil
                     scrollMode = .stickToBottom
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
@@ -424,7 +468,7 @@ struct ChatView: View {
                                 )
                             },
                             onAskSubmit: { toolUseId, answerText in
-                                expandedHistoryBoundary = nil
+                                expandedHistoryBoundaryAbsolute = nil
                                 scrollMode = .stickToBottom
                                 store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                             }
@@ -441,10 +485,16 @@ struct ChatView: View {
         case .historySummary(let stats, let boundary):
             HistorySummaryCard(
                 stats: stats,
-                expanded: expandedHistoryBoundary == boundary,
+                expanded: expandedHistoryBoundaryAbsolute == absoluteTurnIndex(
+                    localIndex: boundary,
+                    loadedOffset: store.loadedOffset
+                ),
                 onToggle: { toggleHistory(proxy) }
             )
-            .id("history-summary-\(boundary)")
+            .id(historySummaryAnchorID(
+                localBoundary: boundary,
+                loadedOffset: store.loadedOffset
+            ))
         }
     }
 
@@ -460,12 +510,17 @@ struct ChatView: View {
         lastUserTurnIndex
     }
 
+    private var absoluteHistoryBoundary: Int? {
+        guard historyBoundary >= 0 else { return nil }
+        return absoluteTurnIndex(localIndex: historyBoundary, loadedOffset: store.loadedOffset)
+    }
+
     private var hasCollapsedHistory: Bool {
         historyBoundary >= 2
     }
 
     private var isHistoryExpanded: Bool {
-        expandedHistoryBoundary == historyBoundary
+        expandedHistoryBoundaryAbsolute == absoluteHistoryBoundary
     }
 
     private var currentHistoryStats: HistoryStats {
@@ -495,7 +550,10 @@ struct ChatView: View {
             if itemTurnIndex(item) < boundary { history.append(item) } else { current.append(item) }
         }
         guard !history.isEmpty else { return base }
-        let expanded = expandedHistoryBoundary == boundary
+        let expanded = expandedHistoryBoundaryAbsolute == absoluteTurnIndex(
+            localIndex: boundary,
+            loadedOffset: store.loadedOffset
+        )
         let stats = computeHistoryStats(turns: store.messages, boundary: boundary)
         var result: [MessageDisplayItem] = []
         if expanded {
@@ -504,6 +562,17 @@ struct ChatView: View {
         }
         result.append(contentsOf: current)
         return result
+    }
+
+    private var presentedMessageItems: [MessageDisplayItem] {
+        groupedMessageItems.filter { item in
+            if case .assistantHeader = item { return true }
+            let absoluteTurn = absoluteTurnIndex(
+                localIndex: itemTurnIndex(item),
+                loadedOffset: store.loadedOffset
+            )
+            return !collapsedAssistantTurns.contains(absoluteTurn)
+        }
     }
 
     /// 当前轮 assistant 回复的下标；用于流式状态和活动分组判断。
@@ -516,7 +585,7 @@ struct ChatView: View {
 
     private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
         Button {
-            expandedHistoryBoundary = nil
+            expandedHistoryBoundaryAbsolute = nil
             scrollMode = .stickToBottom
             scrollToActiveTarget(proxy, animated: true)
         } label: {
@@ -537,20 +606,25 @@ struct ChatView: View {
     private func toggleHistory(_ proxy: ScrollViewProxy) {
         guard hasCollapsedHistory else { return }
         let boundary = historyBoundary
+        let absoluteBoundary = absoluteTurnIndex(
+            localIndex: boundary,
+            loadedOffset: store.loadedOffset
+        )
+        let anchorID = "history-summary-\(absoluteBoundary)"
         let next = !isHistoryExpanded
-        expandedHistoryBoundary = next ? boundary : nil
+        expandedHistoryBoundaryAbsolute = next ? absoluteBoundary : nil
         scrollMode = next ? .manual : .stickToBottom
-        if next && store.canLoadEarlier {
-            store.loadEarlier()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            if next {
+        if next {
+            Task { @MainActor in
+                // 等新一轮 LazyVStack 布局提交，不用固定延时和慢设备/分页竞争。
+                await Task.yield()
+                guard expandedHistoryBoundaryAbsolute == absoluteBoundary else { return }
                 withAnimation(.easeOut(duration: 0.22)) {
-                    proxy.scrollTo("history-summary-\(boundary)", anchor: .top)
+                    proxy.scrollTo(anchorID, anchor: .top)
                 }
-            } else {
-                scrollToActiveTarget(proxy, animated: true)
             }
+        } else {
+            scrollToActiveTarget(proxy, animated: true)
         }
     }
 
@@ -558,6 +632,8 @@ struct ChatView: View {
     private func scrollToActiveTarget(_ proxy: ScrollViewProxy, animated: Bool = false) {
         guard scrollMode != .manual else { return }
         let mode = scrollMode
+        scrollRequestGeneration &+= 1
+        let generation = scrollRequestGeneration
         let scroll = {
             switch mode {
             case .stickToBottom:
@@ -566,16 +642,19 @@ struct ChatView: View {
                 break
             }
         }
-        if animated {
-            withAnimation(.easeOut(duration: 0.22)) { scroll() }
-        } else {
-            scroll()
-        }
-        for delay in [0.05, 0.15, 0.35, 0.7] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard scrollMode == mode else { return }
+        let performScroll = {
+            if animated && !reduceMotion {
+                withAnimation(.easeOut(duration: 0.22)) { scroll() }
+            } else {
                 scroll()
             }
+        }
+        performScroll()
+        Task { @MainActor in
+            // 等消息、键盘或输入栏的新布局提交，再校正一次；新请求或用户手势会取消旧请求。
+            await Task.yield()
+            guard scrollRequestGeneration == generation, scrollMode == mode else { return }
+            performScroll()
         }
     }
 
@@ -889,10 +968,10 @@ struct ChatView: View {
         .animation(.easeInOut(duration: 0.2), value: store.pendingEscalation)
     }
 
-    /// 输入栏是否展开成卡片态（聚焦 / 语音模式 / 有草稿）。否则收起成单行胶囊。
+    /// 仅聚焦或语音模式展开；失焦后草稿和附件保留，但视觉恢复单行胶囊。
     /// 对齐 Codex App：默认是一条胶囊，点进去（聚焦）才长出底部控制行。
     private var inputExpanded: Bool {
-        inputFocused || voiceMode || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
+        composerShouldExpand(focused: inputFocused, voiceMode: voiceMode)
     }
 
     private var inputBar: some View {
@@ -1326,7 +1405,7 @@ struct ChatView: View {
         let text = buildAttachmentPrompt(pendingAttachments, body: draft)
         draft = ""
         pendingAttachments.removeAll()
-        expandedHistoryBoundary = nil
+        expandedHistoryBoundaryAbsolute = nil
         scrollMode = .stickToBottom
         store.send(text: text)
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让 @FocusState 丢焦点、键盘收起，
@@ -1581,6 +1660,8 @@ private enum DisplayItem {
 
 private enum MessageDisplayItem {
     case turn(index: Int, ConversationTurn)
+    /// assistant turn 的统一展开/收起入口；正文仍保持块级懒加载。
+    case assistantHeader(turnIndex: Int, preview: String)
     /// 摊平后的单个 assistant 内容块（见 flattenAssistantTurns / AssistantItemView）。
     case assistantItem(turnIndex: Int, item: DisplayItem)
     /// 子 Agent 作为独立角色常驻展示，不再被折成活动缩略行。
@@ -1646,10 +1727,12 @@ private func identified<Value>(
 }
 
 private func messageDisplayIdentity(_ item: MessageDisplayItem, turnOffset: Int) -> String {
-    let absoluteTurn = turnOffset + itemTurnIndex(item)
+    let absoluteTurn = absoluteTurnIndex(localIndex: itemTurnIndex(item), loadedOffset: turnOffset)
     switch item {
     case .turn:
         return "turn:\(absoluteTurn)"
+    case .assistantHeader:
+        return "assistant-header:\(absoluteTurn)"
     case .assistantItem(_, let displayItem):
         return "assistant:\(absoluteTurn):\(displayItemIdentity(displayItem))"
     case .subagentRole(_, let segment):
@@ -1664,6 +1747,14 @@ private func messageDisplayIdentity(_ item: MessageDisplayItem, turnOffset: Int)
     case .historySummary:
         return "history-summary:\(absoluteTurn)"
     }
+}
+
+func absoluteTurnIndex(localIndex: Int, loadedOffset: Int) -> Int {
+    loadedOffset + localIndex
+}
+
+func historySummaryAnchorID(localBoundary: Int, loadedOffset: Int) -> String {
+    "history-summary-\(absoluteTurnIndex(localIndex: localBoundary, loadedOffset: loadedOffset))"
 }
 
 private func displayItemIdentity(_ item: DisplayItem) -> String {
@@ -1717,10 +1808,21 @@ struct HistoryStats {
     let errors: Int
 }
 
+/// 有折叠边界时仅在用户主动展开历史后显示分页；尾窗没有完整历史边界时必须
+/// 常驻入口，否则 loadedOffset > 0 的更早消息会变成不可达内容。
+func shouldShowLoadEarlierControl(
+    historyExpanded: Bool,
+    hasCollapsedHistory: Bool,
+    canLoadEarlier: Bool
+) -> Bool {
+    canLoadEarlier && (historyExpanded || !hasCollapsedHistory)
+}
+
 /// 取出一个 MessageDisplayItem 归属的 turn 下标，用于按历史边界分区。
 private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
     switch item {
     case .turn(let i, _): return i
+    case .assistantHeader(let i, _): return i
     case .assistantItem(let i, _): return i
     case .subagentRole(let i, _): return i
     case .explorationGroup(_, let i): return i
@@ -1810,6 +1912,10 @@ private func flattenAssistantTurns(
     var out: [MessageDisplayItem] = []
     for item in items {
         if case .turn(let index, let turn) = item, turn.role == "assistant" {
+            out.append(.assistantHeader(
+                turnIndex: index,
+                preview: assistantReplyPreview(turn)
+            ))
             for segment in splitAssistantContentBySubagent(turn.content) {
                 switch segment {
                 case .parent(let blocks):
@@ -2351,14 +2457,44 @@ private func isGroupableExplorationTool(name: String, input: [String: JSONValue]
     isExplorationTool(name) && !isReadImageTool(name: name, input: input)
 }
 
-private let compactUserMinChars = 140
+private let compactUserMinChars = 72
 
-private func shouldCompactUserBody(_ text: String) -> Bool {
+func shouldCompactUserBody(_ text: String) -> Bool {
     text.count > compactUserMinChars
         || text.components(separatedBy: .newlines)
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .prefix(3)
             .count > 2
+}
+
+func compactReplyPreviewText(_ source: String) -> String {
+    let lines = source.components(separatedBy: .newlines).map { line -> String in
+        var value = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["### ", "## ", "# ", "- ", "> "] where value.hasPrefix(prefix) {
+            value.removeFirst(prefix.count)
+            break
+        }
+        return value
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "`", with: "")
+    }
+    let compact = lines.joined(separator: " ")
+        .split(whereSeparator: \Character.isWhitespace)
+        .joined(separator: " ")
+    return String(compact.prefix(160))
+}
+
+private func assistantReplyPreview(_ turn: ConversationTurn) -> String {
+    let texts = turn.content.compactMap { block -> String? in
+        if case .text(let text, _) = block { return text }
+        return nil
+    }
+    let preview = compactReplyPreviewText(texts.joined(separator: " "))
+    if !preview.isEmpty { return preview }
+    let toolCount = turn.content.reduce(into: 0) { count, block in
+        if case .toolUse = block { count += 1 }
+    }
+    return toolCount > 0 ? "\(toolCount) 个工具调用" : "助手回复"
 }
 
 private struct TurnView: View {
@@ -2653,6 +2789,7 @@ private struct ActivitySummaryRow: View {
 }
 
 private struct ActivityDetailSheet: View {
+    @Environment(\.dismiss) private var dismiss
     let group: ActivityGroup
     var baseURL: URL? = nil
     var isLastTurn = false
@@ -2678,6 +2815,15 @@ private struct ActivityDetailSheet: View {
                         .padding(.vertical, 5)
                         .background(Capsule().fill(Theme.background.opacity(0.7)))
                         .frame(maxWidth: 220, alignment: .trailing)
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(Theme.textSecondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("关闭执行详情")
                 }
                 ForEach(identifiedDisplayItems(group.items)) { identified in
                     AssistantItemView(
@@ -3623,7 +3769,7 @@ private struct ToolUseCard: View {
             expanded = initiallyExpanded && hasBody
             appliedInitialExpansion = true
         }
-        .onChange(of: result != nil) { _ in
+        .onChange(of: result != nil) {
             if initiallyExpanded && hasBody {
                 withAnimation(.easeInOut(duration: 0.15)) { expanded = true }
             }
@@ -4031,7 +4177,52 @@ private struct PermissionCard: View {
     }
 }
 
-// MARK: - 历史折叠入口
+// MARK: - 回复与历史折叠入口
+
+private struct AssistantReplyDisclosure: View {
+    let preview: String
+    let collapsed: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.brand)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Theme.brand.opacity(0.12)))
+                Text("Wand")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                if collapsed {
+                    Text(preview)
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.textSecondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text(collapsed ? "展开" : "收起")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(Theme.textSecondary)
+                    .rotationEffect(.degrees(collapsed ? 0 : 180))
+            }
+            .padding(.horizontal, 8)
+            .frame(minHeight: 44)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(collapsed ? Theme.surface.opacity(0.7) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(collapsed ? "展开 Wand 回复，\(preview)" : "收起 Wand 回复")
+        .accessibilityValue(collapsed ? "已收起" : "已展开")
+    }
+}
 
 private struct InlineHistoryChip: View {
     let count: Int
@@ -4174,7 +4365,7 @@ private struct AskUserQuestionCard: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .onAppear { expanded = !isAnswered }
-        .onChange(of: isAnswered) { answered in
+        .onChange(of: isAnswered) { _, answered in
             // 回答送达后自动折叠（对齐 Web 已答默认折叠）。
             if answered { withAnimation(.easeInOut(duration: 0.15)) { expanded = false } }
         }
@@ -4693,7 +4884,7 @@ private struct TerminalCard: View {
             expanded = initiallyExpanded
             appliedInitialExpansion = true
         }
-        .onChange(of: result != nil) { _ in
+        .onChange(of: result != nil) {
             if initiallyExpanded {
                 withAnimation(.easeInOut(duration: 0.15)) { expanded = true }
             }

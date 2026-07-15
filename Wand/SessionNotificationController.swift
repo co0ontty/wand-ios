@@ -38,7 +38,7 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
     func clearPending() {
         center.removeAllPendingNotificationRequests()
         center.removeAllDeliveredNotifications()
-        UIApplication.shared.applicationIconBadgeNumber = 0
+        center.setBadgeCount(0)
     }
 
     func sendTestNotification() {

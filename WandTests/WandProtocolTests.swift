@@ -3,6 +3,79 @@ import XCTest
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
+    func testHistoryIdentityIncludesProvider() throws {
+        let claude = try decode(
+            HistorySession.self,
+            from: #"{"claudeSessionId":"shared-id","cwd":"/tmp","firstUserMessage":"Hi","provider":"claude"}"#
+        )
+        let codex = try decode(
+            HistorySession.self,
+            from: #"{"claudeSessionId":"shared-id","cwd":"/tmp","firstUserMessage":"Hi","provider":"codex"}"#
+        )
+
+        XCTAssertEqual(claude.id, "claude:shared-id")
+        XCTAssertEqual(codex.id, "codex:shared-id")
+        XCTAssertNotEqual(claude.id, codex.id)
+    }
+
+    func testLoadEarlierControlFollowsHistoryDisclosure() {
+        XCTAssertTrue(shouldShowLoadEarlierControl(
+            historyExpanded: false,
+            hasCollapsedHistory: false,
+            canLoadEarlier: true
+        ))
+        XCTAssertFalse(shouldShowLoadEarlierControl(
+            historyExpanded: false,
+            hasCollapsedHistory: true,
+            canLoadEarlier: true
+        ))
+        XCTAssertTrue(shouldShowLoadEarlierControl(
+            historyExpanded: true,
+            hasCollapsedHistory: true,
+            canLoadEarlier: true
+        ))
+        XCTAssertFalse(shouldShowLoadEarlierControl(
+            historyExpanded: true,
+            hasCollapsedHistory: false,
+            canLoadEarlier: false
+        ))
+    }
+
+    func testHistoryAnchorStaysStableWhenEarlierTurnsArePrepended() {
+        XCTAssertEqual(absoluteTurnIndex(localIndex: 5, loadedOffset: 100), 105)
+        XCTAssertEqual(absoluteTurnIndex(localIndex: 15, loadedOffset: 90), 105)
+        XCTAssertEqual(
+            historySummaryAnchorID(localBoundary: 5, loadedOffset: 100),
+            historySummaryAnchorID(localBoundary: 15, loadedOffset: 90)
+        )
+    }
+
+    func testWideListDetailRequiresEnoughWidthAndHeight() {
+        XCTAssertFalse(usesWideListDetail(width: 639, height: 900))
+        XCTAssertFalse(usesWideListDetail(width: 900, height: 479))
+        XCTAssertTrue(usesWideListDetail(width: 640, height: 480))
+    }
+
+    func testHistoricalUserCompactionUsesReadableThresholds() {
+        XCTAssertFalse(shouldCompactUserBody("简短问题"))
+        XCTAssertTrue(shouldCompactUserBody(String(repeating: "a", count: 73)))
+        XCTAssertTrue(shouldCompactUserBody("第一行\n第二行\n第三行"))
+    }
+
+    func testReplyPreviewCompactsMarkdownAndWhitespace() {
+        XCTAssertEqual(
+            compactReplyPreviewText("# Heading\n- **First**   item\n> `quoted` value"),
+            "Heading First item quoted value"
+        )
+        XCTAssertEqual(compactReplyPreviewText("`snake_case`"), "snake_case")
+    }
+
+    func testComposerExpansionOnlyFollowsFocusOrVoiceMode() {
+        XCTAssertFalse(composerShouldExpand(focused: false, voiceMode: false))
+        XCTAssertTrue(composerShouldExpand(focused: true, voiceMode: false))
+        XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: true))
+    }
+
     func testProviderNormalizationTitlesAndRunners() {
         XCTAssertEqual(WandProvider.normalize(nil), "claude")
         XCTAssertEqual(WandProvider.normalize("  CODEX\n"), "codex")

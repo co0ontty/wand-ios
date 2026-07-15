@@ -33,7 +33,7 @@ struct NativeRootView: View {
     }
 
     var body: some View {
-        NavigationView {
+        AdaptiveNavigationContainer {
             ZStack {
                 Theme.background.ignoresSafeArea()
                 switch phase {
@@ -112,7 +112,6 @@ struct NativeRootView: View {
                 }
             }
         }
-        .navigationViewStyle(.stack)
         .fullScreenCover(isPresented: $showWebFallback) {
             // 网页版兜底：不再套壳顶栏，返回入口在网页侧边栏（「返回App」按钮）。
             // 旧版网页 / 加载中 / 出错时 WebContainerView 内部自带回退返回方式。
@@ -374,4 +373,26 @@ struct NativeRootView: View {
             installingUpdate = false
         }
     }
+}
+
+/// iPhone、窄分屏保持单栏返回栈；iPad 横屏和足够大的自由窗口使用系统双栏导航。
+/// 只依据当前可用尺寸，旋转和 Stage Manager 改窗后会自动重新选择布局。
+private struct AdaptiveNavigationContainer<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        GeometryReader { geometry in
+            if usesWideListDetail(width: geometry.size.width, height: geometry.size.height) {
+                NavigationView { content() }
+                    .navigationViewStyle(.columns)
+            } else {
+                NavigationView { content() }
+                    .navigationViewStyle(.stack)
+            }
+        }
+    }
+}
+
+func usesWideListDetail(width: CGFloat, height: CGFloat) -> Bool {
+    width >= 640 && height >= 480
 }

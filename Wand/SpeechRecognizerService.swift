@@ -212,7 +212,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
             }
 
             // —— 回主线程：起 recognitionTask + 置 @Published ——
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [self] in
                 guard self.generation == myGeneration else { return }
                 // 用户在冷启窗口内已松手 → 这次 start 是迟到的，拆掉引擎、不进录音态。
                 guard self.startRequested else {

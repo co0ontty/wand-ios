@@ -103,6 +103,24 @@ warn_root_coresimulator() {
   fi
 }
 
+open_simulator_ui() {
+  local developer_dir="${DEVELOPER_DIR:-$(xcode-select -p)}"
+  local xcode_contents="${developer_dir%/Developer}"
+
+  # Xcode 27 把 Simulator UI 合并进了 Device Hub；旧版 Xcode 仍提供
+  # Simulator.app。优先按当前 toolchain 的绝对路径打开，避免多套 Xcode
+  # 共存时 `open -a Simulator` 找到错误版本或完全找不到应用。
+  if [[ -d "$developer_dir/Applications/Simulator.app" ]]; then
+    open "$developer_dir/Applications/Simulator.app"
+  elif [[ -d "$xcode_contents/Applications/DeviceHub.app" ]]; then
+    open "$xcode_contents/Applications/DeviceHub.app"
+  elif open -Ra Simulator >/dev/null 2>&1; then
+    open -a Simulator
+  else
+    echo "提示：找不到 Simulator 或 Device Hub，继续以无界面方式运行模拟器。"
+  fi
+}
+
 retry() {
   local attempts="$1"
   local label="$2"
@@ -163,7 +181,7 @@ fi
 
 echo "==> 启动模拟器：$SIMULATOR_NAME ($SIMULATOR_ID)"
 run_with_timeout "$SIMCTL_BOOT_TIMEOUT_SECONDS" "启动模拟器" xcrun simctl boot "$SIMULATOR_ID" >/dev/null || true
-open -a Simulator
+open_simulator_ui
 run_with_timeout "$SIMCTL_BOOT_STATUS_TIMEOUT_SECONDS" "等待模拟器启动完成" xcrun simctl bootstatus "$SIMULATOR_ID" -b
 
 echo "==> 重新编译 Wand"

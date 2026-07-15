@@ -20,6 +20,24 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 1
 fi
 
+for command in xcodebuild swift zip; do
+if ! command -v "$command" >/dev/null 2>&1; then
+  echo "❌ 找不到 $command，请先安装并配置 macOS 开发环境。" >&2
+  exit 1
+fi
+done
+
+resolve_xcode_dir() {
+  local candidate
+  for candidate in /Applications/Xcode*.app/Contents/Developer; do
+    [[ -x "$candidate/usr/bin/xcodebuild" ]] || continue
+    echo "$candidate"
+    return 0
+  done
+
+  return 1
+}
+
 VERSION="${1:?usage: build.sh <version> (例如 1.16.0)}"
 BUILD_STAMP="${WAND_BUILD_STAMP:-}"
 if [[ -n "$BUILD_STAMP" && ! "$BUILD_STAMP" =~ ^[0-9]{12}$ ]]; then
@@ -44,7 +62,24 @@ swift "$PROJECT_ROOT/scripts/generate-icons.swift" "$ICONSET_DIR"
 # Liquid Glass 前置条件：必须用 Xcode 26+（iOS 26 SDK）编译链接。
 # 老 SDK 编出的包在 iOS 26 设备上会被系统按「兼容模式」渲染成旧扁平外观。
 # CI（ios-build.yml）已钉 runs-on: macos-26（默认 Xcode 26.x）；本地构建请自查。
-XCODE_MAJOR=$(xcodebuild -version | awk 'NR==1{print int($2)}')
+if ! XCODE_VERSION_OUTPUT="$(xcodebuild -version 2>&1)"; then
+  XCODE_DIR="$(resolve_xcode_dir || true)"
+  if [[ -z "$XCODE_DIR" ]]; then
+    echo "❌ xcodebuild 当前不可用：$XCODE_VERSION_OUTPUT" >&2
+    echo "   请先安装完整的 Xcode 并执行："
+    echo "   sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+    exit 1
+  fi
+
+  echo "⚠️ 当前未使用完整 Xcode，尝试改用：$XCODE_DIR"
+  export DEVELOPER_DIR="$XCODE_DIR"
+  if ! XCODE_VERSION_OUTPUT="$(xcodebuild -version 2>&1)"; then
+    echo "❌ 切换到 $XCODE_DIR 后仍无法调用 xcodebuild：$XCODE_VERSION_OUTPUT" >&2
+    exit 1
+  fi
+fi
+
+XCODE_MAJOR=$(printf '%s\n' "$XCODE_VERSION_OUTPUT" | awk 'NR==1 { gsub("\\..*$", "", $2); print $2 }')
 if (( XCODE_MAJOR < 26 )); then
   echo "⚠️  当前 Xcode 主版本 $XCODE_MAJOR < 26：产物不会启用 iOS 26 Liquid Glass 外观" >&2
 fi

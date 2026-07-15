@@ -509,6 +509,7 @@
 					"@executable_path/Frameworks",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LM_SKIP_METADATA_EXTRACTION = YES;
 				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wand.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -539,6 +540,7 @@
 					"@executable_path/Frameworks",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LM_SKIP_METADATA_EXTRACTION = YES;
 				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wand.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -620,6 +622,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
+				LM_SKIP_METADATA_EXTRACTION = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wand.app.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -645,6 +648,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
+				LM_SKIP_METADATA_EXTRACTION = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.wand.app.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;

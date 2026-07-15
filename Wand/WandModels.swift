@@ -776,7 +776,9 @@ struct HistorySession: Decodable, Identifiable {
     let managedByWand: Bool?
     let provider: String?
 
-    var id: String { claudeSessionId }
+    /// 历史 ID 只在同一 provider 内唯一。把 provider 纳入 SwiftUI 身份，避免
+    /// Claude/Codex 恰好使用相同 ID 时列表去重或本地删除误伤另一条记录。
+    var id: String { "\(WandProvider.normalize(provider)):\(claudeSessionId)" }
 }
 
 // MARK: - WebSocket 消息

@@ -320,7 +320,7 @@ struct GitQuickCommitView: View {
                 .background(RoundedRectangle(cornerRadius: 12).fill(Theme.surface))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
                 .disabled(committing)
-                .onChange(of: tagName) { _ in tagEdited = true }
+                .onChange(of: tagName) { tagEdited = true }
         }
 
         if let errorMessage {
@@ -739,7 +739,7 @@ private struct MagneticDockView: View {
                         fieldSize = geo.size
                         placeHome(animated: false)
                     }
-                    .onChange(of: geo.size) { newSize in
+                    .onChange(of: geo.size) { _, newSize in
                         fieldSize = newSize
                         if dragAnchor == nil { placeHome(animated: false) }
                     }

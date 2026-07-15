@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import Combine
 
 /// 会话列表：原生渲染 /api/sessions，下拉刷新 + 周期轮询，
 /// 对话模式进入原生聊天，PTY 模式进入嵌套网页版对应会话。
@@ -73,7 +74,8 @@ struct SessionListView: View {
             }
         }
     }
-    @State private var historyActionInProgress = false
+    /// 当前正在恢复的 provider-aware 历史身份；用于逐行进度和防重复提交。
+    @State private var restoringHistoryID: String?
     @State private var selectedSessionIds: Set<String> = []
     @State private var isSelecting = false
     /// 长按图标快捷操作 / 新建完成后的程序化跳转目标。
@@ -89,12 +91,15 @@ struct SessionListView: View {
     }
 
     private var recoverableSessions: [HistorySession] {
-        let managedIds = Set(sessions.compactMap(\.claudeSessionId))
+        let managedIds = Set(sessions.compactMap { session -> String? in
+            guard let historyID = session.claudeSessionId else { return nil }
+            return HistorySession.identity(provider: session.provider, sessionID: historyID)
+        })
         return historySessions
             .filter {
                 ($0.hasConversation ?? true)
                     && !($0.managedByWand ?? false)
-                    && !managedIds.contains($0.claudeSessionId)
+                    && !managedIds.contains($0.id)
             }
             .sorted {
                 ($0.mtimeMs ?? 0) > ($1.mtimeMs ?? 0)
@@ -112,21 +117,22 @@ struct SessionListView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            // 隐藏的程序化跳转链接：快捷操作「继续会话」用。
+            // 根容器当前是 NavigationView（宽屏时使用 columns，窄屏时使用 stack）。
+            // navigationDestination 只会被 NavigationStack/NavigationSplitView 消费，
+            // 放在这里会导致点击仅更新 state、但没有任何页面响应。
             NavigationLink(isActive: quickOpenActive) {
                 if let session = quickOpenSession {
-                    // 必须按 session.id 绑定身份：本视图只有这一个隐藏 NavigationLink 承接
-                    // 所有会话跳转，结构上是同一节点。不加 .id 时 SwiftUI 会复用上一个会话的
-                    // 视图身份，ChatView 里的 @StateObject ChatStore 只在首次身份创建时求值，
-                    // 第二个会话拿到的仍是上一个会话的 store（started=true → start() no-op，
-                    // socket 不重连、快照不重拉），表现为打开后没有数据。
+                    // 所有会话共用这个程序化入口，必须显式绑定 session 身份，
+                    // 否则 SwiftUI 可能复用上一个会话的 ChatStore。
                     SessionDestinationView(session: session, api: api)
                         .id(session.id)
                 } else {
                     EmptyView()
                 }
-            } label: { EmptyView() }
-                .hidden()
+            } label: {
+                EmptyView()
+            }
+            .hidden()
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -282,32 +288,37 @@ struct SessionListView: View {
 
     private func load(silent: Bool = false) async {
         if !silent { loading = true }
-        do {
-            async let active = api.listSessions()
-            async let claudeHistory = api.listClaudeHistory()
-            async let codexHistory = api.listCodexHistory()
-            let (loadedSessions, loadedClaudeHistory, loadedCodexHistory) = try await (active, claudeHistory, codexHistory)
+        async let active = try? api.listSessions()
+        async let claudeHistory = try? api.listClaudeHistory()
+        async let codexHistory = try? api.listCodexHistory()
+        let (loadedSessions, loadedClaudeHistory, loadedCodexHistory) = await (
+            active,
+            claudeHistory,
+            codexHistory
+        )
+
+        if let loadedSessions {
             sessions = loadedSessions
             SessionPresenceController.shared.reconcile(snapshots: loadedSessions)
-            historySessions = loadedClaudeHistory.map { history in
-                HistorySession(
-                    claudeSessionId: history.claudeSessionId,
-                    cwd: history.cwd,
-                    firstUserMessage: history.firstUserMessage,
-                    timestamp: history.timestamp,
-                    mtimeMs: history.mtimeMs,
-                    hasConversation: history.hasConversation,
-                    managedByWand: history.managedByWand,
-                    provider: "claude"
-                )
-            } + loadedCodexHistory
-            loadError = nil
             // 同步「最近会话」动态快捷项到长按图标菜单。
             QuickActionCoordinator.updateRecentSessionShortcuts(sessions)
-        } catch {
-            if !silent || sessions.isEmpty {
-                loadError = error.localizedDescription
-            }
+        }
+
+        // 两个历史扫描端点独立容错：单个 provider 瞬时失败时保留它上一轮的
+        // 成功结果，同时仍更新会话和另一个 provider，避免列表整体闪空。
+        if let loadedClaudeHistory {
+            historySessions.removeAll { WandProvider(normalizing: $0.provider) == .claude }
+            historySessions += loadedClaudeHistory.map { $0.withProvider(.claude) }
+        }
+        if let loadedCodexHistory {
+            historySessions.removeAll { WandProvider(normalizing: $0.provider) == .codex }
+            historySessions += loadedCodexHistory.map { $0.withProvider(.codex) }
+        }
+
+        if loadedSessions != nil || loadedClaudeHistory != nil || loadedCodexHistory != nil {
+            loadError = nil
+        } else if !silent || sessions.isEmpty {
+            loadError = "无法刷新会话，请检查服务连接"
         }
         loading = false
     }
@@ -354,10 +365,19 @@ struct SessionListView: View {
         Button {
             resume(session)
         } label: {
-            HistorySessionRow(history: session)
+            HistorySessionRow(
+                history: session,
+                loading: restoringHistoryID == session.id
+            )
         }
         .buttonStyle(.plain)
-        .disabled(historyActionInProgress || isSelecting)
+        .disabled(restoringHistoryID != nil || isSelecting)
+        .accessibilityLabel(
+            restoringHistoryID == session.id
+                ? "正在恢复会话，\(session.firstUserMessage)"
+                : "恢复会话，\(session.firstUserMessage)"
+        )
+        .accessibilityValue(restoringHistoryID == session.id ? "处理中" : "可恢复")
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
                 pendingDelete = .history(session)
@@ -378,8 +398,9 @@ struct SessionListView: View {
     }
 
     private func resume(_ history: HistorySession) {
-        guard !historyActionInProgress else { return }
-        historyActionInProgress = true
+        guard restoringHistoryID == nil else { return }
+        let historyID = history.id
+        restoringHistoryID = historyID
         Task {
             do {
                 let resumed = try await api.resumeHistory(history)
@@ -390,7 +411,9 @@ struct SessionListView: View {
             } catch {
                 loadError = error.localizedDescription
             }
-            historyActionInProgress = false
+            if restoringHistoryID == historyID {
+                restoringHistoryID = nil
+            }
         }
     }
 
@@ -476,6 +499,25 @@ extension Notification.Name {
     static let wandBeginSessionSelection = Notification.Name("wandBeginSessionSelection")
 }
 
+private extension HistorySession {
+    static func identity(provider: String?, sessionID: String) -> String {
+        "\(WandProvider.normalize(provider)):\(sessionID)"
+    }
+
+    func withProvider(_ provider: WandProvider) -> HistorySession {
+        HistorySession(
+            claudeSessionId: claudeSessionId,
+            cwd: cwd,
+            firstUserMessage: firstUserMessage,
+            timestamp: timestamp,
+            mtimeMs: mtimeMs,
+            hasConversation: hasConversation,
+            managedByWand: managedByWand,
+            provider: provider.rawValue
+        )
+    }
+}
+
 private struct SessionDestinationView: View {
     let session: SessionSnapshot
     let api: WandAPI
@@ -551,6 +593,10 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
         .padding(.bottom, 6)
         .animation(.easeInOut(duration: 0.18), value: expanded)
     }
+}
+
+func composerShouldExpand(focused: Bool, voiceMode: Bool) -> Bool {
+    focused || voiceMode
 }
 
 /// PTY 会话的原生外壳：套用与 ChatView 一致的原生导航头（provider 徽章 + 标题 +
@@ -657,7 +703,7 @@ private struct PtySessionView: View {
             store.start()
             refreshGitStatus()
         }
-        .onChange(of: showQuickCommit) { showing in
+        .onChange(of: showQuickCommit) { _, showing in
             if !showing { refreshGitStatus() }
         }
         .onDisappear { store.shutdown() }
@@ -731,7 +777,7 @@ private struct PtySessionView: View {
     }
 
     private var inputExpanded: Bool {
-        inputFocused || voiceMode || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
+        composerShouldExpand(focused: inputFocused, voiceMode: voiceMode)
     }
 
     private var inputBar: some View {
@@ -1418,6 +1464,7 @@ private struct SessionRow: View {
 
 private struct HistorySessionRow: View {
     let history: HistorySession
+    let loading: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -1457,6 +1504,13 @@ private struct HistorySessionRow: View {
                         .foregroundColor(Theme.textSecondary.opacity(0.9))
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            Spacer(minLength: 0)
+            if loading {
+                ProgressView()
+                    .tint(providerTint)
+                    .frame(width: 44, height: 44)
+                    .accessibilityHidden(true)
             }
         }
         .padding(.horizontal, 13)
