@@ -64,8 +64,6 @@ struct ChatView: View {
     @State private var scrollMode: ChatScrollMode = .stickToBottom
     @State private var voicePressed = false
     @State private var voiceCanceling = false
-    /// 语音输入模式：轻点话筒进入，整个输入框变成「按住说话」面板。
-    @State private var voiceMode = false
     @State private var showFileImporter = false
     @State private var showPhotoPicker = false
     @State private var uploadingAttachments = false
@@ -84,6 +82,8 @@ struct ChatView: View {
     @State private var expandedHistoryBoundaryAbsolute: Int?
     /// 用户手动收起的助手回复，使用绝对 turn 下标避免历史 prepend 后串状态。
     @State private var collapsedAssistantTurns: Set<Int> = []
+    /// 用户手动展开的历史回复；其他历史回复默认逐条收起。
+    @State private var expandedHistoricalAssistantTurns: Set<Int> = []
     /// 连续工具 / 思考 / 终端活动的详情 sheet。
     @State private var activitySheet: ActivitySheetItem?
     /// 底部 overlay 的实际占位高度。ChatView 不使用 safeAreaInset 放输入栏，
@@ -250,11 +250,7 @@ struct ChatView: View {
                 LazyVStack(alignment: .leading, spacing: 14) {
                         // 历史折叠时不让顶部哨兵因布局变短而自动连翻多页；展开历史后，或尾窗
                         // 根本没有 user turn 时，提供明确的 44pt 分页入口，始终保证更早消息可达。
-                        if shouldShowLoadEarlierControl(
-                            historyExpanded: isHistoryExpanded,
-                            hasCollapsedHistory: hasCollapsedHistory,
-                            canLoadEarlier: store.canLoadEarlier
-                        ) {
+                        if store.canLoadEarlier {
                             Button {
                                 store.loadEarlier()
                             } label: {
@@ -318,18 +314,6 @@ struct ChatView: View {
                         jumpToLatestButton(proxy)
                     }
                 }
-                .overlay(alignment: .bottomLeading) {
-                    if isHistoryExpanded && hasCollapsedHistory {
-                        InlineHistoryChip(
-                            count: currentHistoryStats.rounds,
-                            expanded: true,
-                            onToggle: { toggleHistory(proxy) }
-                        )
-                        .padding(.leading, 16)
-                        .padding(.bottom, 12)
-                        .transition(.scale(scale: 0.9).combined(with: .opacity))
-                    }
-                }
                 .onAppear { scrollToActiveTarget(proxy) }
                 .onReceive(store.$messages.dropFirst()) { _ in
                     scrollToActiveTarget(proxy)
@@ -357,29 +341,36 @@ struct ChatView: View {
                 localIndex: turnIndex,
                 loadedOffset: store.loadedOffset
             )
-            let collapsed = collapsedAssistantTurns.contains(absoluteTurn)
+            let historical = turnIndex < lastUserTurnIndex
+            let collapsed = historical
+                ? !expandedHistoricalAssistantTurns.contains(absoluteTurn)
+                : collapsedAssistantTurns.contains(absoluteTurn)
             AssistantReplyDisclosure(
                 preview: preview,
                 collapsed: collapsed,
                 onToggle: {
                     if collapsed {
-                        collapsedAssistantTurns.remove(absoluteTurn)
+                        if historical {
+                            expandedHistoricalAssistantTurns.insert(absoluteTurn)
+                        } else {
+                            collapsedAssistantTurns.remove(absoluteTurn)
+                        }
                     } else {
-                        collapsedAssistantTurns.insert(absoluteTurn)
+                        if historical {
+                            expandedHistoricalAssistantTurns.remove(absoluteTurn)
+                        } else {
+                            collapsedAssistantTurns.insert(absoluteTurn)
+                        }
                     }
                 }
             )
         case .turn(let index, let turn):
-            let showInlineHistory = hasCollapsedHistory
-                && !isHistoryExpanded
-                && turn.role == "user"
-                && index == lastUserTurnIndex
             let turnView = TurnView(
                 turn: turn,
                 baseURL: store.api.baseURL,
                 isLastTurn: index == store.messages.count - 1,
                 isResponding: store.isResponding,
-                compactUser: index < lastUserTurnIndex,
+                compactUser: false,
                 askSelections: store.askUserSelections,
                 onAskToggle: { toolUseId, qIdx, optIdx, multi in
                     store.toggleAskOption(
@@ -393,18 +384,7 @@ struct ChatView: View {
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
-            if showInlineHistory {
-                HStack(alignment: .top, spacing: 8) {
-                    InlineHistoryChip(
-                        count: currentHistoryStats.rounds,
-                        onToggle: { toggleHistory(proxy) }
-                    )
-                    .padding(.top, 3)
-                    turnView
-                }
-            } else {
-                turnView
-            }
+            turnView
         case .assistantItem(let turnIndex, let displayItem):
             AssistantItemView(
                 item: displayItem,
@@ -541,36 +521,20 @@ struct ChatView: View {
             latestTurnIndex: latestAssistantTurnIndex ?? -1,
             isResponding: store.isResponding
         )
-        let boundary = lastUserTurnIndex
-        // 至少要折叠一整轮（≥2 条历史 turn）才出摘要卡。
-        guard boundary >= 2 else { return base }
-        var history: [MessageDisplayItem] = []
-        var current: [MessageDisplayItem] = []
-        for item in base {
-            if itemTurnIndex(item) < boundary { history.append(item) } else { current.append(item) }
-        }
-        guard !history.isEmpty else { return base }
-        let expanded = expandedHistoryBoundaryAbsolute == absoluteTurnIndex(
-            localIndex: boundary,
-            loadedOffset: store.loadedOffset
-        )
-        let stats = computeHistoryStats(turns: store.messages, boundary: boundary)
-        var result: [MessageDisplayItem] = []
-        if expanded {
-            result.append(contentsOf: history)
-            result.append(.historySummary(stats: stats, boundary: boundary))
-        }
-        result.append(contentsOf: current)
-        return result
+        return base
     }
 
     private var presentedMessageItems: [MessageDisplayItem] {
         groupedMessageItems.filter { item in
             if case .assistantHeader = item { return true }
-            let absoluteTurn = absoluteTurnIndex(
-                localIndex: itemTurnIndex(item),
-                loadedOffset: store.loadedOffset
-            )
+            let turnIndex = itemTurnIndex(item)
+            guard store.messages.indices.contains(turnIndex), store.messages[turnIndex].role == "assistant" else {
+                return true
+            }
+            let absoluteTurn = absoluteTurnIndex(localIndex: turnIndex, loadedOffset: store.loadedOffset)
+            if turnIndex < lastUserTurnIndex {
+                return expandedHistoricalAssistantTurns.contains(absoluteTurn)
+            }
             return !collapsedAssistantTurns.contains(absoluteTurn)
         }
     }
@@ -973,21 +937,17 @@ struct ChatView: View {
         .animation(.easeInOut(duration: 0.2), value: store.pendingEscalation)
     }
 
-    /// 仅聚焦或语音模式展开；失焦后草稿和附件保留，但视觉恢复单行胶囊。
+    /// 聚焦或正在按住语音时展开；失焦后草稿和附件保留。
     /// 对齐 Codex App：默认是一条胶囊，点进去（聚焦）才长出底部控制行。
     private var inputExpanded: Bool {
-        composerShouldExpand(focused: inputFocused, voiceMode: voiceMode)
+        inputFocused || voicePressed
     }
 
     private var inputBar: some View {
         NativeComposerShell(
             expanded: inputExpanded,
             focused: inputFocused,
-            onFocusInput: {
-                if !voiceMode {
-                    inputFocused = true
-                }
-            },
+            onFocusInput: { inputFocused = true },
             collapsedLeading: { composerActionsMenu },
             inputContent: { composerInputContent },
             collapsedTrailing: {
@@ -995,7 +955,6 @@ struct ChatView: View {
                     modeChip(compact: true)
                     modelThinkingChip(compact: true)
                 }
-                micButton
                 trailingButtons
             },
             expandedControls: { controlRow }
@@ -1010,10 +969,10 @@ struct ChatView: View {
         }
     }
 
-    /// 顶部内容：键盘模式是自增高文本框，语音模式是「按住说话」面板。背景/描边交给外层卡片。
+    /// 文本和语音共用同一输入区：轻点打字，空草稿时按住说话。
     @ViewBuilder private var composerInputContent: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !pendingAttachments.isEmpty && !voiceMode {
+            if !pendingAttachments.isEmpty {
                 PendingAttachmentsPreview(
                     baseURL: api.baseURL,
                     attachments: pendingAttachments,
@@ -1022,30 +981,31 @@ struct ChatView: View {
                     }
                 )
             }
-            if voiceMode {
-                voiceHoldField
-            } else {
-                growingTextField
-                    .focused($inputFocused)
-                    .padding(.leading, inputExpanded ? 6 : 2)
-                    .padding(.trailing, inputExpanded ? 4 : 0)
-                    .padding(.vertical, inputExpanded ? 4 : 2)
-                    .frame(minHeight: inputExpanded ? 32 : 34)
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(
-                        TapGesture().onEnded {
-                            inputFocused = true
-                        }
-                    )
-            }
+            growingTextField
+                .focused($inputFocused)
+                .padding(.leading, inputExpanded ? 6 : 2)
+                .padding(.trailing, inputExpanded ? 4 : 0)
+                .padding(.vertical, inputExpanded ? 4 : 2)
+                .frame(minHeight: inputExpanded ? 32 : 34)
+                .contentShape(Rectangle())
+                .overlay {
+                    if draft.isEmpty {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .gesture(voiceTapOrHoldGesture(onTap: {
+                                inputFocused = true
+                            }))
+                            .accessibilityLabel("消息输入框，轻点打字，按住说话")
+                    }
+                }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 展开态底部控制行：+ / 模式徽标 / 模型·思考徽标 / 话筒 / 发送·停止。
+    /// 展开态底部控制行：+ / 模式徽标 / 模型·思考徽标 / 发送·停止。
     /// 把原本散落在右上角的会话设置（模型 + 思考深度）+ 模式开关全部收拢到这里。
     private var controlRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: ComposerMetrics.actionSpacing) {
             ViewThatFits(in: .horizontal) {
                 controlChipGroup(compact: false)
                 controlChipGroup(compact: true)
@@ -1053,13 +1013,12 @@ struct ChatView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .clipped()
 
-            micButton
             trailingButtons
         }
     }
 
     private func controlChipGroup(compact: Bool) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: ComposerMetrics.actionSpacing) {
             composerActionsMenu
             if store.isStructured {
                 modeChip(compact: compact)
@@ -1087,10 +1046,12 @@ struct ChatView: View {
             Image(systemName: "stop.fill")
                 .font(.system(size: 14, weight: .bold))
                 .foregroundColor(Theme.surface)
-                .frame(width: 38, height: 38)
+                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
                 .background(Circle().fill(Theme.textPrimary))
                 .overlay(Circle().stroke(Theme.border.opacity(0.25), lineWidth: 0.5))
         }
+        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+        .buttonStyle(.plain)
         .accessibilityLabel("停止任务")
     }
 
@@ -1099,9 +1060,11 @@ struct ChatView: View {
             Image(systemName: "stop.fill")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white)
-                .frame(width: 34, height: 34)
+                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
                 .background(Circle().fill(Theme.danger))
         }
+        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+        .buttonStyle(.plain)
         .accessibilityLabel("停止任务")
     }
 
@@ -1110,11 +1073,13 @@ struct ChatView: View {
             Image(systemName: "arrow.up")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundColor(canSend ? Theme.surface : Theme.textSecondary.opacity(0.55))
-                .frame(width: 38, height: 38)
+                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
                 .background(
                     Circle().fill(canSend ? Theme.textPrimary : Theme.textSecondary.opacity(0.16))
                 )
         }
+        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+        .buttonStyle(.plain)
         .disabled(!canSend)
         .accessibilityLabel("发送")
     }
@@ -1337,16 +1302,17 @@ struct ChatView: View {
                 ProgressView()
                     .controlSize(.small)
                     .tint(Theme.textSecondary)
-                    .frame(width: 34, height: 34)
+                    .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
             } else {
                 // 卡片内的「+」走极简：无圆底描边，仅图标（对齐 Codex）。
                 Image(systemName: "plus")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
-                    .frame(width: 34, height: 34)
+                    .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
                     .contentShape(Rectangle())
             }
         }
+        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
         .buttonStyle(.plain)
         .accessibilityLabel("更多操作")
     }
@@ -1396,7 +1362,10 @@ struct ChatView: View {
     }
 
     private var composerPlaceholder: String {
-        store.messages.isEmpty ? "发消息…" : "跟进"
+        if voicePressed {
+            return voiceCanceling ? "松开手指，取消输入" : "松开结束 · 上滑取消"
+        }
+        return "打字或按住说话"
     }
 
     private var canSend: Bool {
@@ -1410,100 +1379,14 @@ struct ChatView: View {
         let text = buildAttachmentPrompt(pendingAttachments, body: draft)
         draft = ""
         pendingAttachments.removeAll()
-        expandedHistoryBoundaryAbsolute = nil
         scrollMode = .stickToBottom
         store.send(text: text)
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让 @FocusState 丢焦点、键盘收起，
-        // 用户得再点一次输入框才能继续。非语音模式下主动保持焦点，连续对话不断。
-        if !voiceMode {
-            inputFocused = true
-        }
+        // 用户得再点一次输入框才能继续。发送后主动保持焦点。
+        inputFocused = true
     }
 
     // MARK: - 按住说话（端侧语音识别）
-
-    /// 麦克风按钮：
-    /// - 轻点 → 切换语音输入模式（整个输入框变成「按住说话」面板，图标变键盘）；
-    /// - 长按 → 立即按住说话（原交互）：按住录音、上滑取消、松手把识别文本追加进输入框。
-    private var micButton: some View {
-        Image(systemName: micButtonSymbol)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(voicePressed ? .white : Theme.brand)
-            .frame(width: 32, height: 32)
-            .background(
-                Circle().fill(
-                    voicePressed
-                        ? (voiceCanceling ? Theme.danger : Theme.brand)
-                        : Theme.brand.opacity(0.12)
-                )
-            )
-            .scaleEffect(voicePressed ? 1.1 : 1)
-            .animation(.easeInOut(duration: 0.15), value: voicePressed)
-            .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
-            .gesture(voiceTapOrHoldGesture(onTap: {
-                voiceMode.toggle()
-                if voiceMode {
-                    inputFocused = false
-                    // 进入语音模式即预热：把首次冷启成本（recognizer/授权/setCategory）
-                    // 前移到用户还没按下时，避免「按下去很久识别框才出现」。
-                    speech.prewarm()
-                }
-            }))
-            .accessibilityLabel(voiceMode ? "切回键盘输入" : "轻点切语音模式，长按说话")
-    }
-
-    private var micButtonSymbol: String {
-        if speech.isRecording { return "waveform" }
-        return voiceMode && !voicePressed ? "keyboard" : "mic"
-    }
-
-    /// 语音模式下替换文本框的「按住说话」面板：
-    /// 按住录音（同话筒长按），轻点切回键盘输入；非录音时显示当前草稿，所见即所得。
-    private var voiceHoldField: some View {
-        HStack {
-            if voicePressed || draft.isEmpty {
-                Spacer(minLength: 0)
-            }
-            Group {
-                if voicePressed {
-                    Text(voiceCanceling ? "松开手指，取消输入" : "松开结束 · 上滑取消")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
-                } else if draft.isEmpty {
-                    Text("按住说话")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
-                } else {
-                    Text(draft)
-                        .font(.system(size: 16))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(2)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
-        .frame(minHeight: 32)
-        // 背景/描边交给外层输入卡片；这里只在按住时给一层淡淡的状态底色。
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(
-                    voicePressed
-                        ? (voiceCanceling ? Theme.danger.opacity(0.14) : Theme.brand.opacity(0.12))
-                        : Color.clear
-                )
-        )
-        .animation(.easeInOut(duration: 0.15), value: voicePressed)
-        .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
-        .contentShape(Rectangle())
-        .gesture(voiceTapOrHoldGesture(onTap: {
-            // 轻点面板：切回键盘并自动聚焦，直接接着打字。
-            voiceMode = false
-            DispatchQueue.main.async { inputFocused = true }
-        }))
-        .accessibilityLabel("按住说话，轻点切回键盘输入")
-    }
 
     /// 上滑超过该距离进入「松开取消」态（对齐 Web 端 VOICE_CANCEL_THRESHOLD）。
     private static let voiceCancelThreshold: CGFloat = 60

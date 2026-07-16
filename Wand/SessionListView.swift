@@ -525,6 +525,12 @@ struct SessionDestinationView: View {
     }
 }
 
+enum ComposerMetrics {
+    static let actionVisualSize: CGFloat = 34
+    static let actionTouchSize: CGFloat = 44
+    static let actionSpacing: CGFloat = 6
+}
+
 struct NativeComposerShell<CollapsedLeading: View, InputContent: View, CollapsedTrailing: View, ExpandedControls: View>: View {
     let expanded: Bool
     let focused: Bool
@@ -538,8 +544,8 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
         let cornerRadius: CGFloat = expanded ? 28 : 24
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
-        return VStack(alignment: .leading, spacing: expanded ? 10 : 0) {
-            HStack(alignment: expanded ? .bottom : .center, spacing: 8) {
+        return VStack(alignment: .leading, spacing: expanded ? 8 : 0) {
+            HStack(alignment: expanded ? .bottom : .center, spacing: ComposerMetrics.actionSpacing) {
                 if !expanded {
                     collapsedLeading()
                 }
@@ -581,7 +587,7 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
             }
         )
         .compositingGroup()
-        .shadow(color: Color.black.opacity(expanded ? 0.14 : 0.08), radius: expanded ? 22 : 12, x: 0, y: expanded ? 10 : 4)
+        .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 3)
         .padding(.horizontal, 12)
         .padding(.top, 6)
         .padding(.bottom, 6)
@@ -614,7 +620,6 @@ private struct PtySessionView: View {
     @State private var pendingAttachments: [UploadedFile] = []
     @State private var voicePressed = false
     @State private var voiceCanceling = false
-    @State private var voiceMode = false
     @State private var voiceHoldWork: DispatchWorkItem?
     @State private var gitStatus: GitStatusResult?
     @State private var quickCommitPhase: QuickCommitToolbarPhase = .idle
@@ -771,7 +776,7 @@ private struct PtySessionView: View {
     }
 
     private var inputExpanded: Bool {
-        composerShouldExpand(focused: inputFocused, voiceMode: voiceMode)
+        inputFocused || voicePressed
     }
 
     private var inputBar: some View {
@@ -779,20 +784,18 @@ private struct PtySessionView: View {
             expanded: inputExpanded,
             focused: inputFocused,
             onFocusInput: {
-                if !voiceMode { inputFocused = true }
+                inputFocused = true
             },
             collapsedLeading: { composerActionsMenu },
             inputContent: { ptyTextField },
             collapsedTrailing: {
-                micButton
                 trailingButtons
             },
             expandedControls: {
-                HStack(spacing: 8) {
+                HStack(spacing: ComposerMetrics.actionSpacing) {
                     composerActionsMenu
                     terminalChip
                     Spacer(minLength: 0)
-                    micButton
                     trailingButtons
                 }
             }
@@ -827,15 +830,16 @@ private struct PtySessionView: View {
                 ProgressView()
                     .controlSize(.small)
                     .tint(Theme.textSecondary)
-                    .frame(width: 34, height: 34)
+                    .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
             } else {
                 Image(systemName: "plus")
                     .font(.system(size: 18, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
-                    .frame(width: 34, height: 34)
+                    .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
                     .contentShape(Rectangle())
             }
         }
+        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
         .buttonStyle(.plain)
         .accessibilityLabel("更多操作")
     }
@@ -850,7 +854,7 @@ private struct PtySessionView: View {
 
     private var ptyTextField: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !pendingAttachments.isEmpty && !voiceMode {
+            if !pendingAttachments.isEmpty {
                 PendingAttachmentsPreview(
                     baseURL: api.baseURL,
                     attachments: pendingAttachments,
@@ -859,28 +863,29 @@ private struct PtySessionView: View {
                     }
                 )
             }
-            if voiceMode {
-                voiceHoldField
-            } else {
-                TextField("输入到终端…", text: $draft, axis: .vertical)
-                    .lineLimit(1...5)
-                    .font(.system(size: 16))
-                    .foregroundColor(Theme.textPrimary)
-                    .tint(Theme.brand)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .focused($inputFocused)
-                    .padding(.leading, inputExpanded ? 6 : 2)
-                    .padding(.trailing, inputExpanded ? 4 : 0)
-                    .padding(.vertical, inputExpanded ? 4 : 2)
-                    .frame(minHeight: inputExpanded ? 32 : 34)
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(
-                        TapGesture().onEnded {
-                            inputFocused = true
-                        }
-                    )
-            }
+            TextField(ptyComposerPlaceholder, text: $draft, axis: .vertical)
+                .lineLimit(1...5)
+                .font(.system(size: 16))
+                .foregroundColor(Theme.textPrimary)
+                .tint(Theme.brand)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($inputFocused)
+                .padding(.leading, inputExpanded ? 6 : 2)
+                .padding(.trailing, inputExpanded ? 4 : 0)
+                .padding(.vertical, inputExpanded ? 4 : 2)
+                .frame(minHeight: inputExpanded ? 32 : 34)
+                .contentShape(Rectangle())
+                .overlay {
+                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .gesture(voiceTapOrHoldGesture(onTap: {
+                                inputFocused = true
+                            }))
+                            .accessibilityLabel("终端输入框，轻点打字，按住说话")
+                    }
+                }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -916,10 +921,12 @@ private struct PtySessionView: View {
             Image(systemName: "stop.fill")
                 .font(.system(size: 14, weight: .bold))
                 .foregroundColor(Theme.surface)
-                .frame(width: 38, height: 38)
+                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
                 .background(Circle().fill(Theme.textPrimary))
                 .overlay(Circle().stroke(Theme.border.opacity(0.25), lineWidth: 0.5))
         }
+        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+        .buttonStyle(.plain)
         .accessibilityLabel("停止任务")
     }
 
@@ -928,9 +935,11 @@ private struct PtySessionView: View {
             Image(systemName: "stop.fill")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.white)
-                .frame(width: 34, height: 34)
+                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
                 .background(Circle().fill(Theme.danger))
         }
+        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+        .buttonStyle(.plain)
         .accessibilityLabel("停止任务")
     }
 
@@ -939,89 +948,22 @@ private struct PtySessionView: View {
             Image(systemName: "arrow.up")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundColor(canSend ? Theme.surface : Theme.textSecondary.opacity(0.55))
-                .frame(width: 38, height: 38)
+                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
                 .background(
                     Circle().fill(canSend ? Theme.textPrimary : Theme.textSecondary.opacity(0.16))
                 )
         }
+        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+        .buttonStyle(.plain)
         .disabled(!canSend)
         .accessibilityLabel("发送")
     }
 
-    private var micButton: some View {
-        Image(systemName: micButtonSymbol)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundColor(voicePressed ? .white : Theme.brand)
-            .frame(width: 32, height: 32)
-            .background(
-                Circle().fill(
-                    voicePressed
-                        ? (voiceCanceling ? Theme.danger : Theme.brand)
-                        : Theme.brand.opacity(0.12)
-                )
-            )
-            .scaleEffect(voicePressed ? 1.1 : 1)
-            .animation(.easeInOut(duration: 0.15), value: voicePressed)
-            .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
-            .gesture(voiceTapOrHoldGesture(onTap: {
-                voiceMode.toggle()
-                if voiceMode {
-                    inputFocused = false
-                    speech.prewarm()
-                } else {
-                    DispatchQueue.main.async { inputFocused = true }
-                }
-            }))
-            .accessibilityLabel(voiceMode ? "切回键盘输入" : "轻点切语音模式，长按说话")
-    }
-
-    private var micButtonSymbol: String {
-        if speech.isRecording { return "waveform" }
-        return voiceMode && !voicePressed ? "keyboard" : "mic"
-    }
-
-    private var voiceHoldField: some View {
-        HStack {
-            if voicePressed || draft.isEmpty {
-                Spacer(minLength: 0)
-            }
-            Group {
-                if voicePressed {
-                    Text(voiceCanceling ? "松开手指，取消输入" : "松开结束 · 上滑取消")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
-                } else if draft.isEmpty {
-                    Text("按住说话")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
-                } else {
-                    Text(draft)
-                        .font(.system(size: 16))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(2)
-                }
-            }
-            Spacer(minLength: 0)
+    private var ptyComposerPlaceholder: String {
+        if voicePressed {
+            return voiceCanceling ? "松开取消" : "松开结束 · 上滑取消"
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
-        .frame(minHeight: 32)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(
-                    voicePressed
-                        ? (voiceCanceling ? Theme.danger.opacity(0.14) : Theme.brand.opacity(0.12))
-                        : Color.clear
-                )
-        )
-        .animation(.easeInOut(duration: 0.15), value: voicePressed)
-        .animation(.easeInOut(duration: 0.15), value: voiceCanceling)
-        .contentShape(Rectangle())
-        .gesture(voiceTapOrHoldGesture(onTap: {
-            voiceMode = false
-            DispatchQueue.main.async { inputFocused = true }
-        }))
-        .accessibilityLabel("按住说话，轻点切回键盘输入")
+        return "打字或按住说话"
     }
 
     private var voiceBubble: some View {
@@ -1068,9 +1010,7 @@ private struct PtySessionView: View {
         draft = ""
         pendingAttachments.removeAll()
         sendPtyInput(text, restoreDraft: restoreDraft, restoreAttachments: restoreAttachments)
-        if !voiceMode {
-            inputFocused = true
-        }
+        inputFocused = true
     }
 
     private func sendPtyInput(_ text: String, restoreDraft: String, restoreAttachments: [UploadedFile]) {
