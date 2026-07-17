@@ -35,6 +35,8 @@ extension SessionActivityAttributes.SessionEntry {
         switch providerRaw.lowercased() {
         case "codex": return "Codex"
         case "opencode": return "OpenCode"
+        case "grok": return "Grok"
+        case "qoder": return "Qoder"
         default: return "Claude"
         }
     }
@@ -43,6 +45,8 @@ extension SessionActivityAttributes.SessionEntry {
         switch providerRaw.lowercased() {
         case "codex": return "chevron.left.forwardslash.chevron.right"
         case "opencode": return "terminal"
+        case "grok": return "bolt"
+        case "qoder": return "q.circle"
         default: return "sparkles"
         }
     }

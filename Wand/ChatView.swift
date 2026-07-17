@@ -211,6 +211,75 @@ struct ChatView: View {
         .environment(\.cardExpandDefaults, store.cardDefaults)
         .environment(\.chatAPI, api)
         .environment(\.chatSessionID, sessionId)
+        .wandKeyboardShortcuts(chatKeyboardShortcuts)
+    }
+
+    private var chatKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        [
+            WandKeyboardShortcutAction(
+                id: "focus-input",
+                title: "聚焦输入",
+                key: "l",
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && !inputFocused
+            ) {
+                inputFocused = true
+            },
+            WandKeyboardShortcutAction(
+                id: "send",
+                title: "发送",
+                key: .return,
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && canSend
+            ) {
+                sendDraft()
+            },
+            WandKeyboardShortcutAction(
+                id: "stop",
+                title: "停止任务",
+                key: ".",
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && store.isResponding
+            ) {
+                showStopConfirm = true
+            },
+            WandKeyboardShortcutAction(
+                id: "attach-file",
+                title: "选择文件",
+                key: "o",
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && !uploadingAttachments
+            ) {
+                inputFocused = false
+                showFileImporter = true
+            },
+            WandKeyboardShortcutAction(
+                id: "quick-commit",
+                title: "快速提交",
+                key: "c",
+                modifiers: [.command, .shift],
+                isEnabled: keyboardShortcutsActive && quickCommitPhase == .idle
+            ) {
+                showQuickCommit = true
+            },
+            WandKeyboardShortcutAction(
+                id: "dismiss-input",
+                title: "收起输入",
+                key: .escape,
+                modifiers: [],
+                isEnabled: keyboardShortcutsActive && inputFocused
+            ) {
+                inputFocused = false
+            },
+        ]
+    }
+
+    private var keyboardShortcutsActive: Bool {
+        !showQuickCommit
+            && !showFileImporter
+            && !showPhotoPicker
+            && !showStopConfirm
+            && activitySheet == nil
     }
 
     @ViewBuilder private var mainContent: some View {
@@ -671,7 +740,7 @@ struct ChatView: View {
     private var providerTint: Color {
         switch currentProvider {
         case .codex: return Theme.codex
-        case .claude, .opencode, .grok: return Theme.brand
+        case .claude, .opencode, .grok, .qoder: return Theme.brand
         }
     }
 
@@ -683,8 +752,7 @@ struct ChatView: View {
                 Circle()
                     .fill(tint.opacity(0.1))
                     .frame(width: 72, height: 72)
-                BrandLogoShape(provider: store.snapshot?.provider)
-                    .fill(tint)
+                BrandLogo(provider: store.snapshot?.provider, color: tint)
                     .frame(width: 32, height: 32)
             }
             Text("开始新的 \(provider.title) 对话")
@@ -851,8 +919,7 @@ struct ChatView: View {
                 .fill(tint.opacity(0.13))
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(tint.opacity(0.24), lineWidth: 1)
-            BrandLogoShape(provider: store.snapshot?.provider)
-                .fill(tint)
+            BrandLogo(provider: store.snapshot?.provider, color: tint)
                 .frame(width: 15, height: 15)
         }
         .frame(width: 26, height: 26)
@@ -1414,6 +1481,8 @@ struct ChatView: View {
         TextField(composerPlaceholder, text: $draft, axis: .vertical)
             .lineLimit(1...5)
             .font(.system(size: 16))
+            .submitLabel(.send)
+            .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
     }
 
     private var composerPlaceholder: String {

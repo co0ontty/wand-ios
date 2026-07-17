@@ -81,23 +81,185 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: false, contentNeedsSpace: true))
     }
 
+    func testWindowedMessagesPreserveLoadedPrefixAndClearLeadingBlockOffset() {
+        let current = messageWindow(
+            messages: [turn("old"), turn("current")],
+            loadedOffset: 5,
+            messageTotal: 7,
+            leadingBlockOffset: 3,
+            leadingBlockTotal: 4
+        )
+
+        let result = mergingWindowedMessages(
+            current: current,
+            incoming: [turn("replacement")],
+            offset: 6,
+            total: 7,
+            leadingOffset: 2,
+            leadingTotal: 5
+        )
+
+        XCTAssertEqual(result.messages.map(text), ["old", "replacement"])
+        XCTAssertEqual(result.loadedOffset, 5)
+        XCTAssertEqual(result.messageTotal, 7)
+        XCTAssertEqual(result.leadingBlockOffset, 0)
+        XCTAssertEqual(result.leadingBlockTotal, 1)
+    }
+
+    func testWindowedMessagesIgnoreEmptyZeroTotalSnapshot() {
+        let current = messageWindow(
+            messages: [turn("kept")],
+            loadedOffset: 8,
+            messageTotal: 9,
+            leadingBlockOffset: 2,
+            leadingBlockTotal: 3
+        )
+
+        let result = mergingWindowedMessages(
+            current: current,
+            incoming: [],
+            offset: 0,
+            total: 0
+        )
+
+        XCTAssertEqual(result.messages.map(text), ["kept"])
+        XCTAssertEqual(result.loadedOffset, 8)
+        XCTAssertEqual(result.messageTotal, 9)
+        XCTAssertEqual(result.leadingBlockOffset, 2)
+        XCTAssertEqual(result.leadingBlockTotal, 3)
+    }
+
+    func testWindowedMessagesClampNegativeServerOffsets() {
+        let result = mergingWindowedMessages(
+            current: messageWindow(
+                messages: [],
+                loadedOffset: 0,
+                messageTotal: 0,
+                leadingBlockOffset: 0,
+                leadingBlockTotal: 0
+            ),
+            incoming: [turn("message")],
+            offset: -4,
+            total: -1,
+            leadingOffset: -2,
+            leadingTotal: 1
+        )
+
+        XCTAssertEqual(result.loadedOffset, 0)
+        XCTAssertEqual(result.messageTotal, 1)
+        XCTAssertEqual(result.leadingBlockOffset, 0)
+        XCTAssertEqual(result.leadingBlockTotal, 1)
+    }
+
+    func testWindowedMessagesUseEarlierSnapshotAndLeadingBlockMetadata() {
+        let current = messageWindow(
+            messages: [turn("late")],
+            loadedOffset: 10,
+            messageTotal: 11,
+            leadingBlockOffset: 0,
+            leadingBlockTotal: 1
+        )
+
+        let result = mergingWindowedMessages(
+            current: current,
+            incoming: [turn("early")],
+            offset: 5,
+            total: 11,
+            leadingOffset: 4,
+            leadingTotal: 6
+        )
+
+        XCTAssertEqual(result.messages.map(text), ["early"])
+        XCTAssertEqual(result.loadedOffset, 5)
+        XCTAssertEqual(result.messageTotal, 11)
+        XCTAssertEqual(result.leadingBlockOffset, 4)
+        XCTAssertEqual(result.leadingBlockTotal, 6)
+    }
+
+    func testIncrementalMessageReplacesSameRoleAndResetsSingleTurnBlockWindow() {
+        let current = messageWindow(
+            messages: [turn("partial", role: "assistant")],
+            loadedOffset: 4,
+            messageTotal: 5,
+            leadingBlockOffset: 8,
+            leadingBlockTotal: 10
+        )
+
+        let result = applyingIncrementalMessage(
+            turn("complete", role: "assistant"),
+            expectedCount: 5,
+            to: current
+        )
+
+        XCTAssertEqual(result.messages.map(text), ["complete"])
+        XCTAssertEqual(result.messageTotal, 5)
+        XCTAssertEqual(result.leadingBlockOffset, 0)
+        XCTAssertEqual(result.leadingBlockTotal, 1)
+    }
+
+    func testIncrementalMessageAppendsOnlyWhenHistoryHasRoom() {
+        let current = messageWindow(
+            messages: [turn("user", role: "user")],
+            loadedOffset: 3,
+            messageTotal: 4,
+            leadingBlockOffset: 0,
+            leadingBlockTotal: 1
+        )
+
+        let appended = applyingIncrementalMessage(
+            turn("assistant", role: "assistant"),
+            expectedCount: 5,
+            to: current
+        )
+        let ignored = applyingIncrementalMessage(
+            turn("duplicate", role: "assistant"),
+            expectedCount: 4,
+            to: current
+        )
+
+        XCTAssertEqual(appended.messages.map(text), ["user", "assistant"])
+        XCTAssertEqual(appended.messageTotal, 5)
+        XCTAssertEqual(ignored.messages.map(text), ["user"])
+        XCTAssertEqual(ignored.messageTotal, 4)
+    }
+
+    func testPtyInputSubmissionKeepsTextAndEnterAsSeparateRequests() {
+        XCTAssertEqual(
+            ptyInputSubmission(text: "git status", view: "terminal"),
+            PtyInputSubmission(
+                text: PtyInputChunk(input: "git status", view: "terminal", shortcutKey: nil),
+                enter: PtyInputChunk(input: "\r", view: "terminal", shortcutKey: "enter_text")
+            )
+        )
+        XCTAssertEqual(
+            ptyInputSubmission(text: "continue", view: "chat"),
+            PtyInputSubmission(
+                text: PtyInputChunk(input: "continue", view: "chat", shortcutKey: nil),
+                enter: PtyInputChunk(input: "\r", view: "chat", shortcutKey: "enter_text")
+            )
+        )
+    }
+
     func testProviderNormalizationTitlesAndRunners() {
         XCTAssertEqual(WandProvider.normalize(nil), "claude")
         XCTAssertEqual(WandProvider.normalize("  CODEX\n"), "codex")
         XCTAssertEqual(WandProvider.normalize("Open-Code"), "opencode")
         XCTAssertEqual(WandProvider.normalize("open_code"), "opencode")
         XCTAssertEqual(WandProvider.normalize("GROK"), "grok")
+        XCTAssertEqual(WandProvider.normalize("qodercli"), "qoder")
         XCTAssertEqual(WandProvider.normalize("future-provider"), "claude")
 
         XCTAssertEqual(WandProvider.claude.title, "Claude")
         XCTAssertEqual(WandProvider.codex.title, "Codex")
         XCTAssertEqual(WandProvider.opencode.title, "OpenCode")
         XCTAssertEqual(WandProvider.grok.title, "Grok")
+        XCTAssertEqual(WandProvider.qoder.title, "Qoder")
 
         XCTAssertEqual(WandProvider.claude.structuredRunner, "claude-cli-print")
         XCTAssertEqual(WandProvider.codex.structuredRunner, "codex-cli-exec")
         XCTAssertEqual(WandProvider.opencode.structuredRunner, "opencode-cli-run")
         XCTAssertEqual(WandProvider.grok.structuredRunner, "grok-cli-headless")
+        XCTAssertEqual(WandProvider.qoder.structuredRunner, "qoder-cli-print")
     }
 
     func testProviderModeClampUsesSupportedFallbackAndSafeDefault() {
@@ -108,6 +270,7 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(WandProvider.opencode.clamp(mode: "default"), "default")
         XCTAssertEqual(WandProvider.opencode.clamp(mode: "native", fallback: "full-access"), "full-access")
         XCTAssertEqual(WandProvider.opencode.clamp(mode: "native", fallback: "auto-edit"), "default")
+        XCTAssertEqual(WandProvider.qoder.clamp(mode: "native", fallback: "auto-edit"), "auto-edit")
         XCTAssertEqual(WandProvider.claude.clamp(mode: "future-auto-mode"), "default")
     }
 
@@ -305,6 +468,31 @@ final class WandProtocolTests: XCTestCase {
 
     private func todo(status: String) -> TodoItem {
         TodoItem(content: "Task", status: status, activeForm: nil)
+    }
+
+    private func turn(_ value: String, role: String = "user") -> ConversationTurn {
+        ConversationTurn(role: role, content: [.text(text: value, subagent: nil)])
+    }
+
+    private func text(_ turn: ConversationTurn) -> String {
+        guard case .text(let value, _) = turn.content.first else { return "" }
+        return value
+    }
+
+    private func messageWindow(
+        messages: [ConversationTurn],
+        loadedOffset: Int,
+        messageTotal: Int,
+        leadingBlockOffset: Int,
+        leadingBlockTotal: Int
+    ) -> SessionMessageWindow {
+        SessionMessageWindow(
+            messages: messages,
+            loadedOffset: loadedOffset,
+            messageTotal: messageTotal,
+            leadingBlockOffset: leadingBlockOffset,
+            leadingBlockTotal: leadingBlockTotal
+        )
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from json: String) throws -> T {

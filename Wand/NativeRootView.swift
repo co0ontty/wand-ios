@@ -81,6 +81,69 @@ struct NativeRootView: View {
             if sessionID == nil { selectedSnapshot = nil }
         }
         .task { await monitorSessionStatus() }
+        .wandKeyboardShortcuts(rootKeyboardShortcuts)
+    }
+
+    private var rootKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        guard phase == .ready else { return [] }
+        return [
+            WandKeyboardShortcutAction(
+                id: "new-session",
+                title: "新建会话",
+                key: "n",
+                modifiers: .command
+            ) {
+                openNewSessionFromKeyboard()
+            },
+            WandKeyboardShortcutAction(
+                id: "show-settings",
+                title: "设置",
+                key: ",",
+                modifiers: .command,
+                isEnabled: !showSettings
+            ) {
+                showWebFallback = false
+                showSettings = true
+            },
+            WandKeyboardShortcutAction(
+                id: "show-sessions",
+                title: "显示会话列表",
+                key: "1",
+                modifiers: .command,
+                isEnabled: selectedSessionID != nil || showWebFallback
+            ) {
+                showSettings = false
+                showWebFallback = false
+                selectedSessionID = nil
+                selectedSnapshot = nil
+            },
+            WandKeyboardShortcutAction(
+                id: "close-active-surface",
+                title: "关闭当前页",
+                key: "w",
+                modifiers: .command,
+                isEnabled: selectedSessionID != nil || showWebFallback || showSettings
+            ) {
+                closeActiveSurfaceFromKeyboard()
+            },
+        ]
+    }
+
+    private func openNewSessionFromKeyboard() {
+        showSettings = false
+        showWebFallback = false
+        QuickActionCoordinator.shared.enqueue(.newSession)
+    }
+
+    private func closeActiveSurfaceFromKeyboard() {
+        if showWebFallback {
+            showWebFallback = false
+        } else if showSettings {
+            showSettings = false
+        } else if selectedSessionID != nil {
+            selectedSessionID = nil
+            selectedSnapshot = nil
+        }
     }
 
     /// 侧边栏：登录/失败/就绪三种阶段共用同一栏。ready 时承载会话列表及其 toolbar。

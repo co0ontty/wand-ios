@@ -193,6 +193,66 @@ struct GitQuickCommitView: View {
         .navigationViewStyle(.stack)
         .interactiveDismissDisabled(committing || pushing)
         .task { await loadStatus(force: true) }
+        .wandKeyboardShortcuts(quickCommitKeyboardShortcuts)
+    }
+
+    private var quickCommitKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        [
+            WandKeyboardShortcutAction(
+                id: "primary-action",
+                title: primaryKeyboardActionTitle,
+                key: .return,
+                modifiers: .command,
+                isEnabled: primaryKeyboardActionEnabled
+            ) {
+                runPrimaryKeyboardAction()
+            },
+            WandKeyboardShortcutAction(
+                id: "generate-ai-message",
+                title: "生成提交文案",
+                key: "a",
+                modifiers: [.command, .shift],
+                isEnabled: hasChanges && !generating && !committing
+            ) {
+                generateAI()
+            },
+            WandKeyboardShortcutAction(
+                id: "refresh-git-status",
+                title: "刷新 Git 状态",
+                key: "r",
+                modifiers: .command,
+                isEnabled: !statusLoading && !committing && !pushing
+            ) {
+                Task { await loadStatus(force: true) }
+            },
+            WandKeyboardShortcutAction(
+                id: "dismiss-quick-commit",
+                title: outcome == nil ? "取消" : "完成",
+                key: .escape,
+                modifiers: [],
+                isEnabled: !committing && !pushing
+            ) {
+                dismiss()
+            },
+        ]
+    }
+
+    private var primaryKeyboardActionTitle: String {
+        if hasChanges { return "提交" }
+        if (status?.ahead ?? 0) > 0 { return "推送" }
+        return "执行"
+    }
+
+    private var primaryKeyboardActionEnabled: Bool {
+        !committing && !pushing && (hasChanges || (status?.ahead ?? 0) > 0)
+    }
+
+    private func runPrimaryKeyboardAction() {
+        if hasChanges {
+            submit(action: "commit", includeSubmodule: false)
+        } else if (status?.ahead ?? 0) > 0 {
+            pushCommitsOnly()
+        }
     }
 
     // MARK: - 头部与状态

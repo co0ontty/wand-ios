@@ -190,6 +190,30 @@ struct SessionListView: View {
         } message: {
             Text(pendingDelete?.dialogMessage ?? "")
         }
+        .wandKeyboardShortcuts(sessionListKeyboardShortcuts)
+    }
+
+    private var sessionListKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        [
+            WandKeyboardShortcutAction(
+                id: "refresh-sessions",
+                title: "刷新会话",
+                key: "r",
+                modifiers: .command,
+                isEnabled: !loading
+            ) {
+                Task { await load(silent: true) }
+            },
+            WandKeyboardShortcutAction(
+                id: "end-selection",
+                title: "退出选择",
+                key: .escape,
+                modifiers: [],
+                isEnabled: isSelecting
+            ) {
+                endSelection()
+            },
+        ]
     }
 
     private var trailingToolbarIcon: String {
@@ -525,87 +549,6 @@ struct SessionDestinationView: View {
     }
 }
 
-enum ComposerMetrics {
-    static let actionVisualSize: CGFloat = 34
-    static let actionTouchSize: CGFloat = 44
-    // 44pt 触控盒已经在 34pt 视觉按钮两侧各留 5pt，不再叠加额外空隙。
-    static let actionSpacing: CGFloat = 0
-}
-
-struct ComposerInputHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-struct NativeComposerShell<CollapsedLeading: View, InputContent: View, CollapsedTrailing: View, ExpandedControls: View>: View {
-    let expanded: Bool
-    let focused: Bool
-    let onFocusInput: () -> Void
-    @ViewBuilder let collapsedLeading: () -> CollapsedLeading
-    @ViewBuilder let inputContent: () -> InputContent
-    @ViewBuilder let collapsedTrailing: () -> CollapsedTrailing
-    @ViewBuilder let expandedControls: () -> ExpandedControls
-
-    var body: some View {
-        let cornerRadius: CGFloat = expanded ? 18 : 24
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-
-        return VStack(alignment: .leading, spacing: expanded ? 8 : 0) {
-            HStack(alignment: expanded ? .bottom : .center, spacing: ComposerMetrics.actionSpacing) {
-                if !expanded {
-                    collapsedLeading()
-                }
-                inputContent()
-                if !expanded {
-                    collapsedTrailing()
-                }
-            }
-            if expanded {
-                expandedControls()
-            }
-        }
-        .padding(.horizontal, expanded ? 8 : 9)
-        .padding(.vertical, expanded ? 7 : 4)
-        .background(.ultraThinMaterial, in: shape)
-        .background {
-            shape
-                .fill(Theme.surface.opacity(expanded ? 0.58 : 0.48))
-        }
-        .overlay {
-            shape
-                .stroke(Theme.border.opacity(expanded ? 0.42 : 0.32), lineWidth: 0.8)
-        }
-        .overlay(alignment: .top) {
-            shape
-                .stroke(Color.white.opacity(expanded ? 0.36 : 0.28), lineWidth: 0.7)
-                .blendMode(.screen)
-        }
-        .overlay {
-            if focused {
-                shape
-                    .stroke(Theme.brand.opacity(0.28), lineWidth: 1)
-            }
-        }
-        .contentShape(shape)
-        .simultaneousGesture(
-            TapGesture().onEnded {
-                onFocusInput()
-            }
-        )
-        .compositingGroup()
-        .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 3)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .animation(.easeInOut(duration: 0.18), value: expanded)
-    }
-}
-
-func composerShouldExpand(focused: Bool, voiceMode: Bool, contentNeedsSpace: Bool = false) -> Bool {
-    focused || voiceMode || contentNeedsSpace
-}
-
 /// PTY 会话的原生外壳：套用与 ChatView 一致的原生导航头（provider 徽章 + 标题 +
 /// cwd），中间嵌入 embed=terminal 的 WebView 只渲染终端黑窗，底部输入栏走原生组件。
 /// 这样 PTY 会话不再是「直接打开整张网页版」，而是和对话模式同样的原生观感，
@@ -716,6 +659,101 @@ private struct PtySessionView: View {
         .onDisappear { store.shutdown() }
         .overlay(alignment: .top) { connectionBanner }
         .overlay(alignment: .top) { toastView }
+        .wandKeyboardShortcuts(ptyKeyboardShortcuts)
+    }
+
+    private var ptyKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        [
+            WandKeyboardShortcutAction(
+                id: "focus-input",
+                title: "聚焦输入",
+                key: "l",
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && !inputFocused
+            ) {
+                inputFocused = true
+            },
+            WandKeyboardShortcutAction(
+                id: "send",
+                title: "发送终端命令",
+                key: .return,
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && canSend
+            ) {
+                sendDraft()
+            },
+            WandKeyboardShortcutAction(
+                id: "stop",
+                title: "停止任务",
+                key: ".",
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && store.isResponding
+            ) {
+                showStopConfirm = true
+            },
+            WandKeyboardShortcutAction(
+                id: "attach-file",
+                title: "选择文件",
+                key: "o",
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && !uploadingAttachments
+            ) {
+                inputFocused = false
+                showFileImporter = true
+            },
+            WandKeyboardShortcutAction(
+                id: "quick-commit",
+                title: "快速提交",
+                key: "c",
+                modifiers: [.command, .shift],
+                isEnabled: keyboardShortcutsActive && quickCommitPhase == .idle
+            ) {
+                showQuickCommit = true
+            },
+            WandKeyboardShortcutAction(
+                id: "refresh-terminal",
+                title: "刷新终端",
+                key: "r",
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && terminalWebModel.phase == .ready
+            ) {
+                terminalWebModel.refreshEmbeddedTerminal()
+            },
+            WandKeyboardShortcutAction(
+                id: "zoom-terminal-in",
+                title: "放大终端",
+                key: "=",
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && terminalWebModel.phase == .ready
+            ) {
+                terminalWebModel.adjustEmbeddedTerminalScale(delta: 0.25)
+            },
+            WandKeyboardShortcutAction(
+                id: "zoom-terminal-out",
+                title: "缩小终端",
+                key: "-",
+                modifiers: .command,
+                isEnabled: keyboardShortcutsActive && terminalWebModel.phase == .ready
+            ) {
+                terminalWebModel.adjustEmbeddedTerminalScale(delta: -0.25)
+            },
+            WandKeyboardShortcutAction(
+                id: "dismiss-input",
+                title: "收起输入",
+                key: .escape,
+                modifiers: [],
+                isEnabled: keyboardShortcutsActive && inputFocused
+            ) {
+                inputFocused = false
+            },
+        ]
+    }
+
+    private var keyboardShortcutsActive: Bool {
+        !showQuickCommit
+            && !showFileImporter
+            && !showPhotoPicker
+            && !showStopConfirm
     }
 
     private var terminalScaleControls: some View {
@@ -880,6 +918,8 @@ private struct PtySessionView: View {
                 .font(.system(size: 16))
                 .foregroundColor(Theme.textPrimary)
                 .tint(Theme.brand)
+                .submitLabel(.send)
+                .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .focused($inputFocused)
@@ -1249,8 +1289,7 @@ private struct PtySessionView: View {
                     .fill(providerInfo == .codex ? Theme.codex.opacity(0.24) : Theme.brand.opacity(0.22))
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(Color.white.opacity(0.16), lineWidth: 0.8)
-                BrandLogoShape(provider: provider)
-                    .fill(Color.white.opacity(0.9))
+                BrandLogo(provider: provider, color: Color.white.opacity(0.9))
                     .frame(width: 14, height: 14)
             }
             .frame(width: 26, height: 26)
@@ -1352,8 +1391,7 @@ private struct SessionRow: View {
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .stroke(providerTint.opacity(0.16), lineWidth: 1)
                     )
-                BrandLogoShape(provider: session.provider)
-                    .fill(providerTint.opacity(0.88))
+                BrandLogo(provider: session.provider, color: providerTint.opacity(0.88))
                     .frame(width: 20, height: 20)
             }
             .frame(width: 44, height: 44)

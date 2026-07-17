@@ -1,9 +1,26 @@
 import SwiftUI
 
-// MARK: - 品牌 logo 矢量 Shape
+// MARK: - 品牌 logo
 // 路径数据来自 simple-icons（CC0），24x24 viewBox，由脚本从 SVG path 转换为
 // SwiftUI Path 命令（圆弧已展开为贝塞尔曲线）。填充色由调用方 .fill(color) 决定。
-// 用法：BrandLogoShape(provider: session.provider).fill(tint).frame(width: 21, height: 21)
+// Qoder 使用 qoder.com 官方 favicon 原始 SVG，保留深色底、绿色与白色品牌配色。
+
+struct BrandLogo: View {
+    let provider: String?
+    let color: Color
+
+    @ViewBuilder
+    var body: some View {
+        if WandProvider(normalizing: provider) == .qoder {
+            Image("QoderLogo")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+        } else {
+            BrandLogoShape(provider: provider)
+                .fill(color)
+        }
+    }
+}
 
 /// 按 provider 渲染品牌 logo：Claude 星芒 / Codex 六角结 / OpenCode 终端代码标记 / Grok 几何 G。
 struct BrandLogoShape: Shape {
@@ -15,6 +32,7 @@ struct BrandLogoShape: Shape {
         case .codex: return Self.codexPath(in: rect)
         case .opencode: return Self.openCodePath(in: rect)
         case .grok: return Self.grokPath(in: rect)
+        case .qoder: return Path()
         }
     }
 

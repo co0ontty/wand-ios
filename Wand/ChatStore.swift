@@ -194,36 +194,34 @@ final class ChatStore: ObservableObject {
         _ incoming: [ConversationTurn]?, offset: Int?, total: Int?,
         leadingOffset: Int? = nil, leadingTotal: Int? = nil
     ) {
-        guard let incoming else { return }
-        let snapOffset = offset ?? 0
-        let snapTotal = total ?? max(snapOffset + incoming.count, incoming.count)
-        if incoming.isEmpty && !messages.isEmpty && snapTotal == 0 { return }
+        applyMessageWindow(
+            mergingWindowedMessages(
+                current: messageWindow,
+                incoming: incoming,
+                offset: offset,
+                total: total,
+                leadingOffset: leadingOffset,
+                leadingTotal: leadingTotal
+            )
+        )
+    }
 
-        if messages.isEmpty {
-            messages = incoming
-            loadedOffset = snapOffset
-        } else if loadedOffset <= snapOffset {
-            // 本地持有的 [loadedOffset, snapOffset) 是比快照窗口更早、已加载的前缀，保留它。
-            let keep = min(max(snapOffset - loadedOffset, 0), messages.count)
-            messages = Array(messages[0..<keep]) + incoming
-            // loadedOffset 不变（仍是更早那条的下标）。
-        } else {
-            // 异常：快照比本地还早，直接以快照为准。
-            messages = incoming
-            loadedOffset = snapOffset
-        }
-        messageTotal = max(snapTotal, loadedOffset + messages.count)
+    private var messageWindow: SessionMessageWindow {
+        SessionMessageWindow(
+            messages: messages,
+            loadedOffset: loadedOffset,
+            messageTotal: messageTotal,
+            leadingBlockOffset: leadingBlockOffset,
+            leadingBlockTotal: leadingBlockTotal
+        )
+    }
 
-        // leading 块状态描述 messages[0]：当 messages[0] 正是快照的最旧入窗 turn
-        //（loadedOffset == snapOffset）时取快照的 leading；否则 messages[0] 是用户已整条
-        // 翻页加载的更早 turn，视为完整（leadingBlockOffset = 0）。
-        if loadedOffset == snapOffset {
-            leadingBlockOffset = max(0, leadingOffset ?? 0)
-            leadingBlockTotal = leadingTotal ?? (messages.first?.content.count ?? 0)
-        } else {
-            leadingBlockOffset = 0
-            leadingBlockTotal = messages.first?.content.count ?? 0
-        }
+    private func applyMessageWindow(_ window: SessionMessageWindow) {
+        messages = window.messages
+        loadedOffset = window.loadedOffset
+        messageTotal = window.messageTotal
+        leadingBlockOffset = window.leadingBlockOffset
+        leadingBlockTotal = window.leadingBlockTotal
     }
 
     private func apply(snapshot snap: SessionSnapshot) {
@@ -347,20 +345,13 @@ final class ChatStore: ObservableObject {
             applyWindowedMessages(msgs, offset: data.messageOffset, total: data.messageTotal,
                                   leadingOffset: data.leadingBlockOffset, leadingTotal: data.leadingBlockTotal)
         } else if incremental, let incoming = data.lastMessage {
-            // expected 是完整历史总数；本地绝对条数 = loadedOffset + messages.count。
-            let expected = data.messageCount ?? 0
-            if let last = messages.last, last.role == incoming.role {
-                messages[messages.count - 1] = incoming
-                // 替换到的若是 messages[0]（单条窗口，通常是流式巨型 turn）：增量带的是完整 turn，
-                // 块级窗口已被它填满，leading 归零，避免之后误按块翻一条其实已完整的 turn。
-                if messages.count == 1 {
-                    leadingBlockOffset = 0
-                    leadingBlockTotal = incoming.content.count
-                }
-            } else if loadedOffset + messages.count < expected || expected == 0 {
-                messages.append(incoming)
-            }
-            if expected > 0 { messageTotal = max(messageTotal, expected) }
+            applyMessageWindow(
+                applyingIncrementalMessage(
+                    incoming,
+                    expectedCount: data.messageCount ?? 0,
+                    to: messageWindow
+                )
+            )
         }
         if let responding = data.isResponding { isResponding = responding }
         applyCommonFields(data)
@@ -484,10 +475,21 @@ final class ChatStore: ObservableObject {
 
     private func sendPtyInput(_ text: String, view: String) async throws {
         try await ensurePtyRunningForInput()
-        let textSnapshot = try await api.sendInput(id: sessionId, input: text, view: view)
+        let submission = ptyInputSubmission(text: text, view: view)
+        let textSnapshot = try await api.sendInput(
+            id: sessionId,
+            input: submission.text.input,
+            view: submission.text.view,
+            shortcutKey: submission.text.shortcutKey
+        )
         apply(snapshot: textSnapshot)
         try await Task.sleep(nanoseconds: 30_000_000)
-        let enterSnapshot = try await api.sendInput(id: sessionId, input: "\r", view: view, shortcutKey: "enter_text")
+        let enterSnapshot = try await api.sendInput(
+            id: sessionId,
+            input: submission.enter.input,
+            view: submission.enter.view,
+            shortcutKey: submission.enter.shortcutKey
+        )
         apply(snapshot: enterSnapshot)
     }
 

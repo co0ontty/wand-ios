@@ -75,6 +75,28 @@ struct SettingsView: View {
         } message: {
             Text("打开会话、收发消息或复现问题后再导出，才能捕获到有用的上下文。")
         }
+        .wandKeyboardShortcuts(settingsKeyboardShortcuts)
+    }
+
+    private var settingsKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        [
+            WandKeyboardShortcutAction(
+                id: "dismiss-settings",
+                title: "完成",
+                key: .escape,
+                modifiers: []
+            ) {
+                dismiss()
+            },
+            WandKeyboardShortcutAction(
+                id: "close-settings",
+                title: "关闭设置",
+                key: "w",
+                modifiers: .command
+            ) {
+                dismiss()
+            },
+        ]
     }
 
     // MARK: - 区块

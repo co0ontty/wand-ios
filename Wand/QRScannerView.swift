@@ -45,6 +45,20 @@ struct QRScannerSheet: View {
         }
         .navigationViewStyle(.stack)
         .onAppear { checkPermission() }
+        .wandKeyboardShortcuts(scannerKeyboardShortcuts)
+    }
+
+    private var scannerKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        [
+            WandKeyboardShortcutAction(
+                id: "dismiss-scanner",
+                title: "取消扫码",
+                key: .escape,
+                modifiers: []
+            ) {
+                dismiss()
+            },
+        ]
     }
 
     // MARK: - 取景框 + 提示

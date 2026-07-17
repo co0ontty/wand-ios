@@ -13,6 +13,7 @@ enum WandProvider: String, CaseIterable, Identifiable {
     case codex
     case opencode
     case grok
+    case qoder
 
     var id: String { rawValue }
 
@@ -28,6 +29,8 @@ enum WandProvider: String, CaseIterable, Identifiable {
             self = .opencode
         case Self.grok.rawValue:
             self = .grok
+        case Self.qoder.rawValue, "qodercli":
+            self = .qoder
         default:
             self = .claude
         }
@@ -44,6 +47,7 @@ enum WandProvider: String, CaseIterable, Identifiable {
         case .codex: return "Codex"
         case .opencode: return "OpenCode"
         case .grok: return "Grok"
+        case .qoder: return "Qoder"
         }
     }
 
@@ -53,6 +57,7 @@ enum WandProvider: String, CaseIterable, Identifiable {
         case .codex: return "codex-cli-exec"
         case .opencode: return "opencode-cli-run"
         case .grok: return "grok-cli-headless"
+        case .qoder: return "qoder-cli-print"
         }
     }
 
@@ -67,6 +72,8 @@ enum WandProvider: String, CaseIterable, Identifiable {
             return ["default", "full-access", "managed"]
         case .grok:
             return ["default", "full-access", "managed"]
+        case .qoder:
+            return ["default", "full-access", "auto-edit", "managed"]
         }
     }
 
@@ -954,14 +961,16 @@ struct ModelsResponse: Decodable {
     let models: [ModelInfo]
     let codexModels: [ModelInfo]
     let opencodeModels: [ModelInfo]
+    let qoderModels: [ModelInfo]
     let defaultModel: String?
     let defaultCodexModel: String?
     let defaultOpenCodeModel: String?
+    let defaultQoderModel: String?
     let defaultModels: ProviderDefaultModels?
 
     private enum CodingKeys: String, CodingKey {
-        case models, codexModels, opencodeModels
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultModels
+        case models, codexModels, opencodeModels, qoderModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultQoderModel, defaultModels
     }
 
     init(from decoder: Decoder) throws {
@@ -971,9 +980,11 @@ struct ModelsResponse: Decodable {
         models = (try? container.decode([ModelInfo].self, forKey: .models)) ?? []
         codexModels = (try? container.decode([ModelInfo].self, forKey: .codexModels)) ?? []
         opencodeModels = (try? container.decode([ModelInfo].self, forKey: .opencodeModels)) ?? []
+        qoderModels = (try? container.decode([ModelInfo].self, forKey: .qoderModels)) ?? []
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
         defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)
         defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
+        defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
     }
 
@@ -987,6 +998,7 @@ struct ModelsResponse: Decodable {
         case .codex: return codexModels
         case .opencode: return opencodeModels
         case .grok: return []
+        case .qoder: return qoderModels
         }
     }
 
@@ -1000,6 +1012,8 @@ struct ModelsResponse: Decodable {
             return defaultModels?.opencode ?? defaultOpenCodeModel ?? ""
         case .grok:
             return ""
+        case .qoder:
+            return defaultModels?.qoder ?? defaultQoderModel ?? ""
         }
     }
 }
@@ -1042,6 +1056,7 @@ struct ServerConfigInfo: Decodable {
     let defaultModel: String?
     let defaultCodexModel: String?
     let defaultOpenCodeModel: String?
+    let defaultQoderModel: String?
     let defaultModels: ProviderDefaultModels?
     let defaultThinkingEffort: String?
     let cardDefaults: CardExpandDefaults?
@@ -1052,7 +1067,7 @@ struct ServerConfigInfo: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case defaultCwd, defaultProvider, defaultSessionKind, defaultMode
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultQoderModel, defaultModels
         case defaultThinkingEffort, cardDefaults
         case currentVersion, latestVersion, updateAvailable, updateChannel
     }
@@ -1066,6 +1081,7 @@ struct ServerConfigInfo: Decodable {
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
         defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)
         defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
+        defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
         defaultThinkingEffort = try? container.decode(String.self, forKey: .defaultThinkingEffort)
         cardDefaults = try? container.decode(CardExpandDefaults.self, forKey: .cardDefaults)
@@ -1085,6 +1101,8 @@ struct ServerConfigInfo: Decodable {
             return defaultModels?.opencode ?? defaultOpenCodeModel ?? ""
         case .grok:
             return ""
+        case .qoder:
+            return defaultModels?.qoder ?? defaultQoderModel ?? ""
         }
     }
 }
@@ -1093,13 +1111,15 @@ struct ProviderDefaultModels: Decodable {
     let claude: String?
     let codex: String?
     let opencode: String?
+    let qoder: String?
 
-    private enum CodingKeys: String, CodingKey { case claude, codex, opencode }
+    private enum CodingKeys: String, CodingKey { case claude, codex, opencode, qoder }
 
-    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil) {
+    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil, qoder: String? = nil) {
         self.claude = claude
         self.codex = codex
         self.opencode = opencode
+        self.qoder = qoder
     }
 
     init(from decoder: Decoder) throws {
@@ -1107,6 +1127,7 @@ struct ProviderDefaultModels: Decodable {
         claude = try? container.decode(String.self, forKey: .claude)
         codex = try? container.decode(String.self, forKey: .codex)
         opencode = try? container.decode(String.self, forKey: .opencode)
+        qoder = try? container.decode(String.self, forKey: .qoder)
     }
 
     func modelId(for provider: String) -> String? {
@@ -1115,6 +1136,7 @@ struct ProviderDefaultModels: Decodable {
         case .codex: return codex
         case .opencode: return opencode
         case .grok: return nil
+        case .qoder: return qoder
         }
     }
 }

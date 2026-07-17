@@ -55,6 +55,44 @@ struct ConnectView: View {
                 connect()
             }
         }
+        .wandKeyboardShortcuts(connectKeyboardShortcuts)
+    }
+
+    private var connectKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        [
+            WandKeyboardShortcutAction(
+                id: "connect",
+                title: "连接",
+                key: .return,
+                modifiers: .command,
+                isEnabled: !trimmedInput.isEmpty && !isConnecting
+            ) {
+                connect()
+            },
+            WandKeyboardShortcutAction(
+                id: "scan-qr",
+                title: "扫码连接",
+                key: "q",
+                modifiers: [.command, .shift],
+                isEnabled: !isConnecting
+            ) {
+                inputFocused = false
+                showScanner = true
+            },
+            WandKeyboardShortcutAction(
+                id: "dismiss-connect",
+                title: "取消",
+                key: .escape,
+                modifiers: [],
+                isEnabled: inputFocused || isPresentedAsSheet
+            ) {
+                if inputFocused {
+                    inputFocused = false
+                } else {
+                    onDismiss?()
+                }
+            },
+        ]
     }
 
     // MARK: - 区块

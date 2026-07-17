@@ -20,7 +20,8 @@ struct NewSessionView: View {
     @State private var availableModels: [ModelInfo] = []
     @State private var codexModels: [ModelInfo] = []
     @State private var opencodeModels: [ModelInfo] = []
-    @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil, opencode: nil)
+    @State private var qoderModels: [ModelInfo] = []
+    @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil, opencode: nil, qoder: nil)
     @State private var selectedModel = ""
     /// Provider -> 用户在本页触碰过的模型。空字符串表示显式恢复
     /// Provider 默认；缺少 key 表示不改服务端现值。保留跨 Provider 待保存值，
@@ -67,6 +68,7 @@ struct NewSessionView: View {
         case .codex: codexModels
         case .opencode: opencodeModels
         case .grok: []
+        case .qoder: qoderModels
         case .claude: availableModels
         }
     }
@@ -97,6 +99,7 @@ struct NewSessionView: View {
                             Text("Codex").tag("codex")
                             Text("OpenCode").tag("opencode")
                             Text("Grok").tag("grok")
+                            Text("Qoder").tag("qoder")
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: provider) { _, newProvider in
@@ -229,6 +232,7 @@ struct NewSessionView: View {
             }
         }
         .navigationViewStyle(.stack)
+        .wandKeyboardShortcuts(newSessionKeyboardShortcuts)
         .onChange(of: thinkingEffort) { _, _ in
             scheduleDefaultsSave()
         }
@@ -250,7 +254,8 @@ struct NewSessionView: View {
                 serverDefaultModels = ProviderDefaultModels(
                     claude: config.defaultModelId(for: WandProvider.claude.rawValue),
                     codex: config.defaultModelId(for: WandProvider.codex.rawValue),
-                    opencode: config.defaultModelId(for: WandProvider.opencode.rawValue)
+                    opencode: config.defaultModelId(for: WandProvider.opencode.rawValue),
+                    qoder: config.defaultModelId(for: WandProvider.qoder.rawValue)
                 )
             }
             selectedModel = ""
@@ -259,11 +264,13 @@ struct NewSessionView: View {
                 availableModels = response.models(for: WandProvider.claude.rawValue)
                 codexModels = response.models(for: WandProvider.codex.rawValue)
                 opencodeModels = response.models(for: WandProvider.opencode.rawValue)
+                qoderModels = response.models(for: WandProvider.qoder.rawValue)
                 didLoadModels = true
                 serverDefaultModels = ProviderDefaultModels(
                     claude: response.defaultModelId(for: WandProvider.claude.rawValue),
                     codex: response.defaultModelId(for: WandProvider.codex.rawValue),
-                    opencode: response.defaultModelId(for: WandProvider.opencode.rawValue)
+                    opencode: response.defaultModelId(for: WandProvider.opencode.rawValue),
+                    qoder: response.defaultModelId(for: WandProvider.qoder.rawValue)
                 )
                 selectedModel = normalizedModel(selectedModel, provider: provider)
             }
@@ -283,6 +290,39 @@ struct NewSessionView: View {
                 }
             }
         }
+    }
+
+    private var newSessionKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        [
+            WandKeyboardShortcutAction(
+                id: "create-session",
+                title: "创建会话",
+                key: .return,
+                modifiers: .command,
+                isEnabled: canCreate
+            ) {
+                create()
+            },
+            WandKeyboardShortcutAction(
+                id: "browse-directory",
+                title: "浏览目录",
+                key: "o",
+                modifiers: .command,
+                isEnabled: !creating
+            ) {
+                focusedField = nil
+                showBrowser = true
+            },
+            WandKeyboardShortcutAction(
+                id: "dismiss",
+                title: "取消",
+                key: .escape,
+                modifiers: [],
+                isEnabled: !creating
+            ) {
+                dismiss()
+            },
+        ]
     }
 
     private var selectedModelLabel: String {
@@ -387,6 +427,7 @@ struct NewSessionView: View {
         case .codex: models = codexModels
         case .opencode: models = opencodeModels
         case .grok: models = []
+        case .qoder: models = qoderModels
         case .claude: models = availableModels
         }
         guard !models.isEmpty else { return normalized }
@@ -398,6 +439,7 @@ struct NewSessionView: View {
         case .codex: serverDefaultModels.codex ?? ""
         case .opencode: serverDefaultModels.opencode ?? ""
         case .grok: ""
+        case .qoder: serverDefaultModels.qoder ?? ""
         case .claude: serverDefaultModels.claude ?? ""
         }
     }
@@ -462,6 +504,8 @@ struct NewSessionView: View {
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
                     .focused($focusedField, equals: .cwd)
+                    .submitLabel(.next)
+                    .onSubmit { focusedField = .firstMessage }
                     .padding(.leading, 12)
                     .padding(.vertical, 11)
 
@@ -519,6 +563,8 @@ struct NewSessionView: View {
         TextField("想让它做什么…", text: $firstMessage)
             .font(.system(size: 15))
             .focused($focusedField, equals: .firstMessage)
+            .submitLabel(.send)
+            .onSubmit { create() }
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
             .background(cardBackground(selected: false))
@@ -581,6 +627,8 @@ struct NewSessionView: View {
                 return "OpenCode JSON 结构化聊天界面，支持多轮对话和工具调用展示。"
             case .grok:
                 return "Grok streaming-json 结构化聊天界面，支持多轮续聊与思考过程展示。"
+            case .qoder:
+                return "Qoder stream-json 结构化聊天界面，支持续聊、思考过程和工具调用展示。"
             case .claude:
                 return "结构化聊天界面，支持多轮对话、流式输出和工具调用展示。"
             }
@@ -592,6 +640,8 @@ struct NewSessionView: View {
             return "OpenCode TUI 终端会话，支持持续交互和终端视图。"
         case .grok:
             return "Grok Build TUI 的原始 PTY 终端会话。"
+        case .qoder:
+            return "Qoder CLI TUI 的原始 PTY 终端会话。"
         case .claude:
             return "原始 PTY 终端会话，支持持续交互、终端视图和权限流。"
         }
@@ -612,6 +662,12 @@ struct NewSessionView: View {
                 return "Grok 将以 always-approve 运行；支持 TUI 与 streaming-json 结构化会话。"
             }
             return "Grok 使用自身权限确认；支持 TUI 与 streaming-json 结构化会话。"
+        case .qoder:
+            if mode == "full-access" || mode == "managed" {
+                return "Qoder 将以 bypass_permissions 运行；支持 TUI 与 stream-json 结构化会话。"
+            }
+            if mode == "auto-edit" { return "Qoder 将自动批准工作区内的安全编辑。" }
+            return "Qoder 使用自身权限确认；结构化模式下未批准的操作会被拒绝。"
         case .claude:
             break
         }
@@ -700,12 +756,14 @@ struct NewSessionView: View {
         var claude = serverDefaultModels.claude
         var codex = serverDefaultModels.codex
         var opencode = serverDefaultModels.opencode
+        var qoder = serverDefaultModels.qoder
         for (provider, model) in values.modelUpdates {
             switch WandProvider(normalizing: provider) {
             case .claude: claude = model
             case .codex: codex = model
             case .opencode: opencode = model
             case .grok: break
+            case .qoder: qoder = model
             }
             if pendingModelDefaults[provider] == model {
                 pendingModelDefaults.removeValue(forKey: provider)
@@ -714,7 +772,8 @@ struct NewSessionView: View {
         serverDefaultModels = ProviderDefaultModels(
             claude: claude,
             codex: codex,
-            opencode: opencode
+            opencode: opencode,
+            qoder: qoder
         )
     }
 
@@ -817,10 +876,42 @@ struct DirectoryBrowserView: View {
             }
         }
         .navigationViewStyle(.stack)
+        .wandKeyboardShortcuts(directoryBrowserKeyboardShortcuts)
         .task {
             currentPath = startPath.isEmpty ? "~" : startPath
             await load()
         }
+    }
+
+    private var directoryBrowserKeyboardShortcuts: [WandKeyboardShortcutAction] {
+        [
+            WandKeyboardShortcutAction(
+                id: "choose-directory",
+                title: "选择此目录",
+                key: .return,
+                modifiers: .command,
+                isEnabled: !loading
+            ) {
+                onPick(currentPath)
+            },
+            WandKeyboardShortcutAction(
+                id: "refresh-directory",
+                title: "刷新目录",
+                key: "r",
+                modifiers: .command,
+                isEnabled: !loading
+            ) {
+                Task { await load() }
+            },
+            WandKeyboardShortcutAction(
+                id: "dismiss-directory-browser",
+                title: "取消",
+                key: .escape,
+                modifiers: []
+            ) {
+                dismiss()
+            },
+        ]
     }
 
     private var pathHeader: some View {
