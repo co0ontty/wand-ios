@@ -302,7 +302,7 @@ struct AskUserQuestion {
 
     /// 从 tool_use 的 input 解析 questions 数组；形状不符返回空数组（上层回落普通工具卡）。
     static func parse(input: [String: JSONValue]) -> [AskUserQuestion] {
-        guard let items = jsonArrayField(input, "questions") else { return [] }
+        guard let items = input["__wandQuestions"]?.arrayValue ?? jsonArrayField(input, "questions") else { return [] }
         var result: [AskUserQuestion] = []
         for item in items {
             guard let obj = item.objectValue else { continue }
@@ -372,8 +372,10 @@ struct TodoItem {
         // 旧 TodoWrite 协议：最后一次写入就是完整快照，倒序取最新即可。
         for i in stride(from: messages.count - 1, through: startIdx, by: -1) {
             for block in messages[i].content.reversed() {
-                if case .toolUse(_, let name, _, let input, _) = block, name == "TodoWrite" {
-                    let todos = parse(input: input)
+                if case .toolUse(_, let name, _, let input, _) = block {
+                    let source = input["__wandTasks"] != nil ? ["todos": input["__wandTasks"]!] : input
+                    if name != "TodoWrite" && input["__wandTasks"] == nil { continue }
+                    let todos = parse(input: source)
                     if todos.isEmpty { continue }
                     let completed = todos.filter { $0.status == "completed" }.count
                     return completed == todos.count ? [] : todos
@@ -454,6 +456,38 @@ struct TodoItem {
     }
 }
 
+private struct ToolUseSemantic: Decodable {
+    struct Question: Decodable {
+        struct Option: Decodable { let label: String; let description: String? }
+        let question: String; let header: String?; let multiSelect: Bool; let options: [Option]
+    }
+    struct Task: Decodable { let id: String; let content: String; let status: String; let activeForm: String? }
+    let kind: String
+    let questions: [Question]?
+    let items: [Task]?
+}
+
+private func mergeSemantic(_ semantic: ToolUseSemantic, into input: inout [String: JSONValue]) {
+    if semantic.kind == "question_request" {
+        input["__wandQuestions"] = .array((semantic.questions ?? []).map { question in
+            .object([
+                "question": .string(question.question), "header": question.header.map(JSONValue.string) ?? .null,
+                "multiSelect": .bool(question.multiSelect),
+                "options": .array(question.options.map { .object([
+                    "label": .string($0.label), "description": $0.description.map(JSONValue.string) ?? .null,
+                ]) }),
+            ])
+        })
+    } else if semantic.kind == "task_list" {
+        input["__wandTasks"] = .array((semantic.items ?? []).map { task in
+            .object([
+                "id": .string(task.id), "content": .string(task.content), "status": .string(task.status),
+                "activeForm": task.activeForm.map(JSONValue.string) ?? .null,
+            ])
+        })
+    }
+}
+
 // MARK: - 会话消息块
 
 struct SubagentMeta: Decodable {
@@ -526,7 +560,7 @@ enum ContentBlock: Decodable {
     case unknown(type: String, payload: String)
 
     private enum CodingKeys: String, CodingKey {
-        case type, text, thinking, id, name, description, input, content
+        case type, text, thinking, id, name, description, input, content, semantic
         case toolUseId = "tool_use_id"
         case isError = "is_error"
         case truncated = "_truncated"
@@ -549,11 +583,15 @@ enum ContentBlock: Decodable {
                 subagent: subagent
             )
         case "tool_use":
+            var input = (try? c.decode([String: JSONValue].self, forKey: .input)) ?? [:]
+            if let semantic = try? c.decode(ToolUseSemantic.self, forKey: .semantic) {
+                mergeSemantic(semantic, into: &input)
+            }
             self = .toolUse(
                 id: (try? c.decode(String.self, forKey: .id)) ?? "",
                 name: (try? c.decode(String.self, forKey: .name)) ?? "tool",
                 description: try? c.decode(String.self, forKey: .description),
-                input: (try? c.decode([String: JSONValue].self, forKey: .input)) ?? [:],
+                input: input,
                 subagent: subagent
             )
         case "tool_result":
