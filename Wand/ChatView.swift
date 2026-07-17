@@ -64,6 +64,7 @@ struct ChatView: View {
     @State private var scrollMode: ChatScrollMode = .stickToBottom
     @State private var voicePressed = false
     @State private var voiceCanceling = false
+    @State private var draftNeedsExpanded = false
     @State private var showFileImporter = false
     @State private var showPhotoPicker = false
     @State private var uploadingAttachments = false
@@ -940,7 +941,11 @@ struct ChatView: View {
     /// 聚焦或正在按住语音时展开；失焦后草稿和附件保留。
     /// 对齐 Codex App：默认是一条胶囊，点进去（聚焦）才长出底部控制行。
     private var inputExpanded: Bool {
-        inputFocused || voicePressed
+        composerShouldExpand(
+            focused: inputFocused,
+            voiceMode: voicePressed,
+            contentNeedsSpace: draftNeedsExpanded
+        )
     }
 
     private var inputBar: some View {
@@ -969,7 +974,7 @@ struct ChatView: View {
         }
     }
 
-    /// 文本和语音共用同一输入区：轻点打字，空草稿时按住说话。
+    /// 文本框只处理系统文本编辑；语音手势由外侧独立按钮承载。
     @ViewBuilder private var composerInputContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !pendingAttachments.isEmpty {
@@ -988,18 +993,33 @@ struct ChatView: View {
                 .padding(.vertical, inputExpanded ? 4 : 2)
                 .frame(minHeight: inputExpanded ? 32 : 34)
                 .contentShape(Rectangle())
-                .overlay {
-                    if draft.isEmpty {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .gesture(voiceTapOrHoldGesture(onTap: {
-                                inputFocused = true
-                            }))
-                            .accessibilityLabel("消息输入框，轻点打字，按住说话")
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: ComposerInputHeightPreferenceKey.self,
+                            value: geometry.size.height
+                        )
                     }
+                }
+                .onPreferenceChange(ComposerInputHeightPreferenceKey.self) { height in
+                    draftNeedsExpanded = !draft.isEmpty && height > 36
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var composerVoiceButton: some View {
+        Image(systemName: voicePressed ? "waveform" : "mic")
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundColor(voiceCanceling ? Theme.danger : (voicePressed ? Theme.brand : Theme.textSecondary))
+            .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
+            .background(Circle().fill(Theme.surface.opacity(0.92)))
+            .overlay(Circle().stroke(Theme.border.opacity(0.5), lineWidth: 0.8))
+            .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+            .contentShape(Circle())
+            .gesture(voiceTapOrHoldGesture(onTap: { inputFocused = true }))
+            .accessibilityLabel("语音输入")
+            .accessibilityValue(voicePressed ? "正在录音" : "长按录音")
     }
 
     /// 展开态底部控制行：+ / 模式徽标 / 模型·思考徽标 / 发送·停止。
@@ -1032,11 +1052,13 @@ struct ChatView: View {
     /// - 有草稿 → 发送按钮（运行中时左侧追加一个红色停止，可一边排队一边停）。
     @ViewBuilder private var trailingButtons: some View {
         if store.isResponding && !canSend {
+            composerVoiceButton
             stopButtonPrimary
         } else {
             if store.isResponding {
                 stopButtonSecondary
             }
+            composerVoiceButton
             sendButton
         }
     }
@@ -1365,7 +1387,7 @@ struct ChatView: View {
         if voicePressed {
             return voiceCanceling ? "松开手指，取消输入" : "松开结束 · 上滑取消"
         }
-        return "打字或按住说话"
+        return "输入消息"
     }
 
     private var canSend: Bool {

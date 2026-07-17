@@ -70,10 +70,11 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(compactReplyPreviewText("`snake_case`"), "snake_case")
     }
 
-    func testComposerExpansionOnlyFollowsFocusOrVoiceMode() {
+    func testComposerExpansionFollowsFocusVoiceOrContentHeight() {
         XCTAssertFalse(composerShouldExpand(focused: false, voiceMode: false))
         XCTAssertTrue(composerShouldExpand(focused: true, voiceMode: false))
         XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: true))
+        XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: false, contentNeedsSpace: true))
     }
 
     func testProviderNormalizationTitlesAndRunners() {

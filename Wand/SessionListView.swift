@@ -531,6 +531,13 @@ enum ComposerMetrics {
     static let actionSpacing: CGFloat = 6
 }
 
+struct ComposerInputHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct NativeComposerShell<CollapsedLeading: View, InputContent: View, CollapsedTrailing: View, ExpandedControls: View>: View {
     let expanded: Bool
     let focused: Bool
@@ -595,8 +602,8 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
     }
 }
 
-func composerShouldExpand(focused: Bool, voiceMode: Bool) -> Bool {
-    focused || voiceMode
+func composerShouldExpand(focused: Bool, voiceMode: Bool, contentNeedsSpace: Bool = false) -> Bool {
+    focused || voiceMode || contentNeedsSpace
 }
 
 /// PTY 会话的原生外壳：套用与 ChatView 一致的原生导航头（provider 徽章 + 标题 +
@@ -620,6 +627,7 @@ private struct PtySessionView: View {
     @State private var pendingAttachments: [UploadedFile] = []
     @State private var voicePressed = false
     @State private var voiceCanceling = false
+    @State private var draftNeedsExpanded = false
     @State private var voiceHoldWork: DispatchWorkItem?
     @State private var gitStatus: GitStatusResult?
     @State private var quickCommitPhase: QuickCommitToolbarPhase = .idle
@@ -776,7 +784,11 @@ private struct PtySessionView: View {
     }
 
     private var inputExpanded: Bool {
-        inputFocused || voicePressed
+        composerShouldExpand(
+            focused: inputFocused,
+            voiceMode: voicePressed,
+            contentNeedsSpace: draftNeedsExpanded
+        )
     }
 
     private var inputBar: some View {
@@ -876,18 +888,33 @@ private struct PtySessionView: View {
                 .padding(.vertical, inputExpanded ? 4 : 2)
                 .frame(minHeight: inputExpanded ? 32 : 34)
                 .contentShape(Rectangle())
-                .overlay {
-                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .gesture(voiceTapOrHoldGesture(onTap: {
-                                inputFocused = true
-                            }))
-                            .accessibilityLabel("终端输入框，轻点打字，按住说话")
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: ComposerInputHeightPreferenceKey.self,
+                            value: geometry.size.height
+                        )
                     }
+                }
+                .onPreferenceChange(ComposerInputHeightPreferenceKey.self) { height in
+                    draftNeedsExpanded = !draft.isEmpty && height > 36
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var composerVoiceButton: some View {
+        Image(systemName: voicePressed ? "waveform" : "mic")
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundColor(voiceCanceling ? Theme.danger : (voicePressed ? Theme.brand : Theme.textSecondary))
+            .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
+            .background(Circle().fill(Theme.surface.opacity(0.92)))
+            .overlay(Circle().stroke(Theme.border.opacity(0.5), lineWidth: 0.8))
+            .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+            .contentShape(Circle())
+            .gesture(voiceTapOrHoldGesture(onTap: { inputFocused = true }))
+            .accessibilityLabel("语音输入")
+            .accessibilityValue(voicePressed ? "正在录音" : "长按录音")
     }
 
     private var terminalChip: some View {
@@ -907,11 +934,13 @@ private struct PtySessionView: View {
 
     @ViewBuilder private var trailingButtons: some View {
         if store.isResponding && !canSend {
+            composerVoiceButton
             stopButtonPrimary
         } else {
             if store.isResponding {
                 stopButtonSecondary
             }
+            composerVoiceButton
             sendButton
         }
     }
@@ -963,7 +992,7 @@ private struct PtySessionView: View {
         if voicePressed {
             return voiceCanceling ? "松开取消" : "松开结束 · 上滑取消"
         }
-        return "打字或按住说话"
+        return "输入终端命令"
     }
 
     private var voiceBubble: some View {
