@@ -528,7 +528,8 @@ struct SessionDestinationView: View {
 enum ComposerMetrics {
     static let actionVisualSize: CGFloat = 34
     static let actionTouchSize: CGFloat = 44
-    static let actionSpacing: CGFloat = 6
+    // 44pt 触控盒已经在 34pt 视觉按钮两侧各留 5pt，不再叠加额外空隙。
+    static let actionSpacing: CGFloat = 0
 }
 
 struct ComposerInputHeightPreferenceKey: PreferenceKey {
@@ -548,7 +549,7 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
     @ViewBuilder let expandedControls: () -> ExpandedControls
 
     var body: some View {
-        let cornerRadius: CGFloat = expanded ? 28 : 24
+        let cornerRadius: CGFloat = expanded ? 18 : 24
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
         return VStack(alignment: .leading, spacing: expanded ? 8 : 0) {
@@ -565,8 +566,8 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
                 expandedControls()
             }
         }
-        .padding(.horizontal, expanded ? 10 : 9)
-        .padding(.vertical, expanded ? 9 : 4)
+        .padding(.horizontal, expanded ? 8 : 9)
+        .padding(.vertical, expanded ? 7 : 4)
         .background(.ultraThinMaterial, in: shape)
         .background {
             shape
@@ -596,8 +597,7 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
         .compositingGroup()
         .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 3)
         .padding(.horizontal, 12)
-        .padding(.top, 6)
-        .padding(.bottom, 6)
+        .padding(.vertical, 6)
         .animation(.easeInOut(duration: 0.18), value: expanded)
     }
 }
@@ -787,7 +787,7 @@ private struct PtySessionView: View {
         composerShouldExpand(
             focused: inputFocused,
             voiceMode: voicePressed,
-            contentNeedsSpace: draftNeedsExpanded
+            contentNeedsSpace: draftNeedsExpanded || !pendingAttachments.isEmpty
         )
     }
 

@@ -983,7 +983,7 @@ struct ChatView: View {
         composerShouldExpand(
             focused: inputFocused,
             voiceMode: voicePressed,
-            contentNeedsSpace: draftNeedsExpanded
+            contentNeedsSpace: draftNeedsExpanded || !pendingAttachments.isEmpty
         )
     }
 
@@ -994,13 +994,7 @@ struct ChatView: View {
             onFocusInput: { inputFocused = true },
             collapsedLeading: { composerActionsMenu },
             inputContent: { composerInputContent },
-            collapsedTrailing: {
-                if store.isStructured {
-                    modeChip(compact: true)
-                    modelThinkingChip(compact: true)
-                }
-                trailingButtons
-            },
+            collapsedTrailing: { trailingButtons },
             expandedControls: { controlRow }
         )
         .confirmationDialog(
