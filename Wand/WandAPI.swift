@@ -225,10 +225,17 @@ final class WandAPI {
     }
 
     @discardableResult
-    func sendInput(id: String, input: String, view: String? = nil, shortcutKey: String? = nil) async throws -> SessionSnapshot {
+    func sendInput(
+        id: String,
+        input: String,
+        view: String? = nil,
+        shortcutKey: String? = nil,
+        respondImmediately: Bool = false
+    ) async throws -> SessionSnapshot {
         var body: [String: Any] = ["input": input]
         if let view { body["view"] = view }
         if let shortcutKey { body["shortcutKey"] = shortcutKey }
+        if respondImmediately { body["respondImmediately"] = true }
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions/\(id)/input", body: body)
     }
 

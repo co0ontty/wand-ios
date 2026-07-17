@@ -136,7 +136,7 @@ extension View {
         isEnabled: @escaping () -> Bool = { true },
         perform action: @escaping () -> Void
     ) -> some View {
-        onKeyPress(.return) { press in
+        onKeyPress(.return, phases: .down) { press in
             guard wandShouldSubmitHardwareReturn(modifiers: press.modifiers) else {
                 return .ignored
             }

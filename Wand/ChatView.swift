@@ -748,13 +748,8 @@ struct ChatView: View {
         let provider = currentProvider
         let tint = providerTint
         return VStack(spacing: 14) {
-            ZStack {
-                Circle()
-                    .fill(tint.opacity(0.1))
-                    .frame(width: 72, height: 72)
-                BrandLogo(provider: store.snapshot?.provider, color: tint)
-                    .frame(width: 32, height: 32)
-            }
+            BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
+                .frame(width: 36, height: 36)
             Text("开始新的 \(provider.title) 对话")
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
@@ -910,20 +905,14 @@ struct ChatView: View {
         (thinkingLevels.first { $0.id == id } ?? thinkingLevels.first)?.shortLabel ?? "自"
     }
 
-    /// 顶栏左侧 provider 小徽标：品牌色弱底圆角方块 + 品牌 logo。
+    /// 顶栏左侧 provider 标识：与会话列表 / Android 一致，仅展示透明底品牌 logo。
     private var providerBadge: some View {
         let provider = currentProvider
         let tint = providerTint
-        return ZStack {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(tint.opacity(0.13))
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(tint.opacity(0.24), lineWidth: 1)
-            BrandLogo(provider: store.snapshot?.provider, color: tint)
-                .frame(width: 15, height: 15)
-        }
-        .frame(width: 26, height: 26)
-        .accessibilityLabel(provider.title)
+        return BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
+            .frame(width: 18, height: 18)
+            .frame(width: 26, height: 26)
+            .accessibilityLabel(provider.title)
     }
 
     private var navigationStatus: some View {
@@ -2910,14 +2899,17 @@ private struct SubagentRoleWindow: View {
         return "子 Agent 输出"
     }
 
+    private var tailAnchorID: String {
+        "subagent-tail:\(segment.id)"
+    }
+
     var body: some View {
         let items = displayItems
-        HStack(alignment: .top, spacing: 9) {
-            avatar(running: running(items))
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 0) {
-                header(items: items)
-                Divider().overlay(Theme.border.opacity(0.7))
+        let refreshToken = subagentTailRefreshToken(items)
+        VStack(alignment: .leading, spacing: 0) {
+            header(items: items)
+            Divider().overlay(Theme.border.opacity(0.7))
+            ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(alignment: .leading, spacing: 9) {
                         if items.isEmpty {
@@ -2940,42 +2932,42 @@ private struct SubagentRoleWindow: View {
                                 )
                             }
                         }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(tailAnchorID)
                     }
                     .padding(10)
                 }
                 .frame(height: subagentWindowContentHeight)
                 .background(Theme.background.opacity(0.45))
+                .onAppear {
+                    scrollToTail(proxy)
+                }
+                .onChange(of: refreshToken) { _ in
+                    scrollToTail(proxy)
+                }
             }
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Theme.surface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Theme.codex.opacity(0.28), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.04), radius: 8, y: 2)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Theme.codex.opacity(0.28), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.04), radius: 8, y: 2)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(title)，\(subtitle)")
     }
 
-    private func avatar(running: Bool) -> some View {
-        ZStack {
-            Circle().fill(Theme.codex.opacity(running ? 0.18 : 0.13))
-            if running {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(Theme.codex)
-            } else {
-                Image(systemName: "person.2.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(Theme.codex)
-            }
+    private func scrollToTail(_ proxy: ScrollViewProxy) {
+        Task { @MainActor in
+            await Task.yield()
+            proxy.scrollTo(tailAnchorID, anchor: .bottom)
         }
-        .frame(width: 34, height: 34)
     }
 
     private func header(items: [DisplayItem]) -> some View {
@@ -3004,6 +2996,32 @@ private struct SubagentRoleWindow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
     }
+}
+
+/// 子 Agent 的 block 数量不变时，流式文本和工具结果仍会持续更新；把这些变化
+/// 纳入 token，窗口才能在每次刷新后重新锚定最新内容。
+private func subagentTailRefreshToken(_ items: [DisplayItem]) -> Int {
+    var hasher = Hasher()
+    hasher.combine(items.count)
+    for item in items {
+        hasher.combine(displayItemIdentity(item))
+        switch item {
+        case .tool(_, _, _, _, _, let result):
+            hasher.combine(result?.text)
+            hasher.combine(result?.isError)
+            hasher.combine(result?.truncated)
+        case .explorationGroup(let tools):
+            for tool in tools {
+                hasher.combine(tool.id)
+                hasher.combine(tool.result?.text)
+                hasher.combine(tool.result?.isError)
+                hasher.combine(tool.result?.truncated)
+            }
+        case .plain:
+            break
+        }
+    }
+    return hasher.finalize()
 }
 
 private func catPrefixedRoleName(_ raw: String?) -> String {

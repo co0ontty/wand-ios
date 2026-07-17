@@ -424,7 +424,13 @@ final class ChatStore: ObservableObject {
         Task {
             do {
                 if structured {
-                    try await api.sendInput(id: sessionId, input: trimmed)
+                    // 结构化回复通过事件流持续更新；HTTP 只需确认服务端已接收。
+                    // 若等待整轮完成，首轮生成标题与模型回复可能超过 30 秒并被误报为网络超时。
+                    try await api.sendInput(
+                        id: sessionId,
+                        input: trimmed,
+                        respondImmediately: !queueing
+                    )
                 } else {
                     try await sendPtyChatInput(trimmed)
                 }
@@ -709,7 +715,7 @@ final class ChatStore: ObservableObject {
         Task {
             do {
                 if isStructured {
-                    try await api.sendInput(id: sessionId, input: answerText)
+                    try await api.sendInput(id: sessionId, input: answerText, respondImmediately: true)
                 } else {
                     try await api.sendInput(id: sessionId, input: answerText + "\n", view: "chat")
                 }

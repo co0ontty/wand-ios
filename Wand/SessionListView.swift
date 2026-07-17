@@ -1283,16 +1283,10 @@ private struct PtySessionView: View {
     private var titleStatus: some View {
         HStack(spacing: 8) {
             let provider = store.snapshot?.provider ?? session.provider
-            let providerInfo = WandProvider(normalizing: provider)
-            ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(providerInfo == .codex ? Theme.codex.opacity(0.24) : Theme.brand.opacity(0.22))
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.white.opacity(0.16), lineWidth: 0.8)
-                BrandLogo(provider: provider, color: Color.white.opacity(0.9))
-                    .frame(width: 14, height: 14)
-            }
-            .frame(width: 26, height: 26)
+            // 与 Android 一致：透明底，只展示品牌 logo。
+            BrandLogo(provider: provider, color: Color.white.opacity(0.9))
+                .frame(width: 18, height: 18)
+                .frame(width: 26, height: 26)
 
             VStack(spacing: 0) {
                 Text(session.displayTitle)
@@ -1376,34 +1370,12 @@ private struct SessionRow: View {
         .shadow(color: Color.black.opacity(selected ? 0.06 : 0.035), radius: 7, y: 2)
     }
 
+    /// 左侧助手标识：只展示 provider 品牌 logo（透明底，对齐 Android ProviderMark）。
     private var providerMark: some View {
-        ZStack(alignment: .bottomTrailing) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [providerTint.opacity(0.16), providerTint.opacity(0.06)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(providerTint.opacity(0.16), lineWidth: 1)
-                    )
-                BrandLogo(provider: session.provider, color: providerTint.opacity(0.88))
-                    .frame(width: 20, height: 20)
-            }
-            .frame(width: 44, height: 44)
-
-            Circle()
-                .fill(statusTint)
-                .frame(width: 8, height: 8)
-                .padding(2)
-                .background(Circle().fill(Theme.surface.opacity(0.82)))
-        }
-        .frame(width: 48, height: 48, alignment: .topLeading)
-        .accessibilityLabel("\(session.providerLabel)，\(statusLabel)")
+        BrandLogo(provider: session.provider, color: providerTint.opacity(0.94))
+            .frame(width: 26, height: 26)
+            .frame(width: 38, height: 38)
+            .accessibilityLabel("\(session.providerLabel)，\(statusLabel)")
     }
 
     private func metadataChip(_ text: String, icon: String?, tint: Color) -> some View {
@@ -1439,15 +1411,6 @@ private struct SessionRow: View {
             : String(format: "%02d:%02d", minutes, remainder)
     }
 
-    private var statusTint: Color {
-        if session.hasPendingPermission { return .orange }
-        switch session.status ?? "" {
-        case "running": return session.isResponding ? .green : Theme.brand
-        case "idle": return Theme.brand.opacity(0.6)
-        default: return .gray
-        }
-    }
-
     private var statusLabel: String {
         if session.hasPendingPermission { return "待授权" }
         if session.isResponding { return "回复中" }
@@ -1469,20 +1432,10 @@ private struct HistorySessionRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [providerTint.opacity(0.2), providerTint.opacity(0.08)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                Image(systemName: "bubble.left.and.text.bubble.right")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(providerTint)
-            }
-            .frame(width: 46, height: 46)
+            // 与 Android HistorySessionCard 一致：透明底品牌 logo，不用圆角色块。
+            BrandLogo(provider: history.provider, color: providerTint.opacity(0.94))
+                .frame(width: 26, height: 26)
+                .frame(width: 38, height: 38)
 
             VStack(alignment: .leading, spacing: 8) {
                 Text(history.firstUserMessage.isEmpty ? "空会话" : history.firstUserMessage)
