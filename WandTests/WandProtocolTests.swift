@@ -18,26 +18,30 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertNotEqual(claude.id, codex.id)
     }
 
-    func testLoadEarlierControlFollowsHistoryDisclosure() {
-        XCTAssertTrue(shouldShowLoadEarlierControl(
-            historyExpanded: false,
-            hasCollapsedHistory: false,
-            canLoadEarlier: true
+    func testEarlierMessagesAutoLoadOnlyAtTopWhileBrowsingHistory() {
+        XCTAssertTrue(shouldAutoLoadEarlierMessages(
+            isTopSentinelVisible: true,
+            isBrowsingHistory: true,
+            canLoadEarlier: true,
+            loadingEarlier: false
         ))
-        XCTAssertFalse(shouldShowLoadEarlierControl(
-            historyExpanded: false,
-            hasCollapsedHistory: true,
-            canLoadEarlier: true
+        XCTAssertFalse(shouldAutoLoadEarlierMessages(
+            isTopSentinelVisible: false,
+            isBrowsingHistory: true,
+            canLoadEarlier: true,
+            loadingEarlier: false
         ))
-        XCTAssertTrue(shouldShowLoadEarlierControl(
-            historyExpanded: true,
-            hasCollapsedHistory: true,
-            canLoadEarlier: true
+        XCTAssertFalse(shouldAutoLoadEarlierMessages(
+            isTopSentinelVisible: true,
+            isBrowsingHistory: false,
+            canLoadEarlier: true,
+            loadingEarlier: false
         ))
-        XCTAssertFalse(shouldShowLoadEarlierControl(
-            historyExpanded: true,
-            hasCollapsedHistory: false,
-            canLoadEarlier: false
+        XCTAssertFalse(shouldAutoLoadEarlierMessages(
+            isTopSentinelVisible: true,
+            isBrowsingHistory: true,
+            canLoadEarlier: true,
+            loadingEarlier: true
         ))
     }
 

@@ -75,6 +75,11 @@ struct NativeRootView: View {
 #endif
             handleQuickAction()
         }
+        // NavigationStack 的系统返回手势只会把 selection 置空；同步释放详情快照，确保
+        // 下次进入（包括同一会话）创建干净的 destination，而不是复用已 shutdown 的页面。
+        .onChange(of: selectedSessionID) { _, sessionID in
+            if sessionID == nil { selectedSnapshot = nil }
+        }
         .task { await monitorSessionStatus() }
     }
 

@@ -92,6 +92,11 @@ struct ChatView: View {
     @State private var bottomBarHeight: CGFloat = 0
     /// 每次贴底请求递增；较旧的下一帧任务看到代次变化后自行退出，避免连续事件抢滚动。
     @State private var scrollRequestGeneration = 0
+    /// 顶部分页哨兵是否在视口内。只有用户主动向历史方向拖动后才允许触发，避免页面
+    /// 初次布局从顶部跳到底部的瞬间误加载。
+    @State private var earlierSentinelVisible = false
+    /// prepend 前最早一条现有消息的稳定身份；加载完成后滚回它，避免内容插入导致阅读位置跳动。
+    @State private var earlierLoadAnchorID: String?
     /// 应用前后台感知：回前台做连接健康检查 + 拉最新快照，避免半死连接苦等 40s 看门狗。
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -249,33 +254,27 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                        // 历史折叠时不让顶部哨兵因布局变短而自动连翻多页；展开历史后，或尾窗
-                        // 根本没有 user turn 时，提供明确的 44pt 分页入口，始终保证更早消息可达。
+                        // 用户浏览到顶部时自动加载更早消息。哨兵不再要求点击；每次 prepend 后
+                        // 会恢复原阅读锚点，使哨兵退出视口，避免一次到顶连续翻完全部历史。
                         if store.canLoadEarlier {
-                            Button {
-                                store.loadEarlier()
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Spacer()
-                                    if store.loadingEarlier {
-                                        ProgressView().controlSize(.small).tint(Theme.brand)
-                                    } else {
-                                        Image(systemName: "arrow.up.circle")
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .foregroundColor(Theme.brand)
-                                    }
-                                    Text(store.loadingEarlier ? "正在加载更早消息…" : "加载更早的消息")
+                            HStack(spacing: 8) {
+                                Spacer()
+                                if store.loadingEarlier {
+                                    ProgressView().controlSize(.small).tint(Theme.brand)
+                                    Text("正在加载更早消息…")
                                         .font(.system(size: 12, weight: .medium))
                                         .foregroundColor(Theme.textSecondary)
-                                    Spacer()
                                 }
-                                .frame(minHeight: 44)
-                                .contentShape(Rectangle())
+                                Spacer()
                             }
-                            .buttonStyle(.plain)
-                            .disabled(store.loadingEarlier)
-                            .accessibilityLabel(store.loadingEarlier ? "正在加载更早消息" : "加载更早的消息")
+                            .frame(minHeight: 24)
+                            .accessibilityLabel(store.loadingEarlier ? "正在加载更早消息" : "继续向上滚动加载更早消息")
                             .id("chat-top")
+                            .onAppear {
+                                earlierSentinelVisible = true
+                                requestEarlierMessagesIfNeeded()
+                            }
+                            .onDisappear { earlierSentinelVisible = false }
                         }
                         // 把每个 assistant turn 摊平成独立的 LazyVStack 行（而非整条 turn 一个
                         // 急加载 VStack）：一条 assistant 消息可能携带上百个 text/工具/diff 块，
@@ -307,6 +306,7 @@ struct ChatView: View {
                             // 列表后，新回复就只能靠右下角按钮才能看到。
                             if value.translation.height > 18 {
                                 scrollMode = .manual
+                                requestEarlierMessagesIfNeeded()
                             }
                         }
                 )
@@ -318,6 +318,21 @@ struct ChatView: View {
                 .onAppear { scrollToActiveTarget(proxy) }
                 .onReceive(store.$messages.dropFirst()) { _ in
                     scrollToActiveTarget(proxy)
+                }
+                .onChange(of: store.loadedOffset) {
+                    restoreEarlierLoadAnchor(proxy)
+                }
+                .onChange(of: store.leadingBlockOffset) {
+                    restoreEarlierLoadAnchor(proxy)
+                }
+                .onChange(of: store.loadingEarlier) { _, loadingEarlier in
+                    // 空页或请求失败不会改变 offset，不能让过期锚点误作用于之后的推送。
+                    if !loadingEarlier, earlierLoadAnchorID != nil {
+                        Task { @MainActor in
+                            await Task.yield()
+                            earlierLoadAnchorID = nil
+                        }
+                    }
                 }
                 .onChange(of: store.isResponding) {
                     scrollToActiveTarget(proxy)
@@ -332,6 +347,30 @@ struct ChatView: View {
                     // 聚焦、语音模式、附件和权限卡都会改变输入区高度。
                     scrollToActiveTarget(proxy)
                 }
+        }
+    }
+
+    private func requestEarlierMessagesIfNeeded() {
+        guard shouldAutoLoadEarlierMessages(
+            isTopSentinelVisible: earlierSentinelVisible,
+            isBrowsingHistory: scrollMode == .manual,
+            canLoadEarlier: store.canLoadEarlier,
+            loadingEarlier: store.loadingEarlier
+        ) else { return }
+
+        earlierLoadAnchorID = identifiedMessageItems(
+            presentedMessageItems,
+            turnOffset: store.loadedOffset
+        ).first?.id
+        store.loadEarlier()
+    }
+
+    private func restoreEarlierLoadAnchor(_ proxy: ScrollViewProxy) {
+        guard let anchorID = earlierLoadAnchorID else { return }
+        earlierLoadAnchorID = nil
+        Task { @MainActor in
+            await Task.yield()
+            proxy.scrollTo(anchorID, anchor: .top)
         }
     }
 
@@ -1718,14 +1757,15 @@ struct HistoryStats {
     let errors: Int
 }
 
-/// 有折叠边界时仅在用户主动展开历史后显示分页；尾窗没有完整历史边界时必须
-/// 常驻入口，否则 loadedOffset > 0 的更早消息会变成不可达内容。
-func shouldShowLoadEarlierControl(
-    historyExpanded: Bool,
-    hasCollapsedHistory: Bool,
-    canLoadEarlier: Bool
+/// 自动历史分页只在顶部哨兵可见、用户正在手动浏览且当前没有请求时触发。
+/// 这样初次进入页面的贴底布局不会误加载，也不会在一次到顶后并发翻多页。
+func shouldAutoLoadEarlierMessages(
+    isTopSentinelVisible: Bool,
+    isBrowsingHistory: Bool,
+    canLoadEarlier: Bool,
+    loadingEarlier: Bool
 ) -> Bool {
-    canLoadEarlier && (historyExpanded || !hasCollapsedHistory)
+    isTopSentinelVisible && isBrowsingHistory && canLoadEarlier && !loadingEarlier
 }
 
 /// 取出一个 MessageDisplayItem 归属的 turn 下标，用于按历史边界分区。

@@ -58,7 +58,12 @@ final class ChatStore: ObservableObject {
     let api: WandAPI
     @Published private(set) var snapshot: SessionSnapshot?
     private let socket: WandSocket
+    /// SwiftUI 的 NavigationStack 会在 pop 后短暂缓存 destination；同一个详情再次出现时，
+    /// @StateObject 可能仍是原来的 ChatStore。active 区分「对象初始化过」与「页面当前可见」，
+    /// 让关闭过 socket 的 store 能安全恢复，而不是被 started 守卫永久挡住。
     private var started = false
+    private var active = false
+    private var initialLoadInProgress = false
     private var queuePromotePending = false
     private var autoResumeAttempted = false
     /// 模型、思考与模式设置各自只接受最后一次请求的回包。三个接口都会返回完整
@@ -93,11 +98,30 @@ final class ChatStore: ObservableObject {
     // MARK: - 生命周期
 
     func start() {
+        guard !active else {
+            wlog("session", "start() 跳过 session=\(sessionId)（页面已激活）")
+            return
+        }
+        active = true
+
+        // 首次 REST 加载还没结束时，只恢复 active；加载任务收尾会按 active 状态建连。
+        guard !initialLoadInProgress else {
+            wlog("session", "start() session=\(sessionId)（等待首次加载完成）")
+            return
+        }
+
+        // destination 被 NavigationStack 复用时，重新打开已经关闭的 socket。
+        // WandSocket.connect() 会自动重订阅并收到 init 快照，无需重复拉模型等静态配置。
         guard !started else {
-            wlog("session", "start() 跳过 session=\(sessionId)（已 started，复用旧 store）")
+            wlog("session", "start() session=\(sessionId)（恢复缓存详情连接）")
+            // 先登记订阅再连接：既避免已有订阅时发两次 subscribe，也覆盖用户在首次
+            // REST 尚未完成前快速返回、socket 从未真正订阅过的情况。
+            socket.subscribe(sessionId: sessionId)
+            socket.connect()
             return
         }
         started = true
+        initialLoadInProgress = true
         wlog("session", "start() session=\(sessionId)")
 
         // WandSocket 的回调已保证主线程，用 assumeIsolated 接回 MainActor 隔离，
@@ -123,8 +147,13 @@ final class ChatStore: ObservableObject {
             await loadModels()
             await loadCardDefaults()
             loading = false
-            socket.connect()
+            initialLoadInProgress = false
+            guard active else {
+                wlog("session", "首次加载完成但页面已离开，暂不连接 session=\(sessionId)")
+                return
+            }
             socket.subscribe(sessionId: sessionId)
+            socket.connect()
             if let initialSnapshot {
                 await autoResumeFailedPtyIfNeeded(initialSnapshot)
             }
@@ -132,6 +161,8 @@ final class ChatStore: ObservableObject {
     }
 
     func shutdown() {
+        guard active else { return }
+        active = false
         wlog("session", "shutdown() session=\(sessionId)（视图销毁，关闭 socket）")
         socket.close()
     }
