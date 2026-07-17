@@ -364,7 +364,7 @@ final class WandAPI {
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/structured-sessions", body: body)
     }
 
-    /// PTY 会话：POST /api/commands，command 与 provider 保持一致。
+    /// PTY 会话：POST /api/commands。Qoder 的 provider ID 与可执行命令名称不同。
     @discardableResult
     func createPtySession(
         provider: String,
@@ -375,7 +375,8 @@ final class WandAPI {
         initialInput: String?
     ) async throws -> SessionSnapshot {
         let normalizedProvider = WandProvider(normalizing: provider).rawValue
-        var body: [String: Any] = ["command": normalizedProvider, "provider": normalizedProvider, "cwd": cwd]
+        let command = normalizedProvider == WandProvider.qoder.rawValue ? "qodercli" : normalizedProvider
+        var body: [String: Any] = ["command": command, "provider": normalizedProvider, "cwd": cwd]
         if let mode, !mode.isEmpty { body["mode"] = mode }
         if let model, !model.isEmpty { body["model"] = model }
         if let thinkingEffort, !thinkingEffort.isEmpty { body["thinkingEffort"] = thinkingEffort }
