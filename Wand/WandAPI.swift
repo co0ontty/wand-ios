@@ -487,6 +487,8 @@ final class WandAPI {
             case .opencode:
                 body["defaultOpenCodeModel"] = model
                 body["defaultModels"] = ["opencode": model]
+            case .grok:
+                break
             case .claude:
                 body["defaultModel"] = model
                 body["defaultModels"] = ["claude": model]

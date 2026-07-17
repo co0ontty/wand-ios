@@ -12,6 +12,7 @@ enum WandProvider: String, CaseIterable, Identifiable {
     case claude
     case codex
     case opencode
+    case grok
 
     var id: String { rawValue }
 
@@ -25,6 +26,8 @@ enum WandProvider: String, CaseIterable, Identifiable {
             self = .codex
         case Self.opencode.rawValue, "open-code", "open_code":
             self = .opencode
+        case Self.grok.rawValue:
+            self = .grok
         default:
             self = .claude
         }
@@ -40,6 +43,7 @@ enum WandProvider: String, CaseIterable, Identifiable {
         case .claude: return "Claude"
         case .codex: return "Codex"
         case .opencode: return "OpenCode"
+        case .grok: return "Grok"
         }
     }
 
@@ -48,6 +52,7 @@ enum WandProvider: String, CaseIterable, Identifiable {
         case .claude: return "claude-cli-print"
         case .codex: return "codex-cli-exec"
         case .opencode: return "opencode-cli-run"
+        case .grok: return "grok-cli-headless"
         }
     }
 
@@ -59,6 +64,8 @@ enum WandProvider: String, CaseIterable, Identifiable {
         case .codex:
             return ["full-access"]
         case .opencode:
+            return ["default", "full-access", "managed"]
+        case .grok:
             return ["default", "full-access", "managed"]
         }
     }
@@ -979,6 +986,7 @@ struct ModelsResponse: Decodable {
         case .claude: return models
         case .codex: return codexModels
         case .opencode: return opencodeModels
+        case .grok: return []
         }
     }
 
@@ -990,6 +998,8 @@ struct ModelsResponse: Decodable {
             return defaultModels?.codex ?? defaultCodexModel ?? ""
         case .opencode:
             return defaultModels?.opencode ?? defaultOpenCodeModel ?? ""
+        case .grok:
+            return ""
         }
     }
 }
@@ -1073,6 +1083,8 @@ struct ServerConfigInfo: Decodable {
             return defaultModels?.codex ?? defaultCodexModel ?? ""
         case .opencode:
             return defaultModels?.opencode ?? defaultOpenCodeModel ?? ""
+        case .grok:
+            return ""
         }
     }
 }
@@ -1102,6 +1114,7 @@ struct ProviderDefaultModels: Decodable {
         case .claude: return claude
         case .codex: return codex
         case .opencode: return opencode
+        case .grok: return nil
         }
     }
 }

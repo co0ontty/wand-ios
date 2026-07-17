@@ -66,6 +66,7 @@ struct NewSessionView: View {
         switch selectedProvider {
         case .codex: codexModels
         case .opencode: opencodeModels
+        case .grok: []
         case .claude: availableModels
         }
     }
@@ -95,6 +96,7 @@ struct NewSessionView: View {
                             Text("Claude").tag("claude")
                             Text("Codex").tag("codex")
                             Text("OpenCode").tag("opencode")
+                            Text("Grok").tag("grok")
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: provider) { _, newProvider in
@@ -384,6 +386,7 @@ struct NewSessionView: View {
         switch WandProvider(normalizing: provider) {
         case .codex: models = codexModels
         case .opencode: models = opencodeModels
+        case .grok: models = []
         case .claude: models = availableModels
         }
         guard !models.isEmpty else { return normalized }
@@ -394,6 +397,7 @@ struct NewSessionView: View {
         switch WandProvider(normalizing: provider) {
         case .codex: serverDefaultModels.codex ?? ""
         case .opencode: serverDefaultModels.opencode ?? ""
+        case .grok: ""
         case .claude: serverDefaultModels.claude ?? ""
         }
     }
@@ -575,6 +579,8 @@ struct NewSessionView: View {
                 return "Codex JSONL 结构化聊天界面，支持多轮对话和工具调用展示。"
             case .opencode:
                 return "OpenCode JSON 结构化聊天界面，支持多轮对话和工具调用展示。"
+            case .grok:
+                return "Grok streaming-json 结构化聊天界面，支持多轮续聊与思考过程展示。"
             case .claude:
                 return "结构化聊天界面，支持多轮对话、流式输出和工具调用展示。"
             }
@@ -584,6 +590,8 @@ struct NewSessionView: View {
             return "Codex PTY 终端会话；terminal 是原始输出，chat 是解析后的阅读视图。"
         case .opencode:
             return "OpenCode TUI 终端会话，支持持续交互和终端视图。"
+        case .grok:
+            return "Grok Build TUI 的原始 PTY 终端会话。"
         case .claude:
             return "原始 PTY 终端会话，支持持续交互、终端视图和权限流。"
         }
@@ -599,6 +607,11 @@ struct NewSessionView: View {
                 return "OpenCode 将自动批准未显式拒绝的权限；支持 TUI 与 JSON 结构化会话。"
             }
             return "OpenCode 使用自身权限配置；结构化模式会自动拒绝未批准的权限请求。"
+        case .grok:
+            if mode == "full-access" || mode == "managed" {
+                return "Grok 将以 always-approve 运行；支持 TUI 与 streaming-json 结构化会话。"
+            }
+            return "Grok 使用自身权限确认；支持 TUI 与 streaming-json 结构化会话。"
         case .claude:
             break
         }
@@ -692,6 +705,7 @@ struct NewSessionView: View {
             case .claude: claude = model
             case .codex: codex = model
             case .opencode: opencode = model
+            case .grok: break
             }
             if pendingModelDefaults[provider] == model {
                 pendingModelDefaults.removeValue(forKey: provider)

@@ -632,7 +632,7 @@ struct ChatView: View {
     private var providerTint: Color {
         switch currentProvider {
         case .codex: return Theme.codex
-        case .claude, .opencode: return Theme.brand
+        case .claude, .opencode, .grok: return Theme.brand
         }
     }
 

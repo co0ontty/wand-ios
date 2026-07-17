@@ -82,15 +82,18 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(WandProvider.normalize("  CODEX\n"), "codex")
         XCTAssertEqual(WandProvider.normalize("Open-Code"), "opencode")
         XCTAssertEqual(WandProvider.normalize("open_code"), "opencode")
+        XCTAssertEqual(WandProvider.normalize("GROK"), "grok")
         XCTAssertEqual(WandProvider.normalize("future-provider"), "claude")
 
         XCTAssertEqual(WandProvider.claude.title, "Claude")
         XCTAssertEqual(WandProvider.codex.title, "Codex")
         XCTAssertEqual(WandProvider.opencode.title, "OpenCode")
+        XCTAssertEqual(WandProvider.grok.title, "Grok")
 
         XCTAssertEqual(WandProvider.claude.structuredRunner, "claude-cli-print")
         XCTAssertEqual(WandProvider.codex.structuredRunner, "codex-cli-exec")
         XCTAssertEqual(WandProvider.opencode.structuredRunner, "opencode-cli-run")
+        XCTAssertEqual(WandProvider.grok.structuredRunner, "grok-cli-headless")
     }
 
     func testProviderModeClampUsesSupportedFallbackAndSafeDefault() {

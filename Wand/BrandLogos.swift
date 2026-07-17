@@ -5,7 +5,7 @@ import SwiftUI
 // SwiftUI Path 命令（圆弧已展开为贝塞尔曲线）。填充色由调用方 .fill(color) 决定。
 // 用法：BrandLogoShape(provider: session.provider).fill(tint).frame(width: 21, height: 21)
 
-/// 按 provider 渲染品牌 logo：Claude 星芒 / Codex 六角结 / OpenCode 终端代码标记。
+/// 按 provider 渲染品牌 logo：Claude 星芒 / Codex 六角结 / OpenCode 终端代码标记 / Grok 几何 G。
 struct BrandLogoShape: Shape {
     let provider: String?
 
@@ -14,6 +14,7 @@ struct BrandLogoShape: Shape {
         case .claude: return Self.claudePath(in: rect)
         case .codex: return Self.codexPath(in: rect)
         case .opencode: return Self.openCodePath(in: rect)
+        case .grok: return Self.grokPath(in: rect)
         }
     }
 
@@ -300,6 +301,42 @@ struct BrandLogoShape: Shape {
 
         // 输入光标。
         p.addRect(CGRect(x: 13 * w, y: 13 * h, width: 4 * w, height: 2 * h))
+        return p
+    }
+
+    /// Grok（xAI 官方 SVG 的 `#mark` 原始路径）。
+    private static func grokPath(in rect: CGRect) -> Path {
+        let scale = min(rect.width / 34.0, rect.height / 33.0)
+        let offsetX = rect.midX - 17 * scale
+        let offsetY = rect.midY - 16.5 * scale
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: offsetX + x * scale, y: offsetY + y * scale) }
+        var p = Path()
+        p.move(to: point(13.2371, 21.0407))
+        p.addLine(to: point(24.3186, 12.8506))
+        p.addCurve(to: point(25.8973, 13.2294), control1: point(24.8619, 12.4491), control2: point(25.6384, 12.6057))
+        p.addCurve(to: point(23.9403, 23.1851), control1: point(27.2597, 16.5185), control2: point(26.651, 20.4712))
+        p.addCurve(to: point(14.0108, 25.1386), control1: point(21.2297, 25.8989), control2: point(17.4581, 26.4941))
+        p.addLine(to: point(10.2449, 26.8843))
+        p.addCurve(to: point(26.304, 25.5601), control1: point(15.6463, 30.5806), control2: point(22.2053, 29.6665))
+        p.addCurve(to: point(29.6205, 13.8673), control1: point(29.5551, 22.3051), control2: point(30.562, 17.8683))
+        p.addLine(to: point(29.629, 13.8758))
+        p.addCurve(to: point(33.449, 0.844576), control1: point(28.2637, 7.99809), control2: point(29.9647, 5.64871))
+        p.addCurve(to: point(33.6964, 0.5), control1: point(33.5314, 0.730667), control2: point(33.6139, 0.616757))
+        p.addLine(to: point(29.1113, 5.09055))
+        p.addLine(to: point(29.1113, 5.07631))
+        p.addLine(to: point(13.2343, 21.0436))
+        p.closeSubpath()
+        p.move(to: point(10.9503, 23.0313))
+        p.addCurve(to: point(11.0498, 10.2763), control1: point(7.07343, 19.3235), control2: point(7.74185, 13.5853))
+        p.addCurve(to: point(21.0021, 8.2971), control1: point(13.4959, 7.82722), control2: point(17.5036, 6.82767))
+        p.addLine(to: point(24.7595, 6.55998))
+        p.addCurve(to: point(22.2195, 5.17313), control1: point(24.0826, 6.07017), control2: point(23.215, 5.54334))
+        p.addCurve(to: point(8.67479, 7.90126), control1: point(17.7198, 3.31926), control2: point(12.3326, 4.24192))
+        p.addCurve(to: point(5.94992, 21.4622), control1: point(5.15635, 11.4239), control2: point(4.0499, 16.8403))
+        p.addCurve(to: point(2.69884, 29.826), control1: point(7.36924, 24.9165), control2: point(5.04257, 27.3598))
+        p.addCurve(to: point(0.36364, 32.5), control1: point(1.86829, 30.7002), control2: point(1.0349, 31.5745))
+        p.addLine(to: point(10.9474, 23.0341))
+        p.closeSubpath()
         return p
     }
 }
