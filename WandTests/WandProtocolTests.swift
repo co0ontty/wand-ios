@@ -3,6 +3,17 @@ import XCTest
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
+    func testSessionTopicFieldsDecodeAndDriveDisplayTitle() throws {
+        let session = try decode(
+            SessionSnapshot.self,
+            from: #"{"id":"s1","title":"共同标题","description":"共同总结多轮要求","titleGenerating":true}"#
+        )
+
+        XCTAssertEqual(session.displayTitle, "共同标题")
+        XCTAssertEqual(session.description, "共同总结多轮要求")
+        XCTAssertEqual(session.titleGenerating, true)
+    }
+
     func testHistoryIdentityIncludesProvider() throws {
         let claude = try decode(
             HistorySession.self,

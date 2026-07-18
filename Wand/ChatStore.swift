@@ -53,6 +53,8 @@ final class ChatStore: ObservableObject {
     private let earlierPageSize = 40
     private let earlierBlockPageSize = 40
     var canLoadEarlier: Bool { leadingBlockOffset > 0 || loadedOffset > 0 }
+    var displayTitle: String { snapshot?.displayTitle ?? "对话详情" }
+    var titleGenerating: Bool { snapshot?.titleGenerating == true }
 
     let sessionId: String
     let api: WandAPI
@@ -335,6 +337,9 @@ final class ChatStore: ObservableObject {
                 permissionBlocked: data.permissionBlocked,
                 autoApprovePermissions: data.autoApprovePermissions
             )
+            snapshot?.title = data.title
+            snapshot?.description = data.description
+            snapshot?.titleGenerating = data.titleGenerating
         }
     }
 
@@ -368,6 +373,16 @@ final class ChatStore: ObservableObject {
     }
 
     private func applyCommonFields(_ data: WsData) {
+        if let title = data.title { snapshot?.title = title }
+        if let description = data.description { snapshot?.description = description }
+        if let summary = data.summary, snapshot?.summary != summary {
+            snapshot = snapshot.map { current in
+                var updated = current
+                updated.summary = summary
+                return updated
+            }
+        }
+        if let generating = data.titleGenerating { snapshot?.titleGenerating = generating }
         if let s = data.structuredState { isResponding = s.inFlight ?? isResponding }
         if let q = data.queuedMessages { queuedMessages = q }
         if let esc = data.pendingEscalation {

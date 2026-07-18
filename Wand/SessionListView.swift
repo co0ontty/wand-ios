@@ -1289,12 +1289,13 @@ private struct PtySessionView: View {
                 .frame(width: 26, height: 26)
 
             VStack(spacing: 0) {
-                Text(session.displayTitle)
+                Text(store.displayTitle)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(Color.white.opacity(0.88))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: 175)
+                    .topicTitleRhythm(store.titleGenerating)
                 Text(session.cwd?.isEmpty == false ? session.cwd! : "未设置工作目录")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(Color.white.opacity(0.58))
@@ -1305,7 +1306,7 @@ private struct PtySessionView: View {
         }
         .shadow(color: Color.black.opacity(0.26), radius: 3, x: 0, y: 1)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(WandProvider(normalizing: store.snapshot?.provider ?? session.provider).title)，\(session.displayTitle)")
+        .accessibilityLabel("\(WandProvider(normalizing: store.snapshot?.provider ?? session.provider).title)，\(store.displayTitle)")
     }
 }
 

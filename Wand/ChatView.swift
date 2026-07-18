@@ -923,6 +923,7 @@ struct ChatView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: 190)
+                .topicTitleRhythm(store.titleGenerating)
             Text(store.snapshot?.cwd ?? "未设置工作目录")
                 .font(.system(size: 8, design: .monospaced))
                 .foregroundColor(Theme.textSecondary)
@@ -938,6 +939,9 @@ struct ChatView: View {
            let task = store.currentTaskTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
            !task.isEmpty {
             return task
+        }
+        if store.snapshot?.title?.isEmpty == false {
+            return store.displayTitle
         }
         return latestUserMessage
     }

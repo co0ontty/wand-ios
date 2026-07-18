@@ -719,7 +719,10 @@ struct SessionSnapshot: Decodable, Identifiable {
     let startedAt: String?
     let endedAt: String?
     let archived: Bool?
-    let summary: String?
+    var summary: String?
+    var title: String? = nil
+    var description: String? = nil
+    var titleGenerating: Bool? = nil
     let currentTaskTitle: String?
     let selectedModel: String?
     let thinkingEffort: String?
@@ -742,8 +745,9 @@ struct SessionSnapshot: Decodable, Identifiable {
     var isStructured: Bool { (sessionKind ?? "pty") == "structured" }
     var providerLabel: String { WandProvider(normalizing: provider).title }
 
-    /// 列表标题：摘要 > 当前任务 > cwd 末段。
+    /// 列表标题：模型标题 > 摘要 > 当前任务 > cwd 末段。
     var displayTitle: String {
+        if let title, !title.isEmpty { return title }
         if let s = summary, !s.isEmpty { return s }
         if let t = currentTaskTitle, !t.isEmpty { return t }
         if let c = cwd, !c.isEmpty {
@@ -868,6 +872,9 @@ struct WsData: Decodable {
     let endedAt: String?
     let archived: Bool?
     let summary: String?
+    let title: String?
+    let description: String?
+    let titleGenerating: Bool?
     let currentTaskTitle: String?
     let selectedModel: String?
     let thinkingEffort: String?

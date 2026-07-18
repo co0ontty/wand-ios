@@ -1,6 +1,33 @@
 import SwiftUI
 import UIKit
 
+private struct TopicTitleRhythmModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var phase = false
+    let active: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(active && !reduceMotion ? (phase ? 1 : 0.64) : 1)
+            .offset(y: active && !reduceMotion && phase ? -1 : 0)
+            .animation(
+                active && !reduceMotion
+                    ? .easeInOut(duration: 1.15).repeatForever(autoreverses: true)
+                    : nil,
+                value: phase
+            )
+            .onAppear { phase = active && !reduceMotion }
+            .onChange(of: active) { _, next in phase = next && !reduceMotion }
+            .onChange(of: reduceMotion) { _, reduced in phase = active && !reduced }
+    }
+}
+
+extension View {
+    func topicTitleRhythm(_ active: Bool) -> some View {
+        modifier(TopicTitleRhythmModifier(active: active))
+    }
+}
+
 enum WandAppearanceMode: String, CaseIterable, Identifiable {
     case light
     case dark
