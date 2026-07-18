@@ -118,7 +118,7 @@ struct SessionListView: View {
 
     var body: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
+            WandAmbientBackground()
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -1296,12 +1296,10 @@ private struct PtySessionView: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: 175)
                     .topicTitleRhythm(store.titleGenerating)
-                Text(session.cwd?.isEmpty == false ? session.cwd! : "未设置工作目录")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(Color.white.opacity(0.58))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 175)
+                if let cwd = session.cwd, !cwd.isEmpty {
+                    WandPathRevealText(path: cwd, fontSize: 9, color: Color.white.opacity(0.58), staggerWindow: 0)
+                        .frame(width: 175)
+                }
             }
         }
         .shadow(color: Color.black.opacity(0.26), radius: 3, x: 0, y: 1)
@@ -1318,64 +1316,56 @@ private struct SessionRow: View {
     let selected: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 11) {
-            if selecting {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 21, weight: .medium))
-                    .foregroundColor(selected ? Theme.brand : Theme.textSecondary)
-                    .frame(width: 38, height: 38)
-                    .accessibilityLabel(selected ? "已选中" : "未选中")
-            } else {
-                providerMark
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(session.displayTitle)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    if !trailingTimeLabel.isEmpty {
-                        Text(trailingTimeLabel)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(Theme.textSecondary.opacity(0.78))
-                            .fixedSize()
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 10) {
+                Group {
+                    if selecting {
+                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(selected ? Theme.brand : Theme.textSecondary)
+                            .accessibilityLabel(selected ? "已选中" : "未选中")
+                    } else {
+                        providerMark
                     }
                 }
+                .frame(width: 46, height: 30)
 
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusTint)
-                        .frame(width: 5, height: 5)
-                    Text("\(session.providerLabel) · \(session.isStructured ? "聊天" : "终端") · \(statusLabel)")
+                Text(session.displayTitle)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack(spacing: 7) {
+                Text(trailingTimeLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Theme.textMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                    .frame(width: 46)
+                Circle().fill(statusTint).frame(width: 5, height: 5)
+                    .accessibilityLabel(statusLabel)
+                if let cwd = session.cwd, !cwd.isEmpty {
+                    WandPathRevealText(path: cwd, fontSize: 10, color: Theme.textMuted)
+                        .frame(maxWidth: .infinity)
+                } else {
+                    Text(statusLabel)
                         .font(.system(size: 10.5, weight: .medium))
                         .foregroundColor(Theme.textSecondary)
-                        .lineLimit(1)
-                    if let cwd = session.cwd, !cwd.isEmpty {
-                        Text("·")
-                            .foregroundColor(Theme.textSecondary.opacity(0.5))
-                        Text(compactPath(cwd))
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(Theme.textSecondary.opacity(0.78))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 11)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(selected ? Theme.brand.opacity(0.09) : Theme.surface.opacity(0.88))
-        )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(selected ? Theme.brand.opacity(0.46) : Theme.border.opacity(0.55), lineWidth: 0.75)
         )
+        .background(selected ? Theme.brand.opacity(0.09) : Color.clear)
+        .wandGlassCard(cornerRadius: 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue("\(session.isStructured ? "聊天模式" : "终端模式")，\(statusLabel)")
     }
 
     /// 左侧助手标识：只展示 provider 品牌 logo（透明底，对齐 Android ProviderMark）。
@@ -1435,12 +1425,6 @@ private struct SessionRow: View {
         return Theme.textSecondary.opacity(0.62)
     }
 
-    private func compactPath(_ path: String) -> String {
-        let segments = path.split(separator: "/").map(String.init)
-        guard segments.count > 2 else { return path }
-        return "…/\(segments.suffix(2).joined(separator: "/"))"
-    }
-
     private var statusLabel: String {
         if session.hasPendingPermission { return "待授权" }
         if session.isResponding { return "回复中" }
@@ -1461,63 +1445,46 @@ private struct HistorySessionRow: View {
     let loading: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 11) {
-            // 与 Android HistorySessionCard 一致：透明底品牌 logo，不用圆角色块。
-            BrandLogo(provider: history.provider, color: providerTint.opacity(0.94))
-                .frame(width: 26, height: 26)
-                .frame(width: 38, height: 38)
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(history.firstUserMessage.isEmpty ? "空会话" : history.firstUserMessage)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if !relativeTime.isEmpty {
-                        Text(relativeTime)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(Theme.textSecondary.opacity(0.78))
-                            .fixedSize()
-                    }
-                }
-
-                HStack(spacing: 6) {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(providerTint)
-                    Text("\(WandProvider(normalizing: history.provider).title) · 可恢复")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
-                    if !history.cwd.isEmpty {
-                        Text("·")
-                            .foregroundColor(Theme.textSecondary.opacity(0.5))
-                        Text(compactPath(history.cwd))
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(Theme.textSecondary.opacity(0.78))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 10) {
+                BrandLogo(provider: history.provider, color: providerTint.opacity(0.94))
+                    .frame(width: 23, height: 23)
+                    .frame(width: 46, height: 30)
+                Text(history.firstUserMessage.isEmpty ? "空会话" : history.firstUserMessage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if loading {
+                    ProgressView().tint(providerTint).controlSize(.small)
+                        .accessibilityHidden(true)
                 }
             }
-            Spacer(minLength: 0)
-            if loading {
-                ProgressView()
-                    .tint(providerTint)
-                    .frame(width: 44, height: 44)
-                    .accessibilityHidden(true)
+            HStack(spacing: 7) {
+                Text(loading ? "恢复中" : relativeTime)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(loading ? providerTint : Theme.textMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                    .frame(width: 46)
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(providerTint)
+                Text("可恢复")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                if !history.cwd.isEmpty {
+                    Text("·").foregroundColor(Theme.textMuted.opacity(0.55))
+                    WandPathRevealText(path: history.cwd, fontSize: 10, color: Theme.textMuted)
+                        .frame(maxWidth: .infinity)
+                }
             }
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 11)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.surface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Theme.border.opacity(0.55), lineWidth: 0.75)
-        )
+        .wandGlassCard(cornerRadius: 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(loading ? "聊天模式，正在恢复" : "聊天模式，可恢复")
     }
 
     private var providerTint: Color {
@@ -1540,9 +1507,4 @@ private struct HistorySessionRow: View {
         return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
     }
 
-    private func compactPath(_ path: String) -> String {
-        let segments = path.split(separator: "/").map(String.init)
-        guard segments.count > 2 else { return path }
-        return "…/\(segments.suffix(2).joined(separator: "/"))"
-    }
 }

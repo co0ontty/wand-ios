@@ -149,7 +149,7 @@ struct NativeRootView: View {
     /// 侧边栏：登录/失败/就绪三种阶段共用同一栏。ready 时承载会话列表及其 toolbar。
     @ViewBuilder private var sidebarContent: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
+            WandAmbientBackground()
             switch phase {
             case .authenticating:
                 VStack(spacing: 16) {
@@ -169,18 +169,27 @@ struct NativeRootView: View {
                         .font(.footnote)
                         .foregroundColor(Theme.textSecondary)
                         .multilineTextAlignment(.center)
-                    Button("重试") { authenticate() }
+                    Button { authenticate() } label: {
+                        Text("重试").frame(maxWidth: .infinity)
+                    }
                         .buttonStyle(WandPrimaryButtonStyle())
                     if LocalNetworkPermission.isLikelyLanHost(serverURL.host) {
-                        Button("打开 Wand 设置") {
+                        Button {
                             LocalNetworkPermission.openSettings()
+                        } label: {
+                            Text("打开 Wand 设置").frame(maxWidth: .infinity)
                         }
                         .buttonStyle(WandSecondaryButtonStyle())
                     }
-                    Button("重新连接") { store.disconnect() }
+                    Button { store.disconnect() } label: {
+                        Text("重新连接").frame(maxWidth: .infinity)
+                    }
                         .buttonStyle(WandSecondaryButtonStyle())
                 }
-                .padding(32)
+                .frame(maxWidth: 420)
+                .padding(24)
+                .wandGlassCard(cornerRadius: 18)
+                .padding(16)
                 .navigationTitle("Wand")
             case .ready:
                 VStack(spacing: 0) {

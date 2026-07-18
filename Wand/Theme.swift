@@ -85,23 +85,24 @@ enum Theme {
         }
     }
 
-    // 品牌色（明暗下统一，便于辨识）
-    static let brand = Color(red: 0.851, green: 0.467, blue: 0.341)        // #D97757
-    static let brandStrong = Color(red: 0.741, green: 0.376, blue: 0.255)  // #BD6041
+    // 品牌色（与 Android / macOS / Web 共用同一组暖珊瑚 token）
+    static let brand = dynamic(light: rgb(0.773, 0.396, 0.239), dark: rgb(0.831, 0.459, 0.314)) // #C5653D / #D47550
+    static let brandStrong = dynamic(light: rgb(0.627, 0.306, 0.180), dark: rgb(0.725, 0.392, 0.263))
     /// Codex（OpenAI）标识蓝，与 Android 端 info 色对一致。
     static let codex = dynamic(light: rgb(0.290, 0.435, 0.647), dark: rgb(0.494, 0.612, 0.769)) // #4A6FA5 / #7E9CC4
 
     // 表面 / 文本（自适应）
-    static let background = dynamic(light: rgb(0.980, 0.976, 0.961), dark: rgb(0.137, 0.137, 0.129)) // #FAF9F5 / #232321
-    static let surface = dynamic(light: rgb(1, 1, 1), dark: rgb(0.184, 0.184, 0.173))                 // #FFFFFF / #2F2F2C
-    static let border = dynamic(light: rgb(0.894, 0.886, 0.851), dark: rgb(0.290, 0.290, 0.271))      // #E4E2D9 / #4A4A45
-    static let textPrimary = dynamic(light: rgb(0.137, 0.133, 0.122), dark: rgb(0.957, 0.953, 0.933)) // #232220 / #F4F3EE
-    static let textSecondary = dynamic(light: rgb(0.435, 0.427, 0.400), dark: rgb(0.655, 0.647, 0.616))
-    static let danger = Color(red: 0.776, green: 0.231, blue: 0.184)       // #C63B2F
+    static let background = dynamic(light: rgb(0.961, 0.953, 0.933), dark: rgb(0.075, 0.067, 0.059)) // #F5F3EE / #13110F
+    static let surface = dynamic(light: rgb(1.000, 0.992, 0.976), dark: rgb(0.129, 0.118, 0.102))    // #FFFDF9 / #211E1A
+    static let border = dynamic(light: rgb(0.851, 0.824, 0.788), dark: rgb(0.239, 0.216, 0.188))     // #D9D2C9 / #3D3730
+    static let textPrimary = dynamic(light: rgb(0.157, 0.137, 0.122), dark: rgb(0.953, 0.933, 0.906)) // #28231F / #F3EEE7
+    static let textSecondary = dynamic(light: rgb(0.384, 0.353, 0.325), dark: rgb(0.780, 0.745, 0.706)) // #625A53 / #C7BEB4
+    static let textMuted = dynamic(light: rgb(0.545, 0.510, 0.475), dark: rgb(0.584, 0.545, 0.506)) // #8B8279 / #958B81
+    static let danger = dynamic(light: rgb(0.698, 0.310, 0.271), dark: rgb(0.878, 0.486, 0.447))
 
     /// WKWebView overscroll 区域底色，避免加载前/回弹时露出白底。
     static var uiBackground: UIColor {
-        dynamicUI(light: rgb(0.980, 0.976, 0.961), dark: rgb(0.137, 0.137, 0.129))
+        dynamicUI(light: rgb(0.961, 0.953, 0.933), dark: rgb(0.075, 0.067, 0.059))
     }
 }
 
@@ -109,6 +110,10 @@ extension View {
     @ViewBuilder
     func wandGlassSurface() -> some View {
         modifier(WandGlassSurfaceModifier())
+    }
+
+    func wandGlassCard(cornerRadius: CGFloat = 16) -> some View {
+        modifier(WandGlassCardModifier(cornerRadius: cornerRadius))
     }
 
     func wandPreferredAppearance() -> some View {
@@ -143,6 +148,79 @@ extension View {
     }
 }
 
+/// 四端共用的低透明度环境色域；它提供玻璃背后的层次，但不会形成明显渐变带。
+struct WandAmbientBackground: View {
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                Theme.background
+                Circle()
+                    .fill(Theme.brand.opacity(0.034))
+                    .frame(width: max(proxy.size.width, proxy.size.height) * 0.84)
+                    .offset(x: -proxy.size.width * 0.38, y: -proxy.size.height * 0.38)
+                Circle()
+                    .fill(Theme.textMuted.opacity(0.024))
+                    .frame(width: max(proxy.size.width, proxy.size.height) * 0.60)
+                    .offset(x: proxy.size.width * 0.48, y: -proxy.size.height * 0.04)
+            }
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+}
+
+private struct WandPathWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// 完整路径从根目录向末级目录揭示一次，最后停在最有辨识度的尾部。
+struct WandPathRevealText: View {
+    let path: String
+    var fontSize: CGFloat = 10
+    var color: Color = Theme.textMuted
+    var initialDelay: Double = 1.8
+    var staggerWindow: Double = 1.2
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var textWidth: CGFloat = 0
+    @State private var revealed = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            let overflow = max(0, textWidth - proxy.size.width)
+            Text(path.replacingOccurrences(of: "\\", with: "/"))
+                .font(.system(size: fontSize, weight: .regular, design: .monospaced))
+                .foregroundColor(color)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .background(
+                    GeometryReader { textProxy in
+                        Color.clear.preference(key: WandPathWidthKey.self, value: textProxy.size.width)
+                    }
+                )
+                .offset(x: (reduceMotion || revealed) ? -overflow : 0)
+                .accessibilityLabel(path)
+                .task(id: "\(path)-\(Int(proxy.size.width))-\(Int(textWidth))") {
+                    revealed = reduceMotion
+                    guard !reduceMotion, overflow > 0 else { return }
+                    let hash = UInt64(bitPattern: Int64(path.hashValue))
+                    let stagger = staggerWindow > 0 ? Double(hash % 1_000) / 1_000 * staggerWindow : 0
+                    try? await Task.sleep(nanoseconds: UInt64((initialDelay + stagger) * 1_000_000_000))
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.linear(duration: min(8, max(1.2, Double(overflow / 28))))) {
+                        revealed = true
+                    }
+                }
+        }
+        .clipped()
+        .frame(height: ceil(fontSize * 1.45))
+        .onPreferenceChange(WandPathWidthKey.self) { textWidth = $0 }
+    }
+}
+
 private struct WandGlassSurfaceModifier: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
@@ -162,6 +240,29 @@ private struct WandGlassSurfaceModifier: ViewModifier {
             content
                 .background(shape.fill(Theme.surface))
                 .overlay(shape.stroke(Theme.border, lineWidth: 1))
+        }
+    }
+}
+
+private struct WandGlassCardModifier: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    let cornerRadius: CGFloat
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if reduceTransparency || contrast == .increased {
+            content
+                .background(shape.fill(Theme.surface))
+                .overlay(shape.stroke(Theme.border, lineWidth: contrast == .increased ? 1.5 : 1))
+        } else if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.tint(Theme.brand.opacity(0.035)), in: shape)
+        } else {
+            content
+                .background(.ultraThinMaterial, in: shape)
+                .background(shape.fill(Theme.surface.opacity(0.72)))
+                .overlay(shape.stroke(Color.white.opacity(0.22), lineWidth: 0.75))
         }
     }
 }
@@ -272,22 +373,20 @@ struct WandSecondaryButtonStyle: ButtonStyle {
     }
 }
 
-/// 复用的品牌 logo：珊瑚渐变圆角方块 + 魔杖图标。
+/// 复用的品牌 logo：克制的品牌色圆角方块 + 魔杖图标。
 struct WandBrandMark: View {
     var size: CGFloat = 64
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Theme.brand, Theme.brandStrong],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+                .fill(Theme.brand)
                 .frame(width: size, height: size)
-                .shadow(color: Theme.brand.opacity(0.35), radius: size * 0.18, y: size * 0.06)
+                .overlay(
+                    RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 0.7)
+                )
+                .shadow(color: Theme.brand.opacity(0.10), radius: 1, y: 1)
             Image(systemName: "wand.and.stars")
                 .font(.system(size: size * 0.46, weight: .medium))
                 .foregroundColor(.white)

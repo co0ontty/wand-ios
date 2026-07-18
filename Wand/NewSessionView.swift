@@ -90,7 +90,7 @@ struct NewSessionView: View {
     var body: some View {
         NavigationView {
             ZStack(alignment: .bottom) {
-                Theme.background.ignoresSafeArea()
+                WandAmbientBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         sectionHeader("Provider")

@@ -34,7 +34,7 @@ struct SettingsView: View {
                 aboutSection
             }
             .scrollContentBackground(.hidden)
-            .background(Theme.background)
+            .background(WandAmbientBackground())
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -43,6 +43,8 @@ struct SettingsView: View {
                         .fontWeight(.semibold)
                 }
             }
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
         }
         .tint(Theme.brand)
         .wandPreferredAppearance()

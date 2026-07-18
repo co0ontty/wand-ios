@@ -22,7 +22,7 @@ struct ConnectView: View {
 
     var body: some View {
         ZStack {
-            Theme.background.ignoresSafeArea()
+            WandAmbientBackground()
 
             VStack(spacing: 0) {
                 if isPresentedAsSheet {
@@ -34,6 +34,8 @@ struct ConnectView: View {
                         Spacer(minLength: 24)
                         card
                             .frame(maxWidth: 440)
+                            .padding(22)
+                            .wandGlassCard(cornerRadius: 22)
                             .padding(.horizontal, 24)
                             .padding(.vertical, 24)
                         Spacer(minLength: 24)
