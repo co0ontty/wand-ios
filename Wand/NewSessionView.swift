@@ -614,7 +614,7 @@ struct NewSessionView: View {
         .disabled(!canCreate)
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(Theme.background.opacity(0.96))
+        .wandGlassSurface()
     }
 
     // MARK: - 提示文案（对齐 Web）

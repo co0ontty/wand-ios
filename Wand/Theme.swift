@@ -106,6 +106,11 @@ enum Theme {
 }
 
 extension View {
+    @ViewBuilder
+    func wandGlassSurface() -> some View {
+        modifier(WandGlassSurfaceModifier())
+    }
+
     func wandPreferredAppearance() -> some View {
         modifier(WandPreferredAppearanceModifier())
     }
@@ -135,6 +140,29 @@ extension View {
                 cornerRadius: cornerRadius
             )
         )
+    }
+}
+
+private struct WandGlassSurfaceModifier: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 0, style: .continuous)
+        let highContrast = contrast == .increased
+
+        if reduceTransparency || highContrast {
+            content
+                .background(shape.fill(Theme.surface))
+                .overlay(shape.stroke(Theme.border, lineWidth: highContrast ? 1.5 : 1))
+        } else if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.tint(Theme.brand.opacity(0.035)), in: shape)
+        } else {
+            content
+                .background(shape.fill(Theme.surface))
+                .overlay(shape.stroke(Theme.border, lineWidth: 1))
+        }
     }
 }
 
