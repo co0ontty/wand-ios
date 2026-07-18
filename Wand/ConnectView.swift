@@ -176,15 +176,7 @@ struct ConnectView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 13)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Theme.surface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(inputFocused ? Theme.brand : Theme.border,
-                            lineWidth: inputFocused ? 1.5 : 1)
-            )
+            .wandInputSurface(focused: inputFocused, invalid: error != nil, cornerRadius: 12)
         }
     }
 

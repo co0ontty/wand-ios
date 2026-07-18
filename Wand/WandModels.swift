@@ -897,8 +897,7 @@ struct WsData: Decodable {
     let isResponding: Bool?
     // —— status 事件附加字段 ——
     let permissionRequest: PermissionRequestInfo?
-    // —— task 事件 ——
-    let title: String?
+    // —— task 事件（title 与上方会话标题共用同一 JSON 字段）——
     let tool: String?
 }
 

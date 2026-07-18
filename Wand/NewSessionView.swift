@@ -555,7 +555,7 @@ struct NewSessionView: View {
                 }
             }
         }
-        .background(cardBackground(selected: false))
+        .wandInputSurface(focused: focusedField == .cwd)
     }
 
     /// 首条消息输入卡。
@@ -567,7 +567,9 @@ struct NewSessionView: View {
             .onSubmit { create() }
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
-            .background(cardBackground(selected: false))
+            .foregroundColor(Theme.textPrimary)
+            .tint(Theme.brand)
+            .wandInputSurface(focused: focusedField == .firstMessage)
     }
 
     private func errorBanner(_ message: String) -> some View {

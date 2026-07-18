@@ -1318,57 +1318,64 @@ private struct SessionRow: View {
     let selected: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .center, spacing: 11) {
             if selecting {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 21, weight: .medium))
                     .foregroundColor(selected ? Theme.brand : Theme.textSecondary)
-            }
-
-            VStack(spacing: 6) {
+                    .frame(width: 38, height: 38)
+                    .accessibilityLabel(selected ? "已选中" : "未选中")
+            } else {
                 providerMark
-                metadataChip(
-                        session.isStructured ? "聊天" : "终端",
-                        icon: session.isStructured ? "bubble.left.fill" : "terminal.fill",
-                        tint: Theme.textSecondary
-                    )
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text(session.displayTitle)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(2)
-
-                HStack(spacing: 8) {
-                    Text(session.cwd?.isEmpty == false ? session.cwd! : "未设置工作目录")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(Theme.textSecondary.opacity(0.9))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(session.displayTitle)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                    if !durationLabel.isEmpty {
-                        Label(durationLabel, systemImage: "clock")
+                    if !trailingTimeLabel.isEmpty {
+                        Text(trailingTimeLabel)
                             .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(Theme.textSecondary.opacity(0.9))
+                            .foregroundColor(Theme.textSecondary.opacity(0.78))
                             .fixedSize()
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(statusTint)
+                        .frame(width: 5, height: 5)
+                    Text("\(session.providerLabel) · \(session.isStructured ? "聊天" : "终端") · \(statusLabel)")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(Theme.textSecondary)
+                        .lineLimit(1)
+                    if let cwd = session.cwd, !cwd.isEmpty {
+                        Text("·")
+                            .foregroundColor(Theme.textSecondary.opacity(0.5))
+                        Text(compactPath(cwd))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(Theme.textSecondary.opacity(0.78))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 11)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(selected ? Theme.brand.opacity(0.08) : Theme.surface)
+                .fill(selected ? Theme.brand.opacity(0.09) : Theme.surface.opacity(0.88))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(selected ? Theme.brand.opacity(0.5) : Theme.border.opacity(0.75), lineWidth: 1)
+                .stroke(selected ? Theme.brand.opacity(0.46) : Theme.border.opacity(0.55), lineWidth: 0.75)
         )
-        .shadow(color: Color.black.opacity(selected ? 0.06 : 0.035), radius: 7, y: 2)
     }
 
     /// 左侧助手标识：只展示 provider 品牌 logo（透明底，对齐 Android ProviderMark）。
@@ -1379,30 +1386,31 @@ private struct SessionRow: View {
             .accessibilityLabel("\(session.providerLabel)，\(statusLabel)")
     }
 
-    private func metadataChip(_ text: String, icon: String?, tint: Color) -> some View {
-        HStack(spacing: 4) {
-            if let icon {
-                Image(systemName: icon)
-                    .font(.system(size: 9, weight: .semibold))
-            }
-            Text(text)
-        }
-        .font(.system(size: 10, weight: .semibold))
-        .foregroundColor(tint)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background(Capsule().fill(tint.opacity(0.1)))
-    }
-
     private var providerTint: Color {
         WandProvider(normalizing: session.provider) == .codex ? Theme.codex : Theme.brand
     }
 
     private static let isoFormatter = ISO8601DateFormatter()
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+
+    private static func parseDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        return fractionalFormatter.date(from: value) ?? isoFormatter.date(from: value)
+    }
 
     private var durationLabel: String {
-        guard let raw = session.startedAt, let started = Self.isoFormatter.date(from: raw) else { return "" }
-        let ended = session.endedAt.flatMap(Self.isoFormatter.date(from:)) ?? Date()
+        guard let started = Self.parseDate(session.startedAt) else { return "" }
+        let ended = Self.parseDate(session.endedAt) ?? Date()
         let seconds = max(0, Int(ended.timeIntervalSince(started)))
         let hours = seconds / 3600
         let minutes = (seconds % 3600) / 60
@@ -1410,6 +1418,27 @@ private struct SessionRow: View {
         return hours > 0
             ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
             : String(format: "%02d:%02d", minutes, remainder)
+    }
+
+    private var trailingTimeLabel: String {
+        if session.status == "running" || session.isResponding || session.hasPendingPermission {
+            return durationLabel.isEmpty ? "" : "已运行 \(durationLabel)"
+        }
+        guard let date = Self.parseDate(session.endedAt ?? session.startedAt) else { return "" }
+        return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private var statusTint: Color {
+        if session.hasPendingPermission { return .orange }
+        if session.isResponding || session.status == "running" { return .green }
+        if session.status == "failed" { return Theme.danger }
+        return Theme.textSecondary.opacity(0.62)
+    }
+
+    private func compactPath(_ path: String) -> String {
+        let segments = path.split(separator: "/").map(String.init)
+        guard segments.count > 2 else { return path }
+        return "…/\(segments.suffix(2).joined(separator: "/"))"
     }
 
     private var statusLabel: String {
@@ -1432,32 +1461,43 @@ private struct HistorySessionRow: View {
     let loading: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .center, spacing: 11) {
             // 与 Android HistorySessionCard 一致：透明底品牌 logo，不用圆角色块。
             BrandLogo(provider: history.provider, color: providerTint.opacity(0.94))
                 .frame(width: 26, height: 26)
                 .frame(width: 38, height: 38)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text(history.firstUserMessage.isEmpty ? "空会话" : history.firstUserMessage)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(2)
-
-                if !relativeTime.isEmpty {
-                    Label(relativeTime, systemImage: "clock")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(Theme.textSecondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Theme.textSecondary.opacity(0.08)))
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(history.firstUserMessage.isEmpty ? "空会话" : history.firstUserMessage)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if !relativeTime.isEmpty {
+                        Text(relativeTime)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(Theme.textSecondary.opacity(0.78))
+                            .fixedSize()
+                    }
                 }
 
-                if !history.cwd.isEmpty {
-                    Text(history.cwd)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(Theme.textSecondary.opacity(0.9))
-                        .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(providerTint)
+                    Text("\(WandProvider(normalizing: history.provider).title) · 可恢复")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(Theme.textSecondary)
+                    if !history.cwd.isEmpty {
+                        Text("·")
+                            .foregroundColor(Theme.textSecondary.opacity(0.5))
+                        Text(compactPath(history.cwd))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(Theme.textSecondary.opacity(0.78))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -1469,16 +1509,15 @@ private struct HistorySessionRow: View {
             }
         }
         .padding(.horizontal, 13)
-        .padding(.vertical, 13)
+        .padding(.vertical, 11)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Theme.surface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Theme.border.opacity(0.75), lineWidth: 1)
+                .stroke(Theme.border.opacity(0.55), lineWidth: 0.75)
         )
-        .shadow(color: Color.black.opacity(0.035), radius: 7, y: 2)
     }
 
     private var providerTint: Color {
@@ -1499,5 +1538,11 @@ private struct HistorySessionRow: View {
         guard let timestamp = history.timestamp else { return "" }
         guard let date = Self.isoFormatter.date(from: timestamp) else { return "" }
         return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private func compactPath(_ path: String) -> String {
+        let segments = path.split(separator: "/").map(String.init)
+        guard segments.count > 2 else { return path }
+        return "…/\(segments.suffix(2).joined(separator: "/"))"
     }
 }

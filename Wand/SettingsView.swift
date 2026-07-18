@@ -13,7 +13,6 @@ struct SettingsView: View {
 
     @EnvironmentObject private var store: ServerStore
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
 
     @State private var serverVersion: String?
@@ -21,40 +20,33 @@ struct SettingsView: View {
     @State private var notificationStatus = "读取中…"
     @State private var logShare: LogShareItem?
     @State private var logExportEmpty = false
-    @State private var sectionsVisible = false
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
-                serverSection
-                    .settingsSectionMotion(index: 0, visible: sectionsVisible, reduceMotion: reduceMotion)
                 appearanceSection
-                    .settingsSectionMotion(index: 1, visible: sectionsVisible, reduceMotion: reduceMotion)
                 featureSection
-                    .settingsSectionMotion(index: 2, visible: sectionsVisible, reduceMotion: reduceMotion)
+                serverSection
                 diagnosticsSection
-                    .settingsSectionMotion(index: 3, visible: sectionsVisible, reduceMotion: reduceMotion)
                 moreSection
-                    .settingsSectionMotion(index: 4, visible: sectionsVisible, reduceMotion: reduceMotion)
                 aboutSection
-                    .settingsSectionMotion(index: 5, visible: sectionsVisible, reduceMotion: reduceMotion)
             }
+            .scrollContentBackground(.hidden)
+            .background(Theme.background)
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }
                         .fontWeight(.semibold)
                 }
             }
         }
-        .navigationViewStyle(.stack)
         .tint(Theme.brand)
         .wandPreferredAppearance()
         .task {
-            sectionsVisible = true
             serverVersion = (try? await api.serverConfig())?.currentVersion
             await refreshNotificationStatus()
         }
@@ -183,12 +175,20 @@ struct SettingsView: View {
                     }
                     Task { await refreshNotificationStatus() }
                 }
-            HStack {
-                Label("系统通知权限", systemImage: "bell.badge")
-                Spacer()
-                Text(notificationStatus)
-                    .foregroundColor(notificationStatus == "已开启" ? .green : Theme.danger)
+            Button {
+                openSystemSettings()
+            } label: {
+                HStack {
+                    Label("系统通知权限", systemImage: "bell.badge")
+                    Spacer()
+                    Text(notificationStatus)
+                        .foregroundStyle(notificationStatus == "已开启" ? .green : Theme.danger)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
             }
+            .buttonStyle(.plain)
             .font(.system(size: 14))
             Button {
                 SessionNotificationController.shared.sendTestNotification()
@@ -197,7 +197,7 @@ struct SettingsView: View {
             }
             .disabled(notificationStatus != "已开启")
         } header: {
-            Text("功能")
+            Text("通知与实时活动")
         } footer: {
             Text("灵动岛显示实时状态；系统通知在 App 位于后台时提醒回复完成或等待授权。若权限关闭，请到 iOS 设置 → Wand 开启。App 被系统彻底挂起后，本地状态与通知都会暂停更新。")
         }
@@ -237,6 +237,8 @@ struct SettingsView: View {
                 Label("打开网页版（完整设置）", systemImage: "safari")
                     .font(.system(size: 15))
             }
+        } header: {
+            Text("服务端设置")
         } footer: {
             Text("更新通道、模型配置等服务端设置在网页版里调整。")
         }
@@ -277,6 +279,11 @@ struct SettingsView: View {
         }
     }
 
+    private func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
     private func infoRow(_ label: String, _ value: String, mono: Bool = false) -> some View {
         LabeledContent {
             Text(value)
@@ -289,29 +296,6 @@ struct SettingsView: View {
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
         }
-    }
-}
-
-private struct SettingsSectionMotion: ViewModifier {
-    let index: Int
-    let visible: Bool
-    let reduceMotion: Bool
-
-    func body(content: Content) -> some View {
-        let shown = reduceMotion || visible
-        content
-            .opacity(shown ? 1 : 0)
-            .offset(y: shown ? 0 : 8)
-            .animation(
-                reduceMotion ? nil : .smooth(duration: 0.28, extraBounce: 0).delay(Double(index) * 0.03),
-                value: visible
-            )
-    }
-}
-
-private extension View {
-    func settingsSectionMotion(index: Int, visible: Bool, reduceMotion: Bool) -> some View {
-        modifier(SettingsSectionMotion(index: index, visible: visible, reduceMotion: reduceMotion))
     }
 }
 

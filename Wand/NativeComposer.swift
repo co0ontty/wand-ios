@@ -15,6 +15,9 @@ struct ComposerInputHeightPreferenceKey: PreferenceKey {
 }
 
 struct NativeComposerShell<CollapsedLeading: View, InputContent: View, CollapsedTrailing: View, ExpandedControls: View>: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+
     let expanded: Bool
     let focused: Bool
     let onFocusInput: () -> Void
@@ -24,10 +27,11 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
     @ViewBuilder let expandedControls: () -> ExpandedControls
 
     var body: some View {
-        let cornerRadius: CGFloat = expanded ? 18 : 24
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        // iPhone 保留聚焦后露出控制行，但表面本身保持同一圆角、材质与阴影。
+        // 键盘已经提供空间变化动画，composer 不再叠加第二套弹性缩放。
+        let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
 
-        VStack(alignment: .leading, spacing: expanded ? 8 : 0) {
+        VStack(alignment: .leading, spacing: expanded ? 6 : 0) {
             HStack(alignment: expanded ? .bottom : .center, spacing: ComposerMetrics.actionSpacing) {
                 if !expanded {
                     collapsedLeading()
@@ -41,27 +45,24 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
                 expandedControls()
             }
         }
-        .padding(.horizontal, expanded ? 8 : 9)
-        .padding(.vertical, expanded ? 7 : 4)
-        .background(.ultraThinMaterial, in: shape)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(reduceTransparency ? AnyShapeStyle(Theme.surface) : AnyShapeStyle(.ultraThinMaterial), in: shape)
         .background {
             shape
-                .fill(Theme.surface.opacity(expanded ? 0.58 : 0.48))
+                .fill(Theme.surface.opacity(0.56))
         }
         .overlay {
             shape
-                .stroke(Theme.border.opacity(expanded ? 0.42 : 0.32), lineWidth: 0.8)
+                .stroke(
+                    focused ? Theme.brand.opacity(contrast == .increased ? 1 : 0.62) : Theme.border.opacity(contrast == .increased ? 1 : 0.46),
+                    lineWidth: contrast == .increased ? 2 : (focused ? 1.25 : 0.8)
+                )
         }
         .overlay(alignment: .top) {
             shape
-                .stroke(Color.white.opacity(expanded ? 0.36 : 0.28), lineWidth: 0.7)
+                .stroke(Color.white.opacity(0.32), lineWidth: 0.7)
                 .blendMode(.screen)
-        }
-        .overlay {
-            if focused {
-                shape
-                    .stroke(Theme.brand.opacity(0.28), lineWidth: 1)
-            }
         }
         .contentShape(shape)
         .simultaneousGesture(
@@ -70,10 +71,14 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
             }
         )
         .compositingGroup()
-        .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 3)
+        .shadow(
+            color: focused ? Theme.brand.opacity(0.12) : Color.black.opacity(0.05),
+            radius: 8,
+            x: 0,
+            y: 3
+        )
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .animation(.easeInOut(duration: 0.18), value: expanded)
     }
 }
 

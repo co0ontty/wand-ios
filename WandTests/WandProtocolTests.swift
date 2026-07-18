@@ -8,10 +8,15 @@ final class WandProtocolTests: XCTestCase {
             SessionSnapshot.self,
             from: #"{"id":"s1","title":"共同标题","description":"共同总结多轮要求","titleGenerating":true}"#
         )
+        let event = try decode(
+            WsData.self,
+            from: #"{"title":"共同标题","description":"共同总结多轮要求","titleGenerating":true}"#
+        )
 
         XCTAssertEqual(session.displayTitle, "共同标题")
         XCTAssertEqual(session.description, "共同总结多轮要求")
         XCTAssertEqual(session.titleGenerating, true)
+        XCTAssertEqual(event.title, "共同标题")
     }
 
     func testHistoryIdentityIncludesProvider() throws {

@@ -120,6 +120,57 @@ extension View {
             )
         }
     }
+
+    /// Wand 文本输入表面：静态时克制，聚焦时用品牌描边与柔和外环给即时反馈。
+    /// 动画为临界阻尼弹簧；减少动态效果下直接切换，避免输入时产生不必要位移。
+    func wandInputSurface(
+        focused: Bool,
+        invalid: Bool = false,
+        cornerRadius: CGFloat = 14
+    ) -> some View {
+        modifier(
+            WandInputSurfaceModifier(
+                focused: focused,
+                invalid: invalid,
+                cornerRadius: cornerRadius
+            )
+        )
+    }
+}
+
+private struct WandInputSurfaceModifier: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    let focused: Bool
+    let invalid: Bool
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let highContrast = contrast == .increased
+        let stroke = invalid ? Theme.danger : (focused ? Theme.brand : Theme.border)
+
+        content
+            .background {
+                shape.fill(
+                    reduceTransparency || highContrast
+                        ? Theme.surface
+                        : Theme.surface.opacity(focused ? 0.98 : 0.86)
+                )
+            }
+            .overlay {
+                shape.stroke(
+                    stroke,
+                    lineWidth: highContrast ? 2 : (focused || invalid ? 1.5 : 1)
+                )
+            }
+            .shadow(
+                color: focused && !highContrast ? Theme.brand.opacity(0.12) : .clear,
+                radius: 10,
+                y: 4
+            )
+    }
 }
 
 private struct WandPreferredAppearanceModifier: ViewModifier {

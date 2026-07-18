@@ -935,11 +935,8 @@ struct ChatView: View {
     }
 
     private var navigationStatusTitle: String {
-        if store.isResponding,
-           let task = store.currentTaskTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !task.isEmpty {
-            return task
-        }
+        // 会话标题由服务端统一解析并通过 title 下发。currentTaskTitle 只描述当前
+        // 执行进度，不能在响应期间替换标题，否则 iOS 会和 Android 显示不同内容。
         if store.snapshot?.title?.isEmpty == false {
             return store.displayTitle
         }
@@ -1474,6 +1471,8 @@ struct ChatView: View {
         TextField(composerPlaceholder, text: $draft, axis: .vertical)
             .lineLimit(1...5)
             .font(.system(size: 16))
+            .foregroundColor(Theme.textPrimary)
+            .tint(Theme.brand)
             .submitLabel(.send)
             .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
     }
