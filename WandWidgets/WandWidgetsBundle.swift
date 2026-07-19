@@ -17,6 +17,8 @@ private enum WandColor {
     static let brand = Color(red: 0.851, green: 0.467, blue: 0.341)        // #D97757
     static let permission = Color.orange
     static let done = Color.green
+    static let secondary = Color.white.opacity(0.62)
+    static let surface = Color.white.opacity(0.10)
 }
 
 private func stateTint(_ stateRaw: String) -> Color {
@@ -45,9 +47,12 @@ struct SessionLiveActivityWidget: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label("Wand", systemImage: "wand.and.stars")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(WandColor.brand)
+                    HStack(spacing: 6) {
+                        Image(systemName: "wand.and.stars")
+                        Text("Wand")
+                    }
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.white)
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -86,11 +91,9 @@ struct SessionLiveActivityWidget: Widget {
 
 private struct CompactLeadingMark: View {
     var body: some View {
-        Text("W")
-            .font(.system(size: 11, weight: .black))
-            .foregroundColor(.white)
-            .frame(width: 20, height: 20)
-            .background(Circle().fill(WandColor.brand))
+        Image(systemName: "wand.and.stars")
+            .font(.system(size: 11, weight: .bold))
+            .foregroundColor(WandColor.brand)
     }
 }
 
@@ -99,20 +102,18 @@ private struct CompactTrailingSummary: View {
 
     var body: some View {
         Text(summary)
-            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
             .foregroundColor(stateTint(state.aggregateStateRaw))
-            .frame(minWidth: 22, minHeight: 20)
-            .padding(.horizontal, 2)
-            .background(Capsule().fill(Color.white.opacity(0.12)))
+            .contentTransition(.numericText())
     }
 
     private var summary: String {
         if state.sessions.count > 1 { return "\(state.sessions.count)" }
         if state.queuedCount > 0 { return "+\(state.queuedCount)" }
         switch state.aggregateStateRaw {
-        case "permission": return "待"
-        case "done": return "完"
-        default: return "答"
+        case "permission": return "确认"
+        case "done": return "完成"
+        default: return "回复中"
         }
     }
 }
