@@ -661,6 +661,101 @@ struct ConversationTurn: Decodable {
     }
 }
 
+extension ContentBlock {
+    var subagentMeta: SubagentMeta? {
+        switch self {
+        case .text(_, let subagent),
+             .thinking(_, let subagent),
+             .toolUse(_, _, _, _, let subagent),
+             .toolResult(_, _, _, _, let subagent):
+            return subagent
+        case .unknown:
+            return nil
+        }
+    }
+}
+
+struct SubagentActivity {
+    enum State: Equatable {
+        case running
+        case completed
+        case failed
+    }
+
+    let id: String
+    let meta: SubagentMeta
+    let blocks: [ContentBlock]
+    let state: State
+}
+
+func collectSubagentActivities(
+    messages: [ConversationTurn],
+    isResponding: Bool
+) -> [SubagentActivity] {
+    struct PendingActivity {
+        var meta: SubagentMeta
+        var blocks: [ContentBlock]
+        var lastSeenTurnIndex: Int
+        var completed = false
+        var failed = false
+    }
+
+    let lastUserTurnIndex = messages.lastIndex { $0.role == "user" } ?? -1
+    var activities: [String: PendingActivity] = [:]
+    var orderedIDs: [String] = []
+
+    for (turnIndex, turn) in messages.enumerated() {
+        for block in turn.content {
+            guard let meta = block.subagentMeta,
+                  let taskID = meta.taskId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !taskID.isEmpty else {
+                continue
+            }
+
+            if activities[taskID] == nil {
+                orderedIDs.append(taskID)
+                activities[taskID] = PendingActivity(
+                    meta: meta,
+                    blocks: [],
+                    lastSeenTurnIndex: turnIndex
+                )
+            }
+
+            guard var activity = activities[taskID] else { continue }
+            activity.meta = meta
+            activity.blocks.append(block)
+            activity.lastSeenTurnIndex = turnIndex
+            if case .toolResult(let toolUseID, _, let isError, _, _) = block, toolUseID == taskID {
+                activity.completed = true
+                activity.failed = isError
+            }
+            activities[taskID] = activity
+        }
+    }
+
+    return orderedIDs.compactMap { taskID in
+        guard let activity = activities[taskID] else { return nil }
+        let state: SubagentActivity.State
+        if activity.completed {
+            state = activity.failed ? .failed : .completed
+        } else if isResponding && activity.lastSeenTurnIndex > lastUserTurnIndex {
+            state = .running
+        } else {
+            state = .completed
+        }
+        return SubagentActivity(
+            id: taskID,
+            meta: activity.meta,
+            blocks: activity.blocks,
+            state: state
+        )
+    }
+}
+
+func parentTranscriptBlocks(_ blocks: [ContentBlock]) -> [ContentBlock] {
+    blocks.filter { $0.subagentMeta == nil }
+}
+
 // MARK: - 权限请求
 
 struct EscalationRequest: Decodable, Equatable {
@@ -758,8 +853,8 @@ struct SessionSnapshot: Decodable, Identifiable {
     }
 
     var isResponding: Bool {
-        if let inFlight = structuredState?.inFlight { return inFlight }
-        return false
+        if isStructured { return structuredState?.inFlight ?? false }
+        return ["initializing", "running", "thinking"].contains(status ?? "")
     }
 
     var hasPendingPermission: Bool {

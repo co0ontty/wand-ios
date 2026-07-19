@@ -1,5 +1,4 @@
 import SwiftUI
-import ActivityKit
 import UIKit
 import UserNotifications
 
@@ -153,20 +152,6 @@ struct SettingsView: View {
 
     private var featureSection: some View {
         Section {
-            Toggle("灵动岛 / 实时活动", isOn: $store.liveActivityEnabled)
-                .tint(Theme.brand)
-                .onChange(of: store.liveActivityEnabled) { _, enabled in
-                    if !enabled { SessionPresenceController.shared.endAll() }
-                }
-            HStack {
-                Label("系统实时活动权限", systemImage: "bolt.horizontal.circle")
-                Spacer()
-                Text(ActivityAuthorizationInfo().areActivitiesEnabled ? "已开启" : "已关闭")
-                    .foregroundColor(
-                        ActivityAuthorizationInfo().areActivitiesEnabled ? .green : Theme.danger
-                    )
-            }
-            .font(.system(size: 14))
             Toggle("回复完成 / 等待授权通知", isOn: $store.notificationsEnabled)
                 .tint(Theme.brand)
                 .onChange(of: store.notificationsEnabled) { _, enabled in
@@ -176,6 +161,11 @@ struct SettingsView: View {
                         SessionNotificationController.shared.clearPending()
                     }
                     Task { await refreshNotificationStatus() }
+                }
+            Toggle("灵动岛与锁屏进度", isOn: $store.liveActivityEnabled)
+                .tint(Theme.brand)
+                .onChange(of: store.liveActivityEnabled) { _, enabled in
+                    if !enabled { SessionPresenceController.shared.endAll() }
                 }
             Button {
                 openSystemSettings()
@@ -199,9 +189,9 @@ struct SettingsView: View {
             }
             .disabled(notificationStatus != "已开启")
         } header: {
-            Text("通知与实时活动")
+            Text("通知")
         } footer: {
-            Text("灵动岛显示实时状态；系统通知在 App 位于后台时提醒回复完成或等待授权。若权限关闭，请到 iOS 设置 → Wand 开启。App 被系统彻底挂起后，本地状态与通知都会暂停更新。")
+            Text("系统通知会在 App 位于后台时提醒回复完成或等待授权。若权限关闭，请到 iOS 设置 → Wand 开启。App 被系统彻底挂起后，通知会暂停更新。")
         }
     }
 

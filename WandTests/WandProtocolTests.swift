@@ -3,6 +3,37 @@ import XCTest
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
+    func testSessionActivityRecognizesPtyAndStructuredStates() throws {
+        let pty = try decode(SessionSnapshot.self, from: #"{"id":"pty","sessionKind":"pty","status":"thinking"}"#)
+        let structuredActive = try decode(SessionSnapshot.self, from: #"{"id":"structured-active","sessionKind":"structured","status":"running","structuredState":{"inFlight":true}}"#)
+        let structuredIdle = try decode(SessionSnapshot.self, from: #"{"id":"structured-idle","sessionKind":"structured","status":"running","structuredState":{"inFlight":false}}"#)
+        let blocked = try decode(SessionSnapshot.self, from: #"{"id":"blocked","sessionKind":"pty","status":"running","permissionBlocked":true}"#)
+
+        XCTAssertTrue(pty.isResponding)
+        XCTAssertTrue(structuredActive.isResponding)
+        XCTAssertFalse(structuredIdle.isResponding)
+        XCTAssertTrue(blocked.hasPendingPermission)
+    }
+
+    func testSessionActivityPrioritizesPermissionThenActiveThenDone() {
+        let done = SessionActivityAttributes.SessionEntry(
+            id: "done", title: "Done", providerRaw: "claude", stateRaw: "done", taskTitle: nil, queuedCount: 0
+        )
+        let active = SessionActivityAttributes.SessionEntry(
+            id: "active", title: "Active", providerRaw: "claude", stateRaw: "responding", taskTitle: nil, queuedCount: 0
+        )
+        let permission = SessionActivityAttributes.SessionEntry(
+            id: "permission", title: "Permission", providerRaw: "claude", stateRaw: "permission", taskTitle: nil, queuedCount: 0
+        )
+        let state = SessionActivityAttributes.ContentState(
+            sessions: [done, active, permission], updatedAt: .now
+        )
+
+        XCTAssertEqual(state.primarySession?.id, "permission")
+        XCTAssertEqual(state.permissionCount, 1)
+        XCTAssertEqual(state.respondingCount, 1)
+    }
+
     func testSessionTopicFieldsDecodeAndDriveDisplayTitle() throws {
         let session = try decode(
             SessionSnapshot.self,
@@ -95,6 +126,44 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertTrue(composerShouldExpand(focused: true, voiceMode: false))
         XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: true))
         XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: false, contentNeedsSpace: true))
+    }
+
+    func testSessionTimeFormattingParsesIso8601AndFormatsDuration() {
+        XCTAssertNotNil(SessionTimeFormatting.date(from: "2026-07-19T12:34:56Z"))
+        XCTAssertNotNil(SessionTimeFormatting.date(from: "2026-07-19T12:34:56.789Z"))
+        XCTAssertNil(SessionTimeFormatting.date(from: "not-a-date"))
+        XCTAssertEqual(
+            SessionTimeFormatting.duration(
+                startedAt: "2026-07-19T12:00:00Z",
+                endedAt: "2026-07-19T12:01:05Z"
+            ),
+            "01:05"
+        )
+        XCTAssertEqual(
+            SessionTimeFormatting.duration(
+                startedAt: "2026-07-19T12:00:00Z",
+                endedAt: "2026-07-19T13:01:05Z"
+            ),
+            "1:01:05"
+        )
+    }
+
+    func testSessionTimeFormattingUsesMtimeForSorting() {
+        XCTAssertEqual(
+            SessionTimeFormatting.sortTimestamp(
+                timestamp: "2026-07-19T12:00:00Z",
+                mtimeMs: 1_234_000
+            ),
+            1_234
+        )
+        XCTAssertEqual(SessionTimeFormatting.sortTimestamp(timestamp: nil, mtimeMs: nil), 0)
+    }
+
+    func testVoiceTranscriptAppendsNormalizedText() {
+        XCTAssertEqual(appendingVoiceTranscript("  新内容\n", to: "已有内容  "), "已有内容 新内容")
+        XCTAssertEqual(appendingVoiceTranscript("  \n", to: "已有内容"), "已有内容")
+        XCTAssertEqual(appendingVoiceTranscript("新内容", to: "  "), "新内容")
+        XCTAssertEqual(appendingVoiceTranscript("新内容", to: "  已有内容  "), "  已有内容 新内容")
     }
 
     func testWindowedMessagesPreserveLoadedPrefixAndClearLeadingBlockOffset() {
@@ -454,6 +523,73 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertTrue(response.text.contains("-tail"))
         XCTAssertFalse(response.text.contains("载荷已截断"))
         XCTAssertGreaterThan(response.text.count, 12_000)
+    }
+
+    func testSubagentActivitiesGroupBlocksAndOnlyParentResultCompletes() {
+        let meta = SubagentMeta(taskId: "task-1", agentType: "Explore", taskDescription: "Inspect the project")
+        let messages = [
+            ConversationTurn(role: "user", content: [.text(text: "Find it", subagent: nil)]),
+            ConversationTurn(role: "assistant", content: [
+                .toolUse(id: "task-1", name: "Task", description: nil, input: [:], subagent: meta),
+                .text(text: "Searching", subagent: meta),
+                .toolResult(toolUseId: "nested-read", text: "result", isError: true, truncated: false, subagent: meta),
+            ]),
+            ConversationTurn(role: "assistant", content: [
+                .toolResult(toolUseId: "task-1", text: "done", isError: false, truncated: false, subagent: meta),
+            ]),
+        ]
+
+        let activities = collectSubagentActivities(messages: messages, isResponding: true)
+
+        XCTAssertEqual(activities.count, 1)
+        XCTAssertEqual(activities[0].id, "task-1")
+        XCTAssertEqual(activities[0].blocks.count, 4)
+        XCTAssertEqual(activities[0].state, .completed)
+    }
+
+    func testSubagentActivityFailureAndRunningScopeFollowParentTurns() {
+        let runningMeta = SubagentMeta(taskId: "running", agentType: "Code", taskDescription: nil)
+        let failedMeta = SubagentMeta(taskId: "failed", agentType: "Review", taskDescription: nil)
+        let messages = [
+            ConversationTurn(role: "assistant", content: [
+                .text(text: "old work", subagent: runningMeta),
+            ]),
+            ConversationTurn(role: "user", content: [.text(text: "New request", subagent: nil)]),
+            ConversationTurn(role: "assistant", content: [
+                .thinking(thinking: "checking", subagent: runningMeta),
+                .toolUse(id: "failed", name: "Task", description: nil, input: [:], subagent: failedMeta),
+                .toolResult(toolUseId: "failed", text: "failed", isError: true, truncated: false, subagent: failedMeta),
+            ]),
+        ]
+
+        let activities = collectSubagentActivities(messages: messages, isResponding: true)
+
+        XCTAssertEqual(activities.first(where: { $0.id == "running" })?.state, .running)
+        XCTAssertEqual(activities.first(where: { $0.id == "failed" })?.state, .failed)
+
+        let staleMessages = messages + [ConversationTurn(role: "user", content: [.text(text: "Follow up", subagent: nil)])]
+        XCTAssertEqual(
+            collectSubagentActivities(messages: staleMessages, isResponding: true)
+                .first(where: { $0.id == "running" })?.state,
+            .completed
+        )
+    }
+
+    func testParentTranscriptFiltersSubagentBlocks() {
+        let meta = SubagentMeta(taskId: "task-1", agentType: "Explore", taskDescription: nil)
+        let parent = ContentBlock.text(text: "Parent reply", subagent: nil)
+        let dispatch = ContentBlock.toolUse(
+            id: "task-1", name: "Task", description: nil, input: [:], subagent: meta
+        )
+        let child = ContentBlock.text(text: "Child reply", subagent: meta)
+
+        let blocks = parentTranscriptBlocks([parent, dispatch, child])
+
+        XCTAssertEqual(blocks.count, 1)
+        guard case .text(let text, _) = blocks[0] else {
+            return XCTFail("Expected parent text")
+        }
+        XCTAssertEqual(text, "Parent reply")
     }
 
     func testTodoActiveIndexPrefersExplicitInProgressTask() {

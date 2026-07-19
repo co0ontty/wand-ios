@@ -31,24 +31,10 @@ extension SessionActivityAttributes.SessionEntry {
     var needsPermission: Bool { stateRaw == "permission" }
     var isDone: Bool { stateRaw == "done" }
 
-    var providerText: String {
-        switch providerRaw.lowercased() {
-        case "codex": return "Codex"
-        case "opencode": return "OpenCode"
-        case "grok": return "Grok"
-        case "qoder": return "Qoder"
-        default: return "Claude"
-        }
-    }
-
-    var providerSymbol: String {
-        switch providerRaw.lowercased() {
-        case "codex": return "chevron.left.forwardslash.chevron.right"
-        case "opencode": return "terminal"
-        case "grok": return "bolt"
-        case "qoder": return "q.circle"
-        default: return "sparkles"
-        }
+    var priority: Int {
+        if needsPermission { return 0 }
+        if isResponding { return 1 }
+        return 2
     }
 
     var statusText: String {
@@ -72,8 +58,11 @@ extension SessionActivityAttributes.SessionEntry {
 
 extension SessionActivityAttributes.ContentState {
     var respondingCount: Int { sessions.filter(\.isResponding).count }
-    var needsPermission: Bool { sessions.contains { $0.needsPermission } }
-    var queuedCount: Int { sessions.reduce(0) { $0 + $1.queuedCount } }
+    var permissionCount: Int { sessions.filter(\.needsPermission).count }
+    var needsPermission: Bool { permissionCount > 0 }
+    var primarySession: SessionActivityAttributes.SessionEntry? {
+        sessions.min { lhs, rhs in lhs.priority < rhs.priority }
+    }
 
     /// 聚合状态：permission > responding > done，给紧凑视图着色 / 选图标用。
     var aggregateStateRaw: String {

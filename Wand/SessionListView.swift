@@ -19,24 +19,11 @@ struct SessionListView: View {
         var sortTimestamp: Double {
             switch self {
             case .session(let session):
-                return Self.parseISO8601(session.startedAt)?.timeIntervalSince1970 ?? 0
+                return SessionTimeFormatting.sortTimestamp(timestamp: session.startedAt, mtimeMs: nil)
             case .recoverable(let session):
-                if let mtimeMs = session.mtimeMs { return mtimeMs / 1000 }
-                return Self.parseISO8601(session.timestamp)?.timeIntervalSince1970 ?? 0
+                return SessionTimeFormatting.sortTimestamp(timestamp: session.timestamp, mtimeMs: session.mtimeMs)
             }
         }
-
-        private static func parseISO8601(_ value: String?) -> Date? {
-            guard let value, !value.isEmpty else { return nil }
-            return fractionalFormatter.date(from: value) ?? isoFormatter.date(from: value)
-        }
-
-        private static let fractionalFormatter: ISO8601DateFormatter = {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            return formatter
-        }()
-        private static let isoFormatter = ISO8601DateFormatter()
     }
 
     let api: WandAPI
@@ -158,6 +145,7 @@ struct SessionListView: View {
             NewSessionView(api: api) { newSession in
                 showNewSession = false
                 sessions.insert(newSession, at: 0)
+                SessionPresenceController.shared.sync(snapshot: newSession)
                 DispatchQueue.main.async {
                     selectSession(id: newSession.id, newSession)
                 }
@@ -248,6 +236,9 @@ struct SessionListView: View {
                 selectSession(id: id, nil)
                 Task {
                     let snapshot = try? await api.getSession(id: id)
+                    if let snapshot {
+                        SessionPresenceController.shared.sync(snapshot: snapshot)
+                    }
                     if selection == id {
                         selectedSnapshot = snapshot
                     }
@@ -424,6 +415,7 @@ struct SessionListView: View {
                 let resumed = try await api.resumeHistory(history)
                 historySessions.removeAll { $0.id == history.id }
                 sessions.insert(resumed, at: 0)
+                SessionPresenceController.shared.sync(snapshot: resumed)
                 selectSession(id: resumed.id, resumed)
                 loadError = nil
             } catch {
@@ -446,6 +438,9 @@ struct SessionListView: View {
             Task { try? await api.deleteHistory(h) }
         case .sessions(let arr):
             sessions.removeAll { snap in arr.contains { $0.id == snap.id } }
+            for session in arr {
+                SessionPresenceController.shared.end(sessionId: session.id, immediately: true)
+            }
             endSelection()
             Task {
                 for s in arr { try? await api.deleteSession(id: s.id) }
@@ -455,6 +450,7 @@ struct SessionListView: View {
 
     private func deleteSession(_ session: SessionSnapshot) {
         sessions.removeAll { $0.id == session.id }
+        SessionPresenceController.shared.end(sessionId: session.id, immediately: true)
         if selection == session.id {
             selectSession(id: nil, nil)
         }
@@ -564,17 +560,13 @@ private struct PtySessionView: View {
     @State private var draft = ""
     @State private var showStopConfirm = false
     @State private var showQuickCommit = false
-    @State private var showFileImporter = false
-    @State private var showPhotoPicker = false
-    @State private var uploadingAttachments = false
-    @State private var pendingAttachments: [UploadedFile] = []
+    @StateObject private var attachments: ComposerAttachmentController
     @State private var voicePressed = false
     @State private var voiceCanceling = false
     @State private var draftNeedsExpanded = false
     @State private var voiceHoldWork: DispatchWorkItem?
     @State private var gitStatus: GitStatusResult?
-    @State private var quickCommitPhase: QuickCommitToolbarPhase = .idle
-    @State private var quickCommitFeedbackToken = 0
+    @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
     @FocusState private var inputFocused: Bool
 
     private var ptyBackground: Color {
@@ -585,6 +577,7 @@ private struct PtySessionView: View {
         self.session = session
         self.api = api
         _store = StateObject(wrappedValue: ChatStore(sessionId: session.id, api: api))
+        _attachments = StateObject(wrappedValue: ComposerAttachmentController(sessionId: session.id, api: api))
     }
 
     var body: some View {
@@ -617,7 +610,7 @@ private struct PtySessionView: View {
         .toolbar {
             ToolbarItem(placement: .principal) { titleStatus }
             ToolbarItem(placement: .navigationBarTrailing) {
-                GitChangesToolbarButton(status: gitStatus, phase: quickCommitPhase) {
+                GitChangesToolbarButton(status: gitStatus, phase: quickCommitFeedback.phase) {
                     showQuickCommit = true
                 }
             }
@@ -638,18 +631,19 @@ private struct PtySessionView: View {
                 .presentationDragIndicator(.visible)
         }
         .fileImporter(
-            isPresented: $showFileImporter,
+            isPresented: $attachments.showFileImporter,
             allowedContentTypes: [.item],
             allowsMultipleSelection: true,
-            onCompletion: handlePickedAttachments
+            onCompletion: attachments.handleFileSelection
         )
-        .sheet(isPresented: $showPhotoPicker) {
+        .sheet(isPresented: $attachments.showPhotoPicker) {
             PhotoLibraryPicker { result in
-                showPhotoPicker = false
-                handlePickedPhotos(result)
+                attachments.showPhotoPicker = false
+                attachments.handlePhotoSelection(result)
             }
         }
         .onAppear {
+            attachments.setToastHandler { store.toast = $0 }
             store.start()
             refreshGitStatus()
         }
@@ -696,17 +690,17 @@ private struct PtySessionView: View {
                 title: "选择文件",
                 key: "o",
                 modifiers: .command,
-                isEnabled: keyboardShortcutsActive && !uploadingAttachments
+                isEnabled: keyboardShortcutsActive && !attachments.isUploading
             ) {
                 inputFocused = false
-                showFileImporter = true
+                attachments.showFileImporter = true
             },
             WandKeyboardShortcutAction(
                 id: "quick-commit",
                 title: "快速提交",
                 key: "c",
                 modifiers: [.command, .shift],
-                isEnabled: keyboardShortcutsActive && quickCommitPhase == .idle
+                isEnabled: keyboardShortcutsActive && quickCommitFeedback.phase == .idle
             ) {
                 showQuickCommit = true
             },
@@ -751,8 +745,8 @@ private struct PtySessionView: View {
 
     private var keyboardShortcutsActive: Bool {
         !showQuickCommit
-            && !showFileImporter
-            && !showPhotoPicker
+            && !attachments.showFileImporter
+            && !attachments.showPhotoPicker
             && !showStopConfirm
     }
 
@@ -825,7 +819,7 @@ private struct PtySessionView: View {
         composerShouldExpand(
             focused: inputFocused,
             voiceMode: voicePressed,
-            contentNeedsSpace: draftNeedsExpanded || !pendingAttachments.isEmpty
+            contentNeedsSpace: draftNeedsExpanded || !attachments.attachments.isEmpty
         )
     }
 
@@ -863,20 +857,20 @@ private struct PtySessionView: View {
     private var composerActionsMenu: some View {
         Menu {
             Button {
-                showPhotoPicker = true
+                attachments.showPhotoPicker = true
             } label: {
                 Label("从相册选择", systemImage: "photo.on.rectangle")
             }
-            .disabled(uploadingAttachments)
+            .disabled(attachments.isUploading)
 
             Button {
-                showFileImporter = true
+                attachments.showFileImporter = true
             } label: {
                 Label("从文件选择", systemImage: "paperclip")
             }
-            .disabled(uploadingAttachments)
+            .disabled(attachments.isUploading)
         } label: {
-            if uploadingAttachments {
+            if attachments.isUploading {
                 ProgressView()
                     .controlSize(.small)
                     .tint(Theme.textSecondary)
@@ -904,13 +898,11 @@ private struct PtySessionView: View {
 
     private var ptyTextField: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !pendingAttachments.isEmpty {
+            if !attachments.attachments.isEmpty {
                 PendingAttachmentsPreview(
                     baseURL: api.baseURL,
-                    attachments: pendingAttachments,
-                    onRemove: { file in
-                        pendingAttachments.removeAll { $0.savedPath == file.savedPath }
-                    }
+                    attachments: attachments.attachments,
+                    onRemove: attachments.remove
                 )
             }
             TextField(ptyComposerPlaceholder, text: $draft, axis: .vertical)
@@ -1068,16 +1060,16 @@ private struct PtySessionView: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.attachments.isEmpty
     }
 
     private func sendDraft() {
         guard canSend else { return }
-        let text = buildAttachmentPrompt(pendingAttachments, body: draft)
+        let text = buildAttachmentPrompt(attachments.attachments, body: draft)
         let restoreDraft = draft
-        let restoreAttachments = pendingAttachments
+        let restoreAttachments = attachments.attachments
         draft = ""
-        pendingAttachments.removeAll()
+        attachments.attachments.removeAll()
         sendPtyInput(text, restoreDraft: restoreDraft, restoreAttachments: restoreAttachments)
         inputFocused = true
     }
@@ -1086,23 +1078,12 @@ private struct PtySessionView: View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         Task {
-            await MainActor.run {
-                SessionPresenceController.shared.start(
-                    sessionId: session.id,
-                    title: session.displayTitle,
-                    provider: session.provider,
-                    taskTitle: store.currentTaskTitle
-                )
-            }
             do {
                 try await store.sendPtyTerminalInput(trimmed)
             } catch {
-                await MainActor.run {
-                    if draft.isEmpty { draft = restoreDraft }
-                    if pendingAttachments.isEmpty { pendingAttachments = restoreAttachments }
-                    store.toast = error.localizedDescription
-                    SessionPresenceController.shared.end(sessionId: session.id, immediately: true)
-                }
+                if draft.isEmpty { draft = restoreDraft }
+                if attachments.attachments.isEmpty { attachments.attachments = restoreAttachments }
+                store.toast = error.localizedDescription
             }
         }
     }
@@ -1168,14 +1149,7 @@ private struct PtySessionView: View {
     }
 
     private func appendTranscriptToDraft(_ text: String) {
-        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-        var existing = draft
-        while let last = existing.unicodeScalars.last,
-              CharacterSet.whitespacesAndNewlines.contains(last) {
-            existing.unicodeScalars.removeLast()
-        }
-        draft = existing.isEmpty ? clean : existing + " " + clean
+        draft = appendingVoiceTranscript(text, to: draft)
     }
 
     private func refreshGitStatus() {
@@ -1185,65 +1159,18 @@ private struct PtySessionView: View {
     }
 
     private func beginQuickCommitFeedback() {
-        quickCommitFeedbackToken += 1
-        quickCommitPhase = .loading
+        quickCommitFeedback.begin()
     }
 
     private func completeQuickCommitFeedback(_ message: String) {
         store.toast = message
-        let token = quickCommitFeedbackToken + 1
-        quickCommitFeedbackToken = token
-        quickCommitPhase = .done
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            if quickCommitFeedbackToken == token {
-                quickCommitPhase = .idle
-                refreshGitStatus()
-            }
-        }
+        quickCommitFeedback.complete(onReset: refreshGitStatus)
     }
 
     private func failQuickCommitFeedback(_ message: String) {
-        quickCommitFeedbackToken += 1
-        quickCommitPhase = .idle
+        quickCommitFeedback.fail()
         store.toast = message
         refreshGitStatus()
-    }
-
-    private func handlePickedAttachments(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result, !urls.isEmpty else {
-            if case .failure(let error) = result { store.toast = error.localizedDescription }
-            return
-        }
-        uploadAttachments(urls)
-    }
-
-    private func handlePickedPhotos(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result, !urls.isEmpty else {
-            if case .failure(let error) = result { store.toast = error.localizedDescription }
-            return
-        }
-        uploadAttachments(urls, cleanupAfterUpload: true)
-    }
-
-    private func uploadAttachments(_ urls: [URL], cleanupAfterUpload: Bool = false) {
-        uploadingAttachments = true
-        Task {
-            defer {
-                uploadingAttachments = false
-                if cleanupAfterUpload {
-                    for url in urls {
-                        try? FileManager.default.removeItem(at: url)
-                    }
-                }
-            }
-            do {
-                let files = try await api.uploadAttachments(id: session.id, urls: urls)
-                pendingAttachments = Array((pendingAttachments + files).suffix(5))
-                store.toast = "已上传 \(files.count) 个附件"
-            } catch {
-                store.toast = error.localizedDescription
-            }
-        }
     }
 
     @ViewBuilder private var connectionBanner: some View {
@@ -1391,42 +1318,15 @@ private struct SessionRow: View {
         WandProvider(normalizing: session.provider) == .codex ? Theme.codex : Theme.brand
     }
 
-    private static let isoFormatter = ISO8601DateFormatter()
-    private static let fractionalFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-    private static let relativeFormatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.unitsStyle = .short
-        return formatter
-    }()
-
-    private static func parseDate(_ value: String?) -> Date? {
-        guard let value else { return nil }
-        return fractionalFormatter.date(from: value) ?? isoFormatter.date(from: value)
-    }
-
     private var durationLabel: String {
-        guard let started = Self.parseDate(session.startedAt) else { return "" }
-        let ended = Self.parseDate(session.endedAt) ?? Date()
-        let seconds = max(0, Int(ended.timeIntervalSince(started)))
-        let hours = seconds / 3600
-        let minutes = (seconds % 3600) / 60
-        let remainder = seconds % 60
-        return hours > 0
-            ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
-            : String(format: "%02d:%02d", minutes, remainder)
+        SessionTimeFormatting.duration(startedAt: session.startedAt, endedAt: session.endedAt)
     }
 
     private var trailingTimeLabel: String {
         if session.status == "running" || session.isResponding || session.hasPendingPermission {
             return durationLabel.isEmpty ? "" : "已运行 \(durationLabel)"
         }
-        guard let date = Self.parseDate(session.endedAt ?? session.startedAt) else { return "" }
-        return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
+        return SessionTimeFormatting.relativeTime(for: session.endedAt ?? session.startedAt)
     }
 
     private var statusTint: Color {
@@ -1537,20 +1437,8 @@ private struct HistorySessionRow: View {
         WandProvider(normalizing: history.provider) == .codex ? Theme.codex : Theme.brand
     }
 
-    // 复用单例 formatter：构造 ISO8601DateFormatter / RelativeDateTimeFormatter 很贵，
-    // 历史列表上百行各 new 一个会卡主线程。都在主线程渲染，static 复用安全。
-    private static let isoFormatter = ISO8601DateFormatter()
-    private static let relativeFormatter: RelativeDateTimeFormatter = {
-        let f = RelativeDateTimeFormatter()
-        f.locale = Locale(identifier: "zh_CN")
-        f.unitsStyle = .short
-        return f
-    }()
-
     private var relativeTime: String {
-        guard let timestamp = history.timestamp else { return "" }
-        guard let date = Self.isoFormatter.date(from: timestamp) else { return "" }
-        return Self.relativeFormatter.localizedString(for: date, relativeTo: Date())
+        SessionTimeFormatting.relativeTime(for: history.timestamp)
     }
 
 }

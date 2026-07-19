@@ -6,6 +6,33 @@ enum QuickCommitToolbarPhase: Hashable {
     case done
 }
 
+@MainActor
+final class QuickCommitFeedbackController: ObservableObject {
+    @Published private(set) var phase: QuickCommitToolbarPhase = .idle
+    private var generation = 0
+
+    func begin() {
+        generation += 1
+        phase = .loading
+    }
+
+    func complete(onReset: @escaping () -> Void) {
+        generation += 1
+        let completedGeneration = generation
+        phase = .done
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.generation == completedGeneration else { return }
+            self.phase = .idle
+            onReset()
+        }
+    }
+
+    func fail() {
+        generation += 1
+        phase = .idle
+    }
+}
+
 struct GitChangesToolbarButton: View {
     let status: GitStatusResult?
     var phase: QuickCommitToolbarPhase = .idle

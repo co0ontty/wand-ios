@@ -16,6 +16,13 @@ private struct ChatBottomBarHeightKey: PreferenceKey {
     }
 }
 
+private struct SubagentShelfHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private enum ChatScrollMode {
     case stickToBottom
     case manual
@@ -65,13 +72,9 @@ struct ChatView: View {
     @State private var voicePressed = false
     @State private var voiceCanceling = false
     @State private var draftNeedsExpanded = false
-    @State private var showFileImporter = false
-    @State private var showPhotoPicker = false
-    @State private var uploadingAttachments = false
-    @State private var pendingAttachments: [UploadedFile] = []
+    @StateObject private var attachments: ComposerAttachmentController
     @State private var gitStatus: GitStatusResult?
-    @State private var quickCommitPhase: QuickCommitToolbarPhase = .idle
-    @State private var quickCommitFeedbackToken = 0
+    @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
     /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
     @State private var voiceHoldWork: DispatchWorkItem?
     /// 停止任务二次确认弹窗开关：点停止按钮先弹确认，避免误触中断正在跑的任务。
@@ -90,6 +93,7 @@ struct ChatView: View {
     /// 底部 overlay 的实际占位高度。ChatView 不使用 safeAreaInset 放输入栏，
     /// 避免 SwiftUI 键盘避让和 KeyboardObserver 手动抬升叠加。
     @State private var bottomBarHeight: CGFloat = 0
+    @State private var subagentShelfHeight: CGFloat = 0
     /// 每次贴底请求递增；较旧的下一帧任务看到代次变化后自行退出，避免连续事件抢滚动。
     @State private var scrollRequestGeneration = 0
     /// 顶部分页哨兵是否在视口内。只有用户主动向历史方向拖动后才允许触发，避免页面
@@ -106,6 +110,7 @@ struct ChatView: View {
         self.sessionId = sessionId
         self.api = api
         _store = StateObject(wrappedValue: ChatStore(sessionId: sessionId, api: api))
+        _attachments = StateObject(wrappedValue: ComposerAttachmentController(sessionId: sessionId, api: api))
     }
 
     var body: some View {
@@ -114,11 +119,50 @@ struct ChatView: View {
             WandAmbientBackground()
 
                 mainContent
-                    .padding(.bottom, bottomBarHeight)
+                    .padding(.bottom, bottomBarHeight + subagentShelfHeight)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .dismissKeyboardOnTap()
 
-                bottomBarOverlay(safeBottom: root.safeAreaInsets.bottom)
+                VStack(spacing: 0) {
+                    if shouldShowSubagentShelf {
+                        SubagentActivityShelf(
+                            activities: subagentActivities,
+                            isResponding: store.isResponding,
+                            baseURL: store.api.baseURL,
+                            askSelections: store.askUserSelections,
+                            onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                                store.toggleAskOption(
+                                    toolUseId: toolUseId, questionIndex: qIdx,
+                                    optionIndex: optIdx, multiSelect: multi
+                                )
+                            },
+                            onAskSubmit: { toolUseId, answerText in
+                                scrollMode = .stickToBottom
+                                store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
+                            }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 6)
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear.preference(
+                                    key: SubagentShelfHeightKey.self,
+                                    value: proxy.size.height + 6
+                                )
+                            }
+                        )
+                    }
+                    bottomBarOverlay(safeBottom: root.safeAreaInsets.bottom)
+                }
+                .onPreferenceChange(SubagentShelfHeightKey.self) { height in
+                    let next = shouldShowSubagentShelf ? height : 0
+                    if abs(next - subagentShelfHeight) > 0.5 {
+                        subagentShelfHeight = next
+                    }
+                }
+                .onChange(of: shouldShowSubagentShelf) { _, showing in
+                    if !showing { subagentShelfHeight = 0 }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -137,7 +181,7 @@ struct ChatView: View {
             }
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .navigationBarTrailing) {
-                GitChangesToolbarButton(status: gitStatus, phase: quickCommitPhase) {
+                GitChangesToolbarButton(status: gitStatus, phase: quickCommitFeedback.phase) {
                     showQuickCommit = true
                 }
             }
@@ -181,18 +225,19 @@ struct ChatView: View {
             .interactiveDismissDisabled()
         }
         .fileImporter(
-            isPresented: $showFileImporter,
+            isPresented: $attachments.showFileImporter,
             allowedContentTypes: [.item],
             allowsMultipleSelection: true,
-            onCompletion: handlePickedAttachments
+            onCompletion: attachments.handleFileSelection
         )
-        .sheet(isPresented: $showPhotoPicker) {
+        .sheet(isPresented: $attachments.showPhotoPicker) {
             PhotoLibraryPicker { result in
-                showPhotoPicker = false
-                handlePickedPhotos(result)
+                attachments.showPhotoPicker = false
+                attachments.handlePhotoSelection(result)
             }
         }
         .onAppear {
+            attachments.setToastHandler { store.toast = $0 }
             store.start()
             refreshGitStatus()
         }
@@ -248,17 +293,17 @@ struct ChatView: View {
                 title: "选择文件",
                 key: "o",
                 modifiers: .command,
-                isEnabled: keyboardShortcutsActive && !uploadingAttachments
+                isEnabled: keyboardShortcutsActive && !attachments.isUploading
             ) {
                 inputFocused = false
-                showFileImporter = true
+                attachments.showFileImporter = true
             },
             WandKeyboardShortcutAction(
                 id: "quick-commit",
                 title: "快速提交",
                 key: "c",
                 modifiers: [.command, .shift],
-                isEnabled: keyboardShortcutsActive && quickCommitPhase == .idle
+                isEnabled: keyboardShortcutsActive && quickCommitFeedback.phase == .idle
             ) {
                 showQuickCommit = true
             },
@@ -276,8 +321,8 @@ struct ChatView: View {
 
     private var keyboardShortcutsActive: Bool {
         !showQuickCommit
-            && !showFileImporter
-            && !showPhotoPicker
+            && !attachments.showFileImporter
+            && !attachments.showPhotoPicker
             && !showStopConfirm
             && activitySheet == nil
     }
@@ -513,25 +558,6 @@ struct ChatView: View {
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
-        case .subagentRole(let turnIndex, let segment):
-            SubagentRoleWindow(
-                segment: segment,
-                baseURL: store.api.baseURL,
-                isLastTurn: turnIndex == store.messages.count - 1,
-                isResponding: store.isResponding,
-                askSelections: store.askUserSelections,
-                onAskToggle: { toolUseId, qIdx, optIdx, multi in
-                    store.toggleAskOption(
-                        toolUseId: toolUseId, questionIndex: qIdx,
-                        optionIndex: optIdx, multiSelect: multi
-                    )
-                },
-                onAskSubmit: { toolUseId, answerText in
-                    expandedHistoryBoundaryAbsolute = nil
-                    scrollMode = .stickToBottom
-                    store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
-                }
-            )
         case .explorationGroup(let tools, let lastTurnIndex):
             ExplorationGroupCard(
                 tools: tools,
@@ -621,6 +647,14 @@ struct ChatView: View {
         return store.messages[lastUserTurnIndex]
     }
 
+    private var subagentActivities: [SubagentActivity] {
+        collectSubagentActivities(messages: store.messages, isResponding: store.isResponding)
+    }
+
+    private var shouldShowSubagentShelf: Bool {
+        store.isStructured && (store.isResponding || !subagentActivities.isEmpty)
+    }
+
     private var groupedMessageItems: [MessageDisplayItem] {
         let base = collapseActivityItems(
             flattenAssistantTurns(
@@ -672,7 +706,7 @@ struct ChatView: View {
         }
         .accessibilityLabel("回到列表底部")
         .padding(.trailing, 16)
-        .padding(.bottom, 12)
+        .padding(.bottom, 12 + subagentShelfHeight)
         .transition(.scale(scale: 0.85).combined(with: .opacity))
     }
 
@@ -1038,7 +1072,7 @@ struct ChatView: View {
         composerShouldExpand(
             focused: inputFocused,
             voiceMode: voicePressed,
-            contentNeedsSpace: draftNeedsExpanded || !pendingAttachments.isEmpty
+            contentNeedsSpace: draftNeedsExpanded || !attachments.attachments.isEmpty
         )
     }
 
@@ -1065,13 +1099,11 @@ struct ChatView: View {
     /// 文本框只处理系统文本编辑；语音手势由外侧独立按钮承载。
     @ViewBuilder private var composerInputContent: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !pendingAttachments.isEmpty {
+            if !attachments.attachments.isEmpty {
                 PendingAttachmentsPreview(
                     baseURL: api.baseURL,
-                    attachments: pendingAttachments,
-                    onRemove: { file in
-                        pendingAttachments.removeAll { $0.savedPath == file.savedPath }
-                    }
+                    attachments: attachments.attachments,
+                    onRemove: attachments.remove
                 )
             }
             growingTextField
@@ -1368,26 +1400,16 @@ struct ChatView: View {
     }
 
     private func beginQuickCommitFeedback() {
-        quickCommitFeedbackToken += 1
-        quickCommitPhase = .loading
+        quickCommitFeedback.begin()
     }
 
     private func completeQuickCommitFeedback(_ message: String) {
         store.toast = message
-        let token = quickCommitFeedbackToken + 1
-        quickCommitFeedbackToken = token
-        quickCommitPhase = .done
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            if quickCommitFeedbackToken == token {
-                quickCommitPhase = .idle
-                refreshGitStatus()
-            }
-        }
+        quickCommitFeedback.complete(onReset: refreshGitStatus)
     }
 
     private func failQuickCommitFeedback(_ message: String) {
-        quickCommitFeedbackToken += 1
-        quickCommitPhase = .idle
+        quickCommitFeedback.fail()
         store.toast = message
         refreshGitStatus()
     }
@@ -1395,20 +1417,20 @@ struct ChatView: View {
     private var composerActionsMenu: some View {
         Menu {
             Button {
-                showPhotoPicker = true
+                attachments.showPhotoPicker = true
             } label: {
                 Label("从相册选择", systemImage: "photo.on.rectangle")
             }
-            .disabled(uploadingAttachments)
+            .disabled(attachments.isUploading)
 
             Button {
-                showFileImporter = true
+                attachments.showFileImporter = true
             } label: {
                 Label("从文件选择", systemImage: "paperclip")
             }
-            .disabled(uploadingAttachments)
+            .disabled(attachments.isUploading)
         } label: {
-            if uploadingAttachments {
+            if attachments.isUploading {
                 ProgressView()
                     .controlSize(.small)
                     .tint(Theme.textSecondary)
@@ -1425,43 +1447,6 @@ struct ChatView: View {
         .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
         .buttonStyle(.plain)
         .accessibilityLabel("更多操作")
-    }
-
-    private func handlePickedAttachments(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result, !urls.isEmpty else {
-            if case .failure(let error) = result { store.toast = error.localizedDescription }
-            return
-        }
-        uploadAttachments(urls)
-    }
-
-    private func handlePickedPhotos(_ result: Result<[URL], Error>) {
-        guard case .success(let urls) = result, !urls.isEmpty else {
-            if case .failure(let error) = result { store.toast = error.localizedDescription }
-            return
-        }
-        uploadAttachments(urls, cleanupAfterUpload: true)
-    }
-
-    private func uploadAttachments(_ urls: [URL], cleanupAfterUpload: Bool = false) {
-        uploadingAttachments = true
-        Task {
-            defer {
-                uploadingAttachments = false
-                if cleanupAfterUpload {
-                    for url in urls {
-                        try? FileManager.default.removeItem(at: url)
-                    }
-                }
-            }
-            do {
-                let files = try await api.uploadAttachments(id: sessionId, urls: urls)
-                pendingAttachments = Array((pendingAttachments + files).suffix(5))
-                store.toast = "已上传 \(files.count) 个附件"
-            } catch {
-                store.toast = error.localizedDescription
-            }
-        }
     }
 
     /// 多行自增高输入框（iOS 26+ 唯一支持形态）。
@@ -1485,14 +1470,14 @@ struct ChatView: View {
     private var canSend: Bool {
         // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
         // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.attachments.isEmpty
     }
 
     private func sendDraft() {
         guard canSend else { return }
-        let text = buildAttachmentPrompt(pendingAttachments, body: draft)
+        let text = buildAttachmentPrompt(attachments.attachments, body: draft)
         draft = ""
-        pendingAttachments.removeAll()
+        attachments.attachments.removeAll()
         scrollMode = .stickToBottom
         store.send(text: text)
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让 @FocusState 丢焦点、键盘收起，
@@ -1560,14 +1545,7 @@ struct ChatView: View {
 
     /// 识别文本追加进草稿（不覆盖已有内容，对齐 Web 端 commitVoiceTranscript）。
     private func appendTranscriptToDraft(_ text: String) {
-        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
-        var existing = draft
-        while let last = existing.unicodeScalars.last,
-              CharacterSet.whitespacesAndNewlines.contains(last) {
-            existing.unicodeScalars.removeLast()
-        }
-        draft = existing.isEmpty ? clean : existing + " " + clean
+        draft = appendingVoiceTranscript(text, to: draft)
     }
 
     /// 输入栏上方的实时转写气泡。
@@ -1666,8 +1644,6 @@ private enum MessageDisplayItem {
     case assistantHeader(turnIndex: Int, preview: String)
     /// 摊平后的单个 assistant 内容块（见 flattenAssistantTurns / AssistantItemView）。
     case assistantItem(turnIndex: Int, item: DisplayItem)
-    /// 子 Agent 作为独立角色常驻展示，不再被折成活动缩略行。
-    case subagentRole(turnIndex: Int, segment: SubagentSegment)
     case explorationGroup(tools: [ExplorationToolItem], lastTurnIndex: Int)
     case activityGroup(turnIndex: Int, group: ActivityGroup, id: String)
     /// 当前 assistant turn 的 token / cost 摘要。
@@ -1737,8 +1713,6 @@ private func messageDisplayIdentity(_ item: MessageDisplayItem, turnOffset: Int)
         return "assistant-header:\(absoluteTurn)"
     case .assistantItem(_, let displayItem):
         return "assistant:\(absoluteTurn):\(displayItemIdentity(displayItem))"
-    case .subagentRole(_, let segment):
-        return "subagent:\(absoluteTurn):\(segment.id)"
     case .explorationGroup(let tools, _):
         let keys = tools.map { !$0.id.isEmpty ? $0.id : ($0.result?.toolUseId ?? $0.name) }
         return "exploration:\(keys.joined(separator: "|"))"
@@ -1795,13 +1769,6 @@ private struct ActivitySheetItem: Identifiable {
     let group: ActivityGroup
 }
 
-private struct SubagentSegment {
-    let id: String
-    let meta: SubagentMeta
-    let blocks: [ContentBlock]
-    let items: [DisplayItem]?
-}
-
 /// 被折叠历史区间的统计：轮次 / 工具调用 / 子代理 / 失败。
 struct HistoryStats {
     let rounds: Int
@@ -1827,7 +1794,6 @@ private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
     case .turn(let i, _): return i
     case .assistantHeader(let i, _): return i
     case .assistantItem(let i, _): return i
-    case .subagentRole(let i, _): return i
     case .explorationGroup(_, let i): return i
     case .activityGroup(let i, _, _): return i
     case .usageSummary(let i, _, _): return i
@@ -1915,26 +1881,14 @@ private func flattenAssistantTurns(
     var out: [MessageDisplayItem] = []
     for item in items {
         if case .turn(let index, let turn) = item, turn.role == "assistant" {
-            out.append(.assistantHeader(
-                turnIndex: index,
-                preview: assistantReplyPreview(turn)
-            ))
-            for segment in splitAssistantContentBySubagent(turn.content) {
-                switch segment {
-                case .parent(let blocks):
-                    let displayItems = pairToolBlocks(blocks)
-                    for displaySegment in splitDisplayItemsBySubagentTool(displayItems) {
-                        switch displaySegment {
-                        case .parent(let items):
-                            for displayItem in items {
-                                out.append(.assistantItem(turnIndex: index, item: displayItem))
-                            }
-                        case .subagent(let subagent):
-                            out.append(.subagentRole(turnIndex: index, segment: subagent))
-                        }
-                    }
-                case .subagent(let subagent):
-                    out.append(.subagentRole(turnIndex: index, segment: subagent))
+            let parentBlocks = parentTranscriptBlocks(turn.content)
+            if !parentBlocks.isEmpty {
+                out.append(.assistantHeader(
+                    turnIndex: index,
+                    preview: assistantReplyPreview(parentBlocks)
+                ))
+                for displayItem in pairToolBlocks(parentBlocks) {
+                    out.append(.assistantItem(turnIndex: index, item: displayItem))
                 }
             }
             let usageIsLive = index == liveTurnIndex
@@ -1948,175 +1902,6 @@ private func flattenAssistantTurns(
         }
     }
     return out
-}
-
-private enum AssistantContentSegment {
-    case parent([ContentBlock])
-    case subagent(SubagentSegment)
-}
-
-/// 对齐 Claude 的 __subagent 元数据：同一个 taskId 在同一轮里聚合成一个角色窗口；
-/// 父助手内容仍按原来的块级懒加载渲染。
-private func splitAssistantContentBySubagent(_ content: [ContentBlock]) -> [AssistantContentSegment] {
-    var segments: [AssistantContentSegment] = []
-    var subagentIndexById: [String: Int] = [:]
-    var parentBlocks: [ContentBlock] = []
-
-    func flushParent() {
-        guard !parentBlocks.isEmpty else { return }
-        segments.append(.parent(parentBlocks))
-        parentBlocks.removeAll(keepingCapacity: true)
-    }
-
-    for block in content {
-        guard let meta = block.subagentMeta else {
-            parentBlocks.append(block)
-            continue
-        }
-        flushParent()
-        let id = subagentIdentity(meta)
-        if let index = subagentIndexById[id], case .subagent(let existing) = segments[index] {
-            segments[index] = .subagent(SubagentSegment(
-                id: existing.id,
-                meta: existing.meta,
-                blocks: existing.blocks + [block],
-                items: nil
-            ))
-        } else {
-            subagentIndexById[id] = segments.count
-            segments.append(.subagent(SubagentSegment(
-                id: id,
-                meta: meta,
-                blocks: [block],
-                items: nil
-            )))
-        }
-    }
-    flushParent()
-    return segments
-}
-
-private enum AssistantDisplaySegment {
-    case parent([DisplayItem])
-    case subagent(SubagentSegment)
-}
-
-/// Claude 的结构化模式里，有些子 Agent 只表现为 Task/Agent 工具调用；
-/// 这类项以前会被活动聚合器折成一行“已子任务”，现在提升成独立角色窗口。
-private func splitDisplayItemsBySubagentTool(_ items: [DisplayItem]) -> [AssistantDisplaySegment] {
-    var segments: [AssistantDisplaySegment] = []
-    var subagentIndexById: [String: Int] = [:]
-    var parentItems: [DisplayItem] = []
-
-    func flushParent() {
-        guard !parentItems.isEmpty else { return }
-        segments.append(.parent(parentItems))
-        parentItems.removeAll(keepingCapacity: true)
-    }
-
-    for item in items {
-        guard let segment = subagentToolSegment(from: item) else {
-            parentItems.append(item)
-            continue
-        }
-        flushParent()
-        if let index = subagentIndexById[segment.id], case .subagent(let existing) = segments[index] {
-            segments[index] = .subagent(SubagentSegment(
-                id: existing.id,
-                meta: existing.meta,
-                blocks: existing.blocks,
-                items: (existing.items ?? []) + (segment.items ?? [])
-            ))
-        } else {
-            subagentIndexById[segment.id] = segments.count
-            segments.append(.subagent(segment))
-        }
-    }
-    flushParent()
-    return segments
-}
-
-private func subagentToolSegment(from item: DisplayItem) -> SubagentSegment? {
-    guard case .tool(let id, let name, let description, let input, let subagent, _) = item,
-          isSubagentTool(name: name, input: input) else {
-        return nil
-    }
-    let taskId = firstText(input, keys: ["taskId", "task_id"]) ?? subagent?.taskId
-    let agentType = subagent?.agentType
-        ?? firstText(input, keys: ["subagent_type", "agent_type", "agentType", "type"])
-        ?? taskRoleName(taskId: taskId, toolName: name)
-    let taskDescription = subagent?.taskDescription
-        ?? description
-        ?? firstText(input, keys: ["description", "prompt", "task", "taskDescription", "instructions"])
-    let meta = SubagentMeta(taskId: taskId, agentType: agentType, taskDescription: taskDescription)
-    return SubagentSegment(
-        id: subagentToolIdentity(toolId: id, taskId: taskId, agentType: agentType, taskDescription: taskDescription),
-        meta: meta,
-        blocks: [],
-        items: [item]
-    )
-}
-
-private func isSubagentTool(name: String, input: [String: JSONValue]) -> Bool {
-    let lower = name.lowercased()
-    if lower == "task" || lower.hasPrefix("task") || lower.contains("agent") {
-        return true
-    }
-    return input["subagent_type"]?.stringValue?.isEmpty == false
-        || input["agent_type"]?.stringValue?.isEmpty == false
-        || input["agentType"]?.stringValue?.isEmpty == false
-}
-
-private func taskRoleName(taskId: String?, toolName: String) -> String {
-    let task = taskId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if !task.isEmpty { return "子任务 \(task)" }
-    return toolLabel(toolName)
-}
-
-private func subagentToolIdentity(
-    toolId: String,
-    taskId: String?,
-    agentType: String,
-    taskDescription: String?
-) -> String {
-    let task = taskId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if !task.isEmpty { return "task:\(task)" }
-    if !toolId.isEmpty { return "tool:\(toolId)" }
-    let description = taskDescription?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if !description.isEmpty { return "desc:\(description)" }
-    return "type:\(agentType)"
-}
-
-private func firstText(_ input: [String: JSONValue], keys: [String]) -> String? {
-    for key in keys {
-        guard let value = input[key] else { continue }
-        let text = (value.stringValue ?? value.summaryText)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty { return text }
-    }
-    return nil
-}
-
-private func subagentIdentity(_ meta: SubagentMeta?) -> String {
-    guard let meta else { return "__parent" }
-    if let taskId = meta.taskId, !taskId.isEmpty { return "task:\(taskId)" }
-    if let agentType = meta.agentType, !agentType.isEmpty { return "type:\(agentType)" }
-    if let description = meta.taskDescription, !description.isEmpty { return "desc:\(description)" }
-    return "__subagent"
-}
-
-private extension ContentBlock {
-    var subagentMeta: SubagentMeta? {
-        switch self {
-        case .text(_, let subagent),
-             .thinking(_, let subagent),
-             .toolUse(_, _, _, _, let subagent),
-             .toolResult(_, _, _, _, let subagent):
-            return subagent
-        case .unknown:
-            return nil
-        }
-    }
 }
 
 private func collapseActivityItems(
@@ -2325,7 +2110,7 @@ private func activityToolSummary(description: String?, input: [String: JSONValue
 private func explorationToolsOnly(in turn: ConversationTurn) -> [ExplorationToolItem]? {
     guard turn.role == "assistant" else { return nil }
     var tools: [ExplorationToolItem] = []
-    for item in pairToolBlocks(turn.content) {
+    for item in pairToolBlocks(parentTranscriptBlocks(turn.content)) {
         switch item {
         case .explorationGroup(let group):
             tools.append(contentsOf: group)
@@ -2487,14 +2272,14 @@ func compactReplyPreviewText(_ source: String) -> String {
     return String(compact.prefix(160))
 }
 
-private func assistantReplyPreview(_ turn: ConversationTurn) -> String {
-    let texts = turn.content.compactMap { block -> String? in
+private func assistantReplyPreview(_ blocks: [ContentBlock]) -> String {
+    let texts = blocks.compactMap { block -> String? in
         if case .text(let text, _) = block { return text }
         return nil
     }
     let preview = compactReplyPreviewText(texts.joined(separator: " "))
     if !preview.isEmpty { return preview }
-    let toolCount = turn.content.reduce(into: 0) { count, block in
+    let toolCount = blocks.reduce(into: 0) { count, block in
         if case .toolUse = block { count += 1 }
     }
     return toolCount > 0 ? "\(toolCount) 个工具调用" : "助手回复"
@@ -2867,55 +2652,216 @@ private func activityIconName(_ items: [DisplayItem]) -> String {
     return "wrench.and.screwdriver"
 }
 
-private let subagentWindowContentHeight: CGFloat = 280
-
-private struct SubagentRoleWindow: View {
-    let segment: SubagentSegment
+private struct SubagentActivityShelf: View {
+    let activities: [SubagentActivity]
+    let isResponding: Bool
     var baseURL: URL? = nil
-    var isLastTurn = false
-    var isResponding = false
     var askSelections: [String: AskUserSelectionState] = [:]
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
     var onAskSubmit: (String, String) -> Void = { _, _ in }
 
-    private var displayItems: [DisplayItem] {
-        if let items = segment.items {
-            return items
-        }
-        return pairToolBlocks(segment.blocks)
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var selectedActivityID: String?
+    @State private var isExpanded = false
+
+    private var selectedActivity: SubagentActivity? {
+        guard let selectedActivityID else { return nil }
+        return activities.first { $0.id == selectedActivityID }
     }
 
-    private func running(_ items: [DisplayItem]) -> Bool {
-        guard isLastTurn && isResponding else { return false }
-        return items.contains(where: isSubagentDisplayItemRunning)
+    private var runningCount: Int {
+        activities.filter { $0.state == .running }.count
     }
 
-    private var title: String {
-        catPrefixedRoleName(segment.meta.agentType)
-    }
-
-    private var subtitle: String {
-        let text = segment.meta.taskDescription?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !text.isEmpty { return text }
-        return "子 Agent 输出"
-    }
-
-    private var tailAnchorID: String {
-        "subagent-tail:\(segment.id)"
+    private var summary: String {
+        if activities.isEmpty { return isResponding ? "正在协调子任务" : "暂无子任务" }
+        if runningCount > 0 { return "\(runningCount) 个正在运行" }
+        return "\(activities.count) 个子任务已完成"
     }
 
     var body: some View {
-        let items = displayItems
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.brand)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Theme.brand.opacity(0.12)))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("子 Agent")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(Theme.textPrimary)
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundColor(Theme.textSecondary)
+                }
+                Spacer(minLength: 0)
+                if isResponding && activities.isEmpty {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Theme.brand)
+                        .accessibilityLabel("正在协调子任务")
+                }
+            }
+
+            if !activities.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(activities, id: \.id) { activity in
+                            activityChip(activity)
+                        }
+                    }
+                }
+            }
+
+            if isExpanded, let selectedActivity {
+                SubagentActivityDetail(
+                    activity: selectedActivity,
+                    baseURL: baseURL,
+                    askSelections: askSelections,
+                    onAskToggle: onAskToggle,
+                    onAskSubmit: onAskSubmit,
+                    onClose: { setExpanded(false) }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.surface))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Theme.border.opacity(0.85), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.045), radius: 8, y: 2)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isExpanded)
+        .onAppear { reconcileSelection() }
+        .onChange(of: activities.map(\.id)) { _, _ in reconcileSelection() }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("子 Agent 活动，\(summary)")
+    }
+
+    private func activityChip(_ activity: SubagentActivity) -> some View {
+        let selected = isExpanded && selectedActivityID == activity.id
+        return Button {
+            selectedActivityID = activity.id
+            setExpanded(!selected)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: subagentSymbol(for: activity.meta.agentType))
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 18, height: 18)
+                    .foregroundColor(subagentTint(activity.state))
+                    .background(Circle().fill(subagentTint(activity.state).opacity(0.12)))
+                Text(subagentRoleName(activity.meta.agentType))
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                subagentStateIndicator(activity.state)
+            }
+            .foregroundColor(Theme.textPrimary)
+            .padding(.horizontal, 9)
+            .frame(minHeight: 44)
+            .background(Capsule().fill(selected ? Theme.brand.opacity(0.12) : Theme.background.opacity(0.72)))
+            .overlay(Capsule().stroke(selected ? Theme.brand.opacity(0.55) : Theme.border.opacity(0.8), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(subagentRoleName(activity.meta.agentType))，\(subagentStateText(activity.state))")
+        .accessibilityValue(selected ? "详情已展开" : "详情已收起")
+        .accessibilityHint("轻点查看子任务输出")
+    }
+
+    @ViewBuilder private func subagentStateIndicator(_ state: SubagentActivity.State) -> some View {
+        switch state {
+        case .running:
+            ProgressView().controlSize(.mini).tint(Theme.brand)
+        case .completed:
+            Image(systemName: "checkmark.circle.fill").foregroundColor(Theme.textMuted)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(Theme.danger)
+        }
+    }
+
+    private func setExpanded(_ expanded: Bool) {
+        if reduceMotion {
+            isExpanded = expanded
+        } else {
+            withAnimation(.easeInOut(duration: 0.18)) { isExpanded = expanded }
+        }
+    }
+
+    private func reconcileSelection() {
+        guard !activities.isEmpty else {
+            selectedActivityID = nil
+            isExpanded = false
+            return
+        }
+        guard selectedActivity == nil else { return }
+        selectedActivityID = activities.first(where: { $0.state == .running })?.id ?? activities.first?.id
+    }
+}
+
+private struct SubagentActivityDetail: View {
+    let activity: SubagentActivity
+    var baseURL: URL? = nil
+    var askSelections: [String: AskUserSelectionState] = [:]
+    var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
+    var onAskSubmit: (String, String) -> Void = { _, _ in }
+    let onClose: () -> Void
+
+    private var items: [DisplayItem] { pairToolBlocks(activity.blocks) }
+    private var tailAnchorID: String { "subagent-shelf-tail:\(activity.id)" }
+    private var title: String { subagentRoleName(activity.meta.agentType) }
+    private var description: String {
+        let value = activity.meta.taskDescription?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? "子任务输出" : value
+    }
+
+    var body: some View {
         let refreshToken = subagentTailRefreshToken(items)
-        VStack(alignment: .leading, spacing: 0) {
-            header(items: items)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: subagentSymbol(for: activity.meta.agentType))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(subagentTint(activity.state))
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(subagentTint(activity.state).opacity(0.12)))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.body.weight(.semibold))
+                        .foregroundColor(Theme.textPrimary)
+                    Text(description)
+                        .font(.caption)
+                        .foregroundColor(Theme.textSecondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Theme.textSecondary)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("收起子任务详情")
+            }
+
+            HStack(spacing: 5) {
+                subagentStateIndicator(activity.state)
+                Text(subagentStateText(activity.state))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(subagentTint(activity.state))
+                Text("· \(items.count) 条内容")
+                    .font(.caption)
+                    .foregroundColor(Theme.textSecondary)
+            }
+
             Divider().overlay(Theme.border.opacity(0.7))
+
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(alignment: .leading, spacing: 9) {
                         if items.isEmpty {
-                            Text("等待子 Agent 输出…")
-                                .font(.system(size: 13))
+                            Text(activity.state == .running ? "等待子 Agent 输出…" : "没有可显示的子任务输出")
+                                .font(.caption)
                                 .foregroundColor(Theme.textSecondary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.vertical, 8)
@@ -2924,8 +2870,8 @@ private struct SubagentRoleWindow: View {
                                 AssistantItemView(
                                     item: identified.item,
                                     baseURL: baseURL,
-                                    isLastTurn: isLastTurn,
-                                    isResponding: isResponding,
+                                    isLastTurn: activity.state == .running,
+                                    isResponding: activity.state == .running,
                                     askSelections: askSelections,
                                     onAskToggle: onAskToggle,
                                     onAskSubmit: onAskSubmit,
@@ -2933,35 +2879,23 @@ private struct SubagentRoleWindow: View {
                                 )
                             }
                         }
-                        Color.clear
-                            .frame(height: 1)
-                            .id(tailAnchorID)
+                        Color.clear.frame(height: 1).id(tailAnchorID)
                     }
-                    .padding(10)
+                    .padding(.vertical, 2)
+                    .padding(.horizontal, 1)
                 }
-                .frame(height: subagentWindowContentHeight)
-                .background(Theme.background.opacity(0.45))
-                .onAppear {
-                    scrollToTail(proxy)
-                }
-                .onChange(of: refreshToken) { _ in
+                .frame(maxHeight: 250)
+                .onAppear { scrollToTail(proxy) }
+                .onChange(of: refreshToken) { _, _ in
+                    guard activity.state == .running else { return }
                     scrollToTail(proxy)
                 }
             }
         }
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.surface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Theme.codex.opacity(0.28), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.04), radius: 8, y: 2)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.background.opacity(0.62)))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(title)，\(subtitle)")
+        .accessibilityLabel("\(title)，\(description)，\(subagentStateText(activity.state))")
     }
 
     private func scrollToTail(_ proxy: ScrollViewProxy) {
@@ -2971,36 +2905,18 @@ private struct SubagentRoleWindow: View {
         }
     }
 
-    private func header(items: [DisplayItem]) -> some View {
-        let isRunning = running(items)
-        return HStack(alignment: .center, spacing: 9) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(subtitle)
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            Text(isRunning ? "处理中" : "\(items.count) 条内容")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(isRunning ? Theme.brand : Theme.codex)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
-                .background(Capsule().fill((isRunning ? Theme.brand : Theme.codex).opacity(0.10)))
+    @ViewBuilder private func subagentStateIndicator(_ state: SubagentActivity.State) -> some View {
+        switch state {
+        case .running:
+            ProgressView().controlSize(.mini).tint(Theme.brand)
+        case .completed:
+            Image(systemName: "checkmark.circle.fill").foregroundColor(Theme.textMuted)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(Theme.danger)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
     }
 }
 
-/// 子 Agent 的 block 数量不变时，流式文本和工具结果仍会持续更新；把这些变化
-/// 纳入 token，窗口才能在每次刷新后重新锚定最新内容。
 private func subagentTailRefreshToken(_ items: [DisplayItem]) -> Int {
     var hasher = Hasher()
     hasher.combine(items.count)
@@ -3025,22 +2941,32 @@ private func subagentTailRefreshToken(_ items: [DisplayItem]) -> Int {
     return hasher.finalize()
 }
 
-private func catPrefixedRoleName(_ raw: String?) -> String {
+private func subagentRoleName(_ raw: String?) -> String {
     let name = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if name.isEmpty { return "猫猫子 Agent" }
-    if name.hasPrefix("猫猫") { return name }
-    return "猫猫 \(name)"
+    return name.isEmpty ? "子 Agent" : name
 }
 
-private func isSubagentDisplayItemRunning(_ item: DisplayItem) -> Bool {
-    switch item {
-    case .tool(_, _, _, _, _, let result):
-        return result == nil
-    case .explorationGroup(let tools):
-        return tools.contains { $0.result == nil }
-    case .plain(let block):
-        if case .thinking = block { return true }
-        return false
+private func subagentSymbol(for role: String?) -> String {
+    let normalized = role?.lowercased() ?? ""
+    if normalized.contains("explore") || normalized.contains("search") { return "magnifyingglass" }
+    if normalized.contains("code") || normalized.contains("dev") { return "chevron.left.forwardslash.chevron.right" }
+    if normalized.contains("review") { return "checklist" }
+    return "sparkles"
+}
+
+private func subagentTint(_ state: SubagentActivity.State) -> Color {
+    switch state {
+    case .running: return Theme.brand
+    case .completed: return Theme.textMuted
+    case .failed: return Theme.danger
+    }
+}
+
+private func subagentStateText(_ state: SubagentActivity.State) -> String {
+    switch state {
+    case .running: return "正在运行"
+    case .completed: return "已完成"
+    case .failed: return "执行失败"
     }
 }
 

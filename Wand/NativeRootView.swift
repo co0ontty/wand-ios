@@ -80,7 +80,6 @@ struct NativeRootView: View {
         .onChange(of: selectedSessionID) { _, sessionID in
             if sessionID == nil { selectedSnapshot = nil }
         }
-        .task { await monitorSessionStatus() }
         .wandKeyboardShortcuts(rootKeyboardShortcuts)
     }
 
@@ -404,19 +403,6 @@ struct NativeRootView: View {
                     phase = .failed(err.userMessage)
                 }
             }
-        }
-    }
-
-    /// Live Activity 不应依赖会话列表或聊天页是否可见。前台期间从根视图轻量轮询，
-    /// 因此网页版发起的任务、冷启动时已运行的任务也能进入灵动岛。
-    private func monitorSessionStatus() async {
-        while !Task.isCancelled {
-            if phase == .ready {
-                if let snapshots = try? await api.listSessions() {
-                    SessionPresenceController.shared.reconcile(snapshots: snapshots)
-                }
-            }
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
         }
     }
 

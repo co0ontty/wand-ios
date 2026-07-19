@@ -50,6 +50,9 @@ final class ServerStore: ObservableObject {
     }
 
     func disconnect() {
+        Task { @MainActor in
+            SessionPresenceController.shared.endAll()
+        }
         serverURL = nil
         token = nil
         defaults.removeObject(forKey: serverURLKey)

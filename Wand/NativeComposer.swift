@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 enum ComposerMetrics {
@@ -84,6 +85,80 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
 
 func composerShouldExpand(focused: Bool, voiceMode: Bool, contentNeedsSpace: Bool = false) -> Bool {
     focused || voiceMode || contentNeedsSpace
+}
+
+func appendingVoiceTranscript(_ transcript: String, to draft: String) -> String {
+    let transcript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !transcript.isEmpty else { return draft }
+
+    var draft = draft
+    while let last = draft.unicodeScalars.last,
+          CharacterSet.whitespacesAndNewlines.contains(last) {
+        draft.unicodeScalars.removeLast()
+    }
+    return draft.isEmpty ? transcript : draft + " " + transcript
+}
+
+@MainActor
+final class ComposerAttachmentController: ObservableObject {
+    @Published var showFileImporter = false
+    @Published var showPhotoPicker = false
+    @Published private(set) var isUploading = false
+    @Published var attachments: [UploadedFile] = []
+
+    private let sessionId: String
+    private let api: WandAPI
+    private var showToast: (String) -> Void = { _ in }
+
+    init(sessionId: String, api: WandAPI) {
+        self.sessionId = sessionId
+        self.api = api
+    }
+
+    func setToastHandler(_ handler: @escaping (String) -> Void) {
+        showToast = handler
+    }
+
+    func remove(_ file: UploadedFile) {
+        attachments.removeAll { $0.savedPath == file.savedPath }
+    }
+
+    func handleFileSelection(_ result: Result<[URL], Error>) {
+        handleSelection(result, cleanupAfterUpload: false)
+    }
+
+    func handlePhotoSelection(_ result: Result<[URL], Error>) {
+        handleSelection(result, cleanupAfterUpload: true)
+    }
+
+    private func handleSelection(_ result: Result<[URL], Error>, cleanupAfterUpload: Bool) {
+        guard case .success(let urls) = result, !urls.isEmpty else {
+            if case .failure(let error) = result { showToast(error.localizedDescription) }
+            return
+        }
+        upload(urls, cleanupAfterUpload: cleanupAfterUpload)
+    }
+
+    private func upload(_ urls: [URL], cleanupAfterUpload: Bool) {
+        isUploading = true
+        Task {
+            defer {
+                isUploading = false
+                if cleanupAfterUpload {
+                    for url in urls {
+                        try? FileManager.default.removeItem(at: url)
+                    }
+                }
+            }
+            do {
+                let uploaded = try await api.uploadAttachments(id: sessionId, urls: urls)
+                attachments = Array((attachments + uploaded).suffix(5))
+                showToast("已上传 \(uploaded.count) 个附件")
+            } catch {
+                showToast(error.localizedDescription)
+            }
+        }
+    }
 }
 
 struct WandKeyboardShortcutAction: Identifiable {

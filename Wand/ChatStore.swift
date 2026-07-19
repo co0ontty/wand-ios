@@ -81,11 +81,6 @@ final class ChatStore: ObservableObject {
     private var thinkingEffortNeedsSync = false
     private var modelsLoaded = false
 
-    // Live Activity（灵动岛）状态：started = 本会话当前在聚合长条里有条目；
-    // sawResponding 防止 PTY 会话在 isResponding 尚未变 true 时被立即收掉。
-    private var liveActivityStarted = false
-    private var liveActivitySawResponding = false
-
     var isStructured: Bool { snapshot?.isStructured ?? true }
     var sessionEnded: Bool { ["exited", "failed", "stopped"].contains(status) }
 
@@ -240,7 +235,33 @@ final class ChatStore: ObservableObject {
         thinkingEffort = snap.thinkingEffort ?? "off"
         mode = snap.mode ?? mode
         if snap.pendingEscalation != nil { legacyPermissionPrompt = nil }
-        refreshLiveActivity()
+        publishPresence()
+    }
+
+    private func publishPresence() {
+        guard let snapshot else { return }
+        if sessionEnded {
+            SessionPresenceController.shared.end(sessionId: sessionId, immediately: true)
+        } else if pendingEscalation != nil || permissionBlocked || legacyPermissionPrompt != nil {
+            SessionPresenceController.shared.start(
+                sessionId: sessionId,
+                title: snapshot.displayTitle,
+                provider: snapshot.provider,
+                state: .permission,
+                taskTitle: currentTaskTitle,
+                queuedCount: queuedMessages.count
+            )
+        } else if isResponding {
+            SessionPresenceController.shared.start(
+                sessionId: sessionId,
+                title: snapshot.displayTitle,
+                provider: snapshot.provider,
+                taskTitle: currentTaskTitle,
+                queuedCount: queuedMessages.count
+            )
+        } else {
+            SessionPresenceController.shared.end(sessionId: sessionId)
+        }
     }
 
     private func handle(_ event: WsIncoming) {
@@ -270,6 +291,7 @@ final class ChatStore: ObservableObject {
                 status = "exited"
                 isResponding = false
             }
+            publishPresence()
         case "error":
             if let message = event.error, !message.isEmpty {
                 toast = message
@@ -277,40 +299,6 @@ final class ChatStore: ObservableObject {
             }
         default:
             break
-        }
-        refreshLiveActivity()
-    }
-
-    // MARK: - Live Activity（灵动岛）
-
-    /// 按当前状态同步 Live Activity：回复中 / 待授权更新；
-    /// 会话退出 / 被杀立即从聚合长条里移除（不展示结束态）；
-    /// 回复成功结束则切「已完成」短暂保留后由控制器自动移除。
-    private func refreshLiveActivity() {
-        if sessionEnded {
-            SessionPresenceController.shared.end(sessionId: sessionId, immediately: true)
-            liveActivityStarted = false
-            liveActivitySawResponding = false
-        } else if permissionBlocked {
-            liveActivitySawResponding = true
-            SessionPresenceController.shared.start(
-                sessionId: sessionId, title: snapshot?.displayTitle ?? "Wand 会话",
-                provider: snapshot?.provider, state: .permission, taskTitle: currentTaskTitle,
-                queuedCount: queuedMessages.count
-            )
-            liveActivityStarted = true
-        } else if isResponding {
-            liveActivitySawResponding = true
-            SessionPresenceController.shared.start(
-                sessionId: sessionId, title: snapshot?.displayTitle ?? "Wand 会话",
-                provider: snapshot?.provider, taskTitle: currentTaskTitle,
-                queuedCount: queuedMessages.count
-            )
-            liveActivityStarted = true
-        } else if liveActivitySawResponding {
-            SessionPresenceController.shared.end(sessionId: sessionId)
-            liveActivityStarted = false
-            liveActivitySawResponding = false
         }
     }
 
@@ -341,6 +329,7 @@ final class ChatStore: ObservableObject {
             snapshot?.description = data.description
             snapshot?.titleGenerating = data.titleGenerating
         }
+        publishPresence()
     }
 
     private func applyOutput(_ data: WsData) {
@@ -360,6 +349,7 @@ final class ChatStore: ObservableObject {
         }
         if let responding = data.isResponding { isResponding = responding }
         applyCommonFields(data)
+        publishPresence()
     }
 
     private func applyStatus(_ data: WsData) {
@@ -370,6 +360,7 @@ final class ChatStore: ObservableObject {
             legacyPermissionPrompt = prompt
             permissionBlocked = true
         }
+        publishPresence()
     }
 
     private func applyCommonFields(_ data: WsData) {
@@ -425,17 +416,8 @@ final class ChatStore: ObservableObject {
                 messages.append(ConversationTurn(role: "user", content: [.text(text: trimmed, subagent: nil)]))
                 isResponding = true
             }
+            publishPresence()
         }
-        // 把本会话加入灵动岛聚合长条（开关关闭 / iOS < 16.1 时是 no-op）。
-        SessionPresenceController.shared.start(
-            sessionId: sessionId,
-            title: snapshot?.displayTitle ?? "Wand 会话",
-            provider: snapshot?.provider,
-            taskTitle: currentTaskTitle,
-            queuedCount: queuedMessages.count
-        )
-        liveActivityStarted = true
-        liveActivitySawResponding = structured
         Task {
             do {
                 if structured {
@@ -458,9 +440,6 @@ final class ChatStore: ObservableObject {
                         isResponding = false
                     }
                 }
-                SessionPresenceController.shared.end(sessionId: sessionId, immediately: true)
-                liveActivityStarted = false
-                liveActivitySawResponding = false
             }
         }
     }
@@ -749,8 +728,8 @@ final class ChatStore: ObservableObject {
         Task {
             do {
                 if !forcePtyChat && isStructured {
-                    try await api.stopSession(id: sessionId)
-                    isResponding = false
+                    let snap = try await api.stopSession(id: sessionId)
+                    apply(snapshot: snap)
                 } else {
                     try await api.sendInput(id: sessionId, input: "\u{1B}", view: "chat", shortcutKey: "esc")
                 }
@@ -779,11 +758,13 @@ final class ChatStore: ObservableObject {
             permissionBlocked = false
             Task {
                 do {
+                    let snap: SessionSnapshot
                     if resolution == "deny" {
-                        _ = try await api.denyPermission(sessionId: sessionId)
+                        snap = try await api.denyPermission(sessionId: sessionId)
                     } else {
-                        _ = try await api.approvePermission(sessionId: sessionId)
+                        snap = try await api.approvePermission(sessionId: sessionId)
                     }
+                    apply(snapshot: snap)
                 } catch {
                     toast = error.localizedDescription
                     socket.requestResync()

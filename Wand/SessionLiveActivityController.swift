@@ -36,6 +36,7 @@ final class SessionLiveActivityController {
     private enum ActivityStore {
         static var activity: Activity<SessionActivityAttributes>?
         static var entries: [SessionActivityAttributes.SessionEntry] = []
+        static var publishedEntries: [SessionActivityAttributes.SessionEntry] = []
         static var doneRemovalTasks: [String: Task<Void, Never>] = [:]
     }
 
@@ -54,6 +55,7 @@ final class SessionLiveActivityController {
         queuedCount: Int = 0
     ) {
         guard enabled else { return }
+        restoreExistingActivityIfNeeded()
         cancelDoneRemoval(sessionId)
         upsert(
             sessionId: sessionId, title: title, provider: provider, state: state,
@@ -89,6 +91,7 @@ final class SessionLiveActivityController {
             endAll()
             return
         }
+        restoreExistingActivityIfNeeded()
         let visibleIds = Set(snapshots.filter { !($0.archived ?? false) }.map(\.id))
         for snapshot in snapshots where !(snapshot.archived ?? false) {
             sync(snapshot: snapshot)
@@ -97,13 +100,19 @@ final class SessionLiveActivityController {
         for id in missingIds {
             end(sessionId: id, immediately: true)
         }
+        sync(allowCreate: false, refresh: true)
     }
 
     func endAll() {
         for task in ActivityStore.doneRemovalTasks.values { task.cancel() }
         ActivityStore.doneRemovalTasks.removeAll()
         ActivityStore.entries.removeAll()
-        sync(allowCreate: false)
+        ActivityStore.publishedEntries.removeAll()
+        let activities = Activity<SessionActivityAttributes>.activities
+        ActivityStore.activity = nil
+        for activity in activities {
+            Task { await activity.end(nil, dismissalPolicy: .immediate) }
+        }
     }
 
     /// 结束：immediately = true（会话退出 / 被杀 / 离开页面）直接从条里移除；
@@ -217,6 +226,18 @@ final class SessionLiveActivityController {
 
     // MARK: - 内部
 
+    private func restoreExistingActivityIfNeeded() {
+        guard ActivityStore.activity == nil else { return }
+        let activities = Array(Activity<SessionActivityAttributes>.activities)
+        guard let activity = activities.first else { return }
+        ActivityStore.activity = activity
+        ActivityStore.entries = activity.content.state.sessions
+        ActivityStore.publishedEntries = activity.content.state.sessions
+        for duplicate in activities.dropFirst() {
+            Task { await duplicate.end(nil, dismissalPolicy: .immediate) }
+        }
+    }
+
     private func upsert(
         sessionId: String, title: String, provider: String?, state: SessionState,
         taskTitle: String?, queuedCount: Int
@@ -262,38 +283,41 @@ final class SessionLiveActivityController {
     }
 
     /// 把当前条目集合同步到系统：空 → 收掉活动；非空 → 更新或（允许时）创建。
-    private func sync(allowCreate: Bool) {
-        let state = SessionActivityAttributes.ContentState(
-            sessions: ActivityStore.entries, updatedAt: Date()
-        )
-        if ActivityStore.entries.isEmpty {
+    private func sync(allowCreate: Bool, refresh: Bool = false) {
+        let entries = ActivityStore.entries.sorted { lhs, rhs in
+            lhs.priority == rhs.priority ? lhs.id < rhs.id : lhs.priority < rhs.priority
+        }
+        if entries.isEmpty {
             guard let activity = ActivityStore.activity else { return }
             ActivityStore.activity = nil
+            ActivityStore.publishedEntries.removeAll()
             Task {
-                await activity.end(
-                    ActivityContent(state: state, staleDate: nil), dismissalPolicy: .immediate
-                )
+                await activity.end(nil, dismissalPolicy: .immediate)
             }
             return
         }
-        if let activity = ActivityStore.activity {
-            Task {
-                await activity.update(ActivityContent(state: state, staleDate: staleDate()))
-            }
+        restoreExistingActivityIfNeeded()
+        guard let activity = ActivityStore.activity else {
+            guard allowCreate else { return }
+            requestActivity(entries: entries)
             return
         }
-        guard allowCreate else { return }
-        // 收掉上次进程遗留的孤儿活动，避免叠出多条岛。
-        for orphan in Activity<SessionActivityAttributes>.activities {
-            Task {
-                await orphan.end(nil, dismissalPolicy: .immediate)
-            }
+        guard refresh || entries != ActivityStore.publishedEntries else { return }
+        ActivityStore.publishedEntries = entries
+        let state = SessionActivityAttributes.ContentState(sessions: entries, updatedAt: Date())
+        Task {
+            await activity.update(ActivityContent(state: state, staleDate: staleDate()))
         }
+    }
+
+    private func requestActivity(entries: [SessionActivityAttributes.SessionEntry]) {
+        let state = SessionActivityAttributes.ContentState(sessions: entries, updatedAt: Date())
         do {
             ActivityStore.activity = try Activity.request(
                 attributes: SessionActivityAttributes(),
                 content: ActivityContent(state: state, staleDate: staleDate())
             )
+            ActivityStore.publishedEntries = entries
         } catch {
             logger.error("Live Activity 创建失败: \(error.localizedDescription, privacy: .public)")
         }
