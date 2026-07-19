@@ -91,9 +91,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        SessionNotificationController.shared.configure()
+        let isLiveActivityMock: Bool
 #if DEBUG
-        guard ProcessInfo.processInfo.environment["WAND_MOCK_LIVE_ACTIVITY"] == nil else {
+        isLiveActivityMock = ProcessInfo.processInfo.environment["WAND_MOCK_LIVE_ACTIVITY"] != nil
+#else
+        isLiveActivityMock = false
+#endif
+        SessionNotificationController.shared.configure(requestPermission: !isLiveActivityMock)
+#if DEBUG
+        guard !isLiveActivityMock else {
             return true
         }
 #endif

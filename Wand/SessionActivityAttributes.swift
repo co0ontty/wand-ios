@@ -18,6 +18,8 @@ struct SessionActivityAttributes: ActivityAttributes {
         var taskTitle: String?
         /// 对话模式中等待发送的消息数。
         var queuedCount: Int
+        /// 本轮工作开始时间。系统可直接渲染计时器，无需 App 高频刷新。
+        var startedAt: Date? = nil
     }
 
     public struct ContentState: Codable, Hashable {
@@ -44,6 +46,35 @@ extension SessionActivityAttributes.SessionEntry {
         case "done": return "已完成"
         default: return stateRaw
         }
+    }
+
+    private var normalizedProvider: String { providerRaw.lowercased() }
+
+    var providerText: String {
+        switch normalizedProvider {
+        case "codex": return "Codex"
+        case "opencode", "open-code", "open_code": return "OpenCode"
+        case "grok": return "Grok"
+        case "qoder", "qodercli": return "Qoder"
+        default: return "Claude"
+        }
+    }
+
+    var providerSymbol: String {
+        switch normalizedProvider {
+        case "codex": return "chevron.left.forwardslash.chevron.right"
+        case "opencode", "open-code", "open_code": return "terminal"
+        case "grok": return "bolt.horizontal"
+        case "qoder", "qodercli": return "curlybraces"
+        default: return "sparkles"
+        }
+    }
+
+    var primaryDetail: String {
+        if needsPermission { return "需要你的确认后继续" }
+        if let taskTitle, !taskTitle.isEmpty { return taskTitle }
+        if isDone { return "回复已完成" }
+        return "正在生成回复"
     }
 
     var statusSymbol: String {

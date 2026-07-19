@@ -16,7 +16,7 @@ private enum ActivityTint {
         switch state {
         case "permission": return .orange
         case "done": return .green
-        default: return brand
+        default: return .white
         }
     }
 }
@@ -37,15 +37,13 @@ struct SessionLiveActivityWidget: Widget {
         ActivityConfiguration(for: SessionActivityAttributes.self) { context in
             LockScreenActivityView(state: context.state, isStale: context.isStale)
                 .widgetURL(activityURL(context.state))
-                .activityBackgroundTint(.black.opacity(0.8))
+                .activityBackgroundTint(Color.black.opacity(0.72))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
             DynamicIsland {
                 expandedContent(state: context.state, isStale: context.isStale)
             } compactLeading: {
-                Image(systemName: "wand.and.stars")
-                    .foregroundStyle(ActivityTint.brand)
-                    .accessibilityLabel("Wand")
+                CompactIdentity(state: context.state)
             } compactTrailing: {
                 CompactStatus(state: context.state)
             } minimal: {
@@ -62,16 +60,29 @@ struct SessionLiveActivityWidget: Widget {
         isStale: Bool
     ) -> DynamicIslandExpandedContent<some View> {
         DynamicIslandExpandedRegion(.leading) {
-            Label("Wand", systemImage: "wand.and.stars")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(ActivityTint.brand)
+            if let primary = state.primarySession {
+                Image(systemName: primary.providerSymbol)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(primary.providerText)
+            }
         }
         DynamicIslandExpandedRegion(.trailing) {
-            AggregateStatus(state: state)
+            ExpandedMetric(state: state, isStale: isStale)
         }
         DynamicIslandExpandedRegion(.bottom) {
             ExpandedActivityView(state: state, isStale: isStale)
         }
+    }
+}
+
+private struct CompactIdentity: View {
+    let state: SessionActivityAttributes.ContentState
+
+    var body: some View {
+        Image(systemName: state.primarySession?.providerSymbol ?? "wand.and.stars")
+            .foregroundStyle(ActivityTint.brand)
+            .accessibilityLabel(state.primarySession?.providerText ?? "Wand")
     }
 }
 
@@ -82,15 +93,47 @@ private struct CompactStatus: View {
         let primary = state.primarySession
         HStack(spacing: 3) {
             Image(systemName: state.aggregateSymbol)
-            if state.permissionCount > 1 {
-                Text("\(state.permissionCount)")
-            } else if state.permissionCount == 0, state.sessions.count > 1 {
+            if state.permissionCount > 0 {
+                Text(state.permissionCount == 1 ? "处理" : "\(state.permissionCount)")
+            } else if state.sessions.count > 1 {
                 Text("\(state.sessions.count)")
+            } else if let startedAt = primary?.startedAt, primary?.isResponding == true {
+                Text(startedAt, style: .timer)
+                    .monospacedDigit()
+                    .frame(maxWidth: 42)
             }
         }
         .font(.caption2.weight(.semibold))
         .foregroundStyle(ActivityTint.color(for: state.aggregateStateRaw))
         .accessibilityLabel(accessibilityText(primary: primary, state: state))
+    }
+}
+
+private struct ExpandedMetric: View {
+    let state: SessionActivityAttributes.ContentState
+    let isStale: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if isStale {
+                Image(systemName: "wifi.exclamationmark")
+                Text("已暂停")
+            } else if state.permissionCount > 0 {
+                Image(systemName: "exclamationmark.circle.fill")
+                Text("需授权")
+            } else if state.respondingCount == 1,
+                      let startedAt = state.primarySession?.startedAt {
+                Text(startedAt, style: .timer)
+                    .monospacedDigit()
+            } else if state.respondingCount > 0 {
+                Text("\(state.respondingCount) 项")
+            } else {
+                Image(systemName: "checkmark")
+                Text("完成")
+            }
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(isStale ? .secondary : ActivityTint.color(for: state.aggregateStateRaw))
     }
 }
 
@@ -128,27 +171,49 @@ private struct ExpandedActivityView: View {
     let isStale: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 5) {
             if let primary = state.primarySession {
                 Link(destination: sessionURL(primary.id)) {
-                    ActivitySessionRow(entry: primary, prominent: true, isStale: isStale)
+                    ExpandedTaskSummary(entry: primary, isStale: isStale)
                 }
                 .buttonStyle(.plain)
-            }
-            let secondary = state.sessions.filter { $0.id != state.primarySession?.id }.prefix(2)
-            ForEach(secondary, id: \.id) { entry in
-                Link(destination: sessionURL(entry.id)) {
-                    ActivitySessionRow(entry: entry, prominent: false, isStale: isStale)
-                }
-                .buttonStyle(.plain)
-            }
-            if state.sessions.count > 3 {
-                Link("查看另外 \(state.sessions.count - 3) 个会话", destination: activityListURL)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
-        .padding(.top, 2)
+        .padding(.top, -2)
+    }
+}
+
+private struct ExpandedTaskSummary: View {
+    let entry: SessionActivityAttributes.SessionEntry
+    let isStale: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(entry.title)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                Image(systemName: "arrow.up.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.tertiary)
+            }
+            HStack(spacing: 6) {
+                Text(entry.primaryDetail)
+                    .lineLimit(1)
+                if entry.queuedCount > 0 {
+                    Text("·")
+                    Text("\(entry.queuedCount) 条排队")
+                        .lineLimit(1)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(entry.needsPermission ? .orange : .secondary)
+        }
+        .opacity(isStale ? 0.68 : 1)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(entry.providerText)，\(entry.title)，\(entry.primaryDetail)")
     }
 }
 
@@ -157,78 +222,166 @@ private struct LockScreenActivityView: View {
     let isStale: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Wand", systemImage: "wand.and.stars")
-                    .font(.headline)
-                    .foregroundStyle(ActivityTint.brand)
+                if let primary = state.primarySession {
+                    Label(primary.providerText, systemImage: primary.providerSymbol)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 AggregateStatus(state: state)
             }
             if let primary = state.primarySession {
                 Link(destination: sessionURL(primary.id)) {
-                    ActivitySessionRow(entry: primary, prominent: true, isStale: isStale)
+                    PrimaryActivityCard(entry: primary, isStale: isStale)
                 }
                 .buttonStyle(.plain)
             }
-            let secondary = state.sessions.filter { $0.id != state.primarySession?.id }.prefix(1)
-            ForEach(secondary, id: \.id) { entry in
-                Link(destination: sessionURL(entry.id)) {
-                    ActivitySessionRow(entry: entry, prominent: false, isStale: isStale)
+            HStack(spacing: 12) {
+                if state.sessions.count > 1 {
+                    Link(destination: activityListURL) {
+                        Label("查看全部 \(state.sessions.count) 个", systemImage: "rectangle.stack")
+                    }
                 }
-                .buttonStyle(.plain)
+                Spacer(minLength: 0)
+                if let primary = state.primarySession {
+                    Link(destination: sessionURL(primary.id)) {
+                        Label(primary.needsPermission ? "处理授权" : "打开会话", systemImage: "arrow.up.right")
+                    }
+                }
             }
-            if state.sessions.count > 2 {
-                Link("查看全部 \(state.sessions.count) 个会话", destination: activityListURL)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(ActivityTint.color(for: state.aggregateStateRaw))
+            StaleNotice(isStale: isStale, updatedAt: state.updatedAt)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
     }
 }
 
-private struct ActivitySessionRow: View {
+private struct PrimaryActivityCard: View {
     let entry: SessionActivityAttributes.SessionEntry
-    let prominent: Bool
     let isStale: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 9) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: entry.statusSymbol)
-                .font(prominent ? .headline : .subheadline)
+                .font(.title3.weight(.semibold))
                 .foregroundStyle(ActivityTint.color(for: entry.stateRaw))
-                .frame(width: 20)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text(entry.title)
-                        .font(prominent ? .headline : .subheadline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text(entry.statusText)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(ActivityTint.color(for: entry.stateRaw))
+                .frame(width: 24)
+                .symbolEffect(.pulse, options: .repeating, isActive: entry.isResponding && !isStale)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(entry.title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(entry.primaryDetail)
+                    .font(.subheadline)
+                    .foregroundStyle(entry.needsPermission ? .primary : .secondary)
+                    .lineLimit(2)
+                HStack(spacing: 8) {
+                    if let startedAt = entry.startedAt, entry.isResponding {
+                        Label {
+                            Text(startedAt, style: .timer).monospacedDigit()
+                        } icon: {
+                            Image(systemName: "clock")
+                        }
+                    }
+                    if entry.queuedCount > 0 {
+                        Label("\(entry.queuedCount) 条排队", systemImage: "text.line.last.and.arrowtriangle.forward")
+                    }
                 }
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(prominent ? 2 : 1)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
         }
-        .opacity(isStale ? 0.58 : 1)
+        .opacity(isStale ? 0.72 : 1)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(entry.title)，\(entry.statusText)，\(detail)")
+        .accessibilityLabel(accessibilityLabel)
     }
 
-    private var detail: String {
-        if entry.needsPermission { return "需要你的确认后继续" }
-        if let task = entry.taskTitle, !task.isEmpty { return task }
-        if entry.queuedCount > 0 { return "\(entry.queuedCount) 条消息等待处理" }
-        if entry.isDone { return "回复已完成" }
-        return "正在生成回复"
+    private var accessibilityLabel: String {
+        var components = [entry.providerText, entry.title, entry.statusText, entry.primaryDetail]
+        if entry.queuedCount > 0 { components.append("\(entry.queuedCount) 条消息等待处理") }
+        if isStale { components.append("状态可能已过期") }
+        return components.joined(separator: "，")
     }
 }
+
+private struct SecondarySummary: View {
+    let state: SessionActivityAttributes.ContentState
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "rectangle.stack")
+            Text("另有 \(state.sessions.count - 1) 个会话")
+            Spacer(minLength: 0)
+            if state.permissionCount > (state.primarySession?.needsPermission == true ? 1 : 0) {
+                Text("含待授权")
+                    .foregroundStyle(.orange)
+            } else if state.respondingCount > (state.primarySession?.isResponding == true ? 1 : 0) {
+                Text("仍在进行")
+            }
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.secondary)
+    }
+}
+
+private struct StaleNotice: View {
+    let isStale: Bool
+    let updatedAt: Date
+
+    var body: some View {
+        if isStale {
+            Label {
+                Text("状态可能已过期 · ") + Text(updatedAt, style: .relative)
+            } icon: {
+                Image(systemName: "wifi.exclamationmark")
+            }
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("状态可能已过期，最后更新于 \(updatedAt.formatted())")
+        }
+    }
+}
+
+#if DEBUG
+private enum ActivityPreviewFixtures {
+    static let now = Date()
+    static let active = SessionActivityAttributes.SessionEntry(
+        id: "preview-active", title: "优化 Wand 锁屏体验", providerRaw: "codex",
+        stateRaw: "responding", taskTitle: "重构灵动岛信息层级与交互",
+        queuedCount: 2, startedAt: now.addingTimeInterval(-94)
+    )
+    static let permission = SessionActivityAttributes.SessionEntry(
+        id: "preview-permission", title: "发布检查清单", providerRaw: "claude",
+        stateRaw: "permission", taskTitle: "需要确认读取截图目录", queuedCount: 0
+    )
+    static let done = SessionActivityAttributes.SessionEntry(
+        id: "preview-done", title: "回归测试", providerRaw: "opencode",
+        stateRaw: "done", taskTitle: nil, queuedCount: 0
+    )
+    static let multi = SessionActivityAttributes.ContentState(
+        sessions: [permission, active, done], updatedAt: now
+    )
+}
+
+#Preview("Lock Screen · Multi") {
+    LockScreenActivityView(state: ActivityPreviewFixtures.multi, isStale: false)
+        .padding()
+        .background(.black)
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Lock Screen · Stale") {
+    LockScreenActivityView(state: ActivityPreviewFixtures.multi, isStale: true)
+        .padding()
+        .background(.black)
+        .preferredColorScheme(.dark)
+}
+#endif
 
 private func accessibilityText(
     primary: SessionActivityAttributes.SessionEntry?,

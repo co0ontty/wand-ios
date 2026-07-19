@@ -34,6 +34,30 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(state.respondingCount, 1)
     }
 
+    func testSessionActivityExposesProviderAndUsefulDetail() {
+        let entry = SessionActivityAttributes.SessionEntry(
+            id: "codex", title: "Live Activity", providerRaw: "codex",
+            stateRaw: "responding", taskTitle: "重构锁屏信息层级", queuedCount: 2,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+
+        XCTAssertEqual(entry.providerText, "Codex")
+        XCTAssertEqual(entry.providerSymbol, "chevron.left.forwardslash.chevron.right")
+        XCTAssertEqual(entry.primaryDetail, "重构锁屏信息层级")
+        XCTAssertEqual(entry.queuedCount, 2)
+        XCTAssertNotNil(entry.startedAt)
+    }
+
+    func testSessionActivityPermissionDetailTakesPriorityOverTaskTitle() {
+        let entry = SessionActivityAttributes.SessionEntry(
+            id: "permission", title: "授权", providerRaw: "claude",
+            stateRaw: "permission", taskTitle: "不应覆盖授权提示", queuedCount: 0
+        )
+
+        XCTAssertEqual(entry.primaryDetail, "需要你的确认后继续")
+        XCTAssertEqual(entry.providerText, "Claude")
+    }
+
     func testSessionTopicFieldsDecodeAndDriveDisplayTitle() throws {
         let session = try decode(
             SessionSnapshot.self,

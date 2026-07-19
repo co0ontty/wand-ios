@@ -38,6 +38,7 @@ final class SessionLiveActivityController {
         static var entries: [SessionActivityAttributes.SessionEntry] = []
         static var publishedEntries: [SessionActivityAttributes.SessionEntry] = []
         static var doneRemovalTasks: [String: Task<Void, Never>] = [:]
+        static var startedAtBySession: [String: Date] = [:]
     }
 
     private var enabled: Bool {
@@ -108,6 +109,7 @@ final class SessionLiveActivityController {
         ActivityStore.doneRemovalTasks.removeAll()
         ActivityStore.entries.removeAll()
         ActivityStore.publishedEntries.removeAll()
+        ActivityStore.startedAtBySession.removeAll()
         let activities = Activity<SessionActivityAttributes>.activities
         ActivityStore.activity = nil
         for activity in activities {
@@ -122,10 +124,13 @@ final class SessionLiveActivityController {
         cancelDoneRemoval(sessionId)
         if immediately {
             ActivityStore.entries.remove(at: index)
+            ActivityStore.startedAtBySession[sessionId] = nil
         } else {
             ActivityStore.entries[index].stateRaw = SessionState.done.rawValue
             ActivityStore.entries[index].taskTitle = nil
             ActivityStore.entries[index].queuedCount = 0
+            ActivityStore.entries[index].startedAt = nil
+            ActivityStore.startedAtBySession[sessionId] = nil
             scheduleDoneRemoval(sessionId)
         }
         sync(allowCreate: false)
@@ -219,7 +224,8 @@ final class SessionLiveActivityController {
             providerRaw: provider,
             stateRaw: state.rawValue,
             taskTitle: taskTitle.map { String($0.prefix(Self.maxTaskTitleLength)) },
-            queuedCount: queuedCount
+            queuedCount: queuedCount,
+            startedAt: state == .responding ? Date().addingTimeInterval(-94) : nil
         )
     }
 #endif
@@ -233,6 +239,9 @@ final class SessionLiveActivityController {
         ActivityStore.activity = activity
         ActivityStore.entries = activity.content.state.sessions
         ActivityStore.publishedEntries = activity.content.state.sessions
+        for entry in ActivityStore.entries {
+            if let startedAt = entry.startedAt { ActivityStore.startedAtBySession[entry.id] = startedAt }
+        }
         for duplicate in activities.dropFirst() {
             Task { await duplicate.end(nil, dismissalPolicy: .immediate) }
         }
@@ -244,16 +253,26 @@ final class SessionLiveActivityController {
     ) {
         let shortTitle = String(title.prefix(Self.maxTitleLength))
         let shortTaskTitle = taskTitle.map { String($0.prefix(Self.maxTaskTitleLength)) }
+        let startedAt: Date?
+        if state == .responding {
+            startedAt = ActivityStore.startedAtBySession[sessionId] ?? Date()
+            ActivityStore.startedAtBySession[sessionId] = startedAt
+        } else {
+            startedAt = nil
+            ActivityStore.startedAtBySession[sessionId] = nil
+        }
         if let index = ActivityStore.entries.firstIndex(where: { $0.id == sessionId }) {
             ActivityStore.entries[index].title = shortTitle
             ActivityStore.entries[index].providerRaw = provider ?? "claude"
             ActivityStore.entries[index].stateRaw = state.rawValue
             ActivityStore.entries[index].taskTitle = shortTaskTitle
             ActivityStore.entries[index].queuedCount = queuedCount
+            ActivityStore.entries[index].startedAt = startedAt
         } else {
             ActivityStore.entries.append(SessionActivityAttributes.SessionEntry(
                 id: sessionId, title: shortTitle, providerRaw: provider ?? "claude",
-                stateRaw: state.rawValue, taskTitle: shortTaskTitle, queuedCount: queuedCount
+                stateRaw: state.rawValue, taskTitle: shortTaskTitle, queuedCount: queuedCount,
+                startedAt: startedAt
             ))
             trimEntriesIfNeeded()
         }
@@ -263,7 +282,9 @@ final class SessionLiveActivityController {
     private func trimEntriesIfNeeded() {
         while ActivityStore.entries.count > Self.maxEntries {
             let victim = ActivityStore.entries.firstIndex { $0.isDone } ?? 0
-            cancelDoneRemoval(ActivityStore.entries[victim].id)
+            let victimId = ActivityStore.entries[victim].id
+            cancelDoneRemoval(victimId)
+            ActivityStore.startedAtBySession[victimId] = nil
             ActivityStore.entries.remove(at: victim)
         }
     }
@@ -274,6 +295,7 @@ final class SessionLiveActivityController {
             guard !Task.isCancelled else { return }
             ActivityStore.doneRemovalTasks[sessionId] = nil
             ActivityStore.entries.removeAll { $0.id == sessionId && $0.isDone }
+            ActivityStore.startedAtBySession[sessionId] = nil
             sync(allowCreate: false)
         }
     }

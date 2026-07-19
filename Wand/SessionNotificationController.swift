@@ -24,9 +24,9 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         super.init()
     }
 
-    func configure() {
+    func configure(requestPermission: Bool = true) {
         center.delegate = self
-        if ServerStore.shared.notificationsEnabled {
+        if requestPermission, ServerStore.shared.notificationsEnabled {
             requestAuthorization()
         }
     }
