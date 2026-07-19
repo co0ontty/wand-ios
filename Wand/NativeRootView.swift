@@ -26,6 +26,9 @@ struct NativeRootView: View {
     /// 不再走隐藏 NavigationLink（在 .columns 双栏下不可靠）。
     @State private var selectedSessionID: String?
     @State private var selectedSnapshot: SessionSnapshot?
+    /// iPhone push 动画期间的会话身份。列表只允许这一次打开落入状态机，避免双击/连点
+    /// 把 navigationDestination(isPresented:) 推进半截时再次改写 selection。
+    @State private var openingSessionID: String?
 
     private enum Phase: Equatable {
         case authenticating
@@ -78,7 +81,12 @@ struct NativeRootView: View {
         // NavigationStack 的系统返回手势只会把 selection 置空；同步释放详情快照，确保
         // 下次进入（包括同一会话）创建干净的 destination，而不是复用已 shutdown 的页面。
         .onChange(of: selectedSessionID) { _, sessionID in
-            if sessionID == nil { selectedSnapshot = nil }
+            guard let sessionID else {
+                selectedSnapshot = nil
+                openingSessionID = nil
+                return
+            }
+            releaseSessionOpenGateAfterTransition(for: sessionID)
         }
         .wandKeyboardShortcuts(rootKeyboardShortcuts)
     }
@@ -201,7 +209,8 @@ struct NativeRootView: View {
                     SessionListView(
                         api: api,
                         selection: $selectedSessionID,
-                        selectedSnapshot: $selectedSnapshot
+                        selectedSnapshot: $selectedSnapshot,
+                        openingSessionID: $openingSessionID
                     )
                 }
                 .toolbar {
@@ -363,6 +372,18 @@ struct NativeRootView: View {
         } else if quickActions.consume(where: { $0 == .showSessions }) != nil {
             showSettings = false
             showWebFallback = false
+        }
+    }
+
+    /// SwiftUI 没有为 navigationDestination(isPresented:) 提供转场完成回调。用一个短暂、
+    /// 可验证的输入锁覆盖 iPhone 默认 push 动画窗口；若期间返回或换会话，identity 检查会
+    /// 让旧任务自然失效。这样既拦住重复打开，也不会把 iPad 双栏永久锁死。
+    private func releaseSessionOpenGateAfterTransition(for sessionID: String) {
+        guard openingSessionID == sessionID else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            guard selectedSessionID == sessionID,
+                  openingSessionID == sessionID else { return }
+            openingSessionID = nil
         }
     }
 

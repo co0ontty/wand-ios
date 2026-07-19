@@ -101,9 +101,12 @@ final class ChatStore: ObservableObject {
         }
         active = true
 
-        // 首次 REST 加载还没结束时，只恢复 active；加载任务收尾会按 active 状态建连。
+        // 首次 REST 加载还没结束时也要立刻恢复实时连接。旧逻辑在这里直接 return，
+        // 而上一次 shutdown 已关 socket，快速返回再打开会一直等 REST + 模型 + 配置
+        // 三段请求收尾，看起来像页面卡死。
         guard !initialLoadInProgress else {
-            wlog("session", "start() session=\(sessionId)（等待首次加载完成）")
+            wlog("session", "start() session=\(sessionId)（首次加载未完，立即恢复实时连接）")
+            connectSocket()
             return
         }
 
@@ -111,10 +114,7 @@ final class ChatStore: ObservableObject {
         // WandSocket.connect() 会自动重订阅并收到 init 快照，无需重复拉模型等静态配置。
         guard !started else {
             wlog("session", "start() session=\(sessionId)（恢复缓存详情连接）")
-            // 先登记订阅再连接：既避免已有订阅时发两次 subscribe，也覆盖用户在首次
-            // REST 尚未完成前快速返回、socket 从未真正订阅过的情况。
-            socket.subscribe(sessionId: sessionId)
-            socket.connect()
+            connectSocket()
             return
         }
         started = true
@@ -130,6 +130,10 @@ final class ChatStore: ObservableObject {
             MainActor.assumeIsolated { self?.connected = up }
         }
 
+        // 实时连接不能被模型目录、卡片默认值等辅助请求挡住。WS init 本身能提供一份
+        // 会话快照；即使 REST 短暂失败，详情也有机会自行恢复。
+        connectSocket()
+
         Task {
             var initialSnapshot: SessionSnapshot?
             do {
@@ -141,25 +145,32 @@ final class ChatStore: ObservableObject {
                 loadError = error.localizedDescription
                 wlog("session", "REST 快照失败 session=\(sessionId): \(error.localizedDescription)")
             }
-            await loadModels()
-            await loadCardDefaults()
             loading = false
             initialLoadInProgress = false
-            guard active else {
-                wlog("session", "首次加载完成但页面已离开，暂不连接 session=\(sessionId)")
-                return
+
+            // 模型和卡片偏好不影响会话可操作性，后台加载即可。模型依赖 snapshot 的
+            // provider，所以只在 REST 拿到快照后发起，避免用 Claude 默认值误判。
+            if initialSnapshot != nil {
+                Task { [weak self] in await self?.loadModels() }
             }
-            socket.subscribe(sessionId: sessionId)
-            socket.connect()
-            if let initialSnapshot {
+            Task { [weak self] in await self?.loadCardDefaults() }
+
+            if active, let initialSnapshot {
                 await autoResumeFailedPtyIfNeeded(initialSnapshot)
             }
         }
     }
 
+    /// 先登记订阅再连接：覆盖首次 REST 尚未完成时快速返回、socket 从未订阅过的情形。
+    private func connectSocket() {
+        socket.subscribe(sessionId: sessionId)
+        socket.connect()
+    }
+
     func shutdown() {
         guard active else { return }
         active = false
+        connected = false
         wlog("session", "shutdown() session=\(sessionId)（视图销毁，关闭 socket）")
         socket.close()
     }
@@ -273,6 +284,8 @@ final class ChatStore: ObservableObject {
         case "init":
             if let data = event.data {
                 applyWsSnapshot(data)
+                // REST 失败后若 WS init 成功，说明详情已经可用，不能继续保留失败页。
+                loadError = nil
                 loading = false
                 wlog("ws", "init session=\(sessionId) msgs=\(data.messages?.count ?? -1) status=\(data.status ?? "?")")
             }
@@ -423,11 +436,16 @@ final class ChatStore: ObservableObject {
                 if structured {
                     // 结构化回复通过事件流持续更新；HTTP 只需确认服务端已接收。
                     // 若等待整轮完成，首轮生成标题与模型回复可能超过 30 秒并被误报为网络超时。
-                    try await api.sendInput(
+                    let accepted = try await api.sendInput(
                         id: sessionId,
                         input: trimmed,
                         respondImmediately: !queueing
                     )
+                    // HTTP 202 已包含服务端刚接受的 canonical snapshot。立刻应用它，
+                    // 再向 socket 请求一次校准：这样 WS 正在重连/首帧丢失时，发送后也
+                    // 不会停在乐观 loading 状态直到下一条推送到来。
+                    apply(snapshot: accepted)
+                    socket.requestResync()
                 } else {
                     try await sendPtyChatInput(trimmed)
                 }

@@ -2,6 +2,16 @@ import SwiftUI
 import UniformTypeIdentifiers
 import Combine
 
+/// 同一详情打开流程尚未稳定前，不允许第二次请求改写 selection。
+/// 选中另一会话但没有动画中的打开操作时（例如 iPad 双栏）仍然允许切换。
+func shouldBeginSessionOpen(
+    requestedID: String,
+    currentSelection: String?,
+    openingSessionID: String?
+) -> Bool {
+    openingSessionID == nil && currentSelection != requestedID
+}
+
 /// 会话列表：原生渲染 /api/sessions，下拉刷新 + 周期轮询，
 /// 对话模式进入原生聊天，PTY 模式进入嵌套网页版对应会话。
 struct SessionListView: View {
@@ -34,6 +44,10 @@ struct SessionListView: View {
     /// 选中会话的完整快照：外层 detail 栏渲染 SessionDestinationView 需要它，
     /// 而外层拿不到本视图私有的 sessions 列表，所以选中时一并回传。
     @Binding var selectedSnapshot: SessionSnapshot?
+    /// 窄屏 NavigationStack 正在 push 时锁住本次打开，防止转场动画中第二次轻点把
+    /// selection/snapshot 改成另一套状态。根视图会在转场稳定后清空它；宽屏下这个
+    /// 短锁也只会屏蔽同一瞬间的重复点击，不影响正常切换 detail。
+    @Binding var openingSessionID: String?
 
     @State private var sessions: [SessionSnapshot] = []
     @State private var historySessions: [HistorySession] = []
@@ -212,6 +226,20 @@ struct SessionListView: View {
     /// 统一的「打开会话」入口：同时写 selection 身份和完整快照，
     /// 外层 detail 栈/栏据此渲染。快照可能来自异步拉取，先置身份再回填快照。
     private func selectSession(id: String?, _ snapshot: SessionSnapshot?) {
+        guard let id else {
+            openingSessionID = nil
+            selection = nil
+            selectedSnapshot = nil
+            return
+        }
+        guard shouldBeginSessionOpen(
+            requestedID: id,
+            currentSelection: selection,
+            openingSessionID: openingSessionID
+        ) else {
+            return
+        }
+        openingSessionID = id
         selection = id
         selectedSnapshot = snapshot
     }
@@ -1284,23 +1312,6 @@ private struct SessionRow: View {
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 11)
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(selected ? Theme.brand.opacity(0.46) : Theme.border.opacity(0.55), lineWidth: 0.75)
-        )
-        .overlay(alignment: .leading) {
-            if prominentStatus && !selecting {
-                Capsule()
-                    .fill(statusTint.opacity(0.9))
-                    .frame(width: 3)
-                    .padding(.vertical, 10)
-            }
-        }
-        .background(
-            selected
-                ? Theme.brand.opacity(0.09)
-                : prominentStatus ? statusTint.opacity(0.055) : Color.clear
-        )
         .wandGlassCard(cornerRadius: 14)
         .accessibilityElement(children: .combine)
         .accessibilityValue("\(session.isStructured ? "聊天模式" : "终端模式")，\(statusLabel)")
@@ -1356,9 +1367,6 @@ private struct SessionRow: View {
                     .foregroundColor(statusTint)
                     .lineLimit(1)
             }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(statusTint.opacity(0.12)))
             .accessibilityElement(children: .combine)
         } else {
             Circle()

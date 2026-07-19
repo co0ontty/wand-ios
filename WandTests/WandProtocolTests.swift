@@ -3,6 +3,18 @@ import XCTest
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
+    func testSessionOpenGateRejectsDuplicateAndConcurrentNavigation() {
+        XCTAssertTrue(shouldBeginSessionOpen(
+            requestedID: "a", currentSelection: nil, openingSessionID: nil
+        ))
+        XCTAssertFalse(shouldBeginSessionOpen(
+            requestedID: "a", currentSelection: "a", openingSessionID: nil
+        ))
+        XCTAssertFalse(shouldBeginSessionOpen(
+            requestedID: "b", currentSelection: "a", openingSessionID: "a"
+        ))
+    }
+
     func testSessionActivityRecognizesPtyAndStructuredStates() throws {
         let pty = try decode(SessionSnapshot.self, from: #"{"id":"pty","sessionKind":"pty","status":"thinking"}"#)
         let structuredActive = try decode(SessionSnapshot.self, from: #"{"id":"structured-active","sessionKind":"structured","status":"running","structuredState":{"inFlight":true}}"#)
