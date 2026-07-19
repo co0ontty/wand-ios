@@ -145,12 +145,8 @@ struct QRScannerSheet: View {
                 }
             } label: {
                 Text("打开系统设置")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 22)
-                    .padding(.vertical, 11)
-                    .background(Capsule().fill(Theme.brand))
             }
+            .buttonStyle(WandPrimaryButtonStyle())
             .padding(.top, 6)
         }
         .padding(32)

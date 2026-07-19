@@ -843,7 +843,7 @@ struct DirectoryBrowserView: View {
     var body: some View {
         NavigationView {
             ZStack {
-                Theme.background.ignoresSafeArea()
+                WandAmbientBackground()
                 VStack(spacing: 0) {
                     pathHeader
                     Divider()

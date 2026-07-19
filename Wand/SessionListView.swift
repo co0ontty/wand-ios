@@ -1344,8 +1344,7 @@ private struct SessionRow: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
                     .frame(width: 46)
-                Circle().fill(statusTint).frame(width: 5, height: 5)
-                    .accessibilityLabel(statusLabel)
+                statusIndicator
                 if let cwd = session.cwd, !cwd.isEmpty {
                     WandPathRevealText(path: cwd, fontSize: 10, color: Theme.textMuted)
                         .frame(maxWidth: .infinity)
@@ -1362,7 +1361,19 @@ private struct SessionRow: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(selected ? Theme.brand.opacity(0.46) : Theme.border.opacity(0.55), lineWidth: 0.75)
         )
-        .background(selected ? Theme.brand.opacity(0.09) : Color.clear)
+        .overlay(alignment: .leading) {
+            if prominentStatus && !selecting {
+                Capsule()
+                    .fill(statusTint.opacity(0.9))
+                    .frame(width: 3)
+                    .padding(.vertical, 10)
+            }
+        }
+        .background(
+            selected
+                ? Theme.brand.opacity(0.09)
+                : prominentStatus ? statusTint.opacity(0.055) : Color.clear
+        )
         .wandGlassCard(cornerRadius: 14)
         .accessibilityElement(children: .combine)
         .accessibilityValue("\(session.isStructured ? "聊天模式" : "终端模式")，\(statusLabel)")
@@ -1420,9 +1431,41 @@ private struct SessionRow: View {
 
     private var statusTint: Color {
         if session.hasPendingPermission { return .orange }
-        if session.isResponding || session.status == "running" { return .green }
+        if session.isResponding || ["running", "thinking"].contains(session.status ?? "") { return .green }
+        if ["waiting-input", "waiting_input", "reconnecting"].contains(session.status ?? "") { return .orange }
         if session.status == "failed" { return Theme.danger }
         return Theme.textSecondary.opacity(0.62)
+    }
+
+    private var prominentStatus: Bool {
+        session.hasPendingPermission
+            || session.isResponding
+            || ["running", "thinking", "waiting-input", "waiting_input", "reconnecting"]
+                .contains(session.status ?? "")
+    }
+
+    @ViewBuilder
+    private var statusIndicator: some View {
+        if prominentStatus {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(statusTint)
+                    .frame(width: 5, height: 5)
+                Text(statusLabel)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(statusTint)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(statusTint.opacity(0.12)))
+            .accessibilityElement(children: .combine)
+        } else {
+            Circle()
+                .fill(statusTint)
+                .frame(width: 5, height: 5)
+                .accessibilityLabel(statusLabel)
+        }
     }
 
     private var statusLabel: String {
@@ -1430,6 +1473,9 @@ private struct SessionRow: View {
         if session.isResponding { return "回复中" }
         switch session.status ?? "" {
         case "running": return "运行中"
+        case "thinking": return "思考中"
+        case "waiting-input", "waiting_input": return "等待输入"
+        case "reconnecting": return "重连中"
         case "idle": return "空闲"
         case "exited", "stopped": return "已结束"
         case "failed": return "失败"

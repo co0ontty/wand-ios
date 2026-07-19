@@ -198,7 +198,6 @@ struct NativeRootView: View {
                             .padding(.horizontal, 16)
                             .padding(.top, 8)
                             .padding(.bottom, 6)
-                            .background(Theme.background)
                     }
                     SessionListView(
                         api: api,
@@ -264,7 +263,7 @@ struct NativeRootView: View {
                 .foregroundColor(Theme.textSecondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.background.ignoresSafeArea())
+        .background { WandAmbientBackground() }
     }
 
     private var shouldShowUpdateBanner: Bool {
@@ -338,15 +337,7 @@ struct NativeRootView: View {
             }
         }
         .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.surface)
-                .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Theme.border, lineWidth: 1)
-        )
+        .wandGlassCard(cornerRadius: 14)
     }
 
     private func versionPill(_ text: String, filled: Bool) -> some View {

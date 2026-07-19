@@ -668,7 +668,7 @@ struct ChatView: View {
                 .frame(width: 42, height: 42)
                 .background(Circle().fill(Theme.brand))
                 .overlay(Circle().stroke(Color.white.opacity(0.2), lineWidth: 1))
-                .shadow(color: Color.black.opacity(0.22), radius: 8, y: 3)
+                .shadow(color: Color.black.opacity(0.10), radius: 6, y: 2)
         }
         .accessibilityLabel("回到列表底部")
         .padding(.trailing, 16)
@@ -2844,7 +2844,7 @@ private struct ActivityDetailSheet: View {
             .padding(.top, 18)
             .padding(.bottom, 26)
         }
-        .background(Theme.background.ignoresSafeArea())
+        .background { WandAmbientBackground() }
     }
 }
 

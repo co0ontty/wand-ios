@@ -7,8 +7,7 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             // 全屏背景，避免 ConnectView/加载中状态露出空白
-            Theme.background
-                .ignoresSafeArea()
+            WandAmbientBackground()
             if let serverURL = store.serverURL {
                 // 原生客户端为主界面（会话列表 + 聊天 + 权限审批），
                 // WebView 退居 NativeRootView 内的「网页版」兜底入口。

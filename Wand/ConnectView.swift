@@ -27,7 +27,6 @@ struct ConnectView: View {
             VStack(spacing: 0) {
                 if isPresentedAsSheet {
                     sheetHeader
-                    Rectangle().fill(Theme.border).frame(height: 1)
                 }
                 ScrollView {
                     VStack {
@@ -110,6 +109,7 @@ struct ConnectView: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
+        .wandGlassSurface()
     }
 
     private var card: some View {

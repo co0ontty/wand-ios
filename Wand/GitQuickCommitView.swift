@@ -179,7 +179,7 @@ struct GitQuickCommitView: View {
                 }
                 .padding(20)
             }
-            .background(Theme.background.ignoresSafeArea())
+            .background { WandAmbientBackground() }
             .dismissKeyboardOnTap()
             .navigationTitle("快捷提交")
             .navigationBarTitleDisplayMode(.inline)
