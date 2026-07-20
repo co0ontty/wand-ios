@@ -49,6 +49,9 @@ struct SessionLiveActivityWidget: Widget {
             } minimal: {
                 MinimalStatus(state: context.state)
             }
+            // The expanded island has a curved clipping mask. Explicit margins
+            // keep the leading/trailing regions clear of its four corners.
+            .contentMargins(.all, 16, for: .expanded)
             .widgetURL(activityURL(context.state))
             .keylineTint(ActivityTint.brand)
         }
@@ -255,6 +258,10 @@ private struct LockScreenActivityView: View {
             .foregroundStyle(ActivityTint.color(for: state.aggregateStateRaw))
             StaleNotice(isStale: isStale, updatedAt: state.updatedAt)
         }
+        // Live Activity cards can have no effective horizontal system margin
+        // when a custom background tint is used. Keep controls and status text
+        // inside the card's rounded-corner clipping mask.
+        .padding(.horizontal, 16)
         .padding(.vertical, 4)
     }
 }

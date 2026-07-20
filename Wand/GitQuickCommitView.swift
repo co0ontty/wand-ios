@@ -368,9 +368,11 @@ struct GitQuickCommitView: View {
     private var hasChanges: Bool { (status?.modifiedCount ?? 0) > 0 }
 
     @ViewBuilder private var formPanel: some View {
-        // "New" + AI 预生成按钮
+        commitWorkspaceLens
+
+        // 提交信息 + AI 预生成按钮
         HStack {
-            Text("New")
+            Text("提交信息")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
             Spacer()
@@ -394,6 +396,9 @@ struct GitQuickCommitView: View {
         // Commit：上一笔 → 新 message
         VStack(alignment: .leading, spacing: 6) {
             pairOldLine(label: "Commit", old: oldCommitLine)
+            Text("新的 Commit 信息")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
             TextField("留空由 AI 根据改动生成", text: $message)
                 .font(.system(size: 15))
                 .textFieldStyle(.plain)
@@ -409,6 +414,9 @@ struct GitQuickCommitView: View {
         // Tag：最新 tag → 新 tag
         VStack(alignment: .leading, spacing: 6) {
             pairOldLine(label: "Tag", old: status?.latestTag ?? "无 tag")
+            Text("Tag（可选）")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Theme.textSecondary)
             TextField("留空则 AI 生成（拖入 Tag 球时生效）", text: $tagName)
                 .font(.system(size: 14, design: .monospaced))
                 .textFieldStyle(.plain)
@@ -485,6 +493,47 @@ struct GitQuickCommitView: View {
 
     private var oldCommitLine: String {
         Self.joinedOr([status?.lastCommit?.shortHash, status?.lastCommit?.subject], fallback: "无 commit")
+    }
+
+    /// 提交前先交代当前分支、改动和待推送状态，避免表单脱离工作区上下文。
+    private var commitWorkspaceLens: some View {
+        let changeCount = status?.modifiedCount ?? 0
+        let ahead = status?.ahead ?? 0
+        let hasPendingChanges = changeCount > 0
+        let tone: Color = hasPendingChanges ? Theme.brand : Theme.success
+        let stateText = hasPendingChanges
+            ? "\(changeCount) 个改动待处理"
+            : (ahead > 0 ? "\(ahead) 个 commit 待推送" : "工作区干净")
+
+        return HStack(spacing: 10) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(tone)
+                .frame(width: 34, height: 34)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tone.opacity(0.13)))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status?.branch ?? "未识别分支")
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(stateText)
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.textSecondary)
+            }
+            Spacer(minLength: 0)
+            if ahead > 0 && hasPendingChanges {
+                Text("↑\(ahead)")
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundColor(Theme.success)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Theme.success.opacity(0.12)))
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(tone.opacity(0.30), lineWidth: 1))
     }
 
     /// 拼接非空片段；全空时回退占位文案。

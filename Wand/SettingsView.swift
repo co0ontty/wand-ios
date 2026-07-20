@@ -25,16 +25,18 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                settingsOverview
                 appearanceSection
                 featureSection
                 serverSection
                 diagnosticsSection
+                clientUpdateSection
                 moreSection
                 aboutSection
             }
             .scrollContentBackground(.hidden)
             .background(WandAmbientBackground())
-            .navigationTitle("设置")
+            .navigationTitle("系统设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -93,6 +95,43 @@ struct SettingsView: View {
     }
 
     // MARK: - 区块
+
+    /// Android 端同样先交代设备、连接和外观；这里保持 iOS Form 的原生信息密度。
+    private var settingsOverview: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    WandBrandMark(size: 46)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("系统设置")
+                            .font(.system(size: 19, weight: .semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                        Text("连接、设备和工作流偏好都在这里调整。")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    Spacer(minLength: 8)
+                    Text(appVersion)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Theme.surface.opacity(0.82)))
+                }
+                HStack(spacing: 7) {
+                    settingsStatePill(
+                        token?.isEmpty == false ? "已安全连接" : "已连接",
+                        color: Theme.success
+                    )
+                    settingsStatePill("iOS 原生", color: Theme.brand)
+                    settingsStatePill(currentAppearance.title, color: Theme.brandStrong)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+    }
 
     private var serverSection: some View {
         Section("服务器") {
@@ -210,6 +249,33 @@ struct SettingsView: View {
         }
     }
 
+    /// iOS 不存在安全的应用内安装 API；把版本与正确的更新路径放在设置中，
+    /// 但不伪造 Android 那种可下载 / 安装的流程。
+    private var clientUpdateSection: some View {
+        Section {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Theme.success)
+                    .frame(width: 34, height: 34)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.success.opacity(0.13)))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("通过签名工具更新")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("当前 \(appVersion)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 4)
+        } header: {
+            Text("应用与更新")
+        } footer: {
+            Text("iOS 自签名应用无法在 App 内下载安装更新。请使用安装 Wand 时的 SideStore、AltStore 或 Sideloadly 刷新签名并安装新版本。")
+        }
+    }
+
     /// 拼最近 5 分钟日志写临时文件并弹系统分享面板；窗口内没有日志时给出提示。
     private func exportLogs() {
         guard WandLog.shared.recentCount(within: 5) > 0 else {
@@ -255,6 +321,22 @@ struct SettingsView: View {
             return "v\(short)"
         }
         return "v\(short)+\(stamp)"
+    }
+
+    private func settingsStatePill(_ label: String, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(label)
+                .lineLimit(1)
+        }
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(Theme.textPrimary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(color.opacity(0.10)))
+        .overlay(Capsule().stroke(color.opacity(0.18), lineWidth: 0.6))
     }
 
     private func refreshNotificationStatus() async {

@@ -98,6 +98,8 @@ enum Theme {
     static let textPrimary = dynamic(light: rgb(0.157, 0.137, 0.122), dark: rgb(0.953, 0.933, 0.906)) // #28231F / #F3EEE7
     static let textSecondary = dynamic(light: rgb(0.384, 0.353, 0.325), dark: rgb(0.780, 0.745, 0.706)) // #625A53 / #C7BEB4
     static let textMuted = dynamic(light: rgb(0.545, 0.510, 0.475), dark: rgb(0.584, 0.545, 0.506)) // #8B8279 / #958B81
+    /// 与 macOS / Web 对齐的成功语义色，用于已连接、已完成等状态。
+    static let success = Color(red: 0.310, green: 0.478, blue: 0.345) // #4F7A58
     static let danger = dynamic(light: rgb(0.698, 0.310, 0.271), dark: rgb(0.878, 0.486, 0.447))
 
     /// WKWebView overscroll 区域底色，避免加载前/回弹时露出白底。
