@@ -3,6 +3,10 @@ import XCTest
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
+    func testModelRefreshUsesLongRequestTimeout() {
+        XCTAssertEqual(WandAPI.modelRefreshTimeout, 180)
+    }
+
     func testSessionOpenGateRejectsDuplicateAndConcurrentNavigation() {
         XCTAssertTrue(shouldBeginSessionOpen(
             requestedID: "a", currentSelection: nil, openingSessionID: nil

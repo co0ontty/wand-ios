@@ -31,6 +31,7 @@ final class ChatStore: ObservableObject {
     @Published var availableModels: [ModelInfo] = []
     @Published var defaultModel: String?
     @Published var selectedModel: String?
+    @Published private(set) var isRefreshingModels = false
     @Published var thinkingEffort = "off"
     /// 服务端全局卡片默认展开偏好；旧服务端缺字段时安全回退为全部收起。
     @Published var cardDefaults = CardExpandDefaults()
@@ -80,6 +81,8 @@ final class ChatStore: ObservableObject {
     /// 快速再次切模型时由最新模型请求接管这次同步。
     private var thinkingEffortNeedsSync = false
     private var modelsLoaded = false
+    /// 模型目录的普通加载与用户手动刷新可能重叠；只有最新请求可以写回 UI。
+    private var modelCatalogRevision = 0
 
     var isStructured: Bool { snapshot?.isStructured ?? true }
     var sessionEnded: Bool { ["exited", "failed", "stopped"].contains(status) }
@@ -681,13 +684,46 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    private func loadModels() async {
-        guard let response = try? await api.models() else { return }
+    /// 用户主动刷新模型目录。实际 CLI 探测由服务端完成，避免 iOS 端重复实现 provider 逻辑。
+    func refreshModels() {
+        guard !isRefreshingModels else { return }
+        // Set this before scheduling the task so two rapid taps cannot enqueue
+        // duplicate refreshes in the small window before the task starts.
+        isRefreshingModels = true
+        Task { [weak self] in
+            await self?.loadModels(forceRefresh: true)
+        }
+    }
+
+    private func loadModels(forceRefresh: Bool = false) async {
+        // 初始加载在用户已经手动刷新后才姗姗来迟时，不得用普通 GET 覆盖刷新结果。
+        if !forceRefresh, modelCatalogRevision > 0 { return }
+        modelCatalogRevision &+= 1
+        let revision = modelCatalogRevision
+        let thinkingRevision = thinkingUpdateRevision
+        if forceRefresh { isRefreshingModels = true }
+        defer {
+            if forceRefresh, revision == modelCatalogRevision {
+                isRefreshingModels = false
+            }
+        }
+
+        let response: ModelsResponse
+        do {
+            response = try await (forceRefresh ? api.refreshModels() : api.models())
+        } catch {
+            guard revision == modelCatalogRevision else { return }
+            if forceRefresh { toast = "刷新模型列表失败：\(error.localizedDescription)" }
+            return
+        }
+        guard !Task.isCancelled, revision == modelCatalogRevision else { return }
         let provider = WandProvider(normalizing: snapshot?.provider).rawValue
         availableModels = response.models(for: provider)
         defaultModel = response.defaultModelId(for: provider)
         modelsLoaded = true
-        if !supportsThinkingEffort(thinkingEffort, model: selectedModel) {
+        // 刷新过程中用户若已手动调整思考档位，不能让旧请求回包替他重置选择。
+        if thinkingRevision == thinkingUpdateRevision,
+           !supportsThinkingEffort(thinkingEffort, model: selectedModel) {
             setThinkingEffort("off")
         }
     }

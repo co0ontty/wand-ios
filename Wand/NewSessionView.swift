@@ -23,6 +23,11 @@ struct NewSessionView: View {
     @State private var qoderModels: [ModelInfo] = []
     @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil, opencode: nil, qoder: nil)
     @State private var selectedModel = ""
+    @State private var isRefreshingModels = false
+    @State private var modelRefreshError: String?
+    /// 目录请求与用户选项可并发发生；代次避免旧响应覆盖较新的模型目录或选择。
+    @State private var modelCatalogRevision = 0
+    @State private var modelSelectionRevision = 0
     /// Provider -> 用户在本页触碰过的模型。空字符串表示显式恢复
     /// Provider 默认；缺少 key 表示不改服务端现值。保留跨 Provider 待保存值，
     /// 避免快速切换时后一次 debounce 丢掉前一个 Provider 的模型选择。
@@ -103,6 +108,7 @@ struct NewSessionView: View {
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: provider) { _, newProvider in
+                            modelSelectionRevision &+= 1
                             mode = supportedMode(mode, provider: newProvider)
                             selectedModel = pendingModelDefaults[WandProvider.normalize(newProvider)] ?? ""
                             normalizeThinkingEffortIfNeeded()
@@ -127,20 +133,37 @@ struct NewSessionView: View {
                                 value: selectedModelLabel,
                                 icon: "cpu"
                             ) {
-                                Button {
-                                    selectModel("")
-                                } label: {
-                                    selectedModel.isEmpty
-                                        ? Label("默认 · \(defaultModelLabel)", systemImage: "checkmark")
-                                        : Label("默认 · \(defaultModelLabel)", systemImage: "circle")
-                                }
-                                ForEach(providerModels.filter { $0.id != "default" }) { model in
+                                Section {
                                     Button {
-                                        selectModel(model.id)
+                                        refreshModelCatalog()
                                     } label: {
-                                        selectedModel == model.id
-                                            ? Label(model.label, systemImage: "checkmark")
-                                            : Label(model.label, systemImage: "circle")
+                                        if isRefreshingModels {
+                                            HStack(spacing: 8) {
+                                                ProgressView().controlSize(.small)
+                                                Text("正在刷新模型列表")
+                                            }
+                                        } else {
+                                            Label("刷新模型列表", systemImage: "arrow.clockwise")
+                                        }
+                                    }
+                                    .disabled(isRefreshingModels)
+                                }
+                                Section("模型") {
+                                    Button {
+                                        selectModel("")
+                                    } label: {
+                                        selectedModel.isEmpty
+                                            ? Label("默认 · \(defaultModelLabel)", systemImage: "checkmark")
+                                            : Label("默认 · \(defaultModelLabel)", systemImage: "circle")
+                                    }
+                                    ForEach(providerModels.filter { $0.id != "default" }) { model in
+                                        Button {
+                                            selectModel(model.id)
+                                        } label: {
+                                            selectedModel == model.id
+                                                ? Label(model.label, systemImage: "checkmark")
+                                                : Label(model.label, systemImage: "circle")
+                                        }
                                     }
                                 }
                             }
@@ -159,6 +182,20 @@ struct NewSessionView: View {
                                     }
                                 }
                             }
+                        }
+                        if isRefreshingModels {
+                            HStack(spacing: 7) {
+                                ProgressView().controlSize(.small).tint(Theme.brand)
+                                Text("正在刷新模型列表…")
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(Theme.textSecondary)
+                            .padding(.top, 6)
+                        } else if let modelRefreshError {
+                            Text(modelRefreshError)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(Theme.danger)
+                                .padding(.top, 6)
                         }
 
                         sectionHeader("模式")
@@ -260,21 +297,11 @@ struct NewSessionView: View {
             }
             selectedModel = ""
             thinkingEffort = config?.defaultThinkingEffort ?? thinkingEffort
-            if let response = try? await api.models() {
-                availableModels = response.models(for: WandProvider.claude.rawValue)
-                codexModels = response.models(for: WandProvider.codex.rawValue)
-                opencodeModels = response.models(for: WandProvider.opencode.rawValue)
-                qoderModels = response.models(for: WandProvider.qoder.rawValue)
-                didLoadModels = true
-                serverDefaultModels = ProviderDefaultModels(
-                    claude: response.defaultModelId(for: WandProvider.claude.rawValue),
-                    codex: response.defaultModelId(for: WandProvider.codex.rawValue),
-                    opencode: response.defaultModelId(for: WandProvider.opencode.rawValue),
-                    qoder: response.defaultModelId(for: WandProvider.qoder.rawValue)
-                )
-                selectedModel = normalizedModel(selectedModel, provider: provider)
-            }
-            let normalizedThinkingEffort = normalizeThinkingEffortIfNeeded()
+            let initialModelSelectionRevision = modelSelectionRevision
+            await loadModelCatalog()
+            let normalizedThinkingEffort = initialModelSelectionRevision == modelSelectionRevision
+                ? normalizeThinkingEffortIfNeeded()
+                : false
             // Provider / 类型 / 模式 / 模型偏好已完成 hydration；目录请求不应继续
             // 阻塞用户选择的即时保存。
             didLoadDefaults = true
@@ -451,10 +478,70 @@ struct NewSessionView: View {
     }
 
     private func selectModel(_ model: String) {
+        modelSelectionRevision &+= 1
         selectedModel = model
         pendingModelDefaults[selectedProvider.rawValue] = model
         normalizeThinkingEffortIfNeeded()
         scheduleDefaultsSave()
+    }
+
+    /// 主动刷新时走服务端的 CLI 探测接口；普通页面加载仍只读取缓存，避免打开页面变慢。
+    private func refreshModelCatalog() {
+        guard !isRefreshingModels else { return }
+        // Publish the busy state before the task is scheduled so rapid taps
+        // cannot start more than one server-side CLI discovery run.
+        isRefreshingModels = true
+        modelRefreshError = nil
+        Task {
+            await loadModelCatalog(forceRefresh: true)
+        }
+    }
+
+    private func loadModelCatalog(forceRefresh: Bool = false) async {
+        // 初始 GET 可能在用户点刷新后才返回，不能覆盖后者探测到的新目录。
+        if !forceRefresh, modelCatalogRevision > 0 { return }
+        modelCatalogRevision &+= 1
+        let catalogRevision = modelCatalogRevision
+        let selectionRevision = modelSelectionRevision
+        if forceRefresh {
+            isRefreshingModels = true
+            modelRefreshError = nil
+        }
+        defer {
+            if forceRefresh, catalogRevision == modelCatalogRevision {
+                isRefreshingModels = false
+            }
+        }
+
+        let response: ModelsResponse
+        do {
+            response = try await (forceRefresh ? api.refreshModels() : api.models())
+        } catch {
+            guard !Task.isCancelled, catalogRevision == modelCatalogRevision else { return }
+            if forceRefresh {
+                modelRefreshError = "刷新模型列表失败：\(error.localizedDescription)"
+            }
+            return
+        }
+        guard !Task.isCancelled, catalogRevision == modelCatalogRevision else { return }
+
+        availableModels = response.models(for: WandProvider.claude.rawValue)
+        codexModels = response.models(for: WandProvider.codex.rawValue)
+        opencodeModels = response.models(for: WandProvider.opencode.rawValue)
+        qoderModels = response.models(for: WandProvider.qoder.rawValue)
+        serverDefaultModels = ProviderDefaultModels(
+            claude: response.defaultModelId(for: WandProvider.claude.rawValue),
+            codex: response.defaultModelId(for: WandProvider.codex.rawValue),
+            opencode: response.defaultModelId(for: WandProvider.opencode.rawValue),
+            qoder: response.defaultModelId(for: WandProvider.qoder.rawValue)
+        )
+        didLoadModels = true
+
+        // 用户请求在飞行中换了 provider 或模型时，目录可以更新，但绝不能替他重置选择。
+        if selectionRevision == modelSelectionRevision {
+            selectedModel = normalizedModel(selectedModel, provider: provider)
+            _ = normalizeThinkingEffortIfNeeded()
+        }
     }
 
     /// 模型/Provider 改变后，旧档位可能不在新的能力列表里。此时真实选择必须
