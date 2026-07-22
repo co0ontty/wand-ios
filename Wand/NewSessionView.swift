@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 新建会话 —— 选项与区块顺序对齐 Web 端「新对话」弹窗（renderSessionModal）：
-/// Provider（Claude / Codex / OpenCode）→ 会话类型（结构化 / PTY）→ 模式
+/// Provider（Claude / Codex / OpenCode / Grok / Qoder）→ 会话类型（结构化 / PTY）→ 模式
 /// （托管 / 全权限 / 自动编辑 / 标准 / 原生；各 Provider 只开放自身支持项）→ 工作目录
 /// （最近路径 / 内置目录浏览器）；iOS 额外保留「首条消息」快捷输入。
 /// 创建成功后回调给列表页直接进入会话。
@@ -20,11 +20,10 @@ struct NewSessionView: View {
     @State private var availableModels: [ModelInfo] = []
     @State private var codexModels: [ModelInfo] = []
     @State private var opencodeModels: [ModelInfo] = []
+    @State private var grokModels: [ModelInfo] = []
     @State private var qoderModels: [ModelInfo] = []
-    @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil, opencode: nil, qoder: nil)
+    @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil, opencode: nil, grok: nil, qoder: nil)
     @State private var selectedModel = ""
-    @State private var isRefreshingModels = false
-    @State private var modelRefreshError: String?
     /// 目录请求与用户选项可并发发生；代次避免旧响应覆盖较新的模型目录或选择。
     @State private var modelCatalogRevision = 0
     @State private var modelSelectionRevision = 0
@@ -72,7 +71,7 @@ struct NewSessionView: View {
         switch selectedProvider {
         case .codex: codexModels
         case .opencode: opencodeModels
-        case .grok: []
+        case .grok: grokModels
         case .qoder: qoderModels
         case .claude: availableModels
         }
@@ -133,21 +132,6 @@ struct NewSessionView: View {
                                 value: selectedModelLabel,
                                 icon: "cpu"
                             ) {
-                                Section {
-                                    Button {
-                                        refreshModelCatalog()
-                                    } label: {
-                                        if isRefreshingModels {
-                                            HStack(spacing: 8) {
-                                                ProgressView().controlSize(.small)
-                                                Text("正在刷新模型列表")
-                                            }
-                                        } else {
-                                            Label("刷新模型列表", systemImage: "arrow.clockwise")
-                                        }
-                                    }
-                                    .disabled(isRefreshingModels)
-                                }
                                 Section("模型") {
                                     Button {
                                         selectModel("")
@@ -183,21 +167,6 @@ struct NewSessionView: View {
                                 }
                             }
                         }
-                        if isRefreshingModels {
-                            HStack(spacing: 7) {
-                                ProgressView().controlSize(.small).tint(Theme.brand)
-                                Text("正在刷新模型列表…")
-                            }
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(Theme.textSecondary)
-                            .padding(.top, 6)
-                        } else if let modelRefreshError {
-                            Text(modelRefreshError)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(Theme.danger)
-                                .padding(.top, 6)
-                        }
-
                         sectionHeader("模式")
                         LazyVGrid(
                             columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
@@ -292,6 +261,7 @@ struct NewSessionView: View {
                     claude: config.defaultModelId(for: WandProvider.claude.rawValue),
                     codex: config.defaultModelId(for: WandProvider.codex.rawValue),
                     opencode: config.defaultModelId(for: WandProvider.opencode.rawValue),
+                    grok: config.defaultModelId(for: WandProvider.grok.rawValue),
                     qoder: config.defaultModelId(for: WandProvider.qoder.rawValue)
                 )
             }
@@ -453,7 +423,7 @@ struct NewSessionView: View {
         switch WandProvider(normalizing: provider) {
         case .codex: models = codexModels
         case .opencode: models = opencodeModels
-        case .grok: models = []
+        case .grok: models = grokModels
         case .qoder: models = qoderModels
         case .claude: models = availableModels
         }
@@ -465,7 +435,7 @@ struct NewSessionView: View {
         switch WandProvider(normalizing: provider) {
         case .codex: serverDefaultModels.codex ?? ""
         case .opencode: serverDefaultModels.opencode ?? ""
-        case .grok: ""
+        case .grok: serverDefaultModels.grok ?? ""
         case .qoder: serverDefaultModels.qoder ?? ""
         case .claude: serverDefaultModels.claude ?? ""
         }
@@ -485,42 +455,17 @@ struct NewSessionView: View {
         scheduleDefaultsSave()
     }
 
-    /// 主动刷新时走服务端的 CLI 探测接口；普通页面加载仍只读取缓存，避免打开页面变慢。
-    private func refreshModelCatalog() {
-        guard !isRefreshingModels else { return }
-        // Publish the busy state before the task is scheduled so rapid taps
-        // cannot start more than one server-side CLI discovery run.
-        isRefreshingModels = true
-        modelRefreshError = nil
-        Task {
-            await loadModelCatalog(forceRefresh: true)
-        }
-    }
-
-    private func loadModelCatalog(forceRefresh: Bool = false) async {
-        // 初始 GET 可能在用户点刷新后才返回，不能覆盖后者探测到的新目录。
-        if !forceRefresh, modelCatalogRevision > 0 { return }
+    /// 读取服务端当前持久化目录。CLI 探测由服务端的自动或管理员刷新完成。
+    private func loadModelCatalog() async {
         modelCatalogRevision &+= 1
         let catalogRevision = modelCatalogRevision
         let selectionRevision = modelSelectionRevision
-        if forceRefresh {
-            isRefreshingModels = true
-            modelRefreshError = nil
-        }
-        defer {
-            if forceRefresh, catalogRevision == modelCatalogRevision {
-                isRefreshingModels = false
-            }
-        }
 
         let response: ModelsResponse
         do {
-            response = try await (forceRefresh ? api.refreshModels() : api.models())
+            response = try await api.models()
         } catch {
             guard !Task.isCancelled, catalogRevision == modelCatalogRevision else { return }
-            if forceRefresh {
-                modelRefreshError = "刷新模型列表失败：\(error.localizedDescription)"
-            }
             return
         }
         guard !Task.isCancelled, catalogRevision == modelCatalogRevision else { return }
@@ -528,11 +473,13 @@ struct NewSessionView: View {
         availableModels = response.models(for: WandProvider.claude.rawValue)
         codexModels = response.models(for: WandProvider.codex.rawValue)
         opencodeModels = response.models(for: WandProvider.opencode.rawValue)
+        grokModels = response.models(for: WandProvider.grok.rawValue)
         qoderModels = response.models(for: WandProvider.qoder.rawValue)
         serverDefaultModels = ProviderDefaultModels(
             claude: response.defaultModelId(for: WandProvider.claude.rawValue),
             codex: response.defaultModelId(for: WandProvider.codex.rawValue),
             opencode: response.defaultModelId(for: WandProvider.opencode.rawValue),
+            grok: response.defaultModelId(for: WandProvider.grok.rawValue),
             qoder: response.defaultModelId(for: WandProvider.qoder.rawValue)
         )
         didLoadModels = true
@@ -845,13 +792,14 @@ struct NewSessionView: View {
         var claude = serverDefaultModels.claude
         var codex = serverDefaultModels.codex
         var opencode = serverDefaultModels.opencode
+        var grok = serverDefaultModels.grok
         var qoder = serverDefaultModels.qoder
         for (provider, model) in values.modelUpdates {
             switch WandProvider(normalizing: provider) {
             case .claude: claude = model
             case .codex: codex = model
             case .opencode: opencode = model
-            case .grok: break
+            case .grok: grok = model
             case .qoder: qoder = model
             }
             if pendingModelDefaults[provider] == model {
@@ -862,6 +810,7 @@ struct NewSessionView: View {
             claude: claude,
             codex: codex,
             opencode: opencode,
+            grok: grok,
             qoder: qoder
         )
     }

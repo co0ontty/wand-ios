@@ -12,8 +12,6 @@ private extension Data {
 final class WandAPI {
     /// 聊天块级窗口默认预算：打开会话只拉最近这么多个内容块，更早的滚动到顶时按需翻页。
     static let chatBlockWindow = 60
-    /// 刷新模型会重新探测多个 CLI，可能超过普通请求的 30 秒窗口。
-    static let modelRefreshTimeout: TimeInterval = 180
 
     let baseURL: URL
     let token: String?
@@ -161,18 +159,6 @@ final class WandAPI {
 
     func models() async throws -> ModelsResponse {
         try await request(ModelsResponse.self, method: "GET", path: "/api/models")
-    }
-
-    /// 重新探测各 CLI 的可用模型，并返回刷新后的统一模型目录。
-    ///
-    /// 与 `models()` 保持独立，避免普通页面加载每次都触发耗时的 CLI 探测。
-    func refreshModels() async throws -> ModelsResponse {
-        try await request(
-            ModelsResponse.self,
-            method: "POST",
-            path: "/api/models/refresh",
-            timeout: Self.modelRefreshTimeout
-        )
     }
 
     @discardableResult
@@ -510,7 +496,8 @@ final class WandAPI {
                 body["defaultOpenCodeModel"] = model
                 body["defaultModels"] = ["opencode": model]
             case .grok:
-                break
+                body["defaultGrokModel"] = model
+                body["defaultModels"] = ["grok": model]
             case .qoder:
                 body["defaultQoderModel"] = model
                 body["defaultModels"] = ["qoder": model]

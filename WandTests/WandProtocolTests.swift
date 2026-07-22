@@ -3,10 +3,6 @@ import XCTest
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
-    func testModelRefreshUsesLongRequestTimeout() {
-        XCTAssertEqual(WandAPI.modelRefreshTimeout, 180)
-    }
-
     func testSessionOpenGateRejectsDuplicateAndConcurrentNavigation() {
         XCTAssertTrue(shouldBeginSessionOpen(
             requestedID: "a", currentSelection: nil, openingSessionID: nil
@@ -415,9 +411,13 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(response.models.map(\.id), ["claude-sonnet"])
         XCTAssertEqual(response.codexModels.map(\.id), ["gpt-5-codex"])
         XCTAssertTrue(response.opencodeModels.isEmpty)
+        XCTAssertTrue(response.grokModels.isEmpty)
         XCTAssertNil(response.defaultOpenCodeModel)
+        XCTAssertNil(response.defaultGrokModel)
         XCTAssertEqual(response.models(for: "opencode").map(\.id), [])
         XCTAssertEqual(response.defaultModelId(for: "opencode"), "")
+        XCTAssertEqual(response.models(for: "grok").map(\.id), [])
+        XCTAssertEqual(response.defaultModelId(for: "grok"), "")
     }
 
     func testCurrentModelsResponseDecodesOpenCodeModelsAndDefaults() throws {
@@ -448,6 +448,33 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(response.defaultOpenCodeModel, "legacy/opencode-default")
         XCTAssertEqual(response.defaultModels?.opencode, "openai/gpt-5")
         XCTAssertEqual(response.defaultModelId(for: "opencode"), "openai/gpt-5")
+    }
+
+    func testCurrentModelsResponseDecodesGrokModelsAndDefaults() throws {
+        let response = try decode(
+            ModelsResponse.self,
+            from: #"""
+            {
+              "models": [],
+              "codexModels": [],
+              "opencodeModels": [],
+              "grokModels": [
+                {"id": "default", "label": "跟随 Grok 默认", "alias": true},
+                {"id": "grok-4.5", "label": "Grok 4.5"}
+              ],
+              "defaultGrokModel": "legacy-grok-default",
+              "defaultModels": {
+                "grok": "grok-4.5"
+              }
+            }
+            """#
+        )
+
+        XCTAssertEqual(response.models(for: WandProvider.grok).map(\.id), ["default", "grok-4.5"])
+        XCTAssertEqual(response.defaultGrokModel, "legacy-grok-default")
+        XCTAssertEqual(response.defaultModels?.grok, "grok-4.5")
+        XCTAssertEqual(response.defaultModels?.modelId(for: "grok"), "grok-4.5")
+        XCTAssertEqual(response.defaultModelId(for: "grok"), "grok-4.5")
     }
 
     func testLegacyServerConfigWithoutOpenCodeFieldsDecodes() throws {
@@ -482,6 +509,26 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(config.defaultOpenCodeModel, "legacy/opencode-default")
         XCTAssertEqual(config.defaultModels?.opencode, "openai/gpt-5")
         XCTAssertEqual(config.defaultModelId(for: "opencode"), "openai/gpt-5")
+    }
+
+    func testServerConfigDecodesGrokDefaults() throws {
+        let config = try decode(
+            ServerConfigInfo.self,
+            from: #"""
+            {
+              "defaultProvider": "grok",
+              "defaultGrokModel": "legacy-grok-default",
+              "defaultModels": {
+                "grok": "grok-4.5"
+              }
+            }
+            """#
+        )
+
+        XCTAssertEqual(config.defaultProvider, "grok")
+        XCTAssertEqual(config.defaultGrokModel, "legacy-grok-default")
+        XCTAssertEqual(config.defaultModels?.grok, "grok-4.5")
+        XCTAssertEqual(config.defaultModelId(for: "grok"), "grok-4.5")
     }
 
     func testToolResultExtractsTextFromStructuredContentParts() throws {

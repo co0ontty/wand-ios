@@ -165,7 +165,9 @@ ios/
   `NativeRootView` 重新登录一次；REST 401 时 `WandAPI` 也会自动重登重试）
 - 会话列表：`GET /api/sessions`（slim，无 messages）；详情 `GET /api/sessions/:id?format=chat`
 - 新建会话：结构化会话 `POST /api/structured-sessions`，终端会话 `POST /api/commands`；
-  两者均显式传 `provider: claude|codex|opencode`
+  两者均显式传 `provider: claude|codex|opencode|grok|qoder`
+- 模型目录：只读 `GET /api/models`，消费服务端持久化的最新目录；CLI 探测和目录刷新
+  仅由服务端自动任务或管理员操作触发。
 - 发消息：`POST /api/sessions/:id/input` —— 结构化会话发原文；PTY 原生输入先发文本，再发 `"\r"`，并带 `shortcutKey:"enter_text"`
 - 停止回复：结构化 `POST /api/sessions/:id/stop`；PTY 发 Esc（`` + `shortcutKey:"esc"`）
 - 权限：`pendingEscalation` → `POST /api/sessions/:id/escalations/:requestId/resolve`

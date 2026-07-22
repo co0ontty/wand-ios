@@ -31,7 +31,6 @@ final class ChatStore: ObservableObject {
     @Published var availableModels: [ModelInfo] = []
     @Published var defaultModel: String?
     @Published var selectedModel: String?
-    @Published private(set) var isRefreshingModels = false
     @Published var thinkingEffort = "off"
     /// 服务端全局卡片默认展开偏好；旧服务端缺字段时安全回退为全部收起。
     @Published var cardDefaults = CardExpandDefaults()
@@ -113,11 +112,14 @@ final class ChatStore: ObservableObject {
             return
         }
 
-        // destination 被 NavigationStack 复用时，重新打开已经关闭的 socket。
-        // WandSocket.connect() 会自动重订阅并收到 init 快照，无需重复拉模型等静态配置。
+        // destination 被 NavigationStack 复用时，重新打开已经关闭的 socket，并重新读取
+        // 服务端当前缓存的模型目录。目录刷新由服务端负责，客户端只消费最新快照。
         guard !started else {
             wlog("session", "start() session=\(sessionId)（恢复缓存详情连接）")
             connectSocket()
+            if snapshot != nil {
+                Task { [weak self] in await self?.loadModels() }
+            }
             return
         }
         started = true
@@ -184,6 +186,9 @@ final class ChatStore: ObservableObject {
     func handleEnterForeground() {
         if !connected { socket.connect() }
         socket.requestResync()
+        if snapshot != nil {
+            Task { [weak self] in await self?.loadModels() }
+        }
     }
 
     /// 退后台：本期刻意不 close()。
@@ -684,36 +689,18 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// 用户主动刷新模型目录。实际 CLI 探测由服务端完成，避免 iOS 端重复实现 provider 逻辑。
-    func refreshModels() {
-        guard !isRefreshingModels else { return }
-        // Set this before scheduling the task so two rapid taps cannot enqueue
-        // duplicate refreshes in the small window before the task starts.
-        isRefreshingModels = true
-        Task { [weak self] in
-            await self?.loadModels(forceRefresh: true)
-        }
-    }
-
-    private func loadModels(forceRefresh: Bool = false) async {
-        // 初始加载在用户已经手动刷新后才姗姗来迟时，不得用普通 GET 覆盖刷新结果。
-        if !forceRefresh, modelCatalogRevision > 0 { return }
+    /// 从服务端读取当前持久化目录。`modelCatalogRevision` 只用于忽略过期 GET 回包；
+    /// CLI 探测与缓存更新由服务端的自动/管理员刷新完成。
+    private func loadModels() async {
         modelCatalogRevision &+= 1
         let revision = modelCatalogRevision
         let thinkingRevision = thinkingUpdateRevision
-        if forceRefresh { isRefreshingModels = true }
-        defer {
-            if forceRefresh, revision == modelCatalogRevision {
-                isRefreshingModels = false
-            }
-        }
 
         let response: ModelsResponse
         do {
-            response = try await (forceRefresh ? api.refreshModels() : api.models())
+            response = try await api.models()
         } catch {
             guard revision == modelCatalogRevision else { return }
-            if forceRefresh { toast = "刷新模型列表失败：\(error.localizedDescription)" }
             return
         }
         guard !Task.isCancelled, revision == modelCatalogRevision else { return }

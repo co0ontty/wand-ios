@@ -1062,29 +1062,33 @@ struct ModelsResponse: Decodable {
     let models: [ModelInfo]
     let codexModels: [ModelInfo]
     let opencodeModels: [ModelInfo]
+    let grokModels: [ModelInfo]
     let qoderModels: [ModelInfo]
     let defaultModel: String?
     let defaultCodexModel: String?
     let defaultOpenCodeModel: String?
+    let defaultGrokModel: String?
     let defaultQoderModel: String?
     let defaultModels: ProviderDefaultModels?
 
     private enum CodingKeys: String, CodingKey {
-        case models, codexModels, opencodeModels, qoderModels
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultQoderModel, defaultModels
+        case models, codexModels, opencodeModels, grokModels, qoderModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultModels
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        // 旧服务端可能没有 Codex/OpenCode 列表，单个 provider 形状异常也不应
+        // 旧服务端可能没有新 provider 的模型列表，单个 provider 形状异常也不应
         // 让整个 /api/models 失败。
         models = (try? container.decode([ModelInfo].self, forKey: .models)) ?? []
         codexModels = (try? container.decode([ModelInfo].self, forKey: .codexModels)) ?? []
         opencodeModels = (try? container.decode([ModelInfo].self, forKey: .opencodeModels)) ?? []
+        grokModels = (try? container.decode([ModelInfo].self, forKey: .grokModels)) ?? []
         qoderModels = (try? container.decode([ModelInfo].self, forKey: .qoderModels)) ?? []
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
         defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)
         defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
+        defaultGrokModel = try? container.decode(String.self, forKey: .defaultGrokModel)
         defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
     }
@@ -1098,7 +1102,7 @@ struct ModelsResponse: Decodable {
         case .claude: return models
         case .codex: return codexModels
         case .opencode: return opencodeModels
-        case .grok: return []
+        case .grok: return grokModels
         case .qoder: return qoderModels
         }
     }
@@ -1112,7 +1116,7 @@ struct ModelsResponse: Decodable {
         case .opencode:
             return defaultModels?.opencode ?? defaultOpenCodeModel ?? ""
         case .grok:
-            return ""
+            return defaultModels?.grok ?? defaultGrokModel ?? ""
         case .qoder:
             return defaultModels?.qoder ?? defaultQoderModel ?? ""
         }
@@ -1157,6 +1161,7 @@ struct ServerConfigInfo: Decodable {
     let defaultModel: String?
     let defaultCodexModel: String?
     let defaultOpenCodeModel: String?
+    let defaultGrokModel: String?
     let defaultQoderModel: String?
     let defaultModels: ProviderDefaultModels?
     let defaultThinkingEffort: String?
@@ -1168,7 +1173,7 @@ struct ServerConfigInfo: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case defaultCwd, defaultProvider, defaultSessionKind, defaultMode
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultQoderModel, defaultModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultModels
         case defaultThinkingEffort, cardDefaults
         case currentVersion, latestVersion, updateAvailable, updateChannel
     }
@@ -1182,6 +1187,7 @@ struct ServerConfigInfo: Decodable {
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
         defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)
         defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
+        defaultGrokModel = try? container.decode(String.self, forKey: .defaultGrokModel)
         defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
         defaultThinkingEffort = try? container.decode(String.self, forKey: .defaultThinkingEffort)
@@ -1201,7 +1207,7 @@ struct ServerConfigInfo: Decodable {
         case .opencode:
             return defaultModels?.opencode ?? defaultOpenCodeModel ?? ""
         case .grok:
-            return ""
+            return defaultModels?.grok ?? defaultGrokModel ?? ""
         case .qoder:
             return defaultModels?.qoder ?? defaultQoderModel ?? ""
         }
@@ -1212,14 +1218,16 @@ struct ProviderDefaultModels: Decodable {
     let claude: String?
     let codex: String?
     let opencode: String?
+    let grok: String?
     let qoder: String?
 
-    private enum CodingKeys: String, CodingKey { case claude, codex, opencode, qoder }
+    private enum CodingKeys: String, CodingKey { case claude, codex, opencode, grok, qoder }
 
-    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil, qoder: String? = nil) {
+    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil, grok: String? = nil, qoder: String? = nil) {
         self.claude = claude
         self.codex = codex
         self.opencode = opencode
+        self.grok = grok
         self.qoder = qoder
     }
 
@@ -1228,6 +1236,7 @@ struct ProviderDefaultModels: Decodable {
         claude = try? container.decode(String.self, forKey: .claude)
         codex = try? container.decode(String.self, forKey: .codex)
         opencode = try? container.decode(String.self, forKey: .opencode)
+        grok = try? container.decode(String.self, forKey: .grok)
         qoder = try? container.decode(String.self, forKey: .qoder)
     }
 
@@ -1236,7 +1245,7 @@ struct ProviderDefaultModels: Decodable {
         case .claude: return claude
         case .codex: return codex
         case .opencode: return opencode
-        case .grok: return nil
+        case .grok: return grok
         case .qoder: return qoder
         }
     }

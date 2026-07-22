@@ -817,9 +817,6 @@ struct ChatView: View {
             value: launchModelLabel,
             icon: "cpu"
         ) {
-            Section {
-                refreshModelsMenuAction
-            }
             Section("模型") {
                 modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
                 ForEach(store.availableModels.filter { $0.id != "default" }) { model in
@@ -921,23 +918,6 @@ struct ChatView: View {
                 Text(label)
             }
         }
-    }
-
-    /// 放在每个模型菜单顶部，用户无需离开当前会话即可重新探测 provider 的模型目录。
-    @ViewBuilder private var refreshModelsMenuAction: some View {
-        Button {
-            store.refreshModels()
-        } label: {
-            if store.isRefreshingModels {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("正在刷新模型列表")
-                }
-            } else {
-                Label("刷新模型列表", systemImage: "arrow.clockwise")
-            }
-        }
-        .disabled(store.isRefreshingModels)
     }
 
     private var thinkingLevels: [ThinkingEffortOption] {
@@ -1316,9 +1296,6 @@ struct ChatView: View {
 
     private func modelThinkingChip(compact: Bool = false) -> some View {
         Menu {
-            Section {
-                refreshModelsMenuAction
-            }
             Section("模型") {
                 modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
                 ForEach(store.availableModels.filter { $0.id != "default" }) { model in
