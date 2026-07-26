@@ -2808,6 +2808,7 @@ private struct SubagentActivityDetail: View {
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
     var onAskSubmit: (String, String) -> Void = { _, _ in }
     let onClose: () -> Void
+    private let subagentWindowContentHeight: CGFloat = 280
 
     private var items: [DisplayItem] { pairToolBlocks(activity.blocks) }
     private var tailAnchorID: String { "subagent-shelf-tail:\(activity.id)" }
@@ -2886,7 +2887,7 @@ private struct SubagentActivityDetail: View {
                     .padding(.vertical, 2)
                     .padding(.horizontal, 1)
                 }
-                .frame(maxHeight: 250)
+                .frame(height: subagentWindowContentHeight)
                 .onAppear { scrollToTail(proxy) }
                 .onChange(of: refreshToken) { _, _ in
                     guard activity.state == .running else { return }
