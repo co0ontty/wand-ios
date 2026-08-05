@@ -459,6 +459,95 @@ final class WandAPI {
         )
     }
 
+    // MARK: - Agent Inbox / Missions
+
+    func missionInbox() async throws -> [AgentActivityItem] {
+        let response = try await request(MissionInboxResponse.self, method: "GET", path: "/api/inbox")
+        return response.items
+    }
+
+    func markMissionInboxRead(sessionId: String? = nil) async throws {
+        let body: [String: Any] = sessionId.map { ["sessionId": $0] } ?? [:]
+        _ = try await request(MissionOKResponse.self, method: "POST", path: "/api/inbox/read", body: body)
+    }
+
+    func missions() async throws -> [MissionInfo] {
+        let response = try await request(MissionListResponse.self, method: "GET", path: "/api/missions")
+        return response.missions
+    }
+
+    func createMission(
+        title: String?,
+        prompt: String,
+        cwd: String,
+        providers: [String],
+        baseRef: String?,
+        sharedDirectories: [String],
+        copyPaths: [String]
+    ) async throws -> MissionInfo {
+        var body: [String: Any] = [
+            "prompt": prompt,
+            "cwd": cwd,
+            "providers": providers,
+            "sharedDirectories": sharedDirectories,
+            "copyPaths": copyPaths,
+        ]
+        if let title, !title.isEmpty { body["title"] = title }
+        if let baseRef, !baseRef.isEmpty { body["baseRef"] = baseRef }
+        return try await request(MissionInfo.self, method: "POST", path: "/api/missions", body: body)
+    }
+
+    func missionDiff(missionId: String, attemptId: String) async throws -> MissionDiff {
+        let mission = percentEncodePathComponent(missionId)
+        let attempt = percentEncodePathComponent(attemptId)
+        return try await request(
+            MissionDiff.self,
+            method: "GET",
+            path: "/api/missions/\(mission)/attempts/\(attempt)/diff"
+        )
+    }
+
+    func addMissionReviewComment(
+        missionId: String,
+        attemptId: String,
+        filePath: String,
+        line: Int?,
+        side: String,
+        body: String
+    ) async throws -> MissionReviewComment {
+        var requestBody: [String: Any] = ["filePath": filePath, "side": side, "body": body]
+        if let line { requestBody["line"] = line }
+        let mission = percentEncodePathComponent(missionId)
+        let attempt = percentEncodePathComponent(attemptId)
+        return try await request(
+            MissionReviewComment.self,
+            method: "POST",
+            path: "/api/missions/\(mission)/attempts/\(attempt)/comments",
+            body: requestBody
+        )
+    }
+
+    func sendMissionReview(missionId: String, attemptId: String) async throws -> [MissionReviewComment] {
+        let mission = percentEncodePathComponent(missionId)
+        let attempt = percentEncodePathComponent(attemptId)
+        let response = try await request(
+            MissionReviewResponse.self,
+            method: "POST",
+            path: "/api/missions/\(mission)/attempts/\(attempt)/review/send",
+            body: [:]
+        )
+        return response.comments
+    }
+
+    func archiveMission(id: String) async throws -> MissionInfo {
+        try await request(
+            MissionInfo.self,
+            method: "POST",
+            path: "/api/missions/\(percentEncodePathComponent(id))/archive",
+            body: [:]
+        )
+    }
+
     // MARK: - 目录与配置
 
     func listDirectory(_ query: String) async throws -> DirectoryListing {

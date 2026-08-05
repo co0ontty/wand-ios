@@ -705,6 +705,22 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertNil(TodoItem.activeIndex(in: todos))
     }
 
+    func testMissionProtocolDecodesInboxAttemptsAndPendingReview() throws {
+        let activity = try decode(
+            AgentActivityItem.self,
+            from: #"{"sessionId":"s1","missionId":"m1","attemptId":"a1","state":"needs_permission","title":"Review API","summary":"等待授权","provider":"codex","cwd":"/repo","updatedAt":"2026-08-05T00:00:00.000Z","readAt":null}"#
+        )
+        let mission = try decode(
+            MissionInfo.self,
+            from: #"{"id":"m1","title":"Review API","prompt":"Review the API","cwd":"/repo","status":"needs_input","worktree":{"baseRef":"abc123","sharedDirectories":[],"copyPaths":[".env.local"]},"createdAt":"2026-08-05T00:00:00.000Z","updatedAt":"2026-08-05T00:00:01.000Z","attempts":[{"id":"a1","missionId":"m1","sessionId":"s1","provider":"codex","state":"needs_permission","branch":"wand/review","worktreePath":"/repo/.wand-worktrees/review","baseRef":"abc123","summary":null,"error":null,"createdAt":"2026-08-05T00:00:00.000Z","updatedAt":"2026-08-05T00:00:01.000Z"}],"comments":[{"id":"c1","missionId":"m1","attemptId":"a1","filePath":"src/api.ts","line":42,"side":"new","body":"Handle this error","status":"pending","createdAt":"2026-08-05T00:00:02.000Z","sentAt":null,"resolvedAt":null}]}"#
+        )
+
+        XCTAssertTrue(activity.needsAttention)
+        XCTAssertEqual(mission.attempts.first?.provider, "codex")
+        XCTAssertEqual(mission.worktree.copyPaths, [".env.local"])
+        XCTAssertEqual(mission.pendingComments(for: "a1").first?.line, 42)
+    }
+
     private func todo(status: String) -> TodoItem {
         TodoItem(content: "Task", status: status, activeForm: nil)
     }

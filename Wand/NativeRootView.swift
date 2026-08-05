@@ -11,6 +11,7 @@ struct NativeRootView: View {
     @State private var phase: Phase = .authenticating
     @State private var showWebFallback = false
     @State private var showSettings = false
+    @State private var showMissions = false
     @State private var serverUpdate: ServerUpdateInfo?
     @State private var dismissedUpdateVersion: String?
     @State private var updateBannerMessage: String?
@@ -53,6 +54,9 @@ struct NativeRootView: View {
                 showWebFallback = false
             }
             .environmentObject(store)
+        }
+        .fullScreenCover(isPresented: $showMissions) {
+            MissionsView(api: api, onOpenSession: openSessionFromMissions)
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(serverURL: serverURL, token: token) {
@@ -120,16 +124,28 @@ struct NativeRootView: View {
                 isEnabled: selectedSessionID != nil || showWebFallback
             ) {
                 showSettings = false
+                showMissions = false
                 showWebFallback = false
                 selectedSessionID = nil
                 selectedSnapshot = nil
+            },
+            WandKeyboardShortcutAction(
+                id: "show-missions",
+                title: "显示 Agent Inbox",
+                key: "2",
+                modifiers: .command,
+                isEnabled: !showMissions
+            ) {
+                showSettings = false
+                showWebFallback = false
+                showMissions = true
             },
             WandKeyboardShortcutAction(
                 id: "close-active-surface",
                 title: "关闭当前页",
                 key: "w",
                 modifiers: .command,
-                isEnabled: selectedSessionID != nil || showWebFallback || showSettings
+                isEnabled: selectedSessionID != nil || showWebFallback || showSettings || showMissions
             ) {
                 closeActiveSurfaceFromKeyboard()
             },
@@ -143,7 +159,9 @@ struct NativeRootView: View {
     }
 
     private func closeActiveSurfaceFromKeyboard() {
-        if showWebFallback {
+        if showMissions {
+            showMissions = false
+        } else if showWebFallback {
             showWebFallback = false
         } else if showSettings {
             showSettings = false
@@ -216,6 +234,11 @@ struct NativeRootView: View {
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Menu {
+                            Button {
+                                showMissions = true
+                            } label: {
+                                Label("Agent Inbox", systemImage: "tray.full")
+                            }
                             Button {
                                 NotificationCenter.default.post(name: .wandBeginSessionSelection, object: nil)
                             } label: {
@@ -384,6 +407,26 @@ struct NativeRootView: View {
             guard selectedSessionID == sessionID,
                   openingSessionID == sessionID else { return }
             openingSessionID = nil
+        }
+    }
+
+    private func openSessionFromMissions(_ sessionID: String) {
+        showMissions = false
+        openingSessionID = sessionID
+        selectedSessionID = sessionID
+        selectedSnapshot = nil
+        Task {
+            do {
+                let snapshot = try await api.getSession(id: sessionID)
+                guard selectedSessionID == sessionID else { return }
+                selectedSnapshot = snapshot
+                SessionPresenceController.shared.sync(snapshot: snapshot)
+            } catch {
+                guard selectedSessionID == sessionID else { return }
+                selectedSessionID = nil
+                selectedSnapshot = nil
+                openingSessionID = nil
+            }
         }
     }
 
