@@ -44,8 +44,9 @@ enum WandAuth {
     static func loginWithToken(serverURL: URL,
                                appToken: String,
                                timeout: TimeInterval = 15,
+                               endpointSession: SelfSignedSession? = nil,
                                completion: @escaping (Result<[HTTPCookie], Failure>) -> Void) {
-        guard let loginURL = URL(string: "/api/login", relativeTo: serverURL)?.absoluteURL else {
+        guard let loginURL = WandEndpoint.url(baseURL: serverURL, route: "/api/login") else {
             completion(.failure(.invalidURL))
             return
         }
@@ -61,7 +62,16 @@ enum WandAuth {
             return
         }
 
-        let task = SelfSignedSession.shared.session.dataTask(with: req) { _, response, error in
+        let sessionHandle = endpointSession ?? SelfSignedSession.forEndpoint(serverURL)
+        guard !sessionHandle.isRetired else {
+            completion(.failure(.network("服务器连接已关闭")))
+            return
+        }
+        let task = sessionHandle.session.dataTask(with: req) { _, response, error in
+            guard !sessionHandle.isRetired else {
+                completion(.failure(.network("服务器连接已关闭")))
+                return
+            }
             if let error {
                 completion(.failure(.network(error.localizedDescription)))
                 return
@@ -75,7 +85,7 @@ enum WandAuth {
                 // 优先从 SelfSignedSession 自带的 cookieStorage 拿——URLSession 已经把
                 // 所有 Set-Cookie 头都解析完丢进去，不会因 Set-Cookie 合并/覆盖丢失。
                 // 兜底再从 header 解析一次（防止 cookieStorage 因 Secure 标记跨 scheme 被滤掉）。
-                let storageCookies = SelfSignedSession.shared.cookieStorage?.cookies(for: loginURL) ?? []
+                let storageCookies = sessionHandle.cookieStorage?.cookies(for: loginURL) ?? []
                 var headerFields: [String: String] = [:]
                 for (key, value) in http.allHeaderFields {
                     if let k = key as? String, let v = value as? String { headerFields[k] = v }
@@ -105,20 +115,11 @@ enum WandAuth {
     // MARK: - 连接码解码
 
     /// 解码连接码：base64(url#token)。服务端用标准 base64（src/server.ts encodeConnectCode），
-    /// 但用户从聊天/二维码界面复制时可能混入换行或空格，所以先剥掉所有空白再用
-    /// `.ignoreUnknownCharacters` 容错。token 是 HMAC-SHA256 的 64 位 hex，长度足够。
+    /// 也兼容 URL-safe、无 padding 的变体；token 是 HMAC-SHA256 的 64 位 hex，长度足够。
     static func decodeConnectCode(_ code: String) -> (url: URL, token: String)? {
-        let cleaned = code.components(separatedBy: .whitespacesAndNewlines).joined()
-        guard !cleaned.isEmpty,
-              let data = Data(base64Encoded: cleaned, options: .ignoreUnknownCharacters),
-              let s = String(data: data, encoding: .utf8),
-              let hash = s.range(of: "#", options: .backwards) else { return nil }
-        let urlPart = String(s[..<hash.lowerBound])
-        let token = String(s[hash.upperBound...])
-        guard urlPart.lowercased().hasPrefix("http"),
-              let url = URL(string: urlPart), url.host != nil,
-              token.count >= 16 else { return nil }
-        return (url, token)
+        guard let decoded = ServerProfiles.decodeConnectCode(code),
+              let token = decoded.token else { return nil }
+        return (decoded.baseURL, token)
     }
 
     // MARK: - 智能解析 + 连接
@@ -144,6 +145,22 @@ enum WandAuth {
                     completion(.success(ConnectTarget(url: decoded.url, token: decoded.token)))
                 case .failure(let err):
                     completion(.failure(err))
+                }
+            }
+            return
+        }
+
+        // Compatibility with the old recent-connections screen: it now displays only a
+        // canonical endpoint, never the token-bearing connection code. Resolve the credential
+        // from the endpoint-scoped profile before falling back to an unauthenticated probe.
+        if let saved = ServerStore.shared.profile(matching: trimmed),
+           let savedToken = saved.token {
+            loginWithToken(serverURL: saved.baseURL, appToken: savedToken) { result in
+                switch result {
+                case .success:
+                    completion(.success(ConnectTarget(url: saved.baseURL, token: savedToken)))
+                case .failure(let error):
+                    completion(.failure(error))
                 }
             }
             return
@@ -188,13 +205,13 @@ enum WandAuth {
 
     /// 用公开端点 `/api/session-check` 探测可达性（始终返回 200，不会污染失败登录计数）。
     static func probe(url: URL, timeout: TimeInterval = 6, completion: @escaping (Bool) -> Void) {
-        guard let checkURL = URL(string: "/api/session-check", relativeTo: url)?.absoluteURL else {
+        guard let checkURL = WandEndpoint.url(baseURL: url, route: "/api/session-check") else {
             completion(false); return
         }
         var req = URLRequest(url: checkURL)
         req.timeoutInterval = timeout
         req.cachePolicy = .reloadIgnoringLocalCacheData
-        let task = SelfSignedSession.shared.session.dataTask(with: req) { _, response, error in
+        let task = SelfSignedSession.forEndpoint(url).session.dataTask(with: req) { _, response, error in
             if error != nil { completion(false); return }
             // 200（公开探测）或 401（旧版服务把 /api 全锁了）都说明服务器可达。
             if let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 401 {

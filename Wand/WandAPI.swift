@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 private extension Data {
     mutating func append(_ string: String) {
@@ -6,8 +7,8 @@ private extension Data {
     }
 }
 
-/// wand 服务端 REST 客户端。复用 SelfSignedSession（自签证书放行 + 共享
-/// cookieStorage），所以 WandAuth.loginWithToken 拿到的 session cookie 在这里
+/// wand 服务端 REST 客户端。复用当前 endpoint 的 SelfSignedSession（自签证书放行 +
+/// 独立 cookieStorage），所以 WandAuth.loginWithToken 拿到的 session cookie 在这里
 /// 的每个请求上自动携带；遇到 401 时用存储的 appToken 重新登录一次再重试。
 final class WandAPI {
     /// 聊天块级窗口默认预算：打开会话只拉最近这么多个内容块，更早的滚动到顶时按需翻页。
@@ -15,10 +16,14 @@ final class WandAPI {
 
     let baseURL: URL
     let token: String?
+    /// Captured once so resetting an endpoint retires this client instead of letting a stale
+    /// owner recreate a session and authenticate again with an obsolete token.
+    let endpointSession: SelfSignedSession
 
     init(baseURL: URL, token: String?) {
         self.baseURL = baseURL
         self.token = token
+        self.endpointSession = SelfSignedSession.forEndpoint(baseURL)
     }
 
     enum APIError: LocalizedError {
@@ -39,8 +44,14 @@ final class WandAPI {
 
     // MARK: - 基础请求
 
-    private func makeRequest(method: String, path: String, body: [String: Any]?, timeout: TimeInterval = 30) throws -> URLRequest {
-        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
+    private func makeRequest(
+        method: String,
+        path: String,
+        body: [String: Any]?,
+        timeout: TimeInterval = 30,
+        queryItems: [URLQueryItem]? = nil
+    ) throws -> URLRequest {
+        guard let url = WandEndpoint.url(baseURL: baseURL, route: path, queryItems: queryItems) else {
             throw APIError.invalidURL
         }
         var req = URLRequest(url: url)
@@ -55,8 +66,14 @@ final class WandAPI {
     }
 
     private func perform(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        guard !endpointSession.isRetired else {
+            throw APIError.network("服务器连接已关闭")
+        }
         do {
-            let (data, response) = try await SelfSignedSession.shared.session.data(for: req)
+            let (data, response) = try await endpointSession.session.data(for: req)
+            guard !endpointSession.isRetired else {
+                throw APIError.network("服务器连接已关闭")
+            }
             guard let http = response as? HTTPURLResponse else {
                 throw APIError.network("无效响应")
             }
@@ -70,14 +87,30 @@ final class WandAPI {
     }
 
     /// 带 401 自动重登的请求入口。
-    private func requestData(method: String, path: String, body: [String: Any]? = nil, timeout: TimeInterval = 30) async throws -> Data {
-        let req = try makeRequest(method: method, path: path, body: body, timeout: timeout)
+    private func requestData(
+        method: String,
+        path: String,
+        body: [String: Any]? = nil,
+        timeout: TimeInterval = 30,
+        queryItems: [URLQueryItem]? = nil
+    ) async throws -> Data {
+        let req = try makeRequest(
+            method: method,
+            path: path,
+            body: body,
+            timeout: timeout,
+            queryItems: queryItems
+        )
         var (data, http) = try await perform(req)
         if http.statusCode == 401, let token, !token.isEmpty {
             wlog("api", "401 \(method) \(path)，用 appToken 重新登录后重试")
             // session cookie 过期：用 appToken 重新登录一次，cookie 注入共享存储后重试。
             let relogged = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-                WandAuth.loginWithToken(serverURL: baseURL, appToken: token) { result in
+                WandAuth.loginWithToken(
+                    serverURL: baseURL,
+                    appToken: token,
+                    endpointSession: endpointSession
+                ) { result in
                     if case .success = result { cont.resume(returning: true) }
                     else { cont.resume(returning: false) }
                 }
@@ -101,17 +134,26 @@ final class WandAPI {
         return data
     }
 
-    private func request<T: Decodable>(_ type: T.Type, method: String, path: String, body: [String: Any]? = nil, timeout: TimeInterval = 30) async throws -> T {
-        let data = try await requestData(method: method, path: path, body: body, timeout: timeout)
+    private func request<T: Decodable>(
+        _ type: T.Type,
+        method: String,
+        path: String,
+        body: [String: Any]? = nil,
+        timeout: TimeInterval = 30,
+        queryItems: [URLQueryItem]? = nil
+    ) async throws -> T {
+        let data = try await requestData(
+            method: method,
+            path: path,
+            body: body,
+            timeout: timeout,
+            queryItems: queryItems
+        )
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
             throw APIError.network("响应解析失败：\(error.localizedDescription)")
         }
-    }
-
-    private func percentEncode(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
     }
 
     /// 路径参数不能使用 urlPathAllowed（其包含 `/`），否则 tool use id 中的
@@ -123,6 +165,119 @@ final class WandAPI {
     }
 
     // MARK: - 会话
+
+    /// 服务端统一分页会话列表。旧服务端没有该路由时才退回多 Provider 本地合并。
+    func fetchSessionList(
+        offset: Int,
+        limit: Int,
+        revision: String? = nil
+    ) async throws -> SessionListPage {
+        var queryItems = [
+            URLQueryItem(name: "offset", value: String(offset)),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        if let revision { queryItems.append(URLQueryItem(name: "revision", value: revision)) }
+        do {
+            return try await request(
+                SessionListPage.self,
+                method: "GET",
+                path: "/api/session-list",
+                queryItems: queryItems
+            )
+        } catch APIError.server(let status, _) where status == 404 {
+            return try await fetchLegacySessionList(
+                offset: offset,
+                limit: limit,
+                requestedRevision: revision
+            )
+        }
+    }
+
+    func fetchSessionDirectories() async throws -> SessionDirectoryTreeResponse {
+        try await request(
+            SessionDirectoryTreeResponse.self,
+            method: "GET",
+            path: "/api/session-directories"
+        )
+    }
+
+    func renameSessionDirectory(path: String, name: String) async throws {
+        _ = try await requestData(
+            method: "PUT",
+            path: "/api/session-directories/name",
+            body: ["path": path, "name": name]
+        )
+    }
+
+    private func fetchLegacySessionList(
+        offset: Int,
+        limit: Int,
+        requestedRevision: String?
+    ) async throws -> SessionListPage {
+        async let managedRequest = listSessions()
+        async let claudeRequest = listClaudeHistory()
+        async let codexRequest = listCodexHistory()
+        async let openCodeRequest: [HistorySession] = (try? await listOpenCodeHistory()) ?? []
+        async let qoderRequest: [HistorySession] = (try? await listQoderHistory()) ?? []
+        let (managed, claude, codex, openCode, qoder) = try await (
+            managedRequest,
+            claudeRequest,
+            codexRequest,
+            openCodeRequest,
+            qoderRequest
+        )
+
+        let managedHistoryKeys = Set(managed.compactMap { session -> String? in
+            guard let nativeID = session.claudeSessionId, !nativeID.isEmpty else { return nil }
+            let provider = WandProvider(normalizing: session.provider).rawValue
+            return "\(provider):\(nativeID)"
+        })
+        var entries = managed.map { session in
+            SessionListEntry.managed(
+                key: "session-\(session.id)",
+                sortTimestamp: SessionTimeFormatting.sortTimestamp(
+                    timestamp: session.startedAt,
+                    mtimeMs: nil
+                ),
+                session: session
+            )
+        }
+        for history in claude + codex + openCode + qoder where
+            (history.hasConversation ?? true)
+                && !(history.managedByWand ?? false)
+                && !managedHistoryKeys.contains("\(history.apiProvider):\(history.claudeSessionId)") {
+            entries.append(.recoverable(
+                key: "recoverable-\(history.apiProvider)-\(history.claudeSessionId)",
+                sortTimestamp: SessionTimeFormatting.sortTimestamp(
+                    timestamp: history.timestamp,
+                    mtimeMs: history.mtimeMs
+                ),
+                history: history
+            ))
+        }
+        entries.sort {
+            $0.sortTimestamp == $1.sortTimestamp
+                ? $0.key < $1.key
+                : $0.sortTimestamp > $1.sortTimestamp
+        }
+        let revision = legacySessionListRevision(entries)
+        if offset > 0, requestedRevision != revision {
+            throw APIError.server(status: 409, message: "会话列表已更新，请重新加载")
+        }
+        let boundedOffset = min(max(0, offset), entries.count)
+        let boundedLimit = max(1, limit)
+        return SessionListPage(
+            entries: Array(entries.dropFirst(boundedOffset).prefix(boundedLimit)),
+            offset: boundedOffset,
+            total: entries.count,
+            revision: revision
+        )
+    }
+
+    private func legacySessionListRevision(_ entries: [SessionListEntry]) -> String {
+        let state = entries.map { "\($0.key)\u{0}\($0.sortTimestamp)" }.joined(separator: "\n")
+        return SHA256.hash(data: Data(state.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
 
     func listSessions() async throws -> [SessionSnapshot] {
         try await request([SessionSnapshot].self, method: "GET", path: "/api/sessions")
@@ -209,7 +364,7 @@ final class WandAPI {
         }
         body.append("--\(boundary)--\r\n")
 
-        guard let url = URL(string: "/api/sessions/\(id)/upload", relativeTo: baseURL)?.absoluteURL else {
+        guard let url = WandEndpoint.url(baseURL: baseURL, route: "/api/sessions/\(id)/upload") else {
             throw APIError.invalidURL
         }
         var req = URLRequest(url: url)
@@ -288,35 +443,69 @@ final class WandAPI {
 
     // MARK: - 历史会话
 
+    /// 原生历史端点只接受这几种 Provider；未知/未来值继续走 Claude 兼容协议。
+    private func nativeHistoryProvider(_ value: String?) -> String {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "codex": return "codex"
+        case "opencode", "open-code", "open_code": return "opencode"
+        case "qoder", "qodercli": return "qoder"
+        case "pi": return "pi"
+        default: return "claude"
+        }
+    }
+
+    func listHistory(provider: String) async throws -> [HistorySession] {
+        let provider = nativeHistoryProvider(provider)
+        let history = try await request(
+            [HistorySession].self,
+            method: "GET",
+            path: "/api/\(provider)-history"
+        )
+        return history.map { $0.withProviderFallback(provider) }
+    }
+
     func listClaudeHistory() async throws -> [HistorySession] {
-        try await request([HistorySession].self, method: "GET", path: "/api/claude-history")
+        try await listHistory(provider: "claude")
     }
 
     func listCodexHistory() async throws -> [HistorySession] {
-        try await request([HistorySession].self, method: "GET", path: "/api/codex-history")
+        try await listHistory(provider: "codex")
+    }
+
+    func listOpenCodeHistory() async throws -> [HistorySession] {
+        try await listHistory(provider: "opencode")
+    }
+
+    func listQoderHistory() async throws -> [HistorySession] {
+        try await listHistory(provider: "qoder")
+    }
+
+    func listPiHistory() async throws -> [HistorySession] {
+        try await listHistory(provider: "pi")
     }
 
     @discardableResult
     func resumeHistory(_ history: HistorySession) async throws -> SessionSnapshot {
-        let provider = history.provider == "codex" ? "codex" : "claude"
+        let provider = history.apiProvider
         return try await request(
             SessionSnapshot.self,
             method: "POST",
-            path: "/api/\(provider)-sessions/\(percentEncode(history.claudeSessionId))/resume",
+            path: "/api/\(provider)-sessions/\(percentEncodePathComponent(history.claudeSessionId))/resume",
             body: ["cwd": history.cwd]
         )
     }
 
     func deleteHistory(_ history: HistorySession) async throws {
-        let provider = history.provider == "codex" ? "codex" : "claude"
+        let provider = history.apiProvider
         _ = try await requestData(
             method: "DELETE",
-            path: "/api/\(provider)-history/\(percentEncode(history.claudeSessionId))"
+            path: "/api/\(provider)-history/\(percentEncodePathComponent(history.claudeSessionId))"
         )
     }
 
     func deleteHistoryBatch(provider: String, ids: [String]) async throws {
         guard !ids.isEmpty else { return }
+        let provider = nativeHistoryProvider(provider)
         _ = try await requestData(
             method: "POST",
             path: "/api/\(provider)-history/batch-delete",
@@ -331,7 +520,7 @@ final class WandAPI {
         try await request(
             SessionSnapshot.self,
             method: "POST",
-            path: "/api/sessions/\(sessionId)/escalations/\(percentEncode(requestId))/resolve",
+            path: "/api/sessions/\(sessionId)/escalations/\(percentEncodePathComponent(requestId))/resolve",
             body: ["resolution": resolution]
         )
     }
@@ -389,6 +578,17 @@ final class WandAPI {
         if let thinkingEffort, !thinkingEffort.isEmpty { body["thinkingEffort"] = thinkingEffort }
         if let initialInput, !initialInput.isEmpty { body["initialInput"] = initialInput }
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/commands", body: body)
+    }
+
+    /// 空白终端：仅启动服务端配置的交互式登录 Shell，不运行任何 Provider CLI。
+    @discardableResult
+    func createShellSession(cwd: String) async throws -> SessionSnapshot {
+        try await request(
+            SessionSnapshot.self,
+            method: "POST",
+            path: "/api/commands",
+            body: ["shell": true, "cwd": cwd]
+        )
     }
 
     // MARK: - Git 快速提交
@@ -551,7 +751,12 @@ final class WandAPI {
     // MARK: - 目录与配置
 
     func listDirectory(_ query: String) async throws -> DirectoryListing {
-        try await request(DirectoryListing.self, method: "GET", path: "/api/directory?q=\(percentEncode(query))")
+        try await request(
+            DirectoryListing.self,
+            method: "GET",
+            path: "/api/directory",
+            queryItems: [URLQueryItem(name: "q", value: query)]
+        )
     }
 
     func recentPaths() async throws -> [RecentPath] {
@@ -590,6 +795,9 @@ final class WandAPI {
             case .qoder:
                 body["defaultQoderModel"] = model
                 body["defaultModels"] = ["qoder": model]
+            case .pi:
+                body["defaultPiModel"] = model
+                body["defaultModels"] = ["pi": model]
             case .claude:
                 body["defaultModel"] = model
                 body["defaultModels"] = ["claude": model]

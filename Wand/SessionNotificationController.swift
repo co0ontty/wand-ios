@@ -18,7 +18,7 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
     private let center = UNUserNotificationCenter.current()
     private var states: [String: SessionState] = [:]
     private var sentAt: [String: Date] = [:]
-    private var hasBaseline = false
+    private var baselinedServerIDs: Set<String> = []
 
     private override init() {
         super.init()
@@ -47,57 +47,71 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
             title: "Wand 通知正常",
             body: "回复完成和等待授权时会在这里提醒你。",
             sessionId: nil,
+            serverID: nil,
             interruptionLevel: .active
         )
     }
 
-    func sendWebNotification(title: String, body: String, tag: String) {
+    func sendWebNotification(
+        title: String,
+        body: String,
+        tag: String,
+        serverID: String? = nil
+    ) {
         guard ServerStore.shared.notificationsEnabled else { return }
         let sessionId = sessionId(from: tag)
+        let serverID = serverID ?? ServerStore.shared.activeServerID
         send(
-            id: normalizedIdentifier(tag: tag, sessionId: sessionId),
+            id: normalizedIdentifier(tag: tag, sessionId: sessionId, serverID: serverID),
             title: title.isEmpty ? "Wand" : title,
             body: body,
             sessionId: sessionId,
+            serverID: serverID,
             interruptionLevel: tag.hasPrefix("permission:") ? .timeSensitive : .active
         )
     }
 
     /// 从全局会话快照识别状态跃迁。首次同步只建立基线，避免冷启动把旧状态全通知一遍。
-    func reconcile(snapshots: [SessionSnapshot]) {
+    func reconcile(snapshots: [SessionSnapshot], serverID: String? = nil) {
+        let serverID = serverID ?? ServerStore.shared.activeServerID ?? "legacy"
         let visible = snapshots.filter { !($0.archived ?? false) }
-        let nextStates = Dictionary(uniqueKeysWithValues: visible.map { ($0.id, state(for: $0)) })
-        guard hasBaseline else {
-            states = nextStates
-            hasBaseline = true
+        let key: (String) -> String = { "\(serverID):\($0)" }
+        let nextStates = Dictionary(uniqueKeysWithValues: visible.map { (key($0.id), state(for: $0)) })
+        guard baselinedServerIDs.contains(serverID) else {
+            states.merge(nextStates) { _, new in new }
+            baselinedServerIDs.insert(serverID)
             return
         }
 
         if ServerStore.shared.notificationsEnabled,
            UIApplication.shared.applicationState != .active {
             for snapshot in visible {
-                let current = nextStates[snapshot.id] ?? .idle
-                let previous = states[snapshot.id]
+                let scopedID = key(snapshot.id)
+                let current = nextStates[scopedID] ?? .idle
+                let previous = states[scopedID]
                 if current == .permission, previous != .permission {
                     send(
-                        id: "wand.permission.\(snapshot.id)",
+                        id: "wand.permission.\(serverID).\(snapshot.id)",
                         title: "需要你的授权",
                         body: notificationBody(for: snapshot, fallback: "会话正在等待确认后继续"),
                         sessionId: snapshot.id,
+                        serverID: serverID,
                         interruptionLevel: .timeSensitive
                     )
                 } else if previous == .responding, current == .idle {
                     send(
-                        id: "wand.completed.\(snapshot.id)",
+                        id: "wand.completed.\(serverID).\(snapshot.id)",
                         title: "回复已完成",
                         body: notificationBody(for: snapshot, fallback: "点击查看会话结果"),
                         sessionId: snapshot.id,
+                        serverID: serverID,
                         interruptionLevel: .active
                     )
                 }
             }
         }
-        states = nextStates
+        states = states.filter { !$0.key.hasPrefix("\(serverID):") }
+        states.merge(nextStates) { _, new in new }
     }
 
     func userNotificationCenter(
@@ -113,7 +127,8 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
     ) async {
         guard let sessionId = response.notification.request.content.userInfo["sessionId"] as? String,
               !sessionId.isEmpty else { return }
-        QuickActionCoordinator.shared.enqueue(.openSession(id: sessionId))
+        let serverID = response.notification.request.content.userInfo["serverId"] as? String
+        QuickActionCoordinator.shared.enqueue(.openSession(id: sessionId, serverID: serverID))
     }
 
     private func state(for snapshot: SessionSnapshot) -> SessionState {
@@ -136,6 +151,7 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         title: String,
         body: String,
         sessionId: String?,
+        serverID: String?,
         interruptionLevel: UNNotificationInterruptionLevel
     ) {
         if let last = sentAt[id], Date().timeIntervalSince(last) < 10 { return }
@@ -145,9 +161,11 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         content.body = body
         content.sound = .default
         content.interruptionLevel = interruptionLevel
-        content.threadIdentifier = sessionId ?? "wand"
+        content.threadIdentifier = [serverID, sessionId].compactMap { $0 }.joined(separator: ":").nilIfEmpty ?? "wand"
         if let sessionId {
-            content.userInfo = ["sessionId": sessionId]
+            var userInfo: [String: Any] = ["sessionId": sessionId]
+            if let serverID { userInfo["serverId"] = serverID }
+            content.userInfo = userInfo
         }
         center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
     }
@@ -160,10 +178,15 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         return nil
     }
 
-    private func normalizedIdentifier(tag: String, sessionId: String?) -> String {
+    private func normalizedIdentifier(tag: String, sessionId: String?, serverID: String?) -> String {
         guard let sessionId else { return tag.isEmpty ? UUID().uuidString : tag }
-        if tag.contains("perm") { return "wand.permission.\(sessionId)" }
-        if tag.contains("ended") { return "wand.completed.\(sessionId)" }
+        let scope = serverID.map { ".\($0)" } ?? ""
+        if tag.contains("perm") { return "wand.permission\(scope).\(sessionId)" }
+        if tag.contains("ended") { return "wand.completed\(scope).\(sessionId)" }
         return tag
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

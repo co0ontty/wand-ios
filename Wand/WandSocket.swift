@@ -2,7 +2,7 @@ import Foundation
 
 /// /ws 的 WebSocket 客户端：订阅单个会话，处理 init/output/status/ended 推送、
 /// 应用层 ping/pong、seq 间隙检测（自动 resync）、断线指数退避重连与 40s 看门狗。
-/// 复用 SelfSignedSession 的 URLSession，自签证书与 session cookie 自动生效。
+/// 复用 endpoint-scoped SelfSignedSession，自签证书与该服务器的 session cookie 自动生效。
 /// 所有状态读写与回调都在主线程上。
 final class WandSocket {
     /// 解析后的服务端推送，主线程回调。
@@ -11,6 +11,9 @@ final class WandSocket {
     var onConnectionChange: ((Bool) -> Void)?
 
     private let baseURL: URL
+    /// Reconnects must stay on the handle captured by this socket. Once reset retires it,
+    /// this socket cannot obtain the replacement session or carry old credentials forward.
+    let endpointSession: SelfSignedSession
     /// 块级窗口预算：>0 时在 subscribe 里带给服务端，init/resync/全量快照只下发最近这么多个块。
     var blockBudget: Int = 0
     private var task: URLSessionWebSocketTask?
@@ -25,6 +28,7 @@ final class WandSocket {
 
     init(baseURL: URL) {
         self.baseURL = baseURL
+        self.endpointSession = SelfSignedSession.forEndpoint(baseURL)
     }
 
     deinit {
@@ -35,6 +39,11 @@ final class WandSocket {
     // MARK: - 生命周期
 
     func connect() {
+        guard !endpointSession.isRetired else {
+            closed = true
+            onConnectionChange?(false)
+            return
+        }
         closed = false
         openSocket()
         startWatchdog()
@@ -71,19 +80,21 @@ final class WandSocket {
     // MARK: - 内部
 
     private var wsURL: URL? {
-        var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: true)
-        comps?.scheme = (baseURL.scheme == "https") ? "wss" : "ws"
-        comps?.path = "/ws"
-        comps?.query = nil
-        return comps?.url
+        WandEndpoint.webSocketURL(baseURL: baseURL)
     }
 
     private func openSocket() {
-        guard !closed, let url = wsURL else { return }
+        guard !closed, !endpointSession.isRetired, let url = wsURL else {
+            if endpointSession.isRetired {
+                closed = true
+                onConnectionChange?(false)
+            }
+            return
+        }
         wlog("ws", "openSocket \(url.absoluteString) session=\(subscribedSessionId ?? "nil")")
         generation += 1
         let gen = generation
-        let socket = SelfSignedSession.shared.session.webSocketTask(with: url)
+        let socket = endpointSession.session.webSocketTask(with: url)
         // 默认 maximumMessageSize 仅 1 MiB：活跃会话的流式 output、init/resync 全量快照
         // （消息里塞满工具输出时）单帧轻松破 1MB，超限会让 receive 直接报错断开 ——
         // 表现为「每隔几秒断一次、不停重连」。浏览器 WebSocket 没有此限制，所以仅 iOS 受影响。
@@ -105,6 +116,12 @@ final class WandSocket {
         socket.receive { [weak self] result in
             DispatchQueue.main.async {
                 guard let self, gen == self.generation else { return }
+                guard !self.endpointSession.isRetired else {
+                    self.closed = true
+                    self.task = nil
+                    self.onConnectionChange?(false)
+                    return
+                }
                 switch result {
                 case .failure(let error):
                     let ns = error as NSError
@@ -155,7 +172,8 @@ final class WandSocket {
     }
 
     private func sendJSON(_ payload: [String: Any]) {
-        guard let task,
+        guard !endpointSession.isRetired,
+              let task,
               let data = try? JSONSerialization.data(withJSONObject: payload),
               let text = String(data: data, encoding: .utf8) else { return }
         task.send(.string(text)) { _ in }
@@ -164,7 +182,13 @@ final class WandSocket {
     // MARK: - 重连与看门狗
 
     private func scheduleReconnect() {
-        guard !closed else { return }
+        guard !closed, !endpointSession.isRetired else {
+            if endpointSession.isRetired {
+                closed = true
+                onConnectionChange?(false)
+            }
+            return
+        }
         wlog("ws", "断线，\(reconnectDelay)s 后重连 session=\(subscribedSessionId ?? "nil")")
         onConnectionChange?(false)
         task?.cancel(with: .goingAway, reason: nil)

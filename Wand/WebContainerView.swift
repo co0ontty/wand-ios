@@ -1,6 +1,19 @@
 import SwiftUI
 import WebKit
 
+/// WebKit 的 cookie 规则不区分端口。每个 canonical endpoint 使用独立的非持久
+/// data store，避免同一主机的多台 Wand 服务在 WebView 里串登录。
+@MainActor
+private enum EndpointWebDataStoreFactory {
+    static func store(for endpoint: URL) -> WKWebsiteDataStore {
+        // Each WebView gets a fresh in-memory jar. Token-backed views immediately inject
+        // the endpoint-native login cookies, while removing a profile cannot leave a
+        // retained WebKit credential that authenticates a later unauthenticated profile.
+        _ = endpoint
+        return WKWebsiteDataStore.nonPersistent()
+    }
+}
+
 /// WebView 的加载状态，由 WebBridge（导航委托）更新，驱动 SwiftUI 覆盖层。
 final class WebViewModel: ObservableObject {
     enum Phase: Equatable {
@@ -402,7 +415,7 @@ struct WebViewRepresentable: UIViewRepresentable {
             ))
         }
         cfg.userContentController = userController
-        cfg.websiteDataStore = .default()
+        cfg.websiteDataStore = EndpointWebDataStoreFactory.store(for: serverURL)
         cfg.defaultWebpagePreferences.allowsContentJavaScript = true
         cfg.allowsInlineMediaPlayback = true
 
@@ -425,44 +438,115 @@ struct WebViewRepresentable: UIViewRepresentable {
         webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1 WandApp/\(version) WandPlatform/iOS"
 
         let targetURL = sessionURL()
-        context.coordinator.attach(webView: webView, serverURL: targetURL)
+        let coordinator = context.coordinator
+        // Capture the endpoint client before any asynchronous setup. Removing or rotating the
+        // profile retires this exact handle; an old WebView must never look up its replacement.
+        let endpointSession = SelfSignedSession.forEndpoint(serverURL)
+        let attachmentGeneration = coordinator.attach(webView: webView, serverURL: serverURL)
+
+        // Compile and install the resource boundary before putting any authenticated cookie
+        // into WebKit. Navigation policy alone cannot see fetch/XHR/script/image requests.
+        let cookieStore = cfg.websiteDataStore.httpCookieStore
+        coordinator.installEndpointContentBoundary(
+            in: userController,
+            serverURL: serverURL
+        ) { result in
+            guard coordinator.isCurrentAttachment(
+                webView: webView,
+                generation: attachmentGeneration
+            ), !endpointSession.isRetired else { return }
+            switch result {
+            case .success:
+                self.authenticateAndLoad(
+                    webView: webView,
+                    cookieStore: cookieStore,
+                    targetURL: targetURL,
+                    coordinator: coordinator,
+                    endpointSession: endpointSession,
+                    attachmentGeneration: attachmentGeneration
+                )
+            case .failure(let error):
+                wlog("web", "WebKit 网络边界启用失败: \(error.localizedDescription)")
+                coordinator.fail(
+                    title: "无法安全加载 wand 服务器",
+                    message: error.localizedDescription,
+                    canRetry: false
+                )
+            }
+        }
+        return webView
+    }
+
+    private func authenticateAndLoad(
+        webView: WKWebView,
+        cookieStore: WKHTTPCookieStore,
+        targetURL: URL,
+        coordinator: WebBridge,
+        endpointSession: SelfSignedSession,
+        attachmentGeneration: Int
+    ) {
+        func isCurrent() -> Bool {
+            !endpointSession.isRetired && coordinator.isCurrentAttachment(
+                webView: webView,
+                generation: attachmentGeneration
+            )
+        }
+        guard isCurrent() else { return }
 
         // 有 token：先调 /api/login 拿 session cookie 注入 WKHTTPCookieStore，再加载主页。
         // 没有 token：当成裸 URL（ConnectView 已探测过可达性），直接加载。
-        let cookieStore = cfg.websiteDataStore.httpCookieStore
         if let token, !token.isEmpty {
-            WandAuth.loginWithToken(serverURL: serverURL, appToken: token) { result in
-                switch result {
-                case .success(let cookies):
-                    DispatchQueue.main.async {
+            let endpointURL = serverURL
+            WandAuth.loginWithToken(
+                serverURL: endpointURL,
+                appToken: token,
+                endpointSession: endpointSession
+            ) { result in
+                DispatchQueue.main.async {
+                    guard isCurrent() else { return }
+                    switch result {
+                    case .success(let cookies):
                         let group = DispatchGroup()
                         for cookie in cookies {
                             group.enter()
                             cookieStore.setCookie(cookie) { group.leave() }
                         }
                         group.notify(queue: .main) {
-                            wlog("web", "注入 \(cookies.count) 个 cookie，加载网页版 \(serverURL.absoluteString)")
+                            guard isCurrent() else { return }
+                            wlog("web", "注入 \(cookies.count) 个 cookie，加载网页版 \(endpointURL.absoluteString)")
                             webView.load(URLRequest(url: targetURL))
                         }
+                    case .failure(let err):
+                        wlog("web", "网页版 token 登录失败: \(err.userMessage)")
+                        coordinator.fail(
+                            title: "无法登录 wand 服务器",
+                            message: err.userMessage,
+                            canRetry: false
+                        )
                     }
-                case .failure(let err):
-                    wlog("web", "网页版 token 登录失败: \(err.userMessage)")
-                    context.coordinator.fail(
-                        title: "无法登录 wand 服务器",
-                        message: err.userMessage,
-                        canRetry: false
-                    )
                 }
             }
         } else {
-            wlog("web", "无 token，直接加载网页版 \(serverURL.absoluteString)")
+            guard isCurrent() else { return }
+            let endpointURL = serverURL
+            wlog("web", "无 token，直接加载网页版 \(endpointURL.absoluteString)")
             webView.load(URLRequest(url: targetURL))
         }
-        return webView
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
         applyAppearance(to: uiView)
+    }
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: WebBridge) {
+        coordinator.detach(webView: uiView)
+        uiView.stopLoading()
+        uiView.navigationDelegate = nil
+        uiView.uiDelegate = nil
+        let userController = uiView.configuration.userContentController
+        userController.removeScriptMessageHandler(forName: "wandNative")
+        userController.removeAllUserScripts()
+        userController.removeAllContentRuleLists()
     }
 
     private func applyAppearance(to webView: WKWebView) {
@@ -491,7 +575,8 @@ struct WebViewRepresentable: UIViewRepresentable {
                 items.append(URLQueryItem(name: "nativeInput", value: "1"))
             }
         }
-        components.queryItems = items
+        guard let encodedQuery = WandEndpoint.percentEncodedQuery(items) else { return serverURL }
+        components.percentEncodedQuery = encodedQuery
         return components.url ?? serverURL
     }
 

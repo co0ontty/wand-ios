@@ -73,6 +73,7 @@ struct ChatView: View {
     @State private var voiceCanceling = false
     @State private var draftNeedsExpanded = false
     @StateObject private var attachments: ComposerAttachmentController
+    @StateObject private var serverFileLinks = ServerFileLinkController()
     @State private var gitStatus: GitStatusResult?
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
     /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
@@ -236,6 +237,18 @@ struct ChatView: View {
                 attachments.handlePhotoSelection(result)
             }
         }
+        .sheet(item: $serverFileLinks.previewItem, onDismiss: {
+            serverFileLinks.dismissPreview()
+        }) { item in
+            ServerFilePreviewView(item: item)
+        }
+        .alert(item: $serverFileLinks.failure) { failure in
+            Alert(
+                title: Text("文件下载失败"),
+                message: Text(failure.message),
+                dismissButton: .default(Text("好"))
+            )
+        }
         .onAppear {
             attachments.setToastHandler { store.toast = $0 }
             store.start()
@@ -244,7 +257,10 @@ struct ChatView: View {
         .onChange(of: showQuickCommit) { _, showing in
             if !showing { refreshGitStatus() }
         }
-        .onDisappear { store.shutdown() }
+        .onDisappear {
+            store.shutdown()
+            serverFileLinks.cancel()
+        }
         .onChange(of: scenePhase) { _, newPhase in
             wlog("session", "scenePhase=\(newPhase) session=\(sessionId)")
             if newPhase == .active { store.handleEnterForeground() }
@@ -253,9 +269,22 @@ struct ChatView: View {
         .overlay(alignment: .top) { connectionBanner }
         .animation(.easeInOut(duration: 0.2), value: store.connected)
         .overlay(alignment: .top) { toastView }
+        .overlay {
+            if serverFileLinks.isDownloading {
+                Label("正在从服务器下载…", systemImage: "arrow.down.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.14), radius: 12, y: 4)
+                    .allowsHitTesting(false)
+            }
+        }
         .environment(\.cardExpandDefaults, store.cardDefaults)
         .environment(\.chatAPI, api)
         .environment(\.chatSessionID, sessionId)
+        .environment(\.serverFileLinkController, serverFileLinks)
         .wandKeyboardShortcuts(chatKeyboardShortcuts)
     }
 
@@ -774,7 +803,7 @@ struct ChatView: View {
     private var providerTint: Color {
         switch currentProvider {
         case .codex: return Theme.codex
-        case .claude, .opencode, .grok, .qoder: return Theme.brand
+        case .claude, .opencode, .grok, .qoder, .pi: return Theme.brand
         }
     }
 
@@ -3173,11 +3202,27 @@ private struct UnknownBlockCard: View {
 private struct MarkdownText: View {
     let text: String
 
+    @Environment(\.chatAPI) private var api
+    @Environment(\.serverFileLinkController) private var serverFileLinks
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 blockView(block)
             }
+        }
+        .environment(\.openURL, serverFileOpenURLAction)
+    }
+
+    private var serverFileOpenURLAction: OpenURLAction {
+        OpenURLAction { url in
+            guard let serverPath = WandServerFileLink.serverPath(url.absoluteString) else {
+                return .systemAction
+            }
+            // A matched absolute path must never fall through to iOS' local file opener.
+            guard let api, let serverFileLinks else { return .discarded }
+            serverFileLinks.open(serverPath: serverPath, api: api)
+            return .handled
         }
     }
 

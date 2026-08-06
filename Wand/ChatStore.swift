@@ -58,6 +58,7 @@ final class ChatStore: ObservableObject {
 
     let sessionId: String
     let api: WandAPI
+    let serverID: String
     @Published private(set) var snapshot: SessionSnapshot?
     private let socket: WandSocket
     /// SwiftUI 的 NavigationStack 会在 pop 后短暂缓存 destination；同一个详情再次出现时，
@@ -89,6 +90,7 @@ final class ChatStore: ObservableObject {
     init(sessionId: String, api: WandAPI) {
         self.sessionId = sessionId
         self.api = api
+        self.serverID = ServerProfiles.stableID(for: api.baseURL)
         self.socket = WandSocket(baseURL: api.baseURL)
         // init/resync/全量快照也按块级窗口下发（与 REST getSession 的 blockBudget 对齐）。
         self.socket.blockBudget = WandAPI.chatBlockWindow
@@ -260,10 +262,15 @@ final class ChatStore: ObservableObject {
     private func publishPresence() {
         guard let snapshot else { return }
         if sessionEnded {
-            SessionPresenceController.shared.end(sessionId: sessionId, immediately: true)
+            SessionPresenceController.shared.end(
+                sessionId: sessionId,
+                serverID: serverID,
+                immediately: true
+            )
         } else if pendingEscalation != nil || permissionBlocked || legacyPermissionPrompt != nil {
             SessionPresenceController.shared.start(
                 sessionId: sessionId,
+                serverID: serverID,
                 title: snapshot.displayTitle,
                 provider: snapshot.provider,
                 state: .permission,
@@ -273,13 +280,14 @@ final class ChatStore: ObservableObject {
         } else if isResponding {
             SessionPresenceController.shared.start(
                 sessionId: sessionId,
+                serverID: serverID,
                 title: snapshot.displayTitle,
                 provider: snapshot.provider,
                 taskTitle: currentTaskTitle,
                 queuedCount: queuedMessages.count
             )
         } else {
-            SessionPresenceController.shared.end(sessionId: sessionId)
+            SessionPresenceController.shared.end(sessionId: sessionId, serverID: serverID)
         }
     }
 

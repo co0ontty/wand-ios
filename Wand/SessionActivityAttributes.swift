@@ -8,6 +8,8 @@ struct SessionActivityAttributes: ActivityAttributes {
     /// 长条内的单个会话条目。
     struct SessionEntry: Codable, Hashable {
         var id: String
+        /// 所属服务器。旧版活动没有该字段，解码时自然回退为 nil（当前服务器）。
+        var serverID: String? = nil
         /// 缩略标题（目录名或摘要，控制器侧已截断）。
         var title: String
         /// claude / codex / opencode，用于快速区分并发会话。
@@ -56,6 +58,7 @@ extension SessionActivityAttributes.SessionEntry {
         case "opencode", "open-code", "open_code": return "OpenCode"
         case "grok": return "Grok"
         case "qoder", "qodercli": return "Qoder"
+        case "pi": return "Pi"
         default: return "Claude"
         }
     }
@@ -66,6 +69,7 @@ extension SessionActivityAttributes.SessionEntry {
         case "opencode", "open-code", "open_code": return "terminal"
         case "grok": return "bolt.horizontal"
         case "qoder", "qodercli": return "curlybraces"
+        case "pi": return "pi"
         default: return "sparkles"
         }
     }

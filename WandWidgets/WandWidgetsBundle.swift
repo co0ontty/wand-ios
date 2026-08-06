@@ -21,15 +21,22 @@ private enum ActivityTint {
     }
 }
 
-private func sessionURL(_ id: String) -> URL {
-    URL(string: "wand://session/\(id)")!
+private func sessionURL(_ id: String, serverID: String?) -> URL {
+    var components = URLComponents()
+    components.scheme = "wand"
+    components.host = "session"
+    components.path = "/\(id)"
+    if let serverID, !serverID.isEmpty {
+        components.queryItems = [URLQueryItem(name: "serverId", value: serverID)]
+    }
+    return components.url!
 }
 
 private let activityListURL = URL(string: "wand://live-activity")!
 
 private func activityURL(_ state: SessionActivityAttributes.ContentState) -> URL {
     guard state.sessions.count == 1, let session = state.primarySession else { return activityListURL }
-    return sessionURL(session.id)
+    return sessionURL(session.id, serverID: session.serverID)
 }
 
 struct SessionLiveActivityWidget: Widget {
@@ -176,7 +183,7 @@ private struct ExpandedActivityView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             if let primary = state.primarySession {
-                Link(destination: sessionURL(primary.id)) {
+                Link(destination: sessionURL(primary.id, serverID: primary.serverID)) {
                     ExpandedTaskSummary(entry: primary, isStale: isStale)
                 }
                 .buttonStyle(.plain)
@@ -236,7 +243,7 @@ private struct LockScreenActivityView: View {
                 AggregateStatus(state: state)
             }
             if let primary = state.primarySession {
-                Link(destination: sessionURL(primary.id)) {
+                Link(destination: sessionURL(primary.id, serverID: primary.serverID)) {
                     PrimaryActivityCard(entry: primary, isStale: isStale)
                 }
                 .buttonStyle(.plain)
@@ -249,7 +256,7 @@ private struct LockScreenActivityView: View {
                 }
                 Spacer(minLength: 0)
                 if let primary = state.primarySession {
-                    Link(destination: sessionURL(primary.id)) {
+                    Link(destination: sessionURL(primary.id, serverID: primary.serverID)) {
                         Label(primary.needsPermission ? "处理授权" : "打开会话", systemImage: "arrow.up.right")
                     }
                 }

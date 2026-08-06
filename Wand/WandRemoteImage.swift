@@ -66,6 +66,16 @@ func buildAttachmentPrompt(_ attachments: [UploadedFile], body: String) -> Strin
 
 // MARK: - 远程图片加载视图
 
+private final class WandRemoteImageSessionHandle: ObservableObject {
+    let baseURL: URL
+    let value: SelfSignedSession
+
+    init(baseURL: URL) {
+        self.baseURL = baseURL
+        self.value = SelfSignedSession.forEndpoint(baseURL)
+    }
+}
+
 /// 通过 SelfSignedSession（带 session cookie + 自签证书放行）加载 `/api/file-raw`
 /// 的图片。不能用 SwiftUI AsyncImage——它走 URLSession.shared，既没有登录 cookie
 /// 也不信任自签证书。带一个进程内 NSCache，避免滚动 / 重渲染反复拉取。
@@ -75,8 +85,26 @@ struct WandRemoteImage<Placeholder: View>: View {
     var contentMode: ContentMode = .fit
     @ViewBuilder var placeholder: () -> Placeholder
 
+    /// `StateObject` evaluates its handle factory only for a new SwiftUI identity. Rebuilding
+    /// an old view value after reset therefore cannot recreate the endpoint pool entry.
+    @StateObject private var endpointSession: WandRemoteImageSessionHandle
     @State private var image: UIImage?
     @State private var failed = false
+
+    init(
+        baseURL: URL,
+        path: String,
+        contentMode: ContentMode = .fit,
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) {
+        self.baseURL = baseURL
+        self.path = path
+        self.contentMode = contentMode
+        self.placeholder = placeholder
+        _endpointSession = StateObject(
+            wrappedValue: WandRemoteImageSessionHandle(baseURL: baseURL)
+        )
+    }
 
     private static var cache: NSCache<NSString, UIImage> {
         WandImageCache.shared
@@ -94,22 +122,29 @@ struct WandRemoteImage<Placeholder: View>: View {
                 placeholder()
             }
         }
-        .task(id: path) {
+        .task(id: "\(baseURL.absoluteString)\u{0}\(path)") {
+            image = nil
+            failed = false
             await load()
         }
     }
 
     private var requestURL: URL? {
-        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
-            return nil
-        }
-        components.path = "/api/file-raw"
-        components.queryItems = [URLQueryItem(name: "path", value: path)]
-        return components.url
+        WandEndpoint.url(
+            baseURL: baseURL,
+            route: "/api/file-raw",
+            queryItems: [URLQueryItem(name: "path", value: path)]
+        )
     }
 
     private func load() async {
-        if let cached = Self.cache.object(forKey: path as NSString) {
+        let sessionHandle = endpointSession.value
+        guard endpointSession.baseURL == baseURL, !sessionHandle.isRetired else {
+            failed = true
+            return
+        }
+        let cacheKey = "\(sessionHandle.resourceCacheNamespace)|\(baseURL.absoluteString)|\(path)" as NSString
+        if let cached = Self.cache.object(forKey: cacheKey) {
             image = cached
             return
         }
@@ -120,7 +155,11 @@ struct WandRemoteImage<Placeholder: View>: View {
         var request = URLRequest(url: url)
         request.cachePolicy = .returnCacheDataElseLoad
         do {
-            let (data, response) = try await SelfSignedSession.shared.session.data(for: request)
+            let (data, response) = try await sessionHandle.session.data(for: request)
+            guard !sessionHandle.isRetired else {
+                failed = true
+                return
+            }
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 failed = true
                 return
@@ -129,7 +168,7 @@ struct WandRemoteImage<Placeholder: View>: View {
                 failed = true
                 return
             }
-            Self.cache.setObject(decoded, forKey: path as NSString)
+            Self.cache.setObject(decoded, forKey: cacheKey)
             if !Task.isCancelled {
                 image = decoded
             }

@@ -30,17 +30,22 @@ struct WandApp: App {
             QuickActionCoordinator.shared.enqueue(.showSessions)
             return
         }
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let sessionId: String?
         if url.host == "session" {
             sessionId = url.pathComponents.dropFirst().first
         } else {
-            sessionId = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems?
+            sessionId = components?.queryItems?
                 .first { $0.name == "sessionId" || $0.name == "session" }?
                 .value
         }
+        let serverID = components?.queryItems?
+            .first { $0.name == "serverId" || $0.name == "server" }?
+            .value
         guard let sessionId, !sessionId.isEmpty else { return }
-        QuickActionCoordinator.shared.enqueue(.openSession(id: sessionId))
+        QuickActionCoordinator.shared.enqueue(
+            .openSession(id: sessionId, serverID: serverID?.isEmpty == false ? serverID : nil)
+        )
     }
 
 #if DEBUG

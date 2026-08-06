@@ -1,20 +1,83 @@
 import SwiftUI
 
+/// Serializes state-changing new-session work per endpoint. Cancellation may remove an
+/// operation that is still waiting, but an HTTP mutation that already started is allowed to
+/// finish before the next snapshot begins. This mirrors Android's per-endpoint workflow mutex
+/// and prevents an older POST from committing after a newer selection.
+@MainActor
+final class NewSessionEndpointMutationQueue {
+    static let shared = NewSessionEndpointMutationQueue()
+
+    private var activeEndpoints: Set<String> = []
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func pendingOperationCount(endpointID: String) -> Int {
+        waiters[endpointID]?.count ?? 0
+    }
+
+    func run<Value>(
+        endpointID: String,
+        operation: @escaping @MainActor () async throws -> Value
+    ) async throws -> Value {
+        await acquire(endpointID)
+        if Task.isCancelled {
+            release(endpointID)
+            throw CancellationError()
+        }
+
+        // An unstructured task does not inherit later cancellation from the debounce owner.
+        // Once its first request starts, the endpoint remains locked until the whole snapshot
+        // (and, for create, the session creation) has completed.
+        let operationTask = Task { @MainActor in
+            try await operation()
+        }
+        let result = await operationTask.result
+        release(endpointID)
+        return try result.get()
+    }
+
+    private func acquire(_ endpointID: String) async {
+        guard activeEndpoints.contains(endpointID) else {
+            activeEndpoints.insert(endpointID)
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters[endpointID, default: []].append(continuation)
+        }
+    }
+
+    private func release(_ endpointID: String) {
+        guard var endpointWaiters = waiters[endpointID], !endpointWaiters.isEmpty else {
+            waiters[endpointID] = nil
+            activeEndpoints.remove(endpointID)
+            return
+        }
+        let next = endpointWaiters.removeFirst()
+        waiters[endpointID] = endpointWaiters.isEmpty ? nil : endpointWaiters
+        next.resume()
+    }
+}
+
 /// 新建会话 —— 选项与区块顺序对齐 Web 端「新对话」弹窗（renderSessionModal）：
-/// Provider（Claude / Codex / OpenCode / Grok / Qoder）→ 会话类型（结构化 / PTY）→ 模式
+/// Provider（Claude / Codex / OpenCode / Grok / Qoder / Pi）→ 会话类型
+/// （结构化 / PTY / 空白终端）→ 模式
 /// （托管 / 全权限 / 自动编辑 / 标准 / 原生；各 Provider 只开放自身支持项）→ 工作目录
 /// （最近路径 / 内置目录浏览器）；iOS 额外保留「首条消息」快捷输入。
 /// 创建成功后回调给列表页直接进入会话。
 struct NewSessionView: View {
     let api: WandAPI
-    let onCreated: (SessionSnapshot) -> Void
+    let hostServerID: String
+    let initialCwd: String?
+    let onCreated: (SessionSnapshot, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var serverStore: ServerStore
 
-    @State private var cwd = ""
+    @State private var selectedServerID: String
+    @State private var cwd: String
     @State private var recentPaths: [RecentPath] = []
     @State private var provider = "claude"
-    @State private var isStructured = true
+    @State private var sessionKind = SessionKind.structured
     // 默认托管模式（Claude / OpenCode 全自动完成）；Codex 切换时 clamp 成全权限。
     @State private var mode = "managed"
     @State private var availableModels: [ModelInfo] = []
@@ -22,7 +85,15 @@ struct NewSessionView: View {
     @State private var opencodeModels: [ModelInfo] = []
     @State private var grokModels: [ModelInfo] = []
     @State private var qoderModels: [ModelInfo] = []
-    @State private var serverDefaultModels = ProviderDefaultModels(claude: nil, codex: nil, opencode: nil, grok: nil, qoder: nil)
+    @State private var piModels: [ModelInfo] = []
+    @State private var serverDefaultModels = ProviderDefaultModels(
+        claude: nil,
+        codex: nil,
+        opencode: nil,
+        grok: nil,
+        qoder: nil,
+        pi: nil
+    )
     @State private var selectedModel = ""
     /// 目录请求与用户选项可并发发生；代次避免旧响应覆盖较新的模型目录或选择。
     @State private var modelCatalogRevision = 0
@@ -36,16 +107,75 @@ struct NewSessionView: View {
     @State private var creating = false
     @State private var errorMessage: String?
     @State private var showBrowser = false
-    /// 选择变化的保存任务。新任务会取消并等待旧任务完全退出，再发最终完整状态，
-    /// 避免快速切换时旧请求晚到、覆盖较新的默认值。
+    /// 选择变化的 debounce 所有者；真正开始的 HTTP mutation 由 endpoint queue 接管，
+    /// 不会随下一次选择的 debounce 取消。
     @State private var defaultsSaveTask: Task<Void, Never>?
     @State private var didLoadDefaults = false
     @State private var didLoadModels = false
+    @State private var bootstrapState = BootstrapState.loading
+    @State private var bootstrapGeneration = 0
     @FocusState private var focusedField: InputField?
+
+    init(
+        api: WandAPI,
+        hostServerID: String,
+        initialCwd: String? = nil,
+        onCreated: @escaping (SessionSnapshot, String) -> Void
+    ) {
+        self.api = api
+        self.hostServerID = hostServerID
+        self.initialCwd = initialCwd
+        self.onCreated = onCreated
+        _selectedServerID = State(initialValue: hostServerID)
+        _cwd = State(initialValue: initialCwd ?? "")
+    }
+
+    /// 单服务器调用点的兼容入口；新列表会显式传 hostServerID 以支持跨服务器创建。
+    init(api: WandAPI, onCreated: @escaping (SessionSnapshot) -> Void) {
+        let serverID = ServerProfiles.stableID(for: api.baseURL)
+        self.init(api: api, hostServerID: serverID) { snapshot, _ in
+            onCreated(snapshot)
+        }
+    }
+
+    private var targetProfile: ServerProfile? {
+        serverStore.profile(id: selectedServerID)
+    }
+
+    private var targetAPI: WandAPI {
+        guard let targetProfile else { return api }
+        return WandAPI(baseURL: targetProfile.baseURL, token: targetProfile.token)
+    }
 
     private enum InputField: Hashable {
         case cwd
         case firstMessage
+    }
+
+    private enum SessionKind: String, CaseIterable, Identifiable {
+        case structured
+        case pty
+        case shell
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .structured: return "结构化"
+            case .pty: return "PTY"
+            case .shell: return "空白终端"
+            }
+        }
+
+        /// 服务端偏好只持久化 AI 会话类型；空白终端不覆盖用户原本的默认类型。
+        var preferenceValue: String? {
+            self == .shell ? nil : rawValue
+        }
+    }
+
+    private enum BootstrapState {
+        case loading
+        case ready
+        case failed(String)
     }
 
     /// 模式选项：id / 标签 / 卡片内一句话说明，与 Web renderModeCards 完全一致。
@@ -73,6 +203,7 @@ struct NewSessionView: View {
         case .opencode: opencodeModels
         case .grok: grokModels
         case .qoder: qoderModels
+        case .pi: piModels
         case .claude: availableModels
         }
     }
@@ -97,93 +228,125 @@ struct NewSessionView: View {
                 WandAmbientBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        sectionHeader("Provider")
-                        Picker("Provider", selection: $provider) {
-                            Text("Claude").tag("claude")
-                            Text("Codex").tag("codex")
-                            Text("OpenCode").tag("opencode")
-                            Text("Grok").tag("grok")
-                            Text("Qoder").tag("qoder")
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: provider) { _, newProvider in
-                            modelSelectionRevision &+= 1
-                            mode = supportedMode(mode, provider: newProvider)
-                            selectedModel = pendingModelDefaults[WandProvider.normalize(newProvider)] ?? ""
-                            normalizeThinkingEffortIfNeeded()
-                            scheduleDefaultsSave()
+                        if serverStore.profiles.count > 1 {
+                            sectionHeader("服务器")
+                            Picker("服务器", selection: $selectedServerID) {
+                                ForEach(serverStore.profiles) { profile in
+                                    Text(profile.displayName).tag(profile.id)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .wandInputSurface(focused: false)
+                            .onChange(of: selectedServerID) { _, newServerID in
+                                defaultsSaveTask?.cancel()
+                                defaultsSaveTask = nil
+                                pendingModelDefaults.removeAll()
+                                cwd = newServerID == hostServerID ? (initialCwd ?? "") : ""
+                                Task { await bootstrap() }
+                            }
+                            fieldHint("配置、目录和会话都会从所选服务器读取，认证信息彼此隔离。")
                         }
 
                         sectionHeader("会话类型")
-                        Picker("会话类型", selection: $isStructured) {
-                            Text("结构化").tag(true)
-                            Text("PTY").tag(false)
+                        Picker("会话类型", selection: $sessionKind) {
+                            ForEach(SessionKind.allCases) { kind in
+                                Text(kind.title).tag(kind)
+                            }
                         }
                         .pickerStyle(.segmented)
-                        .onChange(of: isStructured) { _, _ in
-                            scheduleDefaultsSave()
+                        .onChange(of: sessionKind) { _, newKind in
+                            if newKind.preferenceValue != nil {
+                                scheduleDefaultsSave()
+                            }
                         }
-                        fieldHint(Self.sessionKindHint(provider: provider, structured: isStructured))
+                        fieldHint(Self.sessionKindHint(provider: provider, kind: sessionKind))
 
-                        sectionHeader("模型与思考")
-                        HStack(spacing: 10) {
-                            optionMenuCard(
-                                title: "模型",
-                                value: selectedModelLabel,
-                                icon: "cpu"
-                            ) {
-                                Section("模型") {
-                                    Button {
-                                        selectModel("")
-                                    } label: {
-                                        selectedModel.isEmpty
-                                            ? Label("默认 · \(defaultModelLabel)", systemImage: "checkmark")
-                                            : Label("默认 · \(defaultModelLabel)", systemImage: "circle")
-                                    }
-                                    ForEach(providerModels.filter { $0.id != "default" }) { model in
+                        if sessionKind != .shell {
+                            sectionHeader("Provider")
+                            Picker("Provider", selection: $provider) {
+                                Text("Claude").tag("claude")
+                                Text("Codex").tag("codex")
+                                Text("OpenCode").tag("opencode")
+                                Text("Grok").tag("grok")
+                                Text("Qoder").tag("qoder")
+                                Text("Pi").tag("pi")
+                            }
+                            .pickerStyle(.segmented)
+                            .onChange(of: provider) { _, newProvider in
+                                modelSelectionRevision &+= 1
+                                mode = supportedMode(mode, provider: newProvider)
+                                selectedModel = pendingModelDefaults[WandProvider.normalize(newProvider)] ?? ""
+                                normalizeThinkingEffortIfNeeded()
+                                scheduleDefaultsSave()
+                            }
+
+                            sectionHeader("模型与思考")
+                            HStack(spacing: 10) {
+                                optionMenuCard(
+                                    title: "模型",
+                                    value: selectedModelLabel,
+                                    icon: "cpu"
+                                ) {
+                                    Section("模型") {
                                         Button {
-                                            selectModel(model.id)
+                                            selectModel("")
                                         } label: {
-                                            selectedModel == model.id
-                                                ? Label(model.label, systemImage: "checkmark")
-                                                : Label(model.label, systemImage: "circle")
+                                            selectedModel.isEmpty
+                                                ? Label("默认 · \(defaultModelLabel)", systemImage: "checkmark")
+                                                : Label("默认 · \(defaultModelLabel)", systemImage: "circle")
+                                        }
+                                        ForEach(providerModels.filter { $0.id != "default" }) { model in
+                                            Button {
+                                                selectModel(model.id)
+                                            } label: {
+                                                selectedModel == model.id
+                                                    ? Label(model.label, systemImage: "checkmark")
+                                                    : Label(model.label, systemImage: "circle")
+                                            }
+                                        }
+                                    }
+                                }
+                                optionMenuCard(
+                                    title: "思考深度",
+                                    value: thinkingLabel,
+                                    icon: "brain"
+                                ) {
+                                    ForEach(thinkingLevels) { level in
+                                        Button {
+                                            thinkingEffort = level.id
+                                        } label: {
+                                            effectiveThinkingOption?.id == level.id
+                                                ? Label(level.menuLabel, systemImage: "checkmark")
+                                                : Label(level.menuLabel, systemImage: "circle")
                                         }
                                     }
                                 }
                             }
-                            optionMenuCard(
-                                title: "思考深度",
-                                value: thinkingLabel,
-                                icon: "brain"
+                            sectionHeader("模式")
+                            LazyVGrid(
+                                columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
+                                alignment: .leading,
+                                spacing: 8
                             ) {
-                                ForEach(thinkingLevels) { level in
-                                    Button {
-                                        thinkingEffort = level.id
-                                    } label: {
-                                        effectiveThinkingOption?.id == level.id
-                                            ? Label(level.menuLabel, systemImage: "checkmark")
-                                            : Label(level.menuLabel, systemImage: "circle")
-                                    }
+                                ForEach(Self.sessionModes) { option in
+                                    modeCard(option)
                                 }
                             }
+                            fieldHint(Self.modeHint(provider: provider, mode: mode))
                         }
-                        sectionHeader("模式")
-                        LazyVGrid(
-                            columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
-                            alignment: .leading,
-                            spacing: 8
-                        ) {
-                            ForEach(Self.sessionModes) { option in
-                                modeCard(option)
-                            }
-                        }
-                        fieldHint(Self.modeHint(provider: provider, mode: mode))
 
                         sectionHeader("工作目录")
                         cwdCard
 
-                        sectionHeader("首条消息（可选）")
-                        firstMessageCard
+                        if sessionKind == .shell {
+                            fieldHint("创建后会直接进入可输入命令的空白终端，不启动任何 AI CLI。")
+                        } else {
+                            sectionHeader("首条消息（可选）")
+                            firstMessageCard
+                        }
 
                         if let errorMessage {
                             errorBanner(errorMessage)
@@ -197,13 +360,19 @@ struct NewSessionView: View {
                     .padding(.bottom, focusedField == nil ? 68 : 0)
                 }
                 .scrollDismissesKeyboard(.interactively)
+                .allowsHitTesting(bootstrapReady && !creating)
+                .opacity(bootstrapReady ? 1 : 0)
+
+                if !bootstrapReady {
+                    bootstrapStatusView
+                }
 
                 // 创建栏作为 ZStack 底部兄弟视图浮在表单上，而非放进 safeAreaInset。
                 // safeAreaInset 会把创建栏并入底部安全区参与系统键盘避让：键盘弹出时
                 // 系统先把创建栏抬到键盘上方，再滚动表单保证输入框可见，两段叠加导致
                 // 输入框过量上浮、底边与键盘顶端留出大空隙。改为浮层后创建栏不再参与
                 // 避让，聚焦时直接隐藏，系统只按键盘高度把输入框滚到键盘上方一次。
-                if focusedField == nil {
+                if focusedField == nil && bootstrapReady {
                     createBar
                 }
             }
@@ -212,8 +381,12 @@ struct NewSessionView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("取消") { dismiss() }
-                        .foregroundColor(Theme.textSecondary)
+                    Button(creating ? "创建中…" : "取消") {
+                        guard !creating else { return }
+                        dismiss()
+                    }
+                    .foregroundColor(creating ? Theme.textSecondary.opacity(0.5) : Theme.textSecondary)
+                    .disabled(creating)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if creating {
@@ -231,13 +404,14 @@ struct NewSessionView: View {
                 }
             }
             .sheet(isPresented: $showBrowser) {
-                DirectoryBrowserView(api: api, startPath: cwd) { picked in
+                DirectoryBrowserView(api: targetAPI, startPath: cwd) { picked in
                     cwd = picked
                     showBrowser = false
                 }
             }
         }
         .navigationViewStyle(.stack)
+        .interactiveDismissDisabled(creating)
         .wandKeyboardShortcuts(newSessionKeyboardShortcuts)
         .onChange(of: thinkingEffort) { _, _ in
             scheduleDefaultsSave()
@@ -246,46 +420,133 @@ struct NewSessionView: View {
             scheduleDefaultsSave()
         }
         .task {
-            let config = try? await api.serverConfig()
-            // 服务端是跨客户端的新建偏好唯一真源；请求失败时保留页面初始默认。
-            if let configuredProvider = config?.defaultProvider {
-                provider = WandProvider(normalizing: configuredProvider).rawValue
-            }
-            if let defaultSessionKind = config?.defaultSessionKind {
-                isStructured = defaultSessionKind != "pty"
-            }
-            mode = supportedMode(config?.defaultMode ?? mode, provider: provider)
-            if let config {
-                // defaultModelId 同时兼容 defaultModels 映射和三套旧版独立字段。
-                serverDefaultModels = ProviderDefaultModels(
-                    claude: config.defaultModelId(for: WandProvider.claude.rawValue),
-                    codex: config.defaultModelId(for: WandProvider.codex.rawValue),
-                    opencode: config.defaultModelId(for: WandProvider.opencode.rawValue),
-                    grok: config.defaultModelId(for: WandProvider.grok.rawValue),
-                    qoder: config.defaultModelId(for: WandProvider.qoder.rawValue)
+            await bootstrap()
+        }
+        .onDisappear {
+            bootstrapGeneration &+= 1
+            defaultsSaveTask?.cancel()
+            defaultsSaveTask = nil
+        }
+    }
+
+    private var bootstrapReady: Bool {
+        if case .ready = bootstrapState { return true }
+        return false
+    }
+
+    @ViewBuilder
+    private var bootstrapStatusView: some View {
+        VStack(spacing: 14) {
+            Spacer()
+            switch bootstrapState {
+            case .loading:
+                ProgressView()
+                    .tint(Theme.brand)
+                Text("正在读取服务器配置…")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+            case .failed(let message):
+                Image(systemName: "wifi.exclamationmark")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundColor(Theme.danger)
+                Text(message)
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .foregroundColor(Theme.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    Task { await bootstrap() }
+                } label: {
+                    Label("重试连接", systemImage: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .semibold))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 11)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.white)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Theme.brand)
                 )
+            case .ready:
+                EmptyView()
             }
+            Spacer()
+        }
+        .padding(.horizontal, 28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// `/api/config` 是本页所有默认值和创建请求的根。它失败时保留明确错误状态，
+    /// 不能用一套本地猜测值继续创建；模型目录和最近路径则按服务端一致行为独立容错。
+    private func bootstrap() async {
+        defaultsSaveTask?.cancel()
+        defaultsSaveTask = nil
+        pendingModelDefaults.removeAll()
+        bootstrapGeneration &+= 1
+        let generation = bootstrapGeneration
+        bootstrapState = .loading
+        didLoadDefaults = false
+        didLoadModels = false
+        errorMessage = nil
+        availableModels = []
+        codexModels = []
+        opencodeModels = []
+        grokModels = []
+        qoderModels = []
+        piModels = []
+        recentPaths = []
+
+        do {
+            let api = targetAPI
+            let config = try await NewSessionEndpointMutationQueue.shared.run(
+                endpointID: selectedServerID
+            ) {
+                try await api.serverConfig()
+            }
+            guard !Task.isCancelled, generation == bootstrapGeneration else { return }
+
+            provider = WandProvider(normalizing: config.defaultProvider).rawValue
+            sessionKind = config.defaultSessionKind == SessionKind.pty.rawValue ? .pty : .structured
+            mode = supportedMode(config.resolvedDefaultMode, provider: provider)
+            serverDefaultModels = ProviderDefaultModels(
+                claude: config.defaultModelId(for: WandProvider.claude.rawValue),
+                codex: config.defaultModelId(for: WandProvider.codex.rawValue),
+                opencode: config.defaultModelId(for: WandProvider.opencode.rawValue),
+                grok: config.defaultModelId(for: WandProvider.grok.rawValue),
+                qoder: config.defaultModelId(for: WandProvider.qoder.rawValue),
+                pi: config.defaultModelId(for: WandProvider.pi.rawValue)
+            )
             selectedModel = ""
-            thinkingEffort = config?.defaultThinkingEffort ?? thinkingEffort
+            thinkingEffort = config.resolvedDefaultThinkingEffort
+
             let initialModelSelectionRevision = modelSelectionRevision
-            await loadModelCatalog()
+            await loadModelCatalog(using: api)
+            guard !Task.isCancelled, generation == bootstrapGeneration else { return }
             let normalizedThinkingEffort = initialModelSelectionRevision == modelSelectionRevision
                 ? normalizeThinkingEffortIfNeeded()
                 : false
-            // Provider / 类型 / 模式 / 模型偏好已完成 hydration；目录请求不应继续
-            // 阻塞用户选择的即时保存。
-            didLoadDefaults = true
-            if normalizedThinkingEffort {
-                scheduleDefaultsSave()
-            }
+
             recentPaths = (try? await api.recentPaths()) ?? []
+            guard !Task.isCancelled, generation == bootstrapGeneration else { return }
             if cwd.isEmpty {
                 if let first = recentPaths.first {
                     cwd = first.path
-                } else if let def = config?.defaultCwd {
-                    cwd = def
+                } else if let defaultCwd = config.defaultCwd {
+                    cwd = defaultCwd
                 }
             }
+
+            // Provider / 类型 / 模式 / 模型偏好已完成 hydration；从这里开始才允许
+            // 即时保存与创建，避免失败的配置请求产生半套默认值。
+            didLoadDefaults = true
+            bootstrapState = .ready
+            if normalizedThinkingEffort {
+                scheduleDefaultsSave()
+            }
+        } catch {
+            guard !Task.isCancelled, generation == bootstrapGeneration else { return }
+            bootstrapState = .failed("无法读取服务器配置：\(error.localizedDescription)")
         }
     }
 
@@ -425,6 +686,7 @@ struct NewSessionView: View {
         case .opencode: models = opencodeModels
         case .grok: models = grokModels
         case .qoder: models = qoderModels
+        case .pi: models = piModels
         case .claude: models = availableModels
         }
         guard !models.isEmpty else { return normalized }
@@ -437,6 +699,7 @@ struct NewSessionView: View {
         case .opencode: serverDefaultModels.opencode ?? ""
         case .grok: serverDefaultModels.grok ?? ""
         case .qoder: serverDefaultModels.qoder ?? ""
+        case .pi: serverDefaultModels.pi ?? ""
         case .claude: serverDefaultModels.claude ?? ""
         }
     }
@@ -456,7 +719,7 @@ struct NewSessionView: View {
     }
 
     /// 读取服务端当前持久化目录。CLI 探测由服务端的自动或管理员刷新完成。
-    private func loadModelCatalog() async {
+    private func loadModelCatalog(using api: WandAPI) async {
         modelCatalogRevision &+= 1
         let catalogRevision = modelCatalogRevision
         let selectionRevision = modelSelectionRevision
@@ -475,12 +738,14 @@ struct NewSessionView: View {
         opencodeModels = response.models(for: WandProvider.opencode.rawValue)
         grokModels = response.models(for: WandProvider.grok.rawValue)
         qoderModels = response.models(for: WandProvider.qoder.rawValue)
+        piModels = response.models(for: WandProvider.pi.rawValue)
         serverDefaultModels = ProviderDefaultModels(
             claude: response.defaultModelId(for: WandProvider.claude.rawValue),
             codex: response.defaultModelId(for: WandProvider.codex.rawValue),
             opencode: response.defaultModelId(for: WandProvider.opencode.rawValue),
             grok: response.defaultModelId(for: WandProvider.grok.rawValue),
-            qoder: response.defaultModelId(for: WandProvider.qoder.rawValue)
+            qoder: response.defaultModelId(for: WandProvider.qoder.rawValue),
+            pi: response.defaultModelId(for: WandProvider.pi.rawValue)
         )
         didLoadModels = true
 
@@ -633,7 +898,7 @@ struct NewSessionView: View {
                 if creating {
                     ProgressView().tint(.white)
                 }
-                Text(creating ? "创建中…" : "创建会话")
+                Text(creating ? "创建中…" : sessionKind == .shell ? "创建空白终端" : "创建会话")
                     .font(.system(size: 15, weight: .semibold))
             }
             .frame(maxWidth: .infinity)
@@ -654,8 +919,11 @@ struct NewSessionView: View {
     // MARK: - 提示文案（对齐 Web）
 
     /// 会话类型动态说明，文案对齐 Web getSessionKindHint。
-    private static func sessionKindHint(provider: String, structured: Bool) -> String {
-        if structured {
+    private static func sessionKindHint(provider: String, kind: SessionKind) -> String {
+        if kind == .shell {
+            return "启动当前工作目录下的交互式登录 Shell，不自动运行任何 CLI 工具。"
+        }
+        if kind == .structured {
             switch WandProvider(normalizing: provider) {
             case .codex:
                 return "Codex JSONL 结构化聊天界面，支持多轮对话和工具调用展示。"
@@ -665,6 +933,8 @@ struct NewSessionView: View {
                 return "Grok streaming-json 结构化聊天界面，支持多轮续聊与思考过程展示。"
             case .qoder:
                 return "Qoder stream-json 结构化聊天界面，支持续聊、思考过程和工具调用展示。"
+            case .pi:
+                return "Pi JSON 结构化聊天界面，支持续聊、思考过程和工具调用展示。"
             case .claude:
                 return "结构化聊天界面，支持多轮对话、流式输出和工具调用展示。"
             }
@@ -678,6 +948,8 @@ struct NewSessionView: View {
             return "Grok Build TUI 的原始 PTY 终端会话。"
         case .qoder:
             return "Qoder CLI TUI 的原始 PTY 终端会话。"
+        case .pi:
+            return "Pi TUI 的原始 PTY 终端会话。"
         case .claude:
             return "原始 PTY 终端会话，支持持续交互、终端视图和权限流。"
         }
@@ -704,6 +976,11 @@ struct NewSessionView: View {
             }
             if mode == "auto-edit" { return "Qoder 将自动批准工作区内的安全编辑。" }
             return "Qoder 使用自身权限确认；结构化模式下未批准的操作会被拒绝。"
+        case .pi:
+            if mode == "full-access" || mode == "managed" {
+                return "Pi 将自动批准工具调用；支持 TUI 与 JSON 结构化会话。"
+            }
+            return "Pi 使用自身权限确认；支持 TUI 与 JSON 结构化会话。"
         case .claude:
             break
         }
@@ -719,23 +996,27 @@ struct NewSessionView: View {
     // MARK: - 创建
 
     private var canCreate: Bool {
-        !cwd.trimmingCharacters(in: .whitespaces).isEmpty && !creating
+        bootstrapReady && !cwd.trimmingCharacters(in: .whitespaces).isEmpty && !creating
     }
 
-    /// 保存的是当前完整选择，而不是单字段补丁。即使前一次请求已经开始，新任务也会先
-    /// 取消并等待它结束；最后一次完整写入因此总是获胜。
+    /// 保存当前完整选择而不是单字段补丁。快速输入只取消尚未入队的 debounce；已开始
+    /// 的 HTTP 写入会完成，后续快照再按 endpoint FIFO 执行，保证最终选择最后提交。
     private func scheduleDefaultsSave() {
-        guard didLoadDefaults, !creating else { return }
+        guard didLoadDefaults, !creating, sessionKind != .shell else { return }
         let values = currentDefaults
-        let previous = defaultsSaveTask
-        previous?.cancel()
+        let api = targetAPI
+        defaultsSaveTask?.cancel()
         defaultsSaveTask = Task {
-            _ = await previous?.result
             do {
                 try await Task.sleep(nanoseconds: 250_000_000)
                 try Task.checkCancellation()
-                try await persistDefaults(values)
-                commitPersistedDefaults(values)
+                try await NewSessionEndpointMutationQueue.shared.run(endpointID: values.serverID) {
+                    try await persistDefaults(values, using: api)
+                }
+                try Task.checkCancellation()
+                if selectedServerID == values.serverID {
+                    commitPersistedDefaults(values)
+                }
             } catch is CancellationError {
                 // 快速连续选择时的正常合并路径。
             } catch {
@@ -749,8 +1030,9 @@ struct NewSessionView: View {
     }
 
     private struct DefaultsSnapshot {
+        let serverID: String
         let provider: String
-        let sessionKind: String
+        let sessionKind: String?
         let mode: String
         let modelUpdates: [String: String]
         let thinkingEffort: String
@@ -759,15 +1041,16 @@ struct NewSessionView: View {
     private var currentDefaults: DefaultsSnapshot {
         let normalizedProvider = selectedProvider.rawValue
         return DefaultsSnapshot(
+            serverID: selectedServerID,
             provider: normalizedProvider,
-            sessionKind: isStructured ? "structured" : "pty",
+            sessionKind: sessionKind.preferenceValue,
             mode: supportedMode(mode, provider: normalizedProvider),
             modelUpdates: pendingModelDefaults,
             thinkingEffort: thinkingEffort
         )
     }
 
-    private func persistDefaults(_ values: DefaultsSnapshot) async throws {
+    private func persistDefaults(_ values: DefaultsSnapshot, using api: WandAPI) async throws {
         // 通用默认项一次写入；模型按 Provider 单独写，使 defaultModels 的
         // 部分更新语义与 Android/Web 保持一致。
         try await api.updateNewSessionDefaults(
@@ -789,11 +1072,13 @@ struct NewSessionView: View {
     /// 只清理与该次快照仍一致的 pending 值；若请求期间用户又选了
     /// 新模型，新值会继续留待下一次保存。同步本地默认供切回 Provider 时立即显示。
     private func commitPersistedDefaults(_ values: DefaultsSnapshot) {
+        guard selectedServerID == values.serverID else { return }
         var claude = serverDefaultModels.claude
         var codex = serverDefaultModels.codex
         var opencode = serverDefaultModels.opencode
         var grok = serverDefaultModels.grok
         var qoder = serverDefaultModels.qoder
+        var pi = serverDefaultModels.pi
         for (provider, model) in values.modelUpdates {
             switch WandProvider(normalizing: provider) {
             case .claude: claude = model
@@ -801,6 +1086,7 @@ struct NewSessionView: View {
             case .opencode: opencode = model
             case .grok: grok = model
             case .qoder: qoder = model
+            case .pi: pi = model
             }
             if pendingModelDefaults[provider] == model {
                 pendingModelDefaults.removeValue(forKey: provider)
@@ -811,7 +1097,8 @@ struct NewSessionView: View {
             codex: codex,
             opencode: opencode,
             grok: grok,
-            qoder: qoder
+            qoder: qoder,
+            pi: pi
         )
     }
 
@@ -821,39 +1108,47 @@ struct NewSessionView: View {
         errorMessage = nil
         let path = cwd.trimmingCharacters(in: .whitespaces)
         let prompt = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kind = sessionKind
         let defaults = currentDefaults
         let effectiveMode = defaults.mode
         let effectiveModel = selectedModelForRequest
-        let pendingDefaultsSave = defaultsSaveTask
-        pendingDefaultsSave?.cancel()
+        let targetServerID = selectedServerID
+        let api = targetAPI
+        defaultsSaveTask?.cancel()
+        defaultsSaveTask = nil
         Task {
             do {
-                // 先等即时保存任务完全退出，再以点击创建时的完整快照兜底写一次。
-                _ = await pendingDefaultsSave?.result
-                try await persistDefaults(defaults)
-                commitPersistedDefaults(defaults)
-                let snapshot: SessionSnapshot
-                if defaults.sessionKind == "structured" {
-                    snapshot = try await api.createStructuredSession(
-                        provider: defaults.provider,
-                        cwd: path,
-                        mode: effectiveMode,
-                        model: effectiveModel,
-                        thinkingEffort: defaults.thinkingEffort,
-                        prompt: prompt.isEmpty ? nil : prompt
-                    )
-                } else {
-                    snapshot = try await api.createPtySession(
-                        provider: defaults.provider,
-                        cwd: path,
-                        mode: effectiveMode,
-                        model: effectiveModel,
-                        thinkingEffort: defaults.thinkingEffort,
-                        initialInput: prompt.isEmpty ? nil : prompt
-                    )
+                let snapshot = try await NewSessionEndpointMutationQueue.shared.run(
+                    endpointID: targetServerID
+                ) {
+                    switch kind {
+                    case .shell:
+                        return try await api.createShellSession(cwd: path)
+                    case .structured:
+                        try await persistDefaults(defaults, using: api)
+                        return try await api.createStructuredSession(
+                            provider: defaults.provider,
+                            cwd: path,
+                            mode: effectiveMode,
+                            model: effectiveModel,
+                            thinkingEffort: defaults.thinkingEffort,
+                            prompt: prompt.isEmpty ? nil : prompt
+                        )
+                    case .pty:
+                        try await persistDefaults(defaults, using: api)
+                        return try await api.createPtySession(
+                            provider: defaults.provider,
+                            cwd: path,
+                            mode: effectiveMode,
+                            model: effectiveModel,
+                            thinkingEffort: defaults.thinkingEffort,
+                            initialInput: prompt.isEmpty ? nil : prompt
+                        )
+                    }
                 }
+                if kind != .shell { commitPersistedDefaults(defaults) }
                 creating = false
-                onCreated(snapshot)
+                onCreated(snapshot, targetServerID)
             } catch {
                 creating = false
                 errorMessage = error.localizedDescription
@@ -875,6 +1170,7 @@ struct DirectoryBrowserView: View {
     @State private var items: [DirectoryItem] = []
     @State private var loading = true
     @State private var errorMessage: String?
+    @State private var requestGeneration = 0
 
     var body: some View {
         NavigationView {
@@ -910,6 +1206,7 @@ struct DirectoryBrowserView: View {
                     Button("选择此目录") { onPick(currentPath) }
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(Theme.brand)
+                        .disabled(loading)
                 }
             }
         }
@@ -917,7 +1214,7 @@ struct DirectoryBrowserView: View {
         .wandKeyboardShortcuts(directoryBrowserKeyboardShortcuts)
         .task {
             currentPath = startPath.isEmpty ? "~" : startPath
-            await load()
+            await load(path: currentPath)
         }
     }
 
@@ -939,7 +1236,8 @@ struct DirectoryBrowserView: View {
                 modifiers: .command,
                 isEnabled: !loading
             ) {
-                Task { await load() }
+                let path = currentPath
+                Task { await load(path: path) }
             },
             WandKeyboardShortcutAction(
                 id: "dismiss-directory-browser",
@@ -955,15 +1253,16 @@ struct DirectoryBrowserView: View {
     private var pathHeader: some View {
         HStack(spacing: 8) {
             Button {
+                guard !loading else { return }
                 let parent = (currentPath as NSString).deletingLastPathComponent
                 guard !parent.isEmpty, parent != currentPath else { return }
-                currentPath = parent
-                Task { await load() }
+                navigate(to: parent)
             } label: {
                 Image(systemName: "arrow.up.doc")
                     .font(.system(size: 14))
                     .foregroundColor(Theme.brand)
             }
+            .disabled(loading)
             Text(currentPath)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundColor(Theme.textSecondary)
@@ -979,8 +1278,7 @@ struct DirectoryBrowserView: View {
         List {
             ForEach(items.filter { $0.isDirectory }) { item in
                 Button {
-                    currentPath = item.path
-                    Task { await load() }
+                    navigate(to: item.path)
                 } label: {
                     HStack {
                         Image(systemName: "folder.fill")
@@ -1001,19 +1299,28 @@ struct DirectoryBrowserView: View {
         .listStyle(.plain)
     }
 
-    private func load() async {
+    private func navigate(to path: String) {
+        currentPath = path
+        Task { await load(path: path) }
+    }
+
+    private func load(path requestedPath: String) async {
+        requestGeneration &+= 1
+        let generation = requestGeneration
         loading = true
         errorMessage = nil
         do {
-            let listing = try await api.listDirectory(currentPath)
+            let listing = try await api.listDirectory(requestedPath)
+            guard generation == requestGeneration, currentPath == requestedPath else { return }
             items = listing.items
             // 服务端会把 ~ 之类输入解析为绝对路径；用首项的父路径回填展示。
-            if currentPath == "~", let first = listing.items.first {
+            if requestedPath == "~", let first = listing.items.first {
                 currentPath = (first.path as NSString).deletingLastPathComponent
             }
         } catch {
+            guard generation == requestGeneration, currentPath == requestedPath else { return }
             errorMessage = error.localizedDescription
         }
-        loading = false
+        if generation == requestGeneration { loading = false }
     }
 }

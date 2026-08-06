@@ -9,7 +9,7 @@ import UIKit
 enum QuickAction: Equatable {
     case newSession
     case openWeb
-    case openSession(id: String)
+    case openSession(id: String, serverID: String?)
     case showSessions
 
     static let newSessionType = "com.wand.app.shortcut.new-session"
@@ -24,10 +24,21 @@ enum QuickAction: Equatable {
             self = .openWeb
         case Self.openSessionType:
             guard let id = shortcutItem.userInfo?["sessionId"] as? String, !id.isEmpty else { return nil }
-            self = .openSession(id: id)
+            let serverID = (shortcutItem.userInfo?["serverId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            self = .openSession(id: id, serverID: serverID?.isEmpty == false ? serverID : nil)
         default:
             return nil
         }
+    }
+
+    /// 只有会话级入口需要锁定服务器；静态「新建/网页版」沿用当前服务器。
+    var targetServerID: String? {
+        if case .openSession(_, let serverID) = self { return serverID }
+        return nil
+    }
+
+    func belongs(to serverID: String) -> Bool {
+        targetServerID == nil || targetServerID == serverID
     }
 }
 
@@ -70,15 +81,19 @@ final class QuickActionCoordinator: ObservableObject {
 
     /// 把最近会话同步成动态快捷项（系统把它们排在 Info.plist 静态项之后，最多共展示 4 个）。
     @MainActor
-    static func updateRecentSessionShortcuts(_ sessions: [SessionSnapshot]) {
+    static func updateRecentSessionShortcuts(_ sessions: [SessionSnapshot], serverID: String? = nil) {
         let recent = sessions.filter { !($0.archived ?? false) }.prefix(2)
         UIApplication.shared.shortcutItems = recent.map { session in
+            var userInfo: [String: NSSecureCoding] = ["sessionId": session.id as NSString]
+            if let serverID, !serverID.isEmpty {
+                userInfo["serverId"] = serverID as NSString
+            }
             UIApplicationShortcutItem(
                 type: QuickAction.openSessionType,
                 localizedTitle: session.displayTitle,
                 localizedSubtitle: "\(session.providerLabel) · \(session.isStructured ? "聊天" : "终端")",
                 icon: UIApplicationShortcutIcon(systemImageName: "bubble.left.and.bubble.right"),
-                userInfo: ["sessionId": session.id as NSString]
+                userInfo: userInfo
             )
         }
     }

@@ -11,7 +11,12 @@ struct BrandLogo: View {
 
     @ViewBuilder
     var body: some View {
-        if WandProvider(normalizing: provider) == .qoder {
+        if provider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "terminal" || provider == nil {
+            Image(systemName: "terminal")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .foregroundColor(color)
+        } else if WandProvider(normalizing: provider) == .qoder {
             Image("QoderLogo")
                 .resizable()
                 .aspectRatio(contentMode: .fit)
@@ -22,7 +27,8 @@ struct BrandLogo: View {
     }
 }
 
-/// 按 provider 渲染品牌 logo：Claude 星芒 / Codex 六角结 / OpenCode 终端代码标记 / Grok 几何 G。
+/// 按 provider 渲染品牌 logo：Claude 星芒 / Codex 六角结 / OpenCode 终端代码标记 /
+/// Grok 几何 G / Pi 字标。
 struct BrandLogoShape: Shape {
     let provider: String?
 
@@ -33,7 +39,28 @@ struct BrandLogoShape: Shape {
         case .opencode: return Self.openCodePath(in: rect)
         case .grok: return Self.grokPath(in: rect)
         case .qoder: return Path()
+        case .pi: return Self.piPath(in: rect)
         }
+    }
+
+    /// Pi 的简洁 π 字标。使用几何路径而非字体，确保小尺寸列表图标也保持稳定比例。
+    private static func piPath(in rect: CGRect) -> Path {
+        let w = rect.width / 24.0
+        let h = rect.height / 24.0
+        var path = Path()
+        path.addRoundedRect(
+            in: CGRect(x: 2 * w, y: 4 * h, width: 20 * w, height: 3.2 * h),
+            cornerSize: CGSize(width: 1.6 * w, height: 1.6 * h)
+        )
+        path.addRoundedRect(
+            in: CGRect(x: 5 * w, y: 5.5 * h, width: 3.4 * w, height: 15 * h),
+            cornerSize: CGSize(width: 1.7 * w, height: 1.7 * h)
+        )
+        path.addRoundedRect(
+            in: CGRect(x: 15.6 * w, y: 5.5 * h, width: 3.4 * w, height: 15 * h),
+            cornerSize: CGSize(width: 1.7 * w, height: 1.7 * h)
+        )
+        return path
     }
 
     /// Claude（Anthropic 星芒）。

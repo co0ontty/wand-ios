@@ -7,13 +7,14 @@ import Foundation
 // MARK: - Provider 能力
 
 /// Wand 支持的 CLI provider。与 provider 相关的名称、runner 和模式约束
-/// 集中在这里，避免 UI 各自维护 Claude/Codex 二分判断而漏掉 OpenCode。
+/// 集中在这里，避免 UI 各自维护 Claude/Codex 二分判断而漏掉其他 Provider。
 enum WandProvider: String, CaseIterable, Identifiable {
     case claude
     case codex
     case opencode
     case grok
     case qoder
+    case pi
 
     var id: String { rawValue }
 
@@ -31,6 +32,8 @@ enum WandProvider: String, CaseIterable, Identifiable {
             self = .grok
         case Self.qoder.rawValue, "qodercli":
             self = .qoder
+        case Self.pi.rawValue, "pi-cli", "pi-cli-json":
+            self = .pi
         default:
             self = .claude
         }
@@ -48,6 +51,7 @@ enum WandProvider: String, CaseIterable, Identifiable {
         case .opencode: return "OpenCode"
         case .grok: return "Grok"
         case .qoder: return "Qoder"
+        case .pi: return "Pi"
         }
     }
 
@@ -58,6 +62,7 @@ enum WandProvider: String, CaseIterable, Identifiable {
         case .opencode: return "opencode-cli-run"
         case .grok: return "grok-cli-headless"
         case .qoder: return "qoder-cli-print"
+        case .pi: return "pi-cli-json"
         }
     }
 
@@ -68,9 +73,7 @@ enum WandProvider: String, CaseIterable, Identifiable {
             return ["default", "full-access", "auto-edit", "native", "managed"]
         case .codex:
             return ["full-access"]
-        case .opencode:
-            return ["default", "full-access", "managed"]
-        case .grok:
+        case .opencode, .grok, .pi:
             return ["default", "full-access", "managed"]
         case .qoder:
             return ["default", "full-access", "auto-edit", "managed"]
@@ -86,10 +89,10 @@ enum WandProvider: String, CaseIterable, Identifiable {
         let configured = fallback?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         if supportedModeIDs.contains(configured) { return configured }
 
-        // 与 Web getSafeModeForTool 一致：无效配置必须回落到权限最保守的
-        // supported[0]。不能把未知/未来模式静默升级成 managed 自动执行。
+        // 与 Android NewSessionWorkflow / ProviderRules 一致：当前 Provider 不支持
+        // 旧模式时回到托管模式；Codex 只有 full-access 一个有效值。
         if self == .codex { return "full-access" }
-        return "default"
+        return "managed"
     }
 }
 
@@ -838,7 +841,10 @@ struct SessionSnapshot: Decodable, Identifiable {
     let autoApprovePermissions: Bool?
 
     var isStructured: Bool { (sessionKind ?? "pty") == "structured" }
-    var providerLabel: String { WandProvider(normalizing: provider).title }
+    var providerLabel: String {
+        guard let provider, !provider.isEmpty, provider.lowercased() != "terminal" else { return "终端" }
+        return WandProvider(normalizing: provider).title
+    }
 
     /// 列表标题：模型标题 > 摘要 > 当前任务 > cwd 末段。
     var displayTitle: String {
@@ -916,7 +922,8 @@ struct ToolContentResponse: Decodable {
 
 // MARK: - 历史会话
 
-/// 从 Claude/Codex 本地历史文件扫描出的会话。两个 provider 的接口形状一致。
+/// 从各 Provider 本地历史文件扫描出的会话。各接口沿用兼容字段
+/// `claudeSessionId`，但身份与 API 路径必须同时包含 Provider。
 struct HistorySession: Decodable, Identifiable {
     let claudeSessionId: String
     let cwd: String
@@ -927,9 +934,36 @@ struct HistorySession: Decodable, Identifiable {
     let managedByWand: Bool?
     let provider: String?
 
+    /// 只有这些 Provider 暴露原生历史协议。未知值（含旧版缺失字段）安全回退 Claude。
+    var apiProvider: String {
+        switch provider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "codex": return "codex"
+        case "opencode", "open-code", "open_code": return "opencode"
+        case "qoder", "qodercli": return "qoder"
+        case "pi": return "pi"
+        default: return "claude"
+        }
+    }
+
     /// 历史 ID 只在同一 provider 内唯一。把 provider 纳入 SwiftUI 身份，避免
-    /// Claude/Codex 恰好使用相同 ID 时列表去重或本地删除误伤另一条记录。
-    var id: String { "\(WandProvider.normalize(provider)):\(claudeSessionId)" }
+    /// 不同 Provider 恰好使用相同 ID 时列表去重或本地删除误伤另一条记录。
+    var id: String { "\(apiProvider):\(claudeSessionId)" }
+
+    func withProviderFallback(_ fallback: String) -> HistorySession {
+        if let provider, !provider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return self
+        }
+        return HistorySession(
+            claudeSessionId: claudeSessionId,
+            cwd: cwd,
+            firstUserMessage: firstUserMessage,
+            timestamp: timestamp,
+            mtimeMs: mtimeMs,
+            hasConversation: hasConversation,
+            managedByWand: managedByWand,
+            provider: fallback
+        )
+    }
 }
 
 // MARK: - WebSocket 消息
@@ -1064,16 +1098,18 @@ struct ModelsResponse: Decodable {
     let opencodeModels: [ModelInfo]
     let grokModels: [ModelInfo]
     let qoderModels: [ModelInfo]
+    let piModels: [ModelInfo]
     let defaultModel: String?
     let defaultCodexModel: String?
     let defaultOpenCodeModel: String?
     let defaultGrokModel: String?
     let defaultQoderModel: String?
+    let defaultPiModel: String?
     let defaultModels: ProviderDefaultModels?
 
     private enum CodingKeys: String, CodingKey {
-        case models, codexModels, opencodeModels, grokModels, qoderModels
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultModels
+        case models, codexModels, opencodeModels, grokModels, qoderModels, piModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultModels
     }
 
     init(from decoder: Decoder) throws {
@@ -1085,11 +1121,13 @@ struct ModelsResponse: Decodable {
         opencodeModels = (try? container.decode([ModelInfo].self, forKey: .opencodeModels)) ?? []
         grokModels = (try? container.decode([ModelInfo].self, forKey: .grokModels)) ?? []
         qoderModels = (try? container.decode([ModelInfo].self, forKey: .qoderModels)) ?? []
+        piModels = (try? container.decode([ModelInfo].self, forKey: .piModels)) ?? []
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
         defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)
         defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
         defaultGrokModel = try? container.decode(String.self, forKey: .defaultGrokModel)
         defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
+        defaultPiModel = try? container.decode(String.self, forKey: .defaultPiModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
     }
 
@@ -1104,6 +1142,7 @@ struct ModelsResponse: Decodable {
         case .opencode: return opencodeModels
         case .grok: return grokModels
         case .qoder: return qoderModels
+        case .pi: return piModels
         }
     }
 
@@ -1119,6 +1158,8 @@ struct ModelsResponse: Decodable {
             return defaultModels?.grok ?? defaultGrokModel ?? ""
         case .qoder:
             return defaultModels?.qoder ?? defaultQoderModel ?? ""
+        case .pi:
+            return defaultModels?.pi ?? defaultPiModel ?? ""
         }
     }
 }
@@ -1163,6 +1204,7 @@ struct ServerConfigInfo: Decodable {
     let defaultOpenCodeModel: String?
     let defaultGrokModel: String?
     let defaultQoderModel: String?
+    let defaultPiModel: String?
     let defaultModels: ProviderDefaultModels?
     let defaultThinkingEffort: String?
     let cardDefaults: CardExpandDefaults?
@@ -1173,7 +1215,7 @@ struct ServerConfigInfo: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case defaultCwd, defaultProvider, defaultSessionKind, defaultMode
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultModels
         case defaultThinkingEffort, cardDefaults
         case currentVersion, latestVersion, updateAvailable, updateChannel
     }
@@ -1189,6 +1231,7 @@ struct ServerConfigInfo: Decodable {
         defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
         defaultGrokModel = try? container.decode(String.self, forKey: .defaultGrokModel)
         defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
+        defaultPiModel = try? container.decode(String.self, forKey: .defaultPiModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
         defaultThinkingEffort = try? container.decode(String.self, forKey: .defaultThinkingEffort)
         cardDefaults = try? container.decode(CardExpandDefaults.self, forKey: .cardDefaults)
@@ -1210,8 +1253,15 @@ struct ServerConfigInfo: Decodable {
             return defaultModels?.grok ?? defaultGrokModel ?? ""
         case .qoder:
             return defaultModels?.qoder ?? defaultQoderModel ?? ""
+        case .pi:
+            return defaultModels?.pi ?? defaultPiModel ?? ""
         }
     }
+
+    /// Old servers can omit these fields. Resolve them from protocol defaults, never from
+    /// a view's previous state, because the new-session sheet can switch endpoints in place.
+    var resolvedDefaultMode: String { defaultMode ?? "managed" }
+    var resolvedDefaultThinkingEffort: String { defaultThinkingEffort ?? "off" }
 }
 
 struct ProviderDefaultModels: Decodable {
@@ -1220,15 +1270,17 @@ struct ProviderDefaultModels: Decodable {
     let opencode: String?
     let grok: String?
     let qoder: String?
+    let pi: String?
 
-    private enum CodingKeys: String, CodingKey { case claude, codex, opencode, grok, qoder }
+    private enum CodingKeys: String, CodingKey { case claude, codex, opencode, grok, qoder, pi }
 
-    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil, grok: String? = nil, qoder: String? = nil) {
+    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil, grok: String? = nil, qoder: String? = nil, pi: String? = nil) {
         self.claude = claude
         self.codex = codex
         self.opencode = opencode
         self.grok = grok
         self.qoder = qoder
+        self.pi = pi
     }
 
     init(from decoder: Decoder) throws {
@@ -1238,6 +1290,7 @@ struct ProviderDefaultModels: Decodable {
         opencode = try? container.decode(String.self, forKey: .opencode)
         grok = try? container.decode(String.self, forKey: .grok)
         qoder = try? container.decode(String.self, forKey: .qoder)
+        pi = try? container.decode(String.self, forKey: .pi)
     }
 
     func modelId(for provider: String) -> String? {
@@ -1247,6 +1300,7 @@ struct ProviderDefaultModels: Decodable {
         case .opencode: return opencode
         case .grok: return grok
         case .qoder: return qoder
+        case .pi: return pi
         }
     }
 }

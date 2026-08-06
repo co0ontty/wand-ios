@@ -361,6 +361,96 @@ final class WandProtocolTests: XCTestCase {
         )
     }
 
+    func testTerminalShortcutArrowsAndModifiersUseXtermSequences() {
+        XCTAssertEqual(encodeTerminalKey(TerminalKeyBinding("arrowUp")), "\u{1B}[A")
+        XCTAssertEqual(encodeTerminalKey(TerminalKeyBinding("arrowDown")), "\u{1B}[B")
+        XCTAssertEqual(encodeTerminalKey(TerminalKeyBinding("arrowLeft")), "\u{1B}[D")
+        XCTAssertEqual(encodeTerminalKey(TerminalKeyBinding("arrowRight")), "\u{1B}[C")
+        XCTAssertEqual(
+            encodeTerminalKey(
+                TerminalKeyBinding("arrowRight", modifiers: [.control, .shift])
+            ),
+            "\u{1B}[1;6C"
+        )
+    }
+
+    func testTerminalShortcutPrintableAndEditingKeysEncodeToPtyBytes() {
+        XCTAssertEqual(
+            encodeTerminalKey(TerminalKeyBinding("c", modifiers: [.control])),
+            "\u{3}"
+        )
+        XCTAssertEqual(
+            encodeTerminalKey(TerminalKeyBinding("r", modifiers: [.control, .alt])),
+            "\u{1B}\u{12}"
+        )
+        XCTAssertEqual(
+            encodeTerminalKey(TerminalKeyBinding("a", modifiers: [.shift])),
+            "A"
+        )
+        XCTAssertEqual(
+            encodeTerminalKey(TerminalKeyBinding("tab", modifiers: [.shift])),
+            "\u{1B}[Z"
+        )
+        XCTAssertEqual(encodeTerminalKey(TerminalKeyBinding("backspace")), "\u{7F}")
+        XCTAssertEqual(encodeTerminalKey(TerminalKeyBinding("delete")), "\u{1B}[3~")
+        XCTAssertEqual(encodeTerminalKey(TerminalKeyBinding("enter")), "\r")
+        XCTAssertNil(encodeTerminalKey(TerminalKeyBinding("hello")))
+        XCTAssertNil(normalizeTerminalKeyInput("\n\t"))
+    }
+
+    func testTerminalShortcutLabelsFollowModifierAndSpecialKeyOrder() {
+        XCTAssertEqual(
+            terminalShortcutLabel(
+                TerminalKeyBinding("c", modifiers: [.shift, .alt, .control])
+            ),
+            "Ctrl+Alt+Shift+C"
+        )
+        XCTAssertEqual(
+            terminalShortcutLabel(TerminalKeyBinding("tab", modifiers: [.shift])),
+            "Shift+Tab"
+        )
+        XCTAssertEqual(
+            buildTerminalShortcut(TerminalKeyBinding("arrowLeft", modifiers: [.alt]))?.label,
+            "Alt+←"
+        )
+    }
+
+    @MainActor
+    func testTerminalShortcutDefaultsAndPreferencesStayValid() throws {
+        XCTAssertEqual(builtInTerminalShortcuts.count, Set(builtInTerminalShortcuts.map(\.id)).count)
+        XCTAssertTrue(builtInTerminalShortcuts.allSatisfy { !$0.bytes.isEmpty })
+        XCTAssertTrue(
+            defaultVisibleTerminalShortcutIDs.isSubset(of: Set(builtInTerminalShortcuts.map(\.id)))
+        )
+
+        let suiteName = "WandProtocolTests.TerminalShortcuts.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let preferences = TerminalShortcutPreferences(defaults: defaults)
+        XCTAssertEqual(preferences.snapshot.visibleBuiltInIDs, defaultVisibleTerminalShortcutIDs)
+        XCTAssertTrue(preferences.snapshot.customShortcuts.isEmpty)
+        XCTAssertFalse(preferences.snapshot.hasSeenGuide)
+
+        preferences.setBuiltInVisible("escape", visible: false)
+        preferences.markGuideSeen()
+        for index in 0...maxCustomTerminalShortcuts {
+            XCTAssertNotNil(
+                preferences.addCustomShortcut(
+                    TerminalKeyBinding(String(index % 10), modifiers: [.alt])
+                )
+            )
+        }
+
+        let restored = TerminalShortcutPreferences(defaults: defaults)
+        XCTAssertFalse(restored.snapshot.visibleBuiltInIDs.contains("escape"))
+        XCTAssertTrue(restored.snapshot.hasSeenGuide)
+        XCTAssertEqual(restored.snapshot.customShortcuts.count, maxCustomTerminalShortcuts)
+
+        restored.resetBuiltIns()
+        XCTAssertEqual(restored.snapshot.visibleBuiltInIDs, defaultVisibleTerminalShortcutIDs)
+    }
+
     func testProviderNormalizationTitlesAndRunners() {
         XCTAssertEqual(WandProvider.normalize(nil), "claude")
         XCTAssertEqual(WandProvider.normalize("  CODEX\n"), "codex")
@@ -390,9 +480,9 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(WandProvider.codex.clamp(mode: nil, fallback: "full-access"), "full-access")
         XCTAssertEqual(WandProvider.opencode.clamp(mode: "default"), "default")
         XCTAssertEqual(WandProvider.opencode.clamp(mode: "native", fallback: "full-access"), "full-access")
-        XCTAssertEqual(WandProvider.opencode.clamp(mode: "native", fallback: "auto-edit"), "default")
+        XCTAssertEqual(WandProvider.opencode.clamp(mode: "native", fallback: "auto-edit"), "managed")
         XCTAssertEqual(WandProvider.qoder.clamp(mode: "native", fallback: "auto-edit"), "auto-edit")
-        XCTAssertEqual(WandProvider.claude.clamp(mode: "future-auto-mode"), "default")
+        XCTAssertEqual(WandProvider.claude.clamp(mode: "future-auto-mode"), "managed")
     }
 
     func testLegacyModelsResponseWithoutOpenCodeFieldsDecodesAsEmpty() throws {

@@ -19,6 +19,9 @@ struct SettingsView: View {
     @State private var notificationStatus = "读取中…"
     @State private var logShare: LogShareItem?
     @State private var logExportEmpty = false
+    @State private var showRenameServer = false
+    @State private var serverNameDraft = ""
+    @StateObject private var terminalShortcuts = TerminalShortcutPreferences()
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
 
@@ -28,6 +31,7 @@ struct SettingsView: View {
                 settingsOverview
                 appearanceSection
                 featureSection
+                TerminalShortcutSettingsSections(preferences: terminalShortcuts)
                 serverSection
                 diagnosticsSection
                 clientUpdateSection
@@ -53,14 +57,16 @@ struct SettingsView: View {
             serverVersion = (try? await api.serverConfig())?.currentVersion
             await refreshNotificationStatus()
         }
-        .confirmationDialog("断开后需要重新输入连接码才能连回来。", isPresented: $confirmDisconnect, titleVisibility: .visible) {
-            Button("断开连接", role: .destructive) {
+        .confirmationDialog("返回连接页？", isPresented: $confirmDisconnect, titleVisibility: .visible) {
+            Button("返回连接页") {
                 dismiss()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     store.disconnect()
                 }
             }
             Button("取消", role: .cancel) {}
+        } message: {
+            Text("已保存服务器及各自认证信息会保留，可随时一键重新连接。")
         }
         .sheet(item: $logShare) { item in
             ActivityView(activityItems: [item.url])
@@ -69,6 +75,17 @@ struct SettingsView: View {
             Button("好", role: .cancel) {}
         } message: {
             Text("打开会话、收发消息或复现问题后再导出，才能捕获到有用的上下文。")
+        }
+        .alert("服务器名称", isPresented: $showRenameServer) {
+            TextField("留空使用地址", text: $serverNameDraft)
+            Button("保存") {
+                if let id = store.activeServerID {
+                    store.renameProfile(id: id, customName: serverNameDraft)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("名称只保存在这台设备上，不会修改服务器配置。")
         }
         .wandKeyboardShortcuts(settingsKeyboardShortcuts)
     }
@@ -135,10 +152,21 @@ struct SettingsView: View {
 
     private var serverSection: some View {
         Section("服务器") {
+            if let profile = store.activeProfile {
+                infoRow("名称", profile.displayName)
+            }
             infoRow("地址", serverURL.absoluteString, mono: true)
             infoRow("认证方式", (token?.isEmpty == false) ? "连接码" : "无密码")
+            infoRow("已保存", "\(store.profiles.count) 台")
             if let serverVersion {
                 infoRow("服务端版本", "v\(serverVersion)", mono: true)
+            }
+            Button {
+                serverNameDraft = store.activeProfile?.customName ?? ""
+                showRenameServer = true
+            } label: {
+                Label("重命名当前服务器", systemImage: "pencil")
+                    .font(.system(size: 15))
             }
             Button {
                 dismiss()
@@ -152,7 +180,7 @@ struct SettingsView: View {
             Button(role: .destructive) {
                 confirmDisconnect = true
             } label: {
-                Label("断开连接", systemImage: "xmark.circle")
+                Label("返回连接页", systemImage: "rectangle.portrait.and.arrow.right")
                     .font(.system(size: 15))
             }
         }

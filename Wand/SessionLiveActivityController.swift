@@ -49,6 +49,7 @@ final class SessionLiveActivityController {
     /// 会话开始回复：插入（或刷新）条内对应条目，必要时创建活动。
     func start(
         sessionId: String,
+        serverID: String? = nil,
         title: String,
         provider: String?,
         state: SessionState = .responding,
@@ -56,50 +57,69 @@ final class SessionLiveActivityController {
         queuedCount: Int = 0
     ) {
         guard enabled else { return }
+        let serverID = serverID ?? ServerStore.shared.activeServerID
+        guard serverID == ServerStore.shared.activeServerID else { return }
         restoreExistingActivityIfNeeded()
-        cancelDoneRemoval(sessionId)
+        cancelDoneRemoval(sessionId, serverID: serverID)
         upsert(
-            sessionId: sessionId, title: title, provider: provider, state: state,
+            sessionId: sessionId, serverID: serverID, title: title, provider: provider, state: state,
             taskTitle: taskTitle, queuedCount: queuedCount
         )
         sync(allowCreate: true)
     }
 
     /// 按服务端快照恢复或更新活动。已有运行中的会话不再依赖本机先点一次发送。
-    func sync(snapshot: SessionSnapshot) {
+    func sync(snapshot: SessionSnapshot, serverID: String? = nil) {
+        let serverID = serverID ?? ServerStore.shared.activeServerID
+        guard serverID == ServerStore.shared.activeServerID else { return }
         if snapshot.hasPendingPermission {
             start(
-                sessionId: snapshot.id, title: snapshot.displayTitle, provider: snapshot.provider,
+                sessionId: snapshot.id, serverID: serverID,
+                title: snapshot.displayTitle, provider: snapshot.provider,
                 state: .permission, taskTitle: snapshot.currentTaskTitle,
                 queuedCount: snapshot.queuedMessages?.count ?? 0
             )
         } else if snapshot.isResponding {
             start(
-                sessionId: snapshot.id, title: snapshot.displayTitle, provider: snapshot.provider,
+                sessionId: snapshot.id, serverID: serverID,
+                title: snapshot.displayTitle, provider: snapshot.provider,
                 taskTitle: snapshot.currentTaskTitle, queuedCount: snapshot.queuedMessages?.count ?? 0
             )
         } else if snapshot.isEnded {
-            end(sessionId: snapshot.id, immediately: true)
-        } else if let entry = ActivityStore.entries.first(where: { $0.id == snapshot.id }),
+            end(sessionId: snapshot.id, serverID: serverID, immediately: true)
+        } else if let entry = ActivityStore.entries.first(where: {
+            $0.id == snapshot.id && $0.serverID == serverID
+        }),
                   !entry.isDone {
-            end(sessionId: snapshot.id)
+            end(sessionId: snapshot.id, serverID: serverID)
         }
     }
 
     /// 列表轮询是全局事实来源：恢复所有活跃会话，并清掉服务端已不存在的遗留条目。
-    func reconcile(snapshots: [SessionSnapshot]) {
+    func reconcile(snapshots: [SessionSnapshot], serverID: String? = nil) {
         guard ServerStore.shared.liveActivityEnabled else {
             endAll()
             return
         }
+        let serverID = serverID ?? ServerStore.shared.activeServerID
+        guard serverID == ServerStore.shared.activeServerID else { return }
         restoreExistingActivityIfNeeded()
+        // iOS only polls the selected endpoint. Do not let a refresh from that endpoint renew
+        // stale entries left by an inactive server in the one process-wide Live Activity.
+        let inactiveEntries = ActivityStore.entries.filter { $0.serverID != serverID }
+        for entry in inactiveEntries {
+            removeImmediately(sessionId: entry.id, serverID: entry.serverID)
+        }
         let visibleIds = Set(snapshots.filter { !($0.archived ?? false) }.map(\.id))
         for snapshot in snapshots where !(snapshot.archived ?? false) {
-            sync(snapshot: snapshot)
+            sync(snapshot: snapshot, serverID: serverID)
         }
-        let missingIds = ActivityStore.entries.map(\.id).filter { !visibleIds.contains($0) }
+        let missingIds = ActivityStore.entries
+            .filter { $0.serverID == serverID }
+            .map(\.id)
+            .filter { !visibleIds.contains($0) }
         for id in missingIds {
-            end(sessionId: id, immediately: true)
+            end(sessionId: id, serverID: serverID, immediately: true)
         }
         sync(allowCreate: false, refresh: true)
     }
@@ -117,23 +137,43 @@ final class SessionLiveActivityController {
         }
     }
 
+    func endAll(serverID: String) {
+        restoreExistingActivityIfNeeded()
+        let entries = ActivityStore.entries.filter { $0.serverID == serverID }
+        for entry in entries {
+            removeImmediately(sessionId: entry.id, serverID: entry.serverID)
+        }
+        sync(allowCreate: false, refresh: true)
+    }
+
     /// 结束：immediately = true（会话退出 / 被杀 / 离开页面）直接从条里移除；
     /// 否则视为成功完成，切「已完成」停留片刻再自动移除。
-    func end(sessionId: String, immediately: Bool = false) {
-        guard let index = ActivityStore.entries.firstIndex(where: { $0.id == sessionId }) else { return }
-        cancelDoneRemoval(sessionId)
+    func end(sessionId: String, serverID: String? = nil, immediately: Bool = false) {
+        let serverID = serverID ?? ServerStore.shared.activeServerID
+        guard let index = ActivityStore.entries.firstIndex(where: {
+            $0.id == sessionId && $0.serverID == serverID
+        }) else { return }
+        let key = scopedKey(sessionId, serverID: serverID)
+        cancelDoneRemoval(sessionId, serverID: serverID)
         if immediately {
             ActivityStore.entries.remove(at: index)
-            ActivityStore.startedAtBySession[sessionId] = nil
+            ActivityStore.startedAtBySession[key] = nil
         } else {
             ActivityStore.entries[index].stateRaw = SessionState.done.rawValue
             ActivityStore.entries[index].taskTitle = nil
             ActivityStore.entries[index].queuedCount = 0
             ActivityStore.entries[index].startedAt = nil
-            ActivityStore.startedAtBySession[sessionId] = nil
-            scheduleDoneRemoval(sessionId)
+            ActivityStore.startedAtBySession[key] = nil
+            scheduleDoneRemoval(sessionId, serverID: serverID)
         }
         sync(allowCreate: false)
+    }
+
+    private func removeImmediately(sessionId: String, serverID: String?) {
+        let key = scopedKey(sessionId, serverID: serverID)
+        cancelDoneRemoval(sessionId, serverID: serverID)
+        ActivityStore.entries.removeAll { $0.id == sessionId && $0.serverID == serverID }
+        ActivityStore.startedAtBySession[key] = nil
     }
 
 #if DEBUG
@@ -238,9 +278,17 @@ final class SessionLiveActivityController {
         guard let activity = activities.first else { return }
         ActivityStore.activity = activity
         ActivityStore.entries = activity.content.state.sessions
-        ActivityStore.publishedEntries = activity.content.state.sessions
+        let legacyServerID = ServerStore.shared.activeServerID
+        ActivityStore.entries = ActivityStore.entries.map { entry in
+            var scoped = entry
+            if scoped.serverID == nil { scoped.serverID = legacyServerID }
+            return scoped
+        }
+        ActivityStore.publishedEntries = ActivityStore.entries
         for entry in ActivityStore.entries {
-            if let startedAt = entry.startedAt { ActivityStore.startedAtBySession[entry.id] = startedAt }
+            if let startedAt = entry.startedAt {
+                ActivityStore.startedAtBySession[scopedKey(entry.id, serverID: entry.serverID)] = startedAt
+            }
         }
         for duplicate in activities.dropFirst() {
             Task { await duplicate.end(nil, dismissalPolicy: .immediate) }
@@ -248,20 +296,23 @@ final class SessionLiveActivityController {
     }
 
     private func upsert(
-        sessionId: String, title: String, provider: String?, state: SessionState,
+        sessionId: String, serverID: String?, title: String, provider: String?, state: SessionState,
         taskTitle: String?, queuedCount: Int
     ) {
+        let key = scopedKey(sessionId, serverID: serverID)
         let shortTitle = String(title.prefix(Self.maxTitleLength))
         let shortTaskTitle = taskTitle.map { String($0.prefix(Self.maxTaskTitleLength)) }
         let startedAt: Date?
         if state == .responding {
-            startedAt = ActivityStore.startedAtBySession[sessionId] ?? Date()
-            ActivityStore.startedAtBySession[sessionId] = startedAt
+            startedAt = ActivityStore.startedAtBySession[key] ?? Date()
+            ActivityStore.startedAtBySession[key] = startedAt
         } else {
             startedAt = nil
-            ActivityStore.startedAtBySession[sessionId] = nil
+            ActivityStore.startedAtBySession[key] = nil
         }
-        if let index = ActivityStore.entries.firstIndex(where: { $0.id == sessionId }) {
+        if let index = ActivityStore.entries.firstIndex(where: {
+            $0.id == sessionId && $0.serverID == serverID
+        }) {
             ActivityStore.entries[index].title = shortTitle
             ActivityStore.entries[index].providerRaw = provider ?? "claude"
             ActivityStore.entries[index].stateRaw = state.rawValue
@@ -270,7 +321,8 @@ final class SessionLiveActivityController {
             ActivityStore.entries[index].startedAt = startedAt
         } else {
             ActivityStore.entries.append(SessionActivityAttributes.SessionEntry(
-                id: sessionId, title: shortTitle, providerRaw: provider ?? "claude",
+                id: sessionId, serverID: serverID,
+                title: shortTitle, providerRaw: provider ?? "claude",
                 stateRaw: state.rawValue, taskTitle: shortTaskTitle, queuedCount: queuedCount,
                 startedAt: startedAt
             ))
@@ -282,26 +334,34 @@ final class SessionLiveActivityController {
     private func trimEntriesIfNeeded() {
         while ActivityStore.entries.count > Self.maxEntries {
             let victim = ActivityStore.entries.firstIndex { $0.isDone } ?? 0
-            let victimId = ActivityStore.entries[victim].id
-            cancelDoneRemoval(victimId)
-            ActivityStore.startedAtBySession[victimId] = nil
+            let victimEntry = ActivityStore.entries[victim]
+            let victimId = victimEntry.id
+            cancelDoneRemoval(victimId, serverID: victimEntry.serverID)
+            ActivityStore.startedAtBySession[scopedKey(victimId, serverID: victimEntry.serverID)] = nil
             ActivityStore.entries.remove(at: victim)
         }
     }
 
-    private func scheduleDoneRemoval(_ sessionId: String) {
-        ActivityStore.doneRemovalTasks[sessionId] = Task {
+    private func scheduleDoneRemoval(_ sessionId: String, serverID: String?) {
+        let key = scopedKey(sessionId, serverID: serverID)
+        ActivityStore.doneRemovalTasks[key] = Task {
             try? await Task.sleep(nanoseconds: Self.doneLingerSeconds * 1_000_000_000)
             guard !Task.isCancelled else { return }
-            ActivityStore.doneRemovalTasks[sessionId] = nil
-            ActivityStore.entries.removeAll { $0.id == sessionId && $0.isDone }
-            ActivityStore.startedAtBySession[sessionId] = nil
+            ActivityStore.doneRemovalTasks[key] = nil
+            ActivityStore.entries.removeAll {
+                $0.id == sessionId && $0.serverID == serverID && $0.isDone
+            }
+            ActivityStore.startedAtBySession[key] = nil
             sync(allowCreate: false)
         }
     }
 
-    private func cancelDoneRemoval(_ sessionId: String) {
-        ActivityStore.doneRemovalTasks.removeValue(forKey: sessionId)?.cancel()
+    private func cancelDoneRemoval(_ sessionId: String, serverID: String?) {
+        ActivityStore.doneRemovalTasks.removeValue(forKey: scopedKey(sessionId, serverID: serverID))?.cancel()
+    }
+
+    private func scopedKey(_ sessionId: String, serverID: String?) -> String {
+        "\(serverID ?? "legacy"):\(sessionId)"
     }
 
     /// 把当前条目集合同步到系统：空 → 收掉活动；非空 → 更新或（允许时）创建。
@@ -360,6 +420,7 @@ final class SessionPresenceController {
 
     func start(
         sessionId: String,
+        serverID: String? = nil,
         title: String,
         provider: String?,
         state: SessionLiveActivityController.SessionState = .responding,
@@ -368,6 +429,7 @@ final class SessionPresenceController {
     ) {
         SessionLiveActivityController.shared.start(
             sessionId: sessionId,
+            serverID: serverID,
             title: title,
             provider: provider,
             state: state,
@@ -376,21 +438,31 @@ final class SessionPresenceController {
         )
     }
 
-    func sync(snapshot: SessionSnapshot) {
-        SessionLiveActivityController.shared.sync(snapshot: snapshot)
+    func sync(snapshot: SessionSnapshot, serverID: String? = nil) {
+        SessionLiveActivityController.shared.sync(snapshot: snapshot, serverID: serverID)
     }
 
-    func reconcile(snapshots: [SessionSnapshot]) {
-        SessionLiveActivityController.shared.reconcile(snapshots: snapshots)
-        SessionNotificationController.shared.reconcile(snapshots: snapshots)
+    func reconcile(snapshots: [SessionSnapshot], serverID: String? = nil) {
+        let serverID = serverID ?? ServerStore.shared.activeServerID
+        guard serverID == ServerStore.shared.activeServerID else { return }
+        SessionLiveActivityController.shared.reconcile(snapshots: snapshots, serverID: serverID)
+        SessionNotificationController.shared.reconcile(snapshots: snapshots, serverID: serverID)
     }
 
-    func end(sessionId: String, immediately: Bool = false) {
-        SessionLiveActivityController.shared.end(sessionId: sessionId, immediately: immediately)
+    func end(sessionId: String, serverID: String? = nil, immediately: Bool = false) {
+        SessionLiveActivityController.shared.end(
+            sessionId: sessionId,
+            serverID: serverID,
+            immediately: immediately
+        )
     }
 
     func endAll() {
         SessionLiveActivityController.shared.endAll()
+    }
+
+    func endAll(serverID: String) {
+        SessionLiveActivityController.shared.endAll(serverID: serverID)
     }
 
 #if DEBUG

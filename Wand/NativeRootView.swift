@@ -4,8 +4,7 @@ import SwiftUI
 /// 冷启动后为空），然后进入原生会话列表。WebView 仅作为「网页版」兜底入口保留，
 /// 覆盖设置、文件浏览等原生未实现的功能。
 struct NativeRootView: View {
-    let serverURL: URL
-    let token: String?
+    let profile: ServerProfile
 
     @EnvironmentObject private var store: ServerStore
     @State private var phase: Phase = .authenticating
@@ -18,6 +17,10 @@ struct NativeRootView: View {
     @State private var updateError: String?
     @State private var installingUpdate = false
     @State private var systemSocket: WandSocket?
+    @State private var lifecycleGeneration = 0
+    @State private var authenticationTask: Task<Void, Never>?
+    @State private var updateRefreshTask: Task<Void, Never>?
+    @State private var updateInstallTask: Task<Void, Never>?
 #if DEBUG
     @State private var didApplyDebugSettingsLaunch = false
 #endif
@@ -36,6 +39,10 @@ struct NativeRootView: View {
         case ready
         case failed(String)
     }
+
+    private var serverURL: URL { profile.baseURL }
+    private var token: String? { profile.token }
+    private var serverID: String { profile.id }
 
     private var api: WandAPI {
         WandAPI(baseURL: serverURL, token: token)
@@ -68,10 +75,7 @@ struct NativeRootView: View {
             .environmentObject(store)
         }
         .onAppear { authenticate() }
-        .onDisappear {
-            systemSocket?.close()
-            systemSocket = nil
-        }
+        .onDisappear { invalidateLifecycle() }
         // 「打开网页版」快捷操作归本视图消费；登录完成前先挂起，ready 后再接。
         .onReceive(quickActions.$pending) { _ in
             handleQuickAction()
@@ -224,8 +228,9 @@ struct NativeRootView: View {
                             .padding(.top, 8)
                             .padding(.bottom, 6)
                     }
-                    SessionListView(
+                    UnifiedSessionListView(
                         api: api,
+                        serverID: serverID,
                         selection: $selectedSessionID,
                         selectedSnapshot: $selectedSnapshot,
                         openingSessionID: $openingSessionID
@@ -389,12 +394,16 @@ struct NativeRootView: View {
 
     private func handleQuickAction() {
         guard phase == .ready else { return }
-        if quickActions.consume(where: { $0 == .openWeb }) != nil {
+        if quickActions.consume(where: { $0 == .openWeb && $0.belongs(to: serverID) }) != nil {
             showSettings = false
             showWebFallback = true
-        } else if quickActions.consume(where: { $0 == .showSessions }) != nil {
+        } else if quickActions.consume(where: { $0 == .showSessions && $0.belongs(to: serverID) }) != nil {
             showSettings = false
+            showMissions = false
             showWebFallback = false
+            selectedSessionID = nil
+            selectedSnapshot = nil
+            openingSessionID = nil
         }
     }
 
@@ -420,7 +429,7 @@ struct NativeRootView: View {
                 let snapshot = try await api.getSession(id: sessionID)
                 guard selectedSessionID == sessionID else { return }
                 selectedSnapshot = snapshot
-                SessionPresenceController.shared.sync(snapshot: snapshot)
+                SessionPresenceController.shared.sync(snapshot: snapshot, serverID: serverID)
             } catch {
                 guard selectedSessionID == sessionID else { return }
                 selectedSessionID = nil
@@ -441,56 +450,88 @@ struct NativeRootView: View {
 #endif
 
     private func authenticate() {
+        invalidateLifecycle()
+        let generation = lifecycleGeneration
+        let endpointAPI = api
         phase = .authenticating
         guard let token, !token.isEmpty else {
             // 裸地址连接（无 token）：直接试列表，401 时引导重新连接。
-            Task {
+            authenticationTask = Task { @MainActor in
                 do {
-                    _ = try await api.listSessions()
-                    phase = .ready
-                    startSystemSocket()
-                    await refreshServerUpdateInfo()
+                    _ = try await endpointAPI.listSessions()
+                    guard !Task.isCancelled, isCurrentLifecycle(generation) else { return }
+                    finishAuthentication(generation: generation)
                 } catch {
+                    guard !Task.isCancelled, isCurrentLifecycle(generation) else { return }
+                    authenticationTask = nil
                     phase = .failed("无法访问服务器：\(error.localizedDescription)\n如果服务器设有密码，请用「连接码」重新连接。")
                 }
             }
             return
         }
-        WandAuth.loginWithToken(serverURL: serverURL, appToken: token) { result in
-            DispatchQueue.main.async {
-                switch result {
-                case .success:
-                    phase = .ready
-                    startSystemSocket()
-                    Task { await refreshServerUpdateInfo() }
-                case .failure(let err):
-                    phase = .failed(err.userMessage)
+
+        let endpointURL = serverURL
+        authenticationTask = Task { @MainActor in
+            let result: Result<Void, WandAuth.Failure> = await withCheckedContinuation { continuation in
+                WandAuth.loginWithToken(
+                    serverURL: endpointURL,
+                    appToken: token,
+                    endpointSession: endpointAPI.endpointSession
+                ) {
+                    continuation.resume(returning: $0.map { _ in () })
                 }
+            }
+            guard !Task.isCancelled, isCurrentLifecycle(generation) else { return }
+            switch result {
+            case .success:
+                finishAuthentication(generation: generation)
+            case .failure(let error):
+                authenticationTask = nil
+                phase = .failed(error.userMessage)
             }
         }
     }
 
-    private func refreshServerUpdateInfo() async {
-        guard let config = try? await api.serverConfig(),
-              config.updateAvailable == true,
-              let latest = config.latestVersion,
-              !latest.isEmpty else { return }
-        serverUpdate = ServerUpdateInfo(
-            current: config.currentVersion ?? "?",
-            latest: latest,
-            channel: config.updateChannel
-        )
+    private func finishAuthentication(generation: Int) {
+        guard isCurrentLifecycle(generation) else { return }
+        authenticationTask = nil
+        phase = .ready
+        startSystemSocket(generation: generation)
+        refreshServerUpdateInfo(generation: generation)
     }
 
-    private func startSystemSocket() {
-        guard systemSocket == nil else { return }
-        let socket = WandSocket(baseURL: serverURL)
-        socket.onEvent = { incoming in
-            guard incoming.type == "notification", let data = incoming.data else { return }
-            handleSystemNotification(data)
+    private func refreshServerUpdateInfo(generation: Int) {
+        updateRefreshTask?.cancel()
+        let endpointAPI = api
+        updateRefreshTask = Task { @MainActor in
+            let config = try? await endpointAPI.serverConfig()
+            guard !Task.isCancelled,
+                  isCurrentLifecycle(generation),
+                  let config,
+                  config.updateAvailable == true,
+                  let latest = config.latestVersion,
+                  !latest.isEmpty else { return }
+            serverUpdate = ServerUpdateInfo(
+                current: config.currentVersion ?? "?",
+                latest: latest,
+                channel: config.updateChannel
+            )
+            if isCurrentLifecycle(generation) { updateRefreshTask = nil }
         }
-        socket.connect()
+    }
+
+    private func startSystemSocket(generation: Int) {
+        guard isCurrentLifecycle(generation), systemSocket == nil else { return }
+        let socket = WandSocket(baseURL: serverURL)
+        socket.onEvent = { [weak socket] incoming in
+            guard let socket,
+                  self.systemSocket === socket,
+                  self.isCurrentLifecycle(generation) else { return }
+            guard incoming.type == "notification", let data = incoming.data else { return }
+            self.handleSystemNotification(data)
+        }
         systemSocket = socket
+        socket.connect()
     }
 
     private func handleSystemNotification(_ data: WsData) {
@@ -521,18 +562,45 @@ struct NativeRootView: View {
 
     private func installUpdate() {
         guard !installingUpdate else { return }
+        let generation = lifecycleGeneration
+        guard isCurrentLifecycle(generation) else { return }
+        let endpointAPI = api
+        updateInstallTask?.cancel()
         installingUpdate = true
         updateError = nil
         updateBannerMessage = "服务端正在下载并安装新版"
-        Task {
+        updateInstallTask = Task { @MainActor in
             do {
-                try await api.installServerUpdate()
+                try await endpointAPI.installServerUpdate()
+                guard !Task.isCancelled, isCurrentLifecycle(generation) else { return }
                 updateBannerMessage = "更新命令已发送，服务端即将重启"
             } catch {
+                guard !Task.isCancelled, isCurrentLifecycle(generation) else { return }
                 updateError = error.localizedDescription
             }
+            guard isCurrentLifecycle(generation) else { return }
             installingUpdate = false
+            updateInstallTask = nil
         }
+    }
+
+    private func isCurrentLifecycle(_ generation: Int) -> Bool {
+        lifecycleGeneration == generation
+            && store.activeServerID == serverID
+            && store.activeProfile?.connectionIdentity == profile.connectionIdentity
+    }
+
+    private func invalidateLifecycle() {
+        lifecycleGeneration &+= 1
+        authenticationTask?.cancel()
+        authenticationTask = nil
+        updateRefreshTask?.cancel()
+        updateRefreshTask = nil
+        updateInstallTask?.cancel()
+        updateInstallTask = nil
+        installingUpdate = false
+        systemSocket?.close()
+        systemSocket = nil
     }
 }
 

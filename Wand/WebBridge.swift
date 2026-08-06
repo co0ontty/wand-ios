@@ -8,6 +8,9 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
     private let model: WebViewModel
     private weak var webView: WKWebView?
     private var serverURL: URL?
+    private var serverID: String?
+    private var endpointScope: WandEndpointScope?
+    private var attachmentGeneration = 0
     private var hasLoadedOnce = false
     private var keyboardObservers: [NSObjectProtocol] = []
 
@@ -15,11 +18,30 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         self.model = model
     }
 
-    func attach(webView: WKWebView, serverURL: URL) {
+    @discardableResult
+    func attach(webView: WKWebView, serverURL: URL) -> Int {
+        attachmentGeneration &+= 1
         self.webView = webView
         self.serverURL = serverURL
+        self.serverID = ServerProfiles.stableID(for: serverURL)
+        self.endpointScope = WandEndpointScope(serverURL)
         self.model.webView = webView
         installKeyboardObservers()
+        return attachmentGeneration
+    }
+
+    func isCurrentAttachment(webView: WKWebView, generation: Int) -> Bool {
+        self.webView === webView && attachmentGeneration == generation
+    }
+
+    func detach(webView: WKWebView) {
+        guard self.webView === webView else { return }
+        attachmentGeneration &+= 1
+        self.webView = nil
+        serverURL = nil
+        serverID = nil
+        endpointScope = nil
+        if model.webView === webView { model.webView = nil }
     }
 
     deinit {
@@ -79,7 +101,12 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
             let title = dict["title"] as? String ?? "Wand"
             let body = dict["body"] as? String ?? ""
             let tag = dict["tag"] as? String ?? ""
-            SessionNotificationController.shared.sendWebNotification(title: title, body: body, tag: tag)
+            SessionNotificationController.shared.sendWebNotification(
+                title: title,
+                body: body,
+                tag: tag,
+                serverID: serverID
+            )
         default:
             wlog("web", "ignored native message type=\(type) (no-op on iOS)")
         }
@@ -87,8 +114,8 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
 
     // MARK: - Self-signed HTTPS / Auth challenge
 
-    /// 对自签名证书一律放行：只要是 HTTPS 的 server trust 类型，就用拿到的 trust 构造
-    /// URLCredential 喂回去；否则走默认处理。
+    /// 仅对当前 Wand endpoint 的自签名证书放行。外部导航或同主机其他端口不得
+    /// 继承这个例外。
     func webView(_ webView: WKWebView,
                  didReceive challenge: URLAuthenticationChallenge,
                  completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
@@ -96,7 +123,9 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         let method = space.authenticationMethod
         let host = space.host
 
-        if method == NSURLAuthenticationMethodServerTrust {
+        if method == NSURLAuthenticationMethodServerTrust,
+           endpointScope?.usesHTTPS == true,
+           endpointScope?.matches(space) == true {
             if let trust = space.serverTrust {
                 completionHandler(.useCredential, URLCredential(trust: trust))
             } else {
@@ -108,6 +137,96 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
 
         wlog("web", "auth challenge: 非 ServerTrust method=\(method) host=\(host) — 默认处理")
         completionHandler(.performDefaultHandling, nil)
+    }
+
+    // MARK: - Endpoint navigation boundary
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.cancel)
+            return
+        }
+
+        if isSafeLocalDocumentURL(url) || endpointScope?.contains(url) == true {
+            decisionHandler(.allow)
+            return
+        }
+
+        // An iframe must never leave the selected endpoint. Main-frame external links are
+        // handed to the system browser, whose cookie jar does not contain Wand credentials.
+        let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
+        if isMainFrame {
+            openExternal(url)
+        }
+        decisionHandler(.cancel)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        guard navigationAction.targetFrame == nil,
+              let url = navigationAction.request.url else { return nil }
+        if endpointScope?.contains(url) == true {
+            webView.load(navigationAction.request)
+        } else if !isSafeLocalDocumentURL(url) {
+            openExternal(url)
+        }
+        return nil
+    }
+
+    private func isSafeLocalDocumentURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "about" || scheme == "data" || scheme == "blob"
+    }
+
+    private func openExternal(_ url: URL) {
+        guard UIApplication.shared.canOpenURL(url) else {
+            wlog("web", "系统无法打开外部链接 scheme=\(url.scheme ?? "?")")
+            return
+        }
+        UIApplication.shared.open(url)
+    }
+
+    /// Installs the subresource boundary before the first authentication cookie enters
+    /// WebKit. Failing to compile is fail-closed: the caller keeps the error overlay visible.
+    func installEndpointContentBoundary(
+        in userController: WKUserContentController,
+        serverURL: URL,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        guard let json = WandEndpointContentBoundary.contentRuleListJSON(baseURL: serverURL) else {
+            completion(.failure(NSError(
+                domain: "com.wand.app.web-content-boundary",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "无法生成服务器网络边界"]
+            )))
+            return
+        }
+        let identifier = "wand-endpoint-boundary-v1-\(ServerProfiles.stableID(for: serverURL))"
+        WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: identifier,
+            encodedContentRuleList: json
+        ) { ruleList, error in
+            DispatchQueue.main.async {
+                if let ruleList {
+                    userController.add(ruleList)
+                    completion(.success(()))
+                } else {
+                    completion(.failure(error ?? NSError(
+                        domain: "com.wand.app.web-content-boundary",
+                        code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "无法启用服务器网络边界"]
+                    )))
+                }
+            }
+        }
     }
 
     // MARK: - Navigation lifecycle / diagnostics
