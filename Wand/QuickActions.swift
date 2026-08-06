@@ -88,7 +88,7 @@ final class QuickActionCoordinator: ObservableObject {
             if let serverID, !serverID.isEmpty {
                 userInfo["serverId"] = serverID as NSString
             }
-            UIApplicationShortcutItem(
+            return UIApplicationShortcutItem(
                 type: QuickAction.openSessionType,
                 localizedTitle: session.displayTitle,
                 localizedSubtitle: "\(session.providerLabel) · \(session.isStructured ? "聊天" : "终端")",
