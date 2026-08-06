@@ -691,7 +691,7 @@ private struct MissionReviewComposer: View {
     let onSubmit: (String) async -> Bool
 
     @Environment(\.dismiss) private var dismiss
-    @State private var body = ""
+    @State private var reviewText = ""
     @State private var submitting = false
 
     var body: some View {
@@ -704,7 +704,7 @@ private struct MissionReviewComposer: View {
                     }
                 }
                 Section("审阅意见") {
-                    TextEditor(text: $body)
+                    TextEditor(text: $reviewText)
                         .frame(minHeight: 150)
                 }
             }
@@ -716,11 +716,11 @@ private struct MissionReviewComposer: View {
                     Button("保存") {
                         Task {
                             submitting = true
-                            if await onSubmit(body.trimmingCharacters(in: .whitespacesAndNewlines)) { dismiss() }
+                            if await onSubmit(reviewText.trimmingCharacters(in: .whitespacesAndNewlines)) { dismiss() }
                             submitting = false
                         }
                     }
-                    .disabled(body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || submitting)
+                    .disabled(reviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || submitting)
                 }
             }
         }
