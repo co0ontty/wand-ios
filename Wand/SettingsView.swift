@@ -21,7 +21,6 @@ struct SettingsView: View {
     @State private var logExportEmpty = false
     @State private var showRenameServer = false
     @State private var serverNameDraft = ""
-    @StateObject private var terminalShortcuts = TerminalShortcutPreferences()
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
 
@@ -31,7 +30,6 @@ struct SettingsView: View {
                 settingsOverview
                 appearanceSection
                 featureSection
-                TerminalShortcutSettingsSections(preferences: terminalShortcuts)
                 serverSection
                 diagnosticsSection
                 clientUpdateSection

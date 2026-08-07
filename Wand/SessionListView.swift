@@ -595,10 +595,6 @@ private struct PtySessionView: View {
     @State private var voiceHoldWork: DispatchWorkItem?
     @State private var gitStatus: GitStatusResult?
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
-    @StateObject private var shortcutPreferences: TerminalShortcutPreferences
-    @StateObject private var shortcutSender: TerminalShortcutSender
-    @State private var showPtyQuickStartGuide = false
-    @State private var showTerminalShortcutSettings = false
     @FocusState private var inputFocused: Bool
 
     private var ptyBackground: Color {
@@ -610,8 +606,6 @@ private struct PtySessionView: View {
         self.api = api
         _store = StateObject(wrappedValue: ChatStore(sessionId: session.id, api: api))
         _attachments = StateObject(wrappedValue: ComposerAttachmentController(sessionId: session.id, api: api))
-        _shortcutPreferences = StateObject(wrappedValue: TerminalShortcutPreferences())
-        _shortcutSender = StateObject(wrappedValue: TerminalShortcutSender(sessionID: session.id, api: api))
     }
 
     var body: some View {
@@ -664,22 +658,6 @@ private struct PtySessionView: View {
                 .presentationDetents([.height(620), .large])
                 .presentationDragIndicator(.visible)
         }
-        .sheet(isPresented: $showPtyQuickStartGuide) {
-            PtyQuickStartGuideView(
-                onDismiss: { showPtyQuickStartGuide = false },
-                onFinished: {
-                    shortcutPreferences.markGuideSeen()
-                    showPtyQuickStartGuide = false
-                }
-            )
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-        }
-        .sheet(isPresented: $showTerminalShortcutSettings) {
-            TerminalShortcutSettingsView(preferences: shortcutPreferences)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-        }
         .fileImporter(
             isPresented: $attachments.showFileImporter,
             allowedContentTypes: [.item],
@@ -696,18 +674,11 @@ private struct PtySessionView: View {
             attachments.setToastHandler { store.toast = $0 }
             store.start()
             refreshGitStatus()
-            shortcutPreferences.reload()
-            if !shortcutPreferences.snapshot.hasSeenGuide {
-                DispatchQueue.main.async { showPtyQuickStartGuide = true }
-            }
         }
         .onChange(of: showQuickCommit) { _, showing in
             if !showing { refreshGitStatus() }
         }
-        .onDisappear {
-            store.shutdown()
-            shortcutSender.cancelAll()
-        }
+        .onDisappear { store.shutdown() }
         .overlay(alignment: .top) { connectionBanner }
         .overlay(alignment: .top) { toastView }
         .wandKeyboardShortcuts(ptyKeyboardShortcuts)
@@ -802,8 +773,6 @@ private struct PtySessionView: View {
 
     private var keyboardShortcutsActive: Bool {
         !showQuickCommit
-            && !showPtyQuickStartGuide
-            && !showTerminalShortcutSettings
             && !attachments.showFileImporter
             && !attachments.showPhotoPicker
             && !showStopConfirm
@@ -863,15 +832,6 @@ private struct PtySessionView: View {
 
     private func bottomBar(safeBottom: CGFloat) -> some View {
         VStack(spacing: 0) {
-            PtyTerminalShortcutBar(
-                shortcuts: shortcutPreferences.snapshot.visibleShortcuts,
-                enabled: terminalWebModel.phase == .ready && !(store.snapshot?.isEnded ?? session.isEnded),
-                keyboardVisible: inputFocused,
-                onShortcut: sendTerminalShortcut,
-                onDismissKeyboard: { inputFocused = false },
-                onShowGuide: { showPtyQuickStartGuide = true },
-                onOpenSettings: { showTerminalShortcutSettings = true }
-            )
             if voicePressed {
                 voiceBubble
                     .padding(.horizontal, 12)
@@ -881,12 +841,6 @@ private struct PtySessionView: View {
         }
         .padding(.bottom, safeBottom + keyboard.lift)
         .animation(.easeOut(duration: 0.2), value: keyboard.lift)
-    }
-
-    private func sendTerminalShortcut(_ shortcut: TerminalShortcut) {
-        shortcutSender.send(shortcut) { message in
-            store.toast = message
-        }
     }
 
     private var inputExpanded: Bool {

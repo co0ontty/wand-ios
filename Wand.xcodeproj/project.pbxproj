@@ -48,7 +48,6 @@
 		C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3000000000000000000BC01 /* WandProtocolTests.swift */; };
 		D4000000000000000000AC01 /* MissionsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4000000000000000000BC01 /* MissionsModels.swift */; };
 		D4000000000000000000AC02 /* MissionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4000000000000000000BC02 /* MissionsView.swift */; };
-		E5000000000000000000AC01 /* TerminalShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5000000000000000000BC01 /* TerminalShortcuts.swift */; };
 		F6000000000000000000AC01 /* SessionListModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC01 /* SessionListModels.swift */; };
 		F6000000000000000000AC02 /* SessionListStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC02 /* SessionListStore.swift */; };
 		F6000000000000000000AC03 /* UnifiedSessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC03 /* UnifiedSessionListView.swift */; };
@@ -132,7 +131,6 @@
 		C3000000000000000000BC01 /* WandProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandProtocolTests.swift; sourceTree = "<group>"; };
 		D4000000000000000000BC01 /* MissionsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissionsModels.swift; sourceTree = "<group>"; };
 		D4000000000000000000BC02 /* MissionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissionsView.swift; sourceTree = "<group>"; };
-		E5000000000000000000BC01 /* TerminalShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalShortcuts.swift; sourceTree = "<group>"; };
 		F6000000000000000000BC01 /* SessionListModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListModels.swift; sourceTree = "<group>"; };
 		F6000000000000000000BC02 /* SessionListStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListStore.swift; sourceTree = "<group>"; };
 		F6000000000000000000BC03 /* UnifiedSessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnifiedSessionListView.swift; sourceTree = "<group>"; };
@@ -216,7 +214,6 @@
 				B2000000000000000000BC0A /* LocalNetworkPermission.swift */,
 				D4000000000000000000BC01 /* MissionsModels.swift */,
 				D4000000000000000000BC02 /* MissionsView.swift */,
-				E5000000000000000000BC01 /* TerminalShortcuts.swift */,
 				F6000000000000000000BC01 /* SessionListModels.swift */,
 				F6000000000000000000BC02 /* SessionListStore.swift */,
 				F6000000000000000000BC03 /* UnifiedSessionListView.swift */,
@@ -442,7 +439,6 @@
 				B2000000000000000000AC0A /* LocalNetworkPermission.swift in Sources */,
 				D4000000000000000000AC01 /* MissionsModels.swift in Sources */,
 				D4000000000000000000AC02 /* MissionsView.swift in Sources */,
-				E5000000000000000000AC01 /* TerminalShortcuts.swift in Sources */,
 				F6000000000000000000AC01 /* SessionListModels.swift in Sources */,
 				F6000000000000000000AC02 /* SessionListStore.swift in Sources */,
 				F6000000000000000000AC03 /* UnifiedSessionListView.swift in Sources */,
