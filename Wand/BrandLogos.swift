@@ -28,7 +28,7 @@ struct BrandLogo: View {
 }
 
 /// 按 provider 渲染品牌 logo：Claude 星芒 / Codex 六角结 / OpenCode 终端代码标记 /
-/// Grok 几何 G / Pi 字标。
+/// Grok 几何 G / Pi 官方像素标。
 struct BrandLogoShape: Shape {
     let provider: String?
 
@@ -43,23 +43,31 @@ struct BrandLogoShape: Shape {
         }
     }
 
-    /// Pi 的简洁 π 字标。使用几何路径而非字体，确保小尺寸列表图标也保持稳定比例。
+    /// Pi 官方像素化品牌标，裁掉原 SVG 仅用于安全留白的外圈。
     private static func piPath(in rect: CGRect) -> Path {
-        let w = rect.width / 24.0
-        let h = rect.height / 24.0
+        let w = rect.width / 469.43
+        let h = rect.height / 469.43
         var path = Path()
-        path.addRoundedRect(
-            in: CGRect(x: 2 * w, y: 4 * h, width: 20 * w, height: 3.2 * h),
-            cornerSize: CGSize(width: 1.6 * w, height: 1.6 * h)
-        )
-        path.addRoundedRect(
-            in: CGRect(x: 5 * w, y: 5.5 * h, width: 3.4 * w, height: 15 * h),
-            cornerSize: CGSize(width: 1.7 * w, height: 1.7 * h)
-        )
-        path.addRoundedRect(
-            in: CGRect(x: 15.6 * w, y: 5.5 * h, width: 3.4 * w, height: 15 * h),
-            cornerSize: CGSize(width: 1.7 * w, height: 1.7 * h)
-        )
+        path.move(to: CGPoint(x: 0, y: 0))
+        path.addLine(to: CGPoint(x: 352.07 * w, y: 0))
+        path.addLine(to: CGPoint(x: 352.07 * w, y: 234.71 * h))
+        path.addLine(to: CGPoint(x: 234.71 * w, y: 234.71 * h))
+        path.addLine(to: CGPoint(x: 234.71 * w, y: 352.07 * h))
+        path.addLine(to: CGPoint(x: 117.36 * w, y: 352.07 * h))
+        path.addLine(to: CGPoint(x: 117.36 * w, y: 469.43 * h))
+        path.addLine(to: CGPoint(x: 0, y: 469.43 * h))
+        path.closeSubpath()
+        path.move(to: CGPoint(x: 117.36 * w, y: 117.36 * h))
+        path.addLine(to: CGPoint(x: 117.36 * w, y: 234.71 * h))
+        path.addLine(to: CGPoint(x: 234.71 * w, y: 234.71 * h))
+        path.addLine(to: CGPoint(x: 234.71 * w, y: 117.36 * h))
+        path.closeSubpath()
+        path.addRect(CGRect(
+            x: 352.07 * w,
+            y: 234.71 * h,
+            width: 117.36 * w,
+            height: 234.72 * h
+        ))
         return path
     }
 

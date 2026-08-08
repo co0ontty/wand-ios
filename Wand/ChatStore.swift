@@ -357,6 +357,8 @@ final class ChatStore: ObservableObject {
             snapshot?.title = data.title
             snapshot?.description = data.description
             snapshot?.titleGenerating = data.titleGenerating
+            snapshot?.providerCliActive = data.providerCliActive
+            snapshot?.providerCliExitCode = data.providerCliExitCode
         }
         publishPresence()
     }
@@ -404,6 +406,11 @@ final class ChatStore: ObservableObject {
         }
         if let generating = data.titleGenerating { snapshot?.titleGenerating = generating }
         if let s = data.structuredState { isResponding = s.inFlight ?? isResponding }
+        if let active = data.providerCliActive {
+            snapshot?.providerCliActive = active
+            if !active { isResponding = false }
+        }
+        if let exitCode = data.providerCliExitCode { snapshot?.providerCliExitCode = exitCode }
         if let q = data.queuedMessages { queuedMessages = q }
         if let esc = data.pendingEscalation {
             pendingEscalation = esc

@@ -839,6 +839,8 @@ struct SessionSnapshot: Decodable, Identifiable {
     let pendingEscalation: EscalationRequest?
     let permissionBlocked: Bool?
     let autoApprovePermissions: Bool?
+    var providerCliActive: Bool? = nil
+    var providerCliExitCode: Int? = nil
 
     var isStructured: Bool { (sessionKind ?? "pty") == "structured" }
     var providerLabel: String {
@@ -860,6 +862,7 @@ struct SessionSnapshot: Decodable, Identifiable {
 
     var isResponding: Bool {
         if isStructured { return structuredState?.inFlight ?? false }
+        if providerCliActive == false { return false }
         return ["initializing", "running", "thinking"].contains(status ?? "")
     }
 
@@ -1018,6 +1021,8 @@ struct WsData: Decodable {
     let pendingEscalation: EscalationRequest?
     let permissionBlocked: Bool?
     let autoApprovePermissions: Bool?
+    let providerCliActive: Bool?
+    let providerCliExitCode: Int?
     // —— output 事件增量字段 ——
     let chunk: String?
     let lastMessage: ConversationTurn?
