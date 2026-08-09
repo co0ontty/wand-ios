@@ -592,6 +592,9 @@ private struct PtySessionView: View {
     @State private var voicePressed = false
     @State private var voiceCanceling = false
     @State private var draftNeedsExpanded = false
+    /// 底部快捷栏左上角的拉手控制：折叠时只露出快捷键栏，展开时在快捷键栏上方
+    /// 滑出输入抽屉（文本框 + 发送 + 语音 + 附件）。默认折叠，给终端留出最大可视区。
+    @State private var inputDrawerOpen = false
     @State private var voiceHoldWork: DispatchWorkItem?
     @State private var gitStatus: GitStatusResult?
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
@@ -693,6 +696,8 @@ private struct PtySessionView: View {
                 modifiers: .command,
                 isEnabled: keyboardShortcutsActive && !inputFocused
             ) {
+                // 抽屉折叠时文本框不在视图树里，必须先展开才能聚焦。
+                if !inputDrawerOpen { inputDrawerOpen = true }
                 inputFocused = true
             },
             WandKeyboardShortcutAction(
@@ -837,10 +842,118 @@ private struct PtySessionView: View {
                     .padding(.horizontal, 12)
                     .padding(.bottom, 6)
             }
-            inputBar
+            if inputDrawerOpen {
+                inputBar
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            terminalShortcutBar
         }
         .padding(.bottom, safeBottom + keyboard.lift)
         .animation(.easeOut(duration: 0.2), value: keyboard.lift)
+        .animation(.easeOut(duration: 0.22), value: inputDrawerOpen)
+    }
+
+    /// 终端快捷键栏：始终可见，左端第一个是输入抽屉的拉手（上箭头/键盘图标），
+    /// 点击或上拉展开输入抽屉；其后是高频 PTY 按键。对称 Android PtyShortcutBar。
+    private var terminalShortcutBar: some View {
+        HStack(spacing: 7) {
+            inputDrawerHandle
+            ForEach(TerminalShortcuts.defaults) { shortcut in
+                terminalShortcutKey(shortcut)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 50)
+        .frame(maxWidth: .infinity)
+        .background(ptyBackground)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.white.opacity(0.07))
+                .frame(height: 0.5)
+        }
+    }
+
+    private var inputDrawerHandle: some View {
+        let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+        return HStack(spacing: 5) {
+            Image(systemName: inputDrawerOpen ? "keyboard.fill" : "keyboard")
+                .font(.system(size: 13, weight: .semibold))
+            Image(systemName: inputDrawerOpen ? "chevron.down" : "chevron.up")
+                .font(.system(size: 11, weight: .bold))
+        }
+        .foregroundColor(inputDrawerOpen ? Theme.brand : Color.white.opacity(0.82))
+        .frame(height: 40)
+        .frame(minWidth: 56)
+        .padding(.horizontal, 6)
+        .background(
+            shape.fill(inputDrawerOpen
+                ? Theme.brand.opacity(0.18)
+                : Color.white.opacity(0.08))
+        )
+        .overlay(
+            shape.stroke(
+                inputDrawerOpen ? Theme.brand.opacity(0.45) : Color.white.opacity(0.14),
+                lineWidth: 0.7
+            )
+        )
+        .contentShape(shape)
+        .accessibilityLabel(inputDrawerOpen ? "收起输入框" : "展开输入框")
+        .onTapGesture { toggleInputDrawer() }
+        .gesture(
+            DragGesture(minimumDistance: 12)
+                .onEnded { value in
+                    // 向上拉展开、向下拉收起，给「拉手」一个真实的方向手势。
+                    if value.translation.height < -10, !inputDrawerOpen {
+                        toggleInputDrawer()
+                    } else if value.translation.height > 10, inputDrawerOpen {
+                        toggleInputDrawer()
+                    }
+                }
+        )
+    }
+
+    private func terminalShortcutKey(_ shortcut: TerminalShortcut) -> some View {
+        let compact = shortcut.label.count <= 2
+        let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+        return Text(shortcut.label)
+            .font(.system(size: compact ? 15 : 12, weight: .semibold, design: .monospaced))
+            .foregroundColor(Color.white.opacity(0.9))
+            .frame(height: 40)
+            .frame(minWidth: compact ? 42 : 52)
+            .padding(.horizontal, compact ? 10 : 12)
+            .background(shape.fill(Color.white.opacity(0.08)))
+            .overlay(shape.stroke(Color.white.opacity(0.14), lineWidth: 0.6))
+            .contentShape(shape)
+            .accessibilityLabel(shortcut.accessibilityLabel)
+            .onTapGesture { sendTerminalShortcut(shortcut) }
+    }
+
+    private func toggleInputDrawer() {
+        inputDrawerOpen.toggle()
+        if inputDrawerOpen {
+            // 展开后把焦点放进文本框，顺势唤起键盘；折叠时不强行收键盘，
+            // 让系统的失焦逻辑自然处理。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                if inputDrawerOpen { inputFocused = true }
+            }
+        }
+    }
+
+    private func sendTerminalShortcut(_ shortcut: TerminalShortcut) {
+        let bytes = shortcut.bytes
+        guard !bytes.isEmpty else { return }
+        Task {
+            do {
+                _ = try await api.sendInput(
+                    id: session.id,
+                    input: bytes,
+                    view: "terminal",
+                    shortcutKey: "ios-\(shortcut.id)"
+                )
+            } catch {
+                store.toast = error.localizedDescription
+            }
+        }
     }
 
     private var inputExpanded: Bool {
