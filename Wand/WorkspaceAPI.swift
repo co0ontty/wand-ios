@@ -58,6 +58,24 @@ extension WandAPI {
         )
     }
 
+    @discardableResult
+    func updateWorkspaceTask(taskId: String, name: String?) async throws -> WorkspaceTask {
+        let id = percentEncodePathComponent(taskId)
+        var body: [String: Any] = [:]
+        if let name { body["name"] = name }
+        return try await request(
+            WorkspaceTask.self,
+            method: "PATCH",
+            path: "/api/workspace-tasks/\(id)",
+            body: body.isEmpty ? nil : body
+        )
+    }
+
+    func deleteWorkspaceTask(taskId: String) async throws {
+        let id = percentEncodePathComponent(taskId)
+        _ = try await requestData(method: "DELETE", path: "/api/workspace-tasks/\(id)?cascade=1")
+    }
+
     func getWorkspaceTask(taskId: String) async throws -> WorkspaceTaskDetail {
         let id = percentEncodePathComponent(taskId)
         return try await request(

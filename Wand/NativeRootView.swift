@@ -296,13 +296,25 @@ struct NativeRootView: View {
                     } else {
                         WorkspaceListView(
                             store: workspaceStore,
-                            selectedTaskId: selectedWorkspaceTask?.task.id
-                        ) { workspace, task in
-                            selectedWorkspaceTask = WorkspaceTaskSelection(
-                                workspace: workspace,
-                                task: task
-                            )
-                        }
+                            selectedTaskId: selectedWorkspaceTask?.task.id,
+                            onOpenTask: { workspace, task in
+                                selectedWorkspaceTask = WorkspaceTaskSelection(
+                                    workspace: workspace,
+                                    task: task
+                                )
+                            },
+                            onTaskRenamed: { updated in
+                                if var selection = selectedWorkspaceTask, selection.task.id == updated.id {
+                                    selection = WorkspaceTaskSelection(workspace: selection.workspace, task: updated)
+                                    selectedWorkspaceTask = selection
+                                }
+                            },
+                            onTaskDeleted: { taskId in
+                                if selectedWorkspaceTask?.task.id == taskId {
+                                    selectedWorkspaceTask = nil
+                                }
+                            }
+                        )
                     }
                 }
                 .toolbar {

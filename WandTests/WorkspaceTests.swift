@@ -309,6 +309,37 @@ private final class MockWorkspaceService: WorkspaceServing {
         tasks[workspaceId] ?? []
     }
 
+    func updateWorkspaceTask(taskId: String, name: String?) async throws -> WorkspaceTask {
+        for (workspaceId, list) in tasks {
+            if let index = list.firstIndex(where: { $0.id == taskId }) {
+                let current = list[index]
+                let updated = WorkspaceTask(
+                    id: current.id,
+                    workspaceId: current.workspaceId,
+                    name: name ?? current.name,
+                    worktree: current.worktree,
+                    layout: current.layout,
+                    status: current.status,
+                    createdAt: current.createdAt,
+                    lastOpenedAt: current.lastOpenedAt
+                )
+                tasks[workspaceId]?[index] = updated
+                return updated
+            }
+        }
+        throw MockError.missingTask
+    }
+
+    func deleteWorkspaceTask(taskId: String) async throws {
+        for (workspaceId, list) in tasks {
+            if list.contains(where: { $0.id == taskId }) {
+                tasks[workspaceId] = list.filter { $0.id != taskId }
+                taskDetails.removeValue(forKey: taskId)
+                return
+            }
+        }
+    }
+
     func getWorkspaceTask(taskId: String) async throws -> WorkspaceTaskDetail {
         taskRequestIds.append(taskId)
         if let delay = taskDelays[taskId] { try await Task.sleep(nanoseconds: delay) }

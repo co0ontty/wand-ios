@@ -4,6 +4,8 @@ import Combine
 protocol WorkspaceServing: AnyObject {
     func listWorkspaces() async throws -> [Workspace]
     func listWorkspaceTasks(workspaceId: String) async throws -> [WorkspaceTask]
+    func updateWorkspaceTask(taskId: String, name: String?) async throws -> WorkspaceTask
+    func deleteWorkspaceTask(taskId: String) async throws
     func getWorkspaceTask(taskId: String) async throws -> WorkspaceTaskDetail
     func saveWorkspaceTaskLayout(
         taskId: String,
@@ -112,6 +114,38 @@ final class WorkspaceStore: ObservableObject {
         } catch {
             guard generation == indexGeneration, !Task.isCancelled else { return }
             indexState = .failed(error.localizedDescription)
+        }
+    }
+
+    /// 成功后返回更新后的任务（名称可能被服务端规范化）。
+    @discardableResult
+    func renameWorkspaceTask(
+        workspaceId: String,
+        taskId: String,
+        name: String
+    ) async throws -> WorkspaceTask {
+        let updated = try await api.updateWorkspaceTask(taskId: taskId, name: name)
+        if var list = tasksByWorkspace[workspaceId] {
+            if let index = list.firstIndex(where: { $0.id == taskId }) {
+                list[index] = updated
+                tasksByWorkspace[workspaceId] = list
+            }
+        }
+        if currentTask?.id == taskId {
+            currentTask = updated
+        }
+        return updated
+    }
+
+    func deleteWorkspaceTask(workspaceId: String, taskId: String) async throws {
+        try await api.deleteWorkspaceTask(taskId: taskId)
+        if var list = tasksByWorkspace[workspaceId] {
+            list.removeAll { $0.id == taskId }
+            tasksByWorkspace[workspaceId] = list
+        }
+        if currentTask?.id == taskId {
+            currentTask = nil
+            taskState = .idle
         }
     }
 

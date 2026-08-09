@@ -9,8 +9,17 @@ struct WorkspaceListView: View {
     @ObservedObject var store: WorkspaceStore
     let selectedTaskId: String?
     let onOpenTask: (Workspace, WorkspaceTask) -> Void
+    var onTaskRenamed: ((WorkspaceTask) -> Void)? = nil
+    var onTaskDeleted: ((String) -> Void)? = nil
 
     @State private var expandedWorkspaceIds = Set<String>()
+    @State private var renameTarget: WorkspaceTask?
+    @State private var renameDraft = ""
+    @State private var renameError: String?
+    @State private var renameBusy = false
+    @State private var deleteTarget: WorkspaceTask?
+    @State private var deleteBusy = false
+    @State private var deleteError: String?
 
     var body: some View {
         Group {
@@ -38,6 +47,81 @@ struct WorkspaceListView: View {
         .onChange(of: store.workspaces.map(\.id)) { _, ids in
             if expandedWorkspaceIds.isEmpty {
                 expandedWorkspaceIds = Set(ids)
+            }
+        }
+        .alert("重命名任务", isPresented: Binding(
+            get: { renameTarget != nil },
+            set: { if !$0 { renameTarget = nil } }
+        )) {
+            if let target = renameTarget {
+                TextField("任务名称", text: $renameDraft)
+                    .textInputAutocapitalization(.never)
+                Button("取消", role: .cancel) { renameTarget = nil }
+                Button(renameBusy ? "保存中…" : "保存") {
+                    guard !renameBusy else { return }
+                    let trimmed = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty, trimmed.count <= 80 else {
+                        renameError = "名称不能为空且不超过 80 字符"
+                        return
+                    }
+                    renameBusy = true
+                    Task {
+                        do {
+                            let updated = try await store.renameWorkspaceTask(
+                                workspaceId: target.workspaceId,
+                                taskId: target.id,
+                                name: trimmed
+                            )
+                            renameTarget = nil
+                            renameBusy = false
+                            onTaskRenamed?(updated)
+                        } catch {
+                            renameError = error.localizedDescription
+                            renameBusy = false
+                        }
+                    }
+                }
+                .disabled(renameBusy || renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        } message: {
+            if let renameError {
+                Text(renameError)
+            } else {
+                Text("修改任务的显示名称。")
+            }
+        }
+        .alert("删除任务？", isPresented: Binding(
+            get: { deleteTarget != nil },
+            set: { if !$0 { deleteTarget = nil } }
+        )) {
+            if let target = deleteTarget {
+                Button("取消", role: .cancel) { deleteTarget = nil }
+                Button("删除", role: .destructive) {
+                    guard !deleteBusy else { return }
+                    deleteBusy = true
+                    Task {
+                        do {
+                            try await store.deleteWorkspaceTask(
+                                workspaceId: target.workspaceId,
+                                taskId: target.id
+                            )
+                            let id = target.id
+                            deleteTarget = nil
+                            deleteBusy = false
+                            onTaskDeleted?(id)
+                        } catch {
+                            deleteError = error.localizedDescription
+                            deleteBusy = false
+                        }
+                    }
+                }
+                .disabled(deleteBusy)
+            }
+        } message: {
+            if let deleteError {
+                Text(deleteError)
+            } else if let target = deleteTarget {
+                Text("任务「\(target.name)」及其会话和独立 worktree 将被删除，此操作无法撤销。")
             }
         }
     }
@@ -138,7 +222,7 @@ struct WorkspaceListView: View {
             onOpenTask(workspace, task)
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: task.status == "done" ? "checkmark.circle.fill" : "terminal")
+                Image(systemName: task.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(task.status == "done" ? Theme.success : Theme.textSecondary)
                     .frame(width: 30, height: 30)
@@ -173,6 +257,37 @@ struct WorkspaceListView: View {
         .buttonStyle(.plain)
         .accessibilityLabel("任务 \(task.name)")
         .accessibilityValue(task.status == "done" ? "已完成" : "进行中")
+        .contextMenu {
+            Button {
+                renameDraft = task.name
+                renameError = nil
+                renameTarget = task
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                deleteError = nil
+                deleteTarget = task
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                deleteError = nil
+                deleteTarget = task
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+            Button {
+                renameDraft = task.name
+                renameError = nil
+                renameTarget = task
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
+            .tint(Theme.brand)
+        }
     }
 
     private var loadingState: some View {
