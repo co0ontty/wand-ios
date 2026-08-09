@@ -54,6 +54,14 @@
 		F6000000000000000000AC04 /* WandEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC04 /* WandEndpoint.swift */; };
 		F6000000000000000000AC05 /* ServerFileLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC05 /* ServerFileLink.swift */; };
 		F6000000000000000000AC06 /* AlignmentParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC06 /* AlignmentParityTests.swift */; };
+		E7000000000000000000AC01 /* WorkspaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC01 /* WorkspaceModels.swift */; };
+		E7000000000000000000AC02 /* WorkspaceAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC02 /* WorkspaceAPI.swift */; };
+		E7000000000000000000AC03 /* WorkspaceLayoutReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC03 /* WorkspaceLayoutReconciler.swift */; };
+		E7000000000000000000AC04 /* WorkspaceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC04 /* WorkspaceStore.swift */; };
+		E7000000000000000000AC05 /* WorkspaceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC05 /* WorkspaceListView.swift */; };
+		E7000000000000000000AC06 /* WorkspaceTaskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC06 /* WorkspaceTaskView.swift */; };
+		E7000000000000000000AC07 /* WorkspaceTargetPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC07 /* WorkspaceTargetPicker.swift */; };
+		E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC08 /* WorkspaceTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -137,6 +145,14 @@
 		F6000000000000000000BC04 /* WandEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandEndpoint.swift; sourceTree = "<group>"; };
 		F6000000000000000000BC05 /* ServerFileLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerFileLink.swift; sourceTree = "<group>"; };
 		F6000000000000000000BC06 /* AlignmentParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlignmentParityTests.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC01 /* WorkspaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceModels.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC02 /* WorkspaceAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceAPI.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC03 /* WorkspaceLayoutReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceLayoutReconciler.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC04 /* WorkspaceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceStore.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC05 /* WorkspaceListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceListView.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC06 /* WorkspaceTaskView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTaskView.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC07 /* WorkspaceTargetPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTargetPicker.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC08 /* WorkspaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTests.swift; sourceTree = "<group>"; };
 		C3000000000000000000F101 /* WandTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WandTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -219,6 +235,13 @@
 				F6000000000000000000BC03 /* UnifiedSessionListView.swift */,
 				F6000000000000000000BC04 /* WandEndpoint.swift */,
 				F6000000000000000000BC05 /* ServerFileLink.swift */,
+				E7000000000000000000BC01 /* WorkspaceModels.swift */,
+				E7000000000000000000BC02 /* WorkspaceAPI.swift */,
+				E7000000000000000000BC03 /* WorkspaceLayoutReconciler.swift */,
+				E7000000000000000000BC04 /* WorkspaceStore.swift */,
+				E7000000000000000000BC05 /* WorkspaceListView.swift */,
+				E7000000000000000000BC06 /* WorkspaceTaskView.swift */,
+				E7000000000000000000BC07 /* WorkspaceTargetPicker.swift */,
 				A100000000000000000000D1 /* Assets.xcassets */,
 				A100000000000000000000E1 /* Info.plist */,
 			);
@@ -249,6 +272,7 @@
 			children = (
 				C3000000000000000000BC01 /* WandProtocolTests.swift */,
 				F6000000000000000000BC06 /* AlignmentParityTests.swift */,
+				E7000000000000000000BC08 /* WorkspaceTests.swift */,
 			);
 			path = WandTests;
 			sourceTree = "<group>";
@@ -444,6 +468,13 @@
 				F6000000000000000000AC03 /* UnifiedSessionListView.swift in Sources */,
 				F6000000000000000000AC04 /* WandEndpoint.swift in Sources */,
 				F6000000000000000000AC05 /* ServerFileLink.swift in Sources */,
+				E7000000000000000000AC01 /* WorkspaceModels.swift in Sources */,
+				E7000000000000000000AC02 /* WorkspaceAPI.swift in Sources */,
+				E7000000000000000000AC03 /* WorkspaceLayoutReconciler.swift in Sources */,
+				E7000000000000000000AC04 /* WorkspaceStore.swift in Sources */,
+				E7000000000000000000AC05 /* WorkspaceListView.swift in Sources */,
+				E7000000000000000000AC06 /* WorkspaceTaskView.swift in Sources */,
+				E7000000000000000000AC07 /* WorkspaceTargetPicker.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -462,6 +493,7 @@
 			files = (
 				C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */,
 				F6000000000000000000AC06 /* AlignmentParityTests.swift in Sources */,
+				E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

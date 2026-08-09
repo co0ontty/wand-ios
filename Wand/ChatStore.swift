@@ -348,6 +348,7 @@ final class ChatStore: ObservableObject {
                 summary: data.summary, currentTaskTitle: data.currentTaskTitle,
                 selectedModel: data.selectedModel, thinkingEffort: data.thinkingEffort,
                 claudeSessionId: data.claudeSessionId,
+                workspaceId: data.workspaceId, workspaceTaskId: data.workspaceTaskId,
                 messages: nil, messageOffset: data.messageOffset, messageTotal: data.messageTotal,
                 queuedMessages: data.queuedMessages,
                 structuredState: data.structuredState, pendingEscalation: data.pendingEscalation,

@@ -33,6 +33,26 @@ struct NativeRootView: View {
     /// iPhone push 动画期间的会话身份。列表只允许这一次打开落入状态机，避免双击/连点
     /// 把 navigationDestination(isPresented:) 推进半截时再次改写 selection。
     @State private var openingSessionID: String?
+    @State private var rootSection = RootSection.sessions
+    @State private var selectedWorkspaceTask: WorkspaceTaskSelection?
+    @StateObject private var workspaceStore: WorkspaceStore
+
+    init(profile: ServerProfile) {
+        self.profile = profile
+        _workspaceStore = StateObject(wrappedValue: WorkspaceStore(
+            api: WandAPI(baseURL: profile.baseURL, token: profile.token),
+            serverID: profile.id
+        ))
+    }
+
+    private enum RootSection: String, CaseIterable, Identifiable {
+        case sessions
+        case workspaces
+
+        var id: String { rawValue }
+        var title: String { self == .sessions ? "会话" : "项目" }
+        var icon: String { self == .sessions ? "bubble.left.and.bubble.right" : "folder" }
+    }
 
     private enum Phase: Equatable {
         case authenticating
@@ -50,7 +70,7 @@ struct NativeRootView: View {
 
     var body: some View {
         AdaptiveNavigationContainer(
-            selection: $selectedSessionID,
+            selection: navigationSelection,
             sidebar: { sidebarContent },
             detail: { detailContent }
         )
@@ -96,7 +116,39 @@ struct NativeRootView: View {
             }
             releaseSessionOpenGateAfterTransition(for: sessionID)
         }
+        .onChange(of: rootSection) { _, section in
+            openingSessionID = nil
+            if section == .sessions {
+                selectedWorkspaceTask = nil
+            } else {
+                selectedSessionID = nil
+                selectedSnapshot = nil
+            }
+            if section == .workspaces, case .idle = workspaceStore.indexState {
+                Task { await workspaceStore.loadWorkspaceIndex() }
+            }
+        }
         .wandKeyboardShortcuts(rootKeyboardShortcuts)
+    }
+
+    private var navigationSelection: Binding<String?> {
+        Binding(
+            get: {
+                rootSection == .sessions
+                    ? selectedSessionID
+                    : selectedWorkspaceTask?.task.id
+            },
+            set: { value in
+                guard value == nil else { return }
+                if rootSection == .sessions {
+                    selectedSessionID = nil
+                    selectedSnapshot = nil
+                    openingSessionID = nil
+                } else {
+                    selectedWorkspaceTask = nil
+                }
+            }
+        )
     }
 
     private var rootKeyboardShortcuts: [WandKeyboardShortcutAction] {
@@ -125,8 +177,9 @@ struct NativeRootView: View {
                 title: "显示会话列表",
                 key: "1",
                 modifiers: .command,
-                isEnabled: selectedSessionID != nil || showWebFallback
+                isEnabled: rootSection != .sessions || selectedSessionID != nil || showWebFallback
             ) {
+                rootSection = .sessions
                 showSettings = false
                 showMissions = false
                 showWebFallback = false
@@ -149,7 +202,7 @@ struct NativeRootView: View {
                 title: "关闭当前页",
                 key: "w",
                 modifiers: .command,
-                isEnabled: selectedSessionID != nil || showWebFallback || showSettings || showMissions
+                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showWebFallback || showSettings || showMissions
             ) {
                 closeActiveSurfaceFromKeyboard()
             },
@@ -157,6 +210,7 @@ struct NativeRootView: View {
     }
 
     private func openNewSessionFromKeyboard() {
+        rootSection = .sessions
         showSettings = false
         showWebFallback = false
         QuickActionCoordinator.shared.enqueue(.newSession)
@@ -172,6 +226,8 @@ struct NativeRootView: View {
         } else if selectedSessionID != nil {
             selectedSessionID = nil
             selectedSnapshot = nil
+        } else if selectedWorkspaceTask != nil {
+            selectedWorkspaceTask = nil
         }
     }
 
@@ -228,13 +284,26 @@ struct NativeRootView: View {
                             .padding(.top, 8)
                             .padding(.bottom, 6)
                     }
-                    UnifiedSessionListView(
-                        api: api,
-                        serverID: serverID,
-                        selection: $selectedSessionID,
-                        selectedSnapshot: $selectedSnapshot,
-                        openingSessionID: $openingSessionID
-                    )
+                    rootSectionPicker
+                    if rootSection == .sessions {
+                        UnifiedSessionListView(
+                            api: api,
+                            serverID: serverID,
+                            selection: $selectedSessionID,
+                            selectedSnapshot: $selectedSnapshot,
+                            openingSessionID: $openingSessionID
+                        )
+                    } else {
+                        WorkspaceListView(
+                            store: workspaceStore,
+                            selectedTaskId: selectedWorkspaceTask?.task.id
+                        ) { workspace, task in
+                            selectedWorkspaceTask = WorkspaceTaskSelection(
+                                workspace: workspace,
+                                task: task
+                            )
+                        }
+                    }
                 }
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) {
@@ -244,10 +313,12 @@ struct NativeRootView: View {
                             } label: {
                                 Label("Agent Inbox", systemImage: "tray.full")
                             }
-                            Button {
-                                NotificationCenter.default.post(name: .wandBeginSessionSelection, object: nil)
-                            } label: {
-                                Label("多选会话", systemImage: "checkmark.circle")
+                            if rootSection == .sessions {
+                                Button {
+                                    NotificationCenter.default.post(name: .wandBeginSessionSelection, object: nil)
+                                } label: {
+                                    Label("多选会话", systemImage: "checkmark.circle")
+                                }
                             }
                             Button {
                                 showSettings = true
@@ -275,11 +346,35 @@ struct NativeRootView: View {
         }
     }
 
-    /// 详情内容：选中会话后渲染聊天/终端；未选中或快照未到时显示占位。
-    /// 快照可能在异步拉取中（长按图标打开非列表内会话），先给身份再回填，
-    /// 此期间显示加载态。
+    private var rootSectionPicker: some View {
+        Picker("内容", selection: $rootSection) {
+            ForEach(RootSection.allCases) { section in
+                Label(section.title, systemImage: section.icon).tag(section)
+            }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .background(.ultraThinMaterial)
+        .accessibilityLabel("主内容")
+    }
+
+    /// 详情内容：会话模式渲染聊天/终端；项目模式承载任务欢迎态与工作窗口。
     @ViewBuilder private var detailContent: some View {
-        if let session = selectedSnapshot {
+        if rootSection == .workspaces {
+            if let selection = selectedWorkspaceTask {
+                WorkspaceTaskView(
+                    workspace: selection.workspace,
+                    task: selection.task,
+                    api: api,
+                    store: workspaceStore
+                )
+                .id(selection.task.id)
+            } else {
+                emptyDetailPlaceholder
+            }
+        } else if let session = selectedSnapshot {
             // 所有会话共用 detail 入口，按 session.id 绑定身份：避免 SwiftUI 复用上一个会话的
             // ChatStore（其 @StateObject 只在首次身份创建时求值，导致串数据）。
             SessionDestinationView(session: session, api: api)
@@ -294,7 +389,7 @@ struct NativeRootView: View {
     private var emptyDetailPlaceholder: some View {
         VStack(spacing: 12) {
             WandBrandMark(size: 48)
-            Text("选择一个会话")
+            Text(rootSection == .workspaces ? "选择一个任务" : "选择一个会话")
                 .font(.system(size: 14))
                 .foregroundColor(Theme.textSecondary)
         }
@@ -398,6 +493,7 @@ struct NativeRootView: View {
             showSettings = false
             showWebFallback = true
         } else if quickActions.consume(where: { $0 == .showSessions && $0.belongs(to: serverID) }) != nil {
+            rootSection = .sessions
             showSettings = false
             showMissions = false
             showWebFallback = false
@@ -420,6 +516,7 @@ struct NativeRootView: View {
     }
 
     private func openSessionFromMissions(_ sessionID: String) {
+        rootSection = .sessions
         showMissions = false
         openingSessionID = sessionID
         selectedSessionID = sessionID

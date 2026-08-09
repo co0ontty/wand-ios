@@ -8,7 +8,7 @@ import Foundation
 
 /// Wand 支持的 CLI provider。与 provider 相关的名称、runner 和模式约束
 /// 集中在这里，避免 UI 各自维护 Claude/Codex 二分判断而漏掉其他 Provider。
-enum WandProvider: String, CaseIterable, Identifiable {
+enum WandProvider: String, CaseIterable, Identifiable, Codable {
     case claude
     case codex
     case opencode
@@ -825,6 +825,8 @@ struct SessionSnapshot: Decodable, Identifiable {
     let selectedModel: String?
     let thinkingEffort: String?
     let claudeSessionId: String?
+    let workspaceId: String?
+    let workspaceTaskId: String?
     let messages: [ConversationTurn]?
     /// 窗口化：messages 是完整历史的「最近一窗」，messageOffset = 首条的绝对下标，
     /// messageTotal = 完整 turn 数。更早的消息按需翻页（GET /api/sessions/:id/messages）。
@@ -1011,6 +1013,8 @@ struct WsData: Decodable {
     let selectedModel: String?
     let thinkingEffort: String?
     let claudeSessionId: String?
+    let workspaceId: String?
+    let workspaceTaskId: String?
     let messages: [ConversationTurn]?
     let messageOffset: Int?
     let messageTotal: Int?

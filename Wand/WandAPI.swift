@@ -87,7 +87,7 @@ final class WandAPI {
     }
 
     /// 带 401 自动重登的请求入口。
-    private func requestData(
+    func requestData(
         method: String,
         path: String,
         body: [String: Any]? = nil,
@@ -134,7 +134,7 @@ final class WandAPI {
         return data
     }
 
-    private func request<T: Decodable>(
+    func request<T: Decodable>(
         _ type: T.Type,
         method: String,
         path: String,
@@ -158,7 +158,7 @@ final class WandAPI {
 
     /// 路径参数不能使用 urlPathAllowed（其包含 `/`），否则 tool use id 中的
     /// 分隔符可能改变 endpoint 路径层级。
-    private func percentEncodePathComponent(_ value: String) -> String {
+    func percentEncodePathComponent(_ value: String) -> String {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/?#[]@!$&'()*+,;=:%")
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
