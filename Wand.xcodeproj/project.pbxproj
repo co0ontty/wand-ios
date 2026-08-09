@@ -28,6 +28,7 @@
 		A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC10 /* SessionTimeFormatting.swift */; };
 		A1000000000000000000AC05 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC05 /* ChatView.swift */; };
 		A1000000000000000000AC06 /* SessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC06 /* SessionListView.swift */; };
+		A1000000000000000000AC11 /* TerminalShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC11 /* TerminalShortcuts.swift */; };
 		A1000000000000000000AC07 /* NewSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC07 /* NewSessionView.swift */; };
 		A1000000000000000000AC08 /* NativeRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC08 /* NativeRootView.swift */; };
 		A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC09 /* GitQuickCommitView.swift */; };
@@ -116,6 +117,7 @@
 		A1000000000000000000BC10 /* SessionTimeFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimeFormatting.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC05 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC06 /* SessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListView.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC11 /* TerminalShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalShortcuts.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC07 /* NewSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC08 /* NativeRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRootView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC09 /* GitQuickCommitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitQuickCommitView.swift; sourceTree = "<group>"; };
@@ -214,6 +216,7 @@
 				A1000000000000000000BC10 /* SessionTimeFormatting.swift */,
 				A1000000000000000000BC05 /* ChatView.swift */,
 				A1000000000000000000BC06 /* SessionListView.swift */,
+				A1000000000000000000BC11 /* TerminalShortcuts.swift */,
 				A1000000000000000000BC07 /* NewSessionView.swift */,
 				A1000000000000000000BC08 /* NativeRootView.swift */,
 				A1000000000000000000BC09 /* GitQuickCommitView.swift */,
@@ -447,6 +450,7 @@
 				A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */,
 				A1000000000000000000AC05 /* ChatView.swift in Sources */,
 				A1000000000000000000AC06 /* SessionListView.swift in Sources */,
+				A1000000000000000000AC11 /* TerminalShortcuts.swift in Sources */,
 				A1000000000000000000AC07 /* NewSessionView.swift in Sources */,
 				A1000000000000000000AC08 /* NativeRootView.swift in Sources */,
 				A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */,

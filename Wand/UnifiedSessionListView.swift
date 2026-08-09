@@ -140,7 +140,7 @@ struct UnifiedSessionListView: View {
         Picker("列表视图", selection: $viewModeRaw) {
             Label("会话", systemImage: "bubble.left.and.bubble.right")
                 .tag(SessionListViewMode.sessions.rawValue)
-            Label("目录", systemImage: "folder")
+            Label("项目", systemImage: "folder")
                 .tag(SessionListViewMode.directories.rawValue)
         }
         .pickerStyle(.segmented)
@@ -152,10 +152,14 @@ struct UnifiedSessionListView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            Text(isSelecting ? "已选择 \(selectedKeys.count) 项" : viewMode == .sessions ? "会话" : "目录")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
+        // 分段选择器已经承担了「会话 / 项目」的切换与当前模式标识，
+        // 导航栏中间标题只在多选时显示计数，避免与下方的切换行重复。
+        if isSelecting {
+            ToolbarItem(placement: .principal) {
+                Text("已选择 \(selectedKeys.count) 项")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+            }
         }
         ToolbarItem(placement: .navigationBarTrailing) {
             Button {
@@ -220,7 +224,7 @@ struct UnifiedSessionListView: View {
     @ViewBuilder
     private var directoryContent: some View {
         if listStore.directoryLoading && listStore.directoryTree == nil {
-            loadingState("正在整理目录…")
+            loadingState("正在整理项目…")
         } else if let error = listStore.directoryError, listStore.directoryTree == nil {
             errorState(error) { Task { _ = await listStore.loadDirectories() } }
         } else if let tree = listStore.directoryTree, !tree.roots.isEmpty {
@@ -243,7 +247,7 @@ struct UnifiedSessionListView: View {
         } else {
             emptyState(
                 icon: "folder",
-                title: "还没有会话目录",
+                title: "还没有项目",
                 subtitle: "创建会话后会按工作目录显示在这里"
             ) { presentNewSession(cwd: nil) }
         }
@@ -343,7 +347,7 @@ struct UnifiedSessionListView: View {
             if !node.synthetic && !node.path.isEmpty {
                 Menu {
                     Button { presentNewSession(cwd: node.path) } label: {
-                        Label("在此目录新建会话", systemImage: "plus")
+                        Label("在此项目新建会话", systemImage: "plus")
                     }
                     Button { beginRename(node) } label: {
                         Label("重命名工作区", systemImage: "pencil")
@@ -396,7 +400,7 @@ struct UnifiedSessionListView: View {
         [
             WandKeyboardShortcutAction(
                 id: "refresh-sessions",
-                title: viewMode == .sessions ? "刷新会话" : "刷新目录",
+                title: viewMode == .sessions ? "刷新会话" : "刷新项目",
                 key: "r",
                 modifiers: .command,
                 isEnabled: !listStore.loading && !listStore.directoryLoading
