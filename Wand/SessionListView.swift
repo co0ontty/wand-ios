@@ -855,16 +855,20 @@ private struct PtySessionView: View {
 
     /// 终端快捷键栏：始终可见，左端第一个是输入抽屉的拉手（上箭头/键盘图标），
     /// 点击或上拉展开输入抽屉；其后是高频 PTY 按键。对称 Android PtyShortcutBar。
+    /// 包在水平 ScrollView 里：拉手 + 9 个按键的最小宽度合计远超 iPhone 屏宽，
+    /// 若用固定 HStack 会把整条 bottomBar（以及 WebView、输入抽屉）撑到 ~750pt 宽，
+    /// 导致横向溢出 + 抽屉里发送按钮被推到屏幕外「无法发送」。横向滚动后栏宽恒等于屏宽。
     private var terminalShortcutBar: some View {
-        HStack(spacing: 7) {
-            inputDrawerHandle
-            ForEach(TerminalShortcuts.defaults) { shortcut in
-                terminalShortcutKey(shortcut)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                inputDrawerHandle
+                ForEach(TerminalShortcuts.defaults) { shortcut in
+                    terminalShortcutKey(shortcut)
+                }
             }
+            .padding(.horizontal, 10)
         }
-        .padding(.horizontal, 10)
         .frame(height: 50)
-        .frame(maxWidth: .infinity)
         .background(ptyBackground)
         .overlay(alignment: .top) {
             Rectangle()

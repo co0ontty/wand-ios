@@ -46,9 +46,8 @@ struct UnifiedSessionListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if !isSelecting {
-                viewModePicker
-            }
+            // 顶层的「会话 / 项目」分段切换由 NativeRootView.rootSectionPicker 唯一承担，
+            // 这里不再重复渲染第二段选择器，避免顶部出现两行相同的「会话/项目」。
             content
         }
         .background(WandAmbientBackground())
@@ -176,11 +175,9 @@ struct UnifiedSessionListView: View {
 
     @ViewBuilder
     private var content: some View {
-        if viewMode == .directories {
-            directoryContent
-        } else {
-            sessionContent
-        }
+        // 项目视图统一由顶层 rootSection（工作空间）承载，会话列表固定为平铺列表，
+        // 避免与顶层分段重复。
+        sessionContent
     }
 
     @ViewBuilder
