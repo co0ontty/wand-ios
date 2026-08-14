@@ -659,7 +659,7 @@ final class WandAPI {
         )
     }
 
-    // MARK: - Agent Inbox / Missions
+    // MARK: - Missions
 
     func missionInbox() async throws -> [AgentActivityItem] {
         let response = try await request(MissionInboxResponse.self, method: "GET", path: "/api/inbox")

@@ -2,14 +2,6 @@ import Combine
 import Foundation
 import SwiftUI
 
-private enum MissionWorkspaceTab: String, CaseIterable, Identifiable {
-    case inbox
-    case missions
-
-    var id: String { rawValue }
-    var title: String { self == .inbox ? "Inbox" : "任务" }
-}
-
 private struct MissionProviderOption: Identifiable {
     let id: String
     let title: String
@@ -127,8 +119,6 @@ struct MissionsView: View {
     let onOpenSession: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var tab: MissionWorkspaceTab = .inbox
-    @State private var inbox: [AgentActivityItem] = []
     @State private var missions: [MissionInfo] = []
     @State private var loading = true
     @State private var errorMessage: String?
@@ -139,28 +129,17 @@ struct MissionsView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Picker("任务视图", selection: $tab) {
-                    ForEach(MissionWorkspaceTab.allCases) { item in
-                        Text(item.title).tag(item)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-
                 Group {
-                    if loading && inbox.isEmpty && missions.isEmpty {
+                    if loading && missions.isEmpty {
                         ProgressView().tint(Theme.brand)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if tab == .inbox {
-                        inboxContent
                     } else {
                         missionsContent
                     }
                 }
             }
             .background { WandAmbientBackground() }
-            .navigationTitle("Agent Inbox")
+            .navigationTitle("并行任务")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -185,7 +164,6 @@ struct MissionsView: View {
             MissionCreateView(api: api) { mission in
                 missions.removeAll { $0.id == mission.id }
                 missions.insert(mission, at: 0)
-                tab = .missions
             }
         }
         .task { await refresh(showProgress: true) }
@@ -199,28 +177,6 @@ struct MissionsView: View {
             Button("好", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
-        }
-    }
-
-    @ViewBuilder private var inboxContent: some View {
-        let attention = inbox.filter(\.needsAttention)
-        let working = inbox.filter { $0.state == "working" }
-        let finished = inbox.filter { !$0.needsAttention && $0.state != "working" }
-        if inbox.isEmpty {
-            MissionEmptyState(
-                icon: "tray",
-                title: "Inbox 是空的",
-                detail: "Agent 需要输入、权限或完成任务时会出现在这里。"
-            )
-        } else {
-            List {
-                MissionActivitySection(title: "需要你", items: attention, onOpen: openActivity)
-                MissionActivitySection(title: "执行中", items: working, onOpen: openActivity)
-                MissionActivitySection(title: "最近完成", items: finished, onOpen: openActivity)
-            }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .refreshable { await refresh(showProgress: false) }
         }
     }
 
@@ -247,11 +203,6 @@ struct MissionsView: View {
         }
     }
 
-    private func openActivity(_ item: AgentActivityItem) {
-        Task { try? await api.markMissionInboxRead(sessionId: item.sessionId) }
-        openSessionAndDismiss(item.sessionId)
-    }
-
     private func openSessionAndDismiss(_ sessionId: String) {
         dismiss()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -261,76 +212,15 @@ struct MissionsView: View {
 
     private func refresh(showProgress: Bool) async {
         if showProgress { loading = true }
-        async let loadedInbox = api.missionInbox()
-        async let loadedMissions = api.missions()
         do {
-            let values = try await (loadedInbox, loadedMissions)
-            inbox = values.0
-            missions = values.1
+            missions = try await api.missions()
             errorMessage = nil
         } catch {
-            if showProgress || (inbox.isEmpty && missions.isEmpty) {
+            if showProgress || missions.isEmpty {
                 errorMessage = error.localizedDescription
             }
         }
         loading = false
-    }
-}
-
-private struct MissionActivitySection: View {
-    let title: String
-    let items: [AgentActivityItem]
-    let onOpen: (AgentActivityItem) -> Void
-
-    var body: some View {
-        if !items.isEmpty {
-            Section(title) {
-                ForEach(items) { item in
-                    Button { onOpen(item) } label: {
-                        MissionActivityRow(item: item)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-}
-
-private struct MissionActivityRow: View {
-    let item: AgentActivityItem
-
-    var body: some View {
-        let presentation = missionStatePresentation(item.state)
-        HStack(spacing: 12) {
-            Image(systemName: presentation.1)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundColor(presentation.2)
-                .frame(width: 24)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(item.title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                    if item.readAt == nil {
-                        Circle().fill(Theme.brand).frame(width: 7, height: 7)
-                            .accessibilityLabel("未读")
-                    }
-                }
-                Text(item.summary ?? item.cwd ?? presentation.0)
-                    .font(.system(size: 12))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(2)
-                Text([item.provider?.capitalized, presentation.0].compactMap { $0 }.joined(separator: " · "))
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(presentation.2)
-            }
-            Spacer(minLength: 4)
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundColor(Theme.textMuted)
-        }
-        .padding(.vertical, 4)
     }
 }
 

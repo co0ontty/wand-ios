@@ -188,7 +188,7 @@ struct NativeRootView: View {
             },
             WandKeyboardShortcutAction(
                 id: "show-missions",
-                title: "显示 Agent Inbox",
+                title: "显示并行任务",
                 key: "2",
                 modifiers: .command,
                 isEnabled: !showMissions
@@ -323,7 +323,7 @@ struct NativeRootView: View {
                             Button {
                                 showMissions = true
                             } label: {
-                                Label("Agent Inbox", systemImage: "tray.full")
+                                Label("并行任务", systemImage: "square.stack.3d.up")
                             }
                             if rootSection == .sessions {
                                 Button {
