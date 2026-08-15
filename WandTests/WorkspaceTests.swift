@@ -382,4 +382,44 @@ private final class MockWorkspaceService: WorkspaceServing {
     }
 
     func workspaceDefaultProvider() async throws -> WandProvider { .claude }
+
+    func getWorkspaceDetail(workspaceId: String) async throws -> WorkspaceDetail {
+        throw MockError.missingTask
+    }
+
+    func createWorkspace(
+        name: String,
+        cwd: String,
+        defaultProvider: WandProvider?
+    ) async throws -> Workspace {
+        throw MockError.createUnavailable
+    }
+
+    func updateWorkspace(workspaceId: String, name: String) async throws -> Workspace {
+        throw MockError.missingTask
+    }
+
+    func deleteWorkspace(workspaceId: String) async throws {
+        throw MockError.missingTask
+    }
+
+    func createWorkspaceTask(
+        workspaceId: String,
+        name: String,
+        baseRef: String?
+    ) async throws -> WorkspaceTaskCreation {
+        throw MockError.createUnavailable
+    }
+
+    func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview {
+        throw MockError.missingTask
+    }
+
+    func startWorktreeMergeAgent(
+        workspace: Workspace,
+        provider: WandProvider,
+        prompt: String
+    ) async throws -> SessionSnapshot {
+        throw MockError.createUnavailable
+    }
 }

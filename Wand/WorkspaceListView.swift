@@ -7,10 +7,14 @@ struct WorkspaceTaskSelection: Equatable {
 
 struct WorkspaceListView: View {
     @ObservedObject var store: WorkspaceStore
+    let api: WandAPI
     let selectedTaskId: String?
     let onOpenTask: (Workspace, WorkspaceTask) -> Void
     var onTaskRenamed: ((WorkspaceTask) -> Void)? = nil
     var onTaskDeleted: ((String) -> Void)? = nil
+    var onOpenSession: ((Workspace, WorkspaceSessionSummary) -> Void)? = nil
+    var onMergeAgentStarted: ((Workspace, SessionSnapshot) -> Void)? = nil
+    var onWorkspaceDeleted: ((String) -> Void)? = nil
 
     @State private var expandedWorkspaceIds = Set<String>()
     @State private var renameTarget: WorkspaceTask?
@@ -20,109 +24,305 @@ struct WorkspaceListView: View {
     @State private var deleteTarget: WorkspaceTask?
     @State private var deleteBusy = false
     @State private var deleteError: String?
+    @State private var createTaskTarget: Workspace?
+    @State private var createTaskDraft = ""
+    @State private var createTaskError: String?
+    @State private var createTaskBusy = false
+    @State private var renameWorkspaceTarget: Workspace?
+    @State private var renameWorkspaceDraft = ""
+    @State private var renameWorkspaceError: String?
+    @State private var renameWorkspaceBusy = false
+    @State private var deleteWorkspaceTarget: Workspace?
+    @State private var deleteWorkspaceBusy = false
+    @State private var deleteWorkspaceError: String?
+    @State private var reviewTarget: Workspace?
+    @State private var createWorkspacePresented = false
+    @State private var toastMessage: String?
 
     var body: some View {
-        Group {
-            switch store.indexState {
-            case .idle:
-                loadingState
-            case .loading:
-                if store.workspaces.isEmpty { loadingState }
-                else { workspaceContent }
-            case .failed(let message):
-                if store.workspaces.isEmpty { errorState(message) }
-                else { workspaceContent }
-            case .loaded:
-                workspaceContent
+        sheetContent
+            .background(WandAmbientBackground())
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .overlay(alignment: .top) { toastView }
+            .animation(.easeInOut(duration: 0.25), value: toastMessage)
+            .task {
+                if case .idle = store.indexState {
+                    await store.loadWorkspaceIndex()
+                }
             }
-        }
-        .background(WandAmbientBackground())
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
-        .task {
-            if case .idle = store.indexState {
-                await store.loadWorkspaceIndex()
+            .onChange(of: store.workspaces.map(\.id)) { _, ids in
+                if expandedWorkspaceIds.isEmpty {
+                    expandedWorkspaceIds = Set(ids)
+                }
             }
-        }
-        .onChange(of: store.workspaces.map(\.id)) { _, ids in
-            if expandedWorkspaceIds.isEmpty {
-                expandedWorkspaceIds = Set(ids)
+            .onChange(of: expandedWorkspaceIds) { _, expanded in
+                for workspaceId in expanded where store.standaloneSessions[workspaceId] == nil {
+                    Task { await store.loadWorkspaceSessions(workspaceId: workspaceId) }
+                }
             }
+            .alert("重命名任务", isPresented: renameTaskPresented) {
+                renameTaskAlertContent
+            } message: {
+                if let renameError {
+                    Text(renameError)
+                } else {
+                    Text("修改任务的显示名称。")
+                }
+            }
+            .alert("删除任务？", isPresented: deleteTaskPresented) {
+                deleteTaskAlertContent
+            } message: {
+                if let deleteError {
+                    Text(deleteError)
+                } else if let target = deleteTarget {
+                    Text("任务「\(target.name)」及其会话和独立 worktree 将被删除，此操作无法撤销。")
+                }
+            }
+    }
+
+    private var sheetContent: some View {
+        alertContent
+            .sheet(item: $reviewTarget) { workspace in
+                WorkspaceWorktreeReviewView(
+                    workspace: workspace,
+                    api: api,
+                    store: store,
+                    onMergeAgentStarted: { started in
+                        onMergeAgentStarted?(workspace, started)
+                    }
+                )
+            }
+            .sheet(isPresented: $createWorkspacePresented) {
+                WorkspaceCreateView(api: api, store: store) { created in
+                    showToast("已创建项目「\(created.name)」")
+                }
+            }
+    }
+
+    private var alertContent: some View {
+        stateContent
+            .alert("新任务", isPresented: createTaskPresented) {
+                createTaskAlertContent
+            } message: {
+                if let createTaskError {
+                    Text(createTaskError)
+                } else if let target = createTaskTarget {
+                    Text("在项目「\(target.name)」里创建任务，git 仓库会生成独立 worktree。")
+                }
+            }
+            .alert("重命名项目", isPresented: renameWorkspacePresented) {
+                renameWorkspaceAlertContent
+            } message: {
+                if let renameWorkspaceError {
+                    Text(renameWorkspaceError)
+                } else {
+                    Text("修改项目的显示名称。")
+                }
+            }
+            .alert("删除项目？", isPresented: deleteWorkspacePresented) {
+                deleteWorkspaceAlertContent
+            } message: {
+                if let deleteWorkspaceError {
+                    Text(deleteWorkspaceError)
+                } else if let target = deleteWorkspaceTarget {
+                    Text("项目「\(target.name)」及其任务、会话与独立 worktree 将被删除，此操作无法撤销。")
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var stateContent: some View {
+        switch store.indexState {
+        case .idle:
+            loadingState
+        case .loading:
+            if store.workspaces.isEmpty { loadingState }
+            else { workspaceContent }
+        case .failed(let message):
+            if store.workspaces.isEmpty { errorState(message) }
+            else { workspaceContent }
+        case .loaded:
+            workspaceContent
         }
-        .alert("重命名任务", isPresented: Binding(
+    }
+
+    private var renameTaskPresented: Binding<Bool> {
+        Binding(
             get: { renameTarget != nil },
             set: { if !$0 { renameTarget = nil } }
-        )) {
-            if let target = renameTarget {
-                TextField("任务名称", text: $renameDraft)
-                    .textInputAutocapitalization(.never)
-                Button("取消", role: .cancel) { renameTarget = nil }
-                Button(renameBusy ? "保存中…" : "保存") {
-                    guard !renameBusy else { return }
-                    let trimmed = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty, trimmed.count <= 80 else {
-                        renameError = "名称不能为空且不超过 80 字符"
-                        return
-                    }
-                    renameBusy = true
-                    Task {
-                        do {
-                            let updated = try await store.renameWorkspaceTask(
-                                workspaceId: target.workspaceId,
-                                taskId: target.id,
-                                name: trimmed
-                            )
-                            renameTarget = nil
-                            renameBusy = false
-                            onTaskRenamed?(updated)
-                        } catch {
-                            renameError = error.localizedDescription
-                            renameBusy = false
-                        }
+        )
+    }
+
+    @ViewBuilder
+    private var renameTaskAlertContent: some View {
+        if let target = renameTarget {
+            TextField("任务名称", text: $renameDraft)
+                .textInputAutocapitalization(.never)
+            Button("取消", role: .cancel) { renameTarget = nil }
+            Button(renameBusy ? "保存中…" : "保存") {
+                guard !renameBusy else { return }
+                let trimmed = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, trimmed.count <= 80 else {
+                    renameError = "名称不能为空且不超过 80 字符"
+                    return
+                }
+                renameBusy = true
+                let workspaceId = target.workspaceId
+                let taskId = target.id
+                Task {
+                    do {
+                        let updated = try await store.renameWorkspaceTask(
+                            workspaceId: workspaceId,
+                            taskId: taskId,
+                            name: trimmed
+                        )
+                        renameTarget = nil
+                        renameBusy = false
+                        onTaskRenamed?(updated)
+                    } catch {
+                        renameError = error.localizedDescription
+                        renameBusy = false
                     }
                 }
-                .disabled(renameBusy || renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-        } message: {
-            if let renameError {
-                Text(renameError)
-            } else {
-                Text("修改任务的显示名称。")
-            }
+            .disabled(renameBusy || renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        .alert("删除任务？", isPresented: Binding(
+    }
+
+    private var deleteTaskPresented: Binding<Bool> {
+        Binding(
             get: { deleteTarget != nil },
             set: { if !$0 { deleteTarget = nil } }
-        )) {
-            if let target = deleteTarget {
-                Button("取消", role: .cancel) { deleteTarget = nil }
-                Button("删除", role: .destructive) {
-                    guard !deleteBusy else { return }
-                    deleteBusy = true
-                    Task {
-                        do {
-                            try await store.deleteWorkspaceTask(
-                                workspaceId: target.workspaceId,
-                                taskId: target.id
-                            )
-                            let id = target.id
-                            deleteTarget = nil
-                            deleteBusy = false
-                            onTaskDeleted?(id)
-                        } catch {
-                            deleteError = error.localizedDescription
-                            deleteBusy = false
-                        }
+        )
+    }
+
+    @ViewBuilder
+    private var deleteTaskAlertContent: some View {
+        if let target = deleteTarget {
+            Button("取消", role: .cancel) { deleteTarget = nil }
+            Button("删除", role: .destructive) {
+                guard !deleteBusy else { return }
+                deleteBusy = true
+                let workspaceId = target.workspaceId
+                let taskId = target.id
+                Task {
+                    do {
+                        try await store.deleteWorkspaceTask(
+                            workspaceId: workspaceId,
+                            taskId: taskId
+                        )
+                        deleteTarget = nil
+                        deleteBusy = false
+                        onTaskDeleted?(taskId)
+                    } catch {
+                        deleteError = error.localizedDescription
+                        deleteBusy = false
                     }
                 }
-                .disabled(deleteBusy)
             }
-        } message: {
-            if let deleteError {
-                Text(deleteError)
-            } else if let target = deleteTarget {
-                Text("任务「\(target.name)」及其会话和独立 worktree 将被删除，此操作无法撤销。")
+            .disabled(deleteBusy)
+        }
+    }
+
+    private var createTaskPresented: Binding<Bool> {
+        Binding(
+            get: { createTaskTarget != nil },
+            set: { if !$0 { createTaskTarget = nil } }
+        )
+    }
+
+    @ViewBuilder
+    private var createTaskAlertContent: some View {
+        if let target = createTaskTarget {
+            TextField("任务名称（如：修复登录流程）", text: $createTaskDraft)
+                .textInputAutocapitalization(.never)
+            Button("取消", role: .cancel) { createTaskTarget = nil }
+            Button(createTaskBusy ? "创建中…" : "创建") {
+                guard !createTaskBusy else { return }
+                let trimmed = createTaskDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, trimmed.count <= 80 else {
+                    createTaskError = "名称不能为空且不超过 80 字符"
+                    return
+                }
+                createTaskBusy = true
+                Task {
+                    await performCreateTask(in: target, name: trimmed)
+                }
             }
+            .disabled(createTaskBusy || createTaskDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    private var renameWorkspacePresented: Binding<Bool> {
+        Binding(
+            get: { renameWorkspaceTarget != nil },
+            set: { if !$0 { renameWorkspaceTarget = nil } }
+        )
+    }
+
+    @ViewBuilder
+    private var renameWorkspaceAlertContent: some View {
+        if let target = renameWorkspaceTarget {
+            TextField("项目名称", text: $renameWorkspaceDraft)
+                .textInputAutocapitalization(.never)
+            Button("取消", role: .cancel) { renameWorkspaceTarget = nil }
+            Button(renameWorkspaceBusy ? "保存中…" : "保存") {
+                guard !renameWorkspaceBusy else { return }
+                let trimmed = renameWorkspaceDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else {
+                    renameWorkspaceError = "名称不能为空"
+                    return
+                }
+                renameWorkspaceBusy = true
+                let workspaceId = target.id
+                Task {
+                    do {
+                        _ = try await store.renameWorkspace(
+                            workspaceId: workspaceId,
+                            name: trimmed
+                        )
+                        renameWorkspaceTarget = nil
+                        renameWorkspaceBusy = false
+                        showToast("已重命名为「\(trimmed)」")
+                    } catch {
+                        renameWorkspaceError = error.localizedDescription
+                        renameWorkspaceBusy = false
+                    }
+                }
+            }
+            .disabled(renameWorkspaceBusy || renameWorkspaceDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    private var deleteWorkspacePresented: Binding<Bool> {
+        Binding(
+            get: { deleteWorkspaceTarget != nil },
+            set: { if !$0 { deleteWorkspaceTarget = nil } }
+        )
+    }
+
+    @ViewBuilder
+    private var deleteWorkspaceAlertContent: some View {
+        if let target = deleteWorkspaceTarget {
+            Button("取消", role: .cancel) { deleteWorkspaceTarget = nil }
+            Button("删除", role: .destructive) {
+                guard !deleteWorkspaceBusy else { return }
+                deleteWorkspaceBusy = true
+                let workspaceId = target.id
+                Task {
+                    do {
+                        try await store.deleteWorkspace(workspaceId: workspaceId)
+                        deleteWorkspaceTarget = nil
+                        deleteWorkspaceBusy = false
+                        onWorkspaceDeleted?(workspaceId)
+                    } catch {
+                        deleteWorkspaceError = error.localizedDescription
+                        deleteWorkspaceBusy = false
+                    }
+                }
+            }
+            .disabled(deleteWorkspaceBusy)
         }
     }
 
@@ -130,15 +330,23 @@ struct WorkspaceListView: View {
     private var workspaceContent: some View {
         if store.workspaces.isEmpty {
             VStack(spacing: 12) {
-                Image(systemName: "folder.badge.questionmark")
+                Image(systemName: "folder.badge.plus")
                     .font(.system(size: 34))
                     .foregroundColor(Theme.brand)
                 Text("还没有项目")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
-                Text("可在网页版中创建 Workspace 项目和任务")
+                Text("创建项目后可按任务隔离 worktree，多窗口并行推进")
                     .font(.footnote)
                     .foregroundColor(Theme.textSecondary)
+                Button {
+                    createWorkspacePresented = true
+                } label: {
+                    Text("新建项目")
+                        .frame(maxWidth: 220)
+                }
+                .buttonStyle(WandPrimaryButtonStyle())
+                .padding(.top, 6)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(28)
@@ -148,38 +356,104 @@ struct WorkspaceListView: View {
                     inlineError(message)
                 }
                 ForEach(store.workspaces) { workspace in
-                    DisclosureGroup(
-                        isExpanded: Binding(
-                            get: { expandedWorkspaceIds.contains(workspace.id) },
-                            set: { expanded in
-                                if expanded { expandedWorkspaceIds.insert(workspace.id) }
-                                else { expandedWorkspaceIds.remove(workspace.id) }
-                            }
-                        )
-                    ) {
-                        if let error = store.taskErrors[workspace.id] {
-                            inlineError(error)
-                        }
-                        let tasks = store.tasks(for: workspace.id)
-                        if tasks.isEmpty && store.taskErrors[workspace.id] == nil {
-                            Text("还没有任务")
-                                .font(.footnote)
-                                .foregroundColor(Theme.textMuted)
-                                .padding(.vertical, 10)
-                        } else {
-                            ForEach(tasks) { task in
-                                taskRow(task, workspace: workspace)
-                            }
-                        }
-                    } label: {
-                        workspaceHeader(workspace)
-                    }
-                    .listRowBackground(Theme.background)
-                    .listRowSeparator(.hidden)
+                    workspaceSection(workspace)
                 }
             }
             .listStyle(.plain)
-            .refreshable { await store.loadWorkspaceIndex() }
+            .refreshable {
+                await store.loadWorkspaceIndex()
+                for workspaceId in expandedWorkspaceIds {
+                    Task { await store.loadWorkspaceSessions(workspaceId: workspaceId, force: true) }
+                }
+            }
+        }
+    }
+
+    private func workspaceSection(_ workspace: Workspace) -> some View {
+        DisclosureGroup(
+            isExpanded: Binding(
+                get: { expandedWorkspaceIds.contains(workspace.id) },
+                set: { expanded in
+                    if expanded {
+                        expandedWorkspaceIds.insert(workspace.id)
+                        Task { await store.loadWorkspaceSessions(workspaceId: workspace.id) }
+                    } else {
+                        expandedWorkspaceIds.remove(workspace.id)
+                    }
+                }
+            )
+        ) {
+            if let error = store.taskErrors[workspace.id] {
+                inlineError(error)
+            }
+            if let error = store.standaloneSessionErrors[workspace.id],
+               store.standaloneSessions[workspace.id] == nil {
+                inlineError(error)
+            }
+            let tasks = store.tasks(for: workspace.id)
+            let sessions = store.standaloneSessions[workspace.id] ?? []
+            if sessions.isEmpty && tasks.isEmpty
+                && store.taskErrors[workspace.id] == nil
+                && store.standaloneSessionErrors[workspace.id] == nil {
+                Text("还没有任务。点击「+」创建隔离任务，或在「会话」里新建。")
+                    .font(.footnote)
+                    .foregroundColor(Theme.textMuted)
+                    .padding(.vertical, 10)
+            } else {
+                ForEach(sessions) { session in
+                    standaloneSessionRow(session, workspace: workspace)
+                }
+                ForEach(tasks) { task in
+                    taskRow(task, workspace: workspace)
+                }
+            }
+        } label: {
+            workspaceHeader(workspace)
+        }
+        .listRowBackground(Theme.background)
+        .listRowSeparator(.hidden)
+        .contextMenu {
+            Button {
+                createTaskDraft = ""
+                createTaskError = nil
+                createTaskTarget = workspace
+            } label: {
+                Label("新任务", systemImage: "plus")
+            }
+            Button {
+                reviewTarget = workspace
+            } label: {
+                Label("Worktree 审查", systemImage: "arrow.triangle.branch")
+            }
+            Button {
+                renameWorkspaceDraft = workspace.name
+                renameWorkspaceError = nil
+                renameWorkspaceTarget = workspace
+            } label: {
+                Label("重命名项目", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                deleteWorkspaceError = nil
+                deleteWorkspaceTarget = workspace
+            } label: {
+                Label("删除项目", systemImage: "trash")
+            }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                deleteWorkspaceError = nil
+                deleteWorkspaceTarget = workspace
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+            Button {
+                createTaskDraft = ""
+                createTaskError = nil
+                createTaskTarget = workspace
+            } label: {
+                Label("新任务", systemImage: "plus")
+            }
+            .tint(Theme.brand)
         }
     }
 
@@ -211,10 +485,101 @@ struct WorkspaceListView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            Spacer(minLength: 6)
+            worktreeBadge(workspace)
+            Button {
+                createTaskDraft = ""
+                createTaskError = nil
+                createTaskTarget = workspace
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(Theme.brand)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        Circle().fill(Theme.brand.opacity(0.10))
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(createTaskBusy)
+            .accessibilityLabel("在 \(workspace.name) 新建任务")
         }
         .padding(.vertical, 5)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("项目 \(workspace.name)，目录 \(workspace.cwd)")
+    }
+
+    /// 行尾的 Worktree 徽章按钮：显示数量，为 0 时禁用（对齐 web 端审查入口）。
+    private func worktreeBadge(_ workspace: Workspace) -> some View {
+        let count = workspace.worktreeCount
+            ?? store.tasks(for: workspace.id).filter { $0.worktree != nil }.count
+        return Button {
+            reviewTarget = workspace
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+            }
+            .foregroundColor(count > 0 ? Theme.brand : Theme.textMuted)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(
+                Capsule().fill(count > 0 ? Theme.brand.opacity(0.10) : Theme.surface)
+            )
+            .overlay(
+                Capsule().stroke(Theme.border, lineWidth: 0.8)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(count == 0)
+        .accessibilityLabel("\(workspace.name) 的 Worktree：\(count) 个")
+    }
+
+    private func standaloneSessionRow(
+        _ session: WorkspaceSessionSummary,
+        workspace: Workspace
+    ) -> some View {
+        Button {
+            onOpenSession?(workspace, session)
+        } label: {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Theme.surface)
+                    BrandLogo(
+                        provider: session.provider ?? "terminal",
+                        color: Theme.textSecondary
+                    )
+                    .frame(width: 17, height: 17)
+                }
+                .frame(width: 30, height: 30)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(session.title?.isEmpty == false ? session.title! : "未命名会话")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(1)
+                    Text(session.providerLabel)
+                        .font(.system(size: 10))
+                        .foregroundColor(Theme.textMuted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Circle()
+                    .fill(session.status == "running" ? Theme.success : Theme.textMuted.opacity(0.5))
+                    .frame(width: 7, height: 7)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(Theme.textMuted)
+            }
+            .padding(.leading, 14)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("会话 \(session.title ?? session.providerLabel)")
     }
 
     private func taskRow(_ task: WorkspaceTask, workspace: Workspace) -> some View {
@@ -287,6 +652,47 @@ struct WorkspaceListView: View {
                 Label("重命名", systemImage: "pencil")
             }
             .tint(Theme.brand)
+        }
+    }
+
+    private func performCreateTask(in workspace: Workspace, name: String) async {
+        do {
+            let outcome = try await store.createWorkspaceTask(workspaceId: workspace.id, name: name)
+            createTaskTarget = nil
+            createTaskBusy = false
+            if !outcome.creation.isIsolated, let worktreeError = outcome.creation.worktreeError {
+                showToast("已创建任务「\(outcome.creation.name)」：\(worktreeError)")
+            } else {
+                showToast("已创建任务「\(outcome.creation.name)」（独立 worktree）")
+            }
+            onOpenTask(workspace, outcome.task)
+        } catch {
+            createTaskError = error.localizedDescription
+            createTaskBusy = false
+        }
+    }
+
+    private func showToast(_ message: String) {
+        toastMessage = message
+    }
+
+    @ViewBuilder
+    private var toastView: some View {
+        if let toastMessage {
+            Text(toastMessage)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Capsule().fill(Color.black.opacity(0.78)))
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .onAppear {
+                    let current = toastMessage
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) {
+                        if toastMessage == current { self.toastMessage = nil }
+                    }
+                }
         }
     }
 

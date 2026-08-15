@@ -62,7 +62,11 @@
 		E7000000000000000000AC05 /* WorkspaceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC05 /* WorkspaceListView.swift */; };
 		E7000000000000000000AC06 /* WorkspaceTaskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC06 /* WorkspaceTaskView.swift */; };
 		E7000000000000000000AC07 /* WorkspaceTargetPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC07 /* WorkspaceTargetPicker.swift */; };
+		E7000000000000000000AC09 /* WorkspaceWorktreeModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC09 /* WorkspaceWorktreeModels.swift */; };
+		E7000000000000000000AC10 /* WorkspaceWorktreeReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */; };
+		E9000000000000000000AC12 /* WorkspaceCreateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9000000000000000000BC12 /* WorkspaceCreateView.swift */; };
 		E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC08 /* WorkspaceTests.swift */; };
+		E8000000000000000000AC01 /* WorkspaceWorktreeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -155,6 +159,10 @@
 		E7000000000000000000BC06 /* WorkspaceTaskView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTaskView.swift; sourceTree = "<group>"; };
 		E7000000000000000000BC07 /* WorkspaceTargetPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTargetPicker.swift; sourceTree = "<group>"; };
 		E7000000000000000000BC08 /* WorkspaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTests.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC09 /* WorkspaceWorktreeModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWorktreeModels.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWorktreeReviewView.swift; sourceTree = "<group>"; };
+		E9000000000000000000BC12 /* WorkspaceCreateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCreateView.swift; sourceTree = "<group>"; };
+		E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWorktreeTests.swift; sourceTree = "<group>"; };
 		C3000000000000000000F101 /* WandTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WandTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -245,6 +253,9 @@
 				E7000000000000000000BC05 /* WorkspaceListView.swift */,
 				E7000000000000000000BC06 /* WorkspaceTaskView.swift */,
 				E7000000000000000000BC07 /* WorkspaceTargetPicker.swift */,
+				E7000000000000000000BC09 /* WorkspaceWorktreeModels.swift */,
+				E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */,
+				E9000000000000000000BC12 /* WorkspaceCreateView.swift */,
 				A100000000000000000000D1 /* Assets.xcassets */,
 				A100000000000000000000E1 /* Info.plist */,
 			);
@@ -276,6 +287,7 @@
 				C3000000000000000000BC01 /* WandProtocolTests.swift */,
 				F6000000000000000000BC06 /* AlignmentParityTests.swift */,
 				E7000000000000000000BC08 /* WorkspaceTests.swift */,
+				E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */,
 			);
 			path = WandTests;
 			sourceTree = "<group>";
@@ -479,6 +491,9 @@
 				E7000000000000000000AC05 /* WorkspaceListView.swift in Sources */,
 				E7000000000000000000AC06 /* WorkspaceTaskView.swift in Sources */,
 				E7000000000000000000AC07 /* WorkspaceTargetPicker.swift in Sources */,
+				E7000000000000000000AC09 /* WorkspaceWorktreeModels.swift in Sources */,
+				E7000000000000000000AC10 /* WorkspaceWorktreeReviewView.swift in Sources */,
+				E9000000000000000000AC12 /* WorkspaceCreateView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -498,6 +513,7 @@
 				C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */,
 				F6000000000000000000AC06 /* AlignmentParityTests.swift in Sources */,
 				E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */,
+				E8000000000000000000AC01 /* WorkspaceWorktreeTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

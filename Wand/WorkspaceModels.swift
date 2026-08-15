@@ -276,6 +276,31 @@ struct Workspace: Codable, Equatable, Identifiable {
     let layout: LayoutNode?
     let createdAt: String
     let lastOpenedAt: String?
+    /// v4.40+ 服务端附带；老服务端缺省时由任务列表推算。
+    let worktreeCount: Int?
+    let sessionCount: Int?
+
+    init(
+        id: String,
+        name: String,
+        cwd: String,
+        defaultProvider: WandProvider?,
+        layout: LayoutNode?,
+        createdAt: String,
+        lastOpenedAt: String?,
+        worktreeCount: Int? = nil,
+        sessionCount: Int? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.cwd = cwd
+        self.defaultProvider = defaultProvider
+        self.layout = layout
+        self.createdAt = createdAt
+        self.lastOpenedAt = lastOpenedAt
+        self.worktreeCount = worktreeCount
+        self.sessionCount = sessionCount
+    }
 }
 
 struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
@@ -287,6 +312,7 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
     let status: String?
     let cwd: String?
     let startedAt: String?
+    let workspaceTaskId: String?
 
     init(snapshot: SessionSnapshot) {
         id = snapshot.id
@@ -297,6 +323,7 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
         status = snapshot.status
         cwd = snapshot.cwd
         startedAt = snapshot.startedAt
+        workspaceTaskId = nil
     }
 
     var providerLabel: String {

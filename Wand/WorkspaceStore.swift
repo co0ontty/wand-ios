@@ -17,6 +17,25 @@ protocol WorkspaceServing: AnyObject {
     ) async throws -> SessionSnapshot
     func getSession(id: String, blockBudget: Int) async throws -> SessionSnapshot
     func workspaceDefaultProvider() async throws -> WandProvider
+    func getWorkspaceDetail(workspaceId: String) async throws -> WorkspaceDetail
+    func createWorkspace(
+        name: String,
+        cwd: String,
+        defaultProvider: WandProvider?
+    ) async throws -> Workspace
+    func updateWorkspace(workspaceId: String, name: String) async throws -> Workspace
+    func deleteWorkspace(workspaceId: String) async throws
+    func createWorkspaceTask(
+        workspaceId: String,
+        name: String,
+        baseRef: String?
+    ) async throws -> WorkspaceTaskCreation
+    func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview
+    func startWorktreeMergeAgent(
+        workspace: Workspace,
+        provider: WandProvider,
+        prompt: String
+    ) async throws -> SessionSnapshot
 }
 
 extension WandAPI: WorkspaceServing {}
@@ -49,6 +68,9 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var workspaces: [Workspace] = []
     @Published private(set) var tasksByWorkspace: [String: [WorkspaceTask]] = [:]
     @Published private(set) var taskErrors: [String: String] = [:]
+    /// 项目直属会话（未绑定任务的会话），按项目缓存，展开项目行时加载。
+    @Published private(set) var standaloneSessions: [String: [WorkspaceSessionSummary]] = [:]
+    @Published private(set) var standaloneSessionErrors: [String: String] = [:]
 
     @Published private(set) var currentWorkspace: Workspace?
     @Published private(set) var currentTask: WorkspaceTask?
@@ -70,6 +92,7 @@ final class WorkspaceStore: ObservableObject {
     private var indexGeneration = 0
     private var taskGeneration = 0
     private var sessionGeneration = 0
+    private var loadingStandaloneSessions = Set<String>()
 
     init(api: WorkspaceServing, serverID: String) {
         self.api = api
@@ -110,11 +133,140 @@ final class WorkspaceStore: ObservableObject {
             guard generation == indexGeneration, !Task.isCancelled else { return }
             tasksByWorkspace = loadedTasks
             taskErrors = errors
+            standaloneSessions = [:]
+            standaloneSessionErrors = [:]
             indexState = .loaded
         } catch {
             guard generation == indexGeneration, !Task.isCancelled else { return }
             indexState = .failed(error.localizedDescription)
         }
+    }
+
+    /// 展开项目行时加载直属会话；已缓存或加载中时跳过。
+    func loadWorkspaceSessions(workspaceId: String, force: Bool = false) async {
+        guard force || standaloneSessions[workspaceId] == nil else { return }
+        guard !loadingStandaloneSessions.contains(workspaceId) else { return }
+        loadingStandaloneSessions.insert(workspaceId)
+        defer { loadingStandaloneSessions.remove(workspaceId) }
+        do {
+            let detail = try await api.getWorkspaceDetail(workspaceId: workspaceId)
+            standaloneSessions[workspaceId] = detail.standaloneSessions
+            standaloneSessionErrors[workspaceId] = nil
+        } catch {
+            if standaloneSessions[workspaceId] == nil {
+                standaloneSessionErrors[workspaceId] = error.localizedDescription
+            }
+        }
+    }
+
+    /// 新建项目后整表刷新，返回服务端创建的实体。
+    @discardableResult
+    func createWorkspace(
+        name: String,
+        cwd: String,
+        defaultProvider: WandProvider?
+    ) async throws -> Workspace {
+        let created = try await api.createWorkspace(
+            name: name,
+            cwd: cwd,
+            defaultProvider: defaultProvider
+        )
+        await loadWorkspaceIndex()
+        return created
+    }
+
+    @discardableResult
+    func renameWorkspace(workspaceId: String, name: String) async throws -> Workspace {
+        let updated = try await api.updateWorkspace(workspaceId: workspaceId, name: name)
+        if let index = workspaces.firstIndex(where: { $0.id == workspaceId }) {
+            workspaces[index] = updated
+        }
+        if currentWorkspace?.id == workspaceId {
+            currentWorkspace = updated
+        }
+        return updated
+    }
+
+    /// 级联删除项目（任务、会话与独立 worktree 一并清理），并清理本地状态。
+    func deleteWorkspace(workspaceId: String) async throws {
+        try await api.deleteWorkspace(workspaceId: workspaceId)
+        workspaces.removeAll { $0.id == workspaceId }
+        tasksByWorkspace[workspaceId] = nil
+        standaloneSessions[workspaceId] = nil
+        standaloneSessionErrors[workspaceId] = nil
+        if currentWorkspace?.id == workspaceId {
+            currentWorkspace = nil
+            currentTask = nil
+            taskState = .idle
+            visibleSessionID = nil
+            visibleSnapshot = nil
+        }
+    }
+
+    /// 新建任务（服务端会尝试创建独立 worktree），成功后刷新任务列表。
+    /// 返回创建结果（含 isolated/worktreeError 提示信息）与可打开的任务实体。
+    @discardableResult
+    func createWorkspaceTask(
+        workspaceId: String,
+        name: String
+    ) async throws -> (creation: WorkspaceTaskCreation, task: WorkspaceTask) {
+        let creation = try await api.createWorkspaceTask(
+            workspaceId: workspaceId,
+            name: name,
+            baseRef: nil
+        )
+        var refreshed: [WorkspaceTask] = []
+        do {
+            refreshed = try await api.listWorkspaceTasks(workspaceId: workspaceId)
+            tasksByWorkspace[workspaceId] = refreshed
+        } catch {
+            var existing = tasksByWorkspace[workspaceId] ?? []
+            if !existing.contains(where: { $0.id == creation.id }) {
+                existing.append(WorkspaceTask(
+                    id: creation.id,
+                    workspaceId: creation.workspaceId,
+                    name: creation.name,
+                    worktree: creation.worktree,
+                    layout: nil,
+                    status: creation.status,
+                    createdAt: "",
+                    lastOpenedAt: nil
+                ))
+            }
+            tasksByWorkspace[workspaceId] = existing
+        }
+        let task = refreshed.first { $0.id == creation.id }
+            ?? WorkspaceTask(
+                id: creation.id,
+                workspaceId: creation.workspaceId,
+                name: creation.name,
+                worktree: creation.worktree,
+                layout: nil,
+                status: creation.status,
+                createdAt: "",
+                lastOpenedAt: nil
+            )
+        return (creation, task)
+    }
+
+    /// Worktree 合并：用审查结果生成任务书并启动只绑定项目的托管 Agent 会话。
+    /// provider 回退：项目默认 → 服务器默认 → Claude。
+    func startWorktreeMergeAgent(
+        workspace: Workspace,
+        overview: WorkspaceWorktreeOverview,
+        selectedTaskIds: Set<String>
+    ) async throws -> SessionSnapshot {
+        let prompt = try buildWorkspaceMergeAgentPrompt(
+            workspace: workspace,
+            overview: overview,
+            selectedTaskIds: selectedTaskIds
+        )
+        let provider = workspace.defaultProvider ?? serverDefaultProvider
+        return try await api.startWorktreeMergeAgent(
+            workspace: workspace,
+            provider: provider,
+            prompt: prompt
+        )
     }
 
     /// 成功后返回更新后的任务（名称可能被服务端规范化）。

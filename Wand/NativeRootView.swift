@@ -296,6 +296,7 @@ struct NativeRootView: View {
                     } else {
                         WorkspaceListView(
                             store: workspaceStore,
+                            api: api,
                             selectedTaskId: selectedWorkspaceTask?.task.id,
                             onOpenTask: { workspace, task in
                                 selectedWorkspaceTask = WorkspaceTaskSelection(
@@ -311,6 +312,17 @@ struct NativeRootView: View {
                             },
                             onTaskDeleted: { taskId in
                                 if selectedWorkspaceTask?.task.id == taskId {
+                                    selectedWorkspaceTask = nil
+                                }
+                            },
+                            onOpenSession: { _, session in
+                                openWorkspaceStandaloneSession(session.id)
+                            },
+                            onMergeAgentStarted: { _, started in
+                                presentMergeAgentSession(started)
+                            },
+                            onWorkspaceDeleted: { workspaceId in
+                                if selectedWorkspaceTask?.workspace.id == workspaceId {
                                     selectedWorkspaceTask = nil
                                 }
                             }
@@ -372,7 +384,8 @@ struct NativeRootView: View {
         .accessibilityLabel("主内容")
     }
 
-    /// 详情内容：会话模式渲染聊天/终端；项目模式承载任务欢迎态与工作窗口。
+    /// 详情内容：会话模式渲染聊天/终端；项目模式承载任务欢迎态与工作窗口，
+    /// 也可承接项目直属会话 / 合并 Agent 会话（保持项目上下文，不强制切回会话分区）。
     @ViewBuilder private var detailContent: some View {
         if rootSection == .workspaces {
             if let selection = selectedWorkspaceTask {
@@ -383,6 +396,11 @@ struct NativeRootView: View {
                     store: workspaceStore
                 )
                 .id(selection.task.id)
+            } else if let session = selectedSnapshot {
+                SessionDestinationView(session: session, api: api)
+                    .id(session.id)
+            } else if selectedSessionID != nil {
+                ProgressView().tint(Theme.brand)
             } else {
                 emptyDetailPlaceholder
             }
@@ -546,6 +564,38 @@ struct NativeRootView: View {
                 openingSessionID = nil
             }
         }
+    }
+
+    /// 打开项目直属会话：留在项目分区，替换任务详情为会话详情。
+    private func openWorkspaceStandaloneSession(_ sessionID: String) {
+        guard openingSessionID != sessionID, selectedSessionID != sessionID else { return }
+        selectedWorkspaceTask = nil
+        openingSessionID = sessionID
+        selectedSessionID = sessionID
+        selectedSnapshot = nil
+        Task {
+            do {
+                let snapshot = try await api.getSession(id: sessionID)
+                guard selectedSessionID == sessionID else { return }
+                selectedSnapshot = snapshot
+                openingSessionID = nil
+                SessionPresenceController.shared.sync(snapshot: snapshot, serverID: serverID)
+            } catch {
+                guard selectedSessionID == sessionID else { return }
+                selectedSessionID = nil
+                selectedSnapshot = nil
+                openingSessionID = nil
+            }
+        }
+    }
+
+    /// Worktree 合并 Agent 启动完成：快照已就绪，直接在项目分区展示该托管会话。
+    private func presentMergeAgentSession(_ snapshot: SessionSnapshot) {
+        selectedWorkspaceTask = nil
+        openingSessionID = nil
+        selectedSessionID = snapshot.id
+        selectedSnapshot = snapshot
+        SessionPresenceController.shared.sync(snapshot: snapshot, serverID: serverID)
     }
 
 #if DEBUG
