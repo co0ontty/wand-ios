@@ -4239,35 +4239,6 @@ private struct AssistantReplyDisclosure: View {
     }
 }
 
-private struct InlineHistoryChip: View {
-    let count: Int
-    var expanded = false
-    let onToggle: () -> Void
-
-    var body: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 5) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 10, weight: .bold))
-                    .rotationEffect(.degrees(expanded ? -90 : 0))
-                Text(expanded ? "收起上文" : "已收起 \(count) 轮")
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .foregroundColor(Theme.textSecondary)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 8)
-            .frame(minHeight: 36)
-            .background(Capsule(style: .continuous).fill(Theme.surface))
-            .overlay(Capsule(style: .continuous).stroke(Theme.border, lineWidth: 1))
-            .contentShape(Capsule(style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(expanded ? "收起上文" : "展开已收起的 \(count) 轮上文")
-    }
-}
-
 // MARK: - 历史折叠摘要卡
 
 /// 发新消息后，把"最后一条用户消息"之前的历史折叠成这张分隔卡。展开时它上方出现
