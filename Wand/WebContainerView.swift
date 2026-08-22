@@ -31,6 +31,10 @@ final class WebViewModel: ObservableObject {
     var requestClose: (() -> Void)?
     /// WebBridge attach 时回填，供"重试"调用 reload()。
     weak var webView: WKWebView?
+    /// 嵌入终端被点击时触发（nativeInput 模式）：网页侧 xterm textarea 已被锁成
+    /// readonly，点终端不可能弹网页键盘，由原生壳接管（PtySessionView 展开输入
+    /// 抽屉并聚焦，唤起系统键盘）。
+    var onEmbeddedTerminalTap: (() -> Void)?
 
     func retry() {
         phase = .loading
@@ -684,6 +688,21 @@ struct WebViewRepresentable: UIViewRepresentable {
               } catch (e) {}
             }, true);
           });
+        }
+
+        if (!window.__wandNativeTerminalTapGuard) {
+          window.__wandNativeTerminalTapGuard = true;
+          // 点击终端窗口：xterm textarea 已锁 readonly，弹不出网页键盘，改报给
+          // 原生壳展开原生输入抽屉。用 click 而非 touchstart/end，滚动/选择时
+          // touchmove 会取消 click，不会误触发键盘。
+          document.addEventListener('click', function(event) {
+            try {
+              var target = event.target;
+              if (!target || !target.closest) return;
+              if (!target.closest('.terminal-container')) return;
+              window.webkit.messageHandlers.wandNative.postMessage({ type: 'terminalTap' });
+            } catch (e) {}
+          }, true);
         }
 
         function fitTerminal() {

@@ -325,17 +325,21 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
 
         if isFocused {
             if !textView.isFirstResponder {
-                DispatchQueue.main.async { [weak textView] in
-                    guard let textView, context.coordinator.parent.isFocused else { return }
-                    textView.becomeFirstResponder()
-                }
+                // 不能只调一次 becomeFirstResponder：抽屉转场动画中段、或从
+                // WKWebView 手里抢 first responder 时，单次调用会静默失败，
+                // 键盘永远弹不出来。交给带重试的聚焦（见 Coordinator）。
+                context.coordinator.requestFocus(textView)
             }
-        } else if textView.isFirstResponder {
-            textView.resignFirstResponder()
+        } else {
+            context.coordinator.cancelFocusRetry()
+            if textView.isFirstResponder {
+                textView.resignFirstResponder()
+            }
         }
     }
 
     static func dismantleUIView(_ textView: ComposerUITextView, coordinator: Coordinator) {
+        coordinator.cancelFocusRetry()
         textView.onMarkedTextChange = nil
         textView.delegate = nil
     }
@@ -345,9 +349,34 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         var isApplyingBinding = false
         private var lastReportedHeight: CGFloat = 0
         private var lastComposing = false
+        /// 带重试的聚焦任务列表：覆盖抽屉 .move 转场（~0.22s）、WKWebView 让出
+        /// first responder 的跨进程间隙等一次性失败场景。
+        private var focusRetryWorks: [DispatchWorkItem] = []
+        private static let focusRetryDelays: [TimeInterval] = [0, 0.08, 0.18, 0.32, 0.5, 0.75]
 
         init(parent: IMEAwareComposerTextView) {
             self.parent = parent
+        }
+
+        /// 在多个时间点上反复尝试成为 first responder，直到成功、外部取消聚焦
+        /// （isFocused 变 false）或视图脱离窗口为止。幂等：重复调用会先取消旧批次。
+        func requestFocus(_ textView: UITextView) {
+            cancelFocusRetry()
+            for delay in Self.focusRetryDelays {
+                let work = DispatchWorkItem { [weak self, weak textView] in
+                    guard let self, let textView else { return }
+                    guard self.parent.isFocused, textView.window != nil else { return }
+                    guard !textView.isFirstResponder else { return }
+                    textView.becomeFirstResponder()
+                }
+                focusRetryWorks.append(work)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            }
+        }
+
+        func cancelFocusRetry() {
+            for work in focusRetryWorks { work.cancel() }
+            focusRetryWorks.removeAll()
         }
 
         func publishComposition(_ active: Bool) {

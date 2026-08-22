@@ -95,6 +95,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
             DispatchQueue.main.async { [weak self] in
                 self?.model.requestClose?()
             }
+        case "terminalTap":
+            // 嵌入终端（nativeInput 模式）被点击：交给原生壳唤起输入抽屉/键盘。
+            DispatchQueue.main.async { [weak self] in
+                self?.model.onEmbeddedTerminalTap?()
+            }
         case "requestNotificationPermission":
             SessionNotificationController.shared.requestAuthorization()
         case "sendNotification":

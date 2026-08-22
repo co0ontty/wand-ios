@@ -133,6 +133,7 @@ private struct PtySessionView: View {
         }
         .onAppear {
             attachments.setToastHandler { store.toast = $0 }
+            terminalWebModel.onEmbeddedTerminalTap = handleEmbeddedTerminalTap
             store.start()
             refreshGitStatus()
         }
@@ -393,13 +394,22 @@ private struct PtySessionView: View {
     private func toggleInputDrawer() {
         inputDrawerOpen.toggle()
         if inputDrawerOpen {
-            terminalWebModel.suppressEmbeddedTerminalIme()
-            // 展开后把焦点放进文本框，顺势唤起键盘；折叠时不强行收键盘，
-            // 让系统的失焦逻辑自然处理。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                if inputDrawerOpen { inputFocused = true }
-            }
+            focusNativeInput()
         }
+    }
+
+    /// 唤起原生输入：先压住网页侧 xterm 隐藏 textarea（readonly + blur），再把
+    /// 焦点交给抽屉里的文本框。IMEAwareComposerTextView 内部带多次重试，
+    /// 转场动画/WKWebView 抢焦点导致的单次失败会自动补上。
+    private func focusNativeInput() {
+        terminalWebModel.suppressEmbeddedTerminalIme()
+        if inputDrawerOpen { inputFocused = true }
+    }
+
+    /// 点终端黑窗：nativeInput 模式下网页侧不可能弹键盘，直接展开输入抽屉并聚焦。
+    private func handleEmbeddedTerminalTap() {
+        if !inputDrawerOpen { inputDrawerOpen = true }
+        focusNativeInput()
     }
 
     private func sendTerminalShortcut(_ shortcut: TerminalShortcut) {
