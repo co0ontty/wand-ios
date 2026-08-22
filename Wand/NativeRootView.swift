@@ -16,6 +16,7 @@ struct NativeRootView: View {
     @State private var updateBannerMessage: String?
     @State private var updateError: String?
     @State private var installingUpdate = false
+    @State private var canManageSettings = false
     @State private var systemSocket: WandSocket?
     @State private var lifecycleGeneration = 0
     @State private var authenticationTask: Task<Void, Never>?
@@ -447,7 +448,7 @@ struct NativeRootView: View {
                     Text(installingUpdate ? "正在更新服务端" : "发现新版本")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(Theme.textPrimary)
-                    Text(updateError ?? updateBannerMessage ?? "点击下方按钮一键更新")
+                    Text(updateError ?? updateBannerMessage ?? (canManageSettings ? "点击下方按钮一键更新" : "请到网页版或本机终端更新服务端"))
                         .font(.system(size: 12))
                         .foregroundColor(updateError == nil ? Theme.textSecondary : Theme.danger)
                         .fixedSize(horizontal: false, vertical: true)
@@ -473,6 +474,7 @@ struct NativeRootView: View {
                         .foregroundColor(Theme.textSecondary)
                     versionPill(info.displayLatest, filled: true)
                     Spacer(minLength: 0)
+                    if canManageSettings {
                     Button {
                         installUpdate()
                     } label: {
@@ -494,6 +496,7 @@ struct NativeRootView: View {
                         )
                     }
                     .disabled(installingUpdate)
+                    }
                 }
             }
         }
@@ -670,6 +673,7 @@ struct NativeRootView: View {
                   config.updateAvailable == true,
                   let latest = config.latestVersion,
                   !latest.isEmpty else { return }
+            canManageSettings = config.canManageSettings == true
             serverUpdate = ServerUpdateInfo(
                 current: config.currentVersion ?? "?",
                 latest: latest,

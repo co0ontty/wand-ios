@@ -75,22 +75,25 @@ struct SessionListPage: Decodable {
     let offset: Int
     let total: Int
     let revision: String
+    let unchanged: Bool
 
-    init(entries: [SessionListEntry], offset: Int, total: Int, revision: String) {
+    init(entries: [SessionListEntry], offset: Int, total: Int, revision: String, unchanged: Bool = false) {
         self.entries = entries
         self.offset = offset
         self.total = total
         self.revision = revision
+        self.unchanged = unchanged
     }
 
-    private enum CodingKeys: String, CodingKey { case entries, offset, total, revision }
+    private enum CodingKeys: String, CodingKey { case entries, offset, total, revision, unchanged }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        entries = try container.decode([SessionListEntry].self, forKey: .entries)
+        entries = try container.decodeIfPresent([SessionListEntry].self, forKey: .entries) ?? []
         offset = try container.decode(Int.self, forKey: .offset)
         total = try container.decode(Int.self, forKey: .total)
         revision = try container.decode(String.self, forKey: .revision)
+        unchanged = try container.decodeIfPresent(Bool.self, forKey: .unchanged) ?? false
 
         guard offset >= 0,
               total >= offset,

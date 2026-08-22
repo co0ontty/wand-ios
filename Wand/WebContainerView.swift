@@ -49,6 +49,25 @@ final class WebViewModel: ObservableObject {
         runTerminalControlScript(clickElementId: nil)
     }
 
+    /// 原生输入栏接管键盘时，把 xterm 隐藏 textarea 踢出 first responder。
+    /// 否则中文输入法会一会儿打进原生框、一会儿打进看不见的 xterm 辅助框，
+    /// PI / Claude TUI 上表现为输不进去或重复插入。
+    func suppressEmbeddedTerminalIme() {
+        let script = """
+        (function() {
+          try {
+            var nodes = document.querySelectorAll('.xterm-helper-textarea');
+            for (var i = 0; i < nodes.length; i++) {
+              var el = nodes[i];
+              el.readOnly = true;
+              if (typeof el.blur === 'function') el.blur();
+            }
+          } catch (e) {}
+        })();
+        """
+        webView?.evaluateJavaScript(script, completionHandler: nil)
+    }
+
     private func runTerminalControlScript(clickElementId: String?) {
         let clickExpression = clickElementId.map { "'\($0)'" } ?? "null"
         let script = """
@@ -615,6 +634,30 @@ struct WebViewRepresentable: UIViewRepresentable {
             }
           `;
           document.head.appendChild(style);
+        }
+
+        if (!window.__wandNativeInputImeGuard) {
+          window.__wandNativeInputImeGuard = true;
+          function lockXtermIme() {
+            try {
+              var nodes = document.querySelectorAll('.xterm-helper-textarea');
+              for (var i = 0; i < nodes.length; i++) {
+                var el = nodes[i];
+                el.readOnly = true;
+                if (document.activeElement === el && typeof el.blur === 'function') el.blur();
+              }
+            } catch (e) {}
+          }
+          document.addEventListener('focusin', function(event) {
+            try {
+              var target = event.target;
+              if (target && target.classList && target.classList.contains('xterm-helper-textarea')) {
+                target.readOnly = true;
+                if (typeof target.blur === 'function') target.blur();
+              }
+            } catch (e) {}
+          }, true);
+          [0, 80, 220, 520].forEach(function(delay) { setTimeout(lockXtermIme, delay); });
         }
 
         if (!window.__wandNativeJoystickFocusGuard) {

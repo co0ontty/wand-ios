@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 enum ComposerMetrics {
     static let actionVisualSize: CGFloat = 34
@@ -232,4 +233,231 @@ func wandShouldSubmitHardwareReturn(modifiers: EventModifiers) -> Bool {
         && !modifiers.contains(.option)
         && !modifiers.contains(.control)
         && !modifiers.contains(.command)
+}
+
+func composerShouldApplyExternalText(_ incoming: String, current: String, isComposing: Bool) -> Bool {
+    !isComposing && incoming != current
+}
+
+func composerShouldSubmitReturn(isComposing: Bool) -> Bool {
+    !isComposing
+}
+
+func composerDraftIsSendable(_ draft: String, hasAttachments: Bool, isComposing: Bool) -> Bool {
+    !isComposing && (
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments
+    )
+}
+
+/// UITextView 走 UIKit 的 marked-text 管线。SwiftUI TextField 在中文输入法组字时会把
+/// 半成品写进 Binding，父视图一刷新就重置组字，表现为「输不进去」或候选确认后重复插入。
+/// 对齐 macOS IMEAwareComposerTextView：组字期间不回写 Binding，也不把确认键当成发送。
+struct IMEAwareComposerTextView: UIViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let isFocused: Bool
+    var disableAutocorrect: Bool = false
+    let onFocusChange: (Bool) -> Void
+    let onCompositionChange: (Bool) -> Void
+    let onSubmit: () -> Void
+    let onHeightChange: (CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> ComposerUITextView {
+        let textView = ComposerUITextView()
+        textView.delegate = context.coordinator
+        textView.text = text
+        textView.placeholder = placeholder
+        textView.onMarkedTextChange = { active in
+            context.coordinator.publishComposition(active)
+        }
+        textView.backgroundColor = .clear
+        textView.textColor = UIColor.label
+        textView.tintColor = UIColor(Theme.brand)
+        textView.font = .systemFont(ofSize: 16)
+        textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+        textView.textContainer.lineFragmentPadding = 0
+        textView.isScrollEnabled = false
+        textView.keyboardDismissMode = .none
+        textView.returnKeyType = .send
+        textView.enablesReturnKeyAutomatically = false
+        textView.smartQuotesType = .no
+        textView.smartDashesType = .no
+        textView.smartInsertDeleteType = .no
+        if disableAutocorrect {
+            textView.autocorrectionType = .no
+            textView.autocapitalizationType = .none
+            textView.spellCheckingType = .no
+        }
+        textView.adjustsFontForContentSizeCategory = true
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textView.accessibilityLabel = "消息输入"
+        context.coordinator.reportHeight(for: textView)
+        return textView
+    }
+
+    func updateUIView(_ textView: ComposerUITextView, context: Context) {
+        context.coordinator.parent = self
+        textView.placeholder = placeholder
+        textView.onMarkedTextChange = { active in
+            context.coordinator.publishComposition(active)
+        }
+        textView.tintColor = UIColor(Theme.brand)
+
+        let composing = textView.markedTextRange != nil
+        context.coordinator.publishComposition(composing)
+        if composerShouldApplyExternalText(text, current: textView.text ?? "", isComposing: composing) {
+            let selected = textView.selectedRange
+            context.coordinator.isApplyingBinding = true
+            textView.text = text
+            context.coordinator.isApplyingBinding = false
+            let maxLocation = (text as NSString).length
+            if selected.location <= maxLocation {
+                let length = min(selected.length, maxLocation - selected.location)
+                textView.selectedRange = NSRange(location: selected.location, length: length)
+            }
+            textView.refreshPlaceholder()
+            context.coordinator.reportHeight(for: textView)
+        }
+
+        if isFocused {
+            if !textView.isFirstResponder {
+                DispatchQueue.main.async { [weak textView] in
+                    guard let textView, context.coordinator.parent.isFocused else { return }
+                    textView.becomeFirstResponder()
+                }
+            }
+        } else if textView.isFirstResponder {
+            textView.resignFirstResponder()
+        }
+    }
+
+    static func dismantleUIView(_ textView: ComposerUITextView, coordinator: Coordinator) {
+        textView.onMarkedTextChange = nil
+        textView.delegate = nil
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: IMEAwareComposerTextView
+        var isApplyingBinding = false
+        private var lastReportedHeight: CGFloat = 0
+        private var lastComposing = false
+
+        init(parent: IMEAwareComposerTextView) {
+            self.parent = parent
+        }
+
+        func publishComposition(_ active: Bool) {
+            guard active != lastComposing else { return }
+            lastComposing = active
+            parent.onCompositionChange(active)
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            if !parent.isFocused {
+                parent.onFocusChange(true)
+            }
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            publishComposition(false)
+            if parent.isFocused {
+                parent.onFocusChange(false)
+            }
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            let composing = textView.markedTextRange != nil
+            publishComposition(composing)
+            (textView as? ComposerUITextView)?.refreshPlaceholder()
+            if !isApplyingBinding, !composing {
+                parent.text = textView.text ?? ""
+            }
+            reportHeight(for: textView)
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            publishComposition(textView.markedTextRange != nil)
+        }
+
+        func textView(
+            _ textView: UITextView,
+            shouldChangeTextIn range: NSRange,
+            replacementText text: String
+        ) -> Bool {
+            if textView.markedTextRange != nil {
+                return true
+            }
+            if text == "\n" {
+                guard composerShouldSubmitReturn(isComposing: false) else { return true }
+                parent.onSubmit()
+                return false
+            }
+            return true
+        }
+
+        func reportHeight(for textView: UITextView) {
+            let width = textView.bounds.width > 0 ? textView.bounds.width : 280
+            let fitted = textView.sizeThatFits(
+                CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            )
+            let height = min(112, max(24, ceil(fitted.height)))
+            textView.isScrollEnabled = fitted.height > 112
+            guard abs(height - lastReportedHeight) > 0.5 else { return }
+            lastReportedHeight = height
+            DispatchQueue.main.async { [weak self] in
+                self?.parent.onHeightChange(height)
+            }
+        }
+    }
+}
+
+final class ComposerUITextView: UITextView {
+    var onMarkedTextChange: ((Bool) -> Void)?
+    private let placeholderLabel = UILabel()
+
+    var placeholder = "" {
+        didSet {
+            placeholderLabel.text = placeholder
+            refreshPlaceholder()
+        }
+    }
+
+    override init(frame: CGRect, textContainer: NSTextContainer?) {
+        super.init(frame: frame, textContainer: textContainer)
+        placeholderLabel.font = .systemFont(ofSize: 16)
+        placeholderLabel.textColor = .placeholderText
+        placeholderLabel.numberOfLines = 1
+        placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(placeholderLabel)
+        NSLayoutConstraint.activate([
+            placeholderLabel.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            placeholderLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            placeholderLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+        super.setMarkedText(markedText, selectedRange: selectedRange)
+        onMarkedTextChange?(markedTextRange != nil)
+        refreshPlaceholder()
+    }
+
+    override func unmarkText() {
+        super.unmarkText()
+        onMarkedTextChange?(false)
+        refreshPlaceholder()
+    }
+
+    func refreshPlaceholder() {
+        placeholderLabel.isHidden = !text.isEmpty || markedTextRange != nil
+    }
 }

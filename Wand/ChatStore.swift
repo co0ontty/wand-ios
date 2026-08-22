@@ -246,6 +246,7 @@ final class ChatStore: ObservableObject {
     }
 
     private func apply(snapshot snap: SessionSnapshot) {
+        let previousError = snapshot?.structuredState?.lastError
         self.snapshot = snap
         applyWindowedMessages(snap.messages, offset: snap.messageOffset, total: snap.messageTotal,
                               leadingOffset: snap.leadingBlockOffset, leadingTotal: snap.leadingBlockTotal)
@@ -259,6 +260,10 @@ final class ChatStore: ObservableObject {
         thinkingEffort = snap.thinkingEffort ?? "off"
         mode = snap.mode ?? mode
         if snap.pendingEscalation != nil { legacyPermissionPrompt = nil }
+        if let error = snap.structuredState?.lastError?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !error.isEmpty, error != previousError {
+            toast = error
+        }
         publishPresence()
     }
 
@@ -801,7 +806,7 @@ final class ChatStore: ObservableObject {
                 if isStructured {
                     try await api.sendInput(id: sessionId, input: answerText, respondImmediately: true)
                 } else {
-                    try await api.sendInput(id: sessionId, input: answerText + "\n", view: "chat")
+                    try await sendPtyChatInput(answerText)
                 }
             } catch {
                 toast = error.localizedDescription
@@ -829,8 +834,13 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// 权限决策。结构化 escalation 走 resolve 端点；PTY 旧式提示走 approve/deny。
+    /// 权限决策。结构化会话没有运行时批准条；PTY 走 approve/deny。
     func resolvePermission(_ resolution: String) {
+        if isStructured {
+            pendingEscalation = nil
+            permissionBlocked = false
+            return
+        }
         if let esc = pendingEscalation {
             pendingEscalation = nil
             permissionBlocked = false

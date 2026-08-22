@@ -108,8 +108,11 @@ final class SessionListStore: ObservableObject {
             let page = try await api.fetchSessionList(
                 offset: 0,
                 limit: refreshLimit,
-                revision: nil
+                revision: revision
             )
+            if page.unchanged {
+                return true
+            }
             let retainTail = entries.count > refreshLimit
                 && page.entries.count == refreshLimit
                 && page.revision == revision

@@ -72,6 +72,8 @@ struct ChatView: View {
     @State private var voicePressed = false
     @State private var voiceCanceling = false
     @State private var draftNeedsExpanded = false
+    @State private var composerInputHeight: CGFloat = 34
+    @State private var composerIsComposing = false
     @StateObject private var attachments: ComposerAttachmentController
     @StateObject private var serverFileLinks = ServerFileLinkController()
     @State private var gitStatus: GitStatusResult?
@@ -1147,23 +1149,12 @@ struct ChatView: View {
                 )
             }
             growingTextField
-                .focused($inputFocused)
                 .padding(.leading, inputExpanded ? 6 : 2)
                 .padding(.trailing, inputExpanded ? 4 : 0)
                 .padding(.vertical, inputExpanded ? 4 : 2)
                 .frame(minHeight: inputExpanded ? 32 : 34)
+                .frame(height: max(inputExpanded ? 32 : 34, composerInputHeight))
                 .contentShape(Rectangle())
-                .background {
-                    GeometryReader { geometry in
-                        Color.clear.preference(
-                            key: ComposerInputHeightPreferenceKey.self,
-                            value: geometry.size.height
-                        )
-                    }
-                }
-                .onPreferenceChange(ComposerInputHeightPreferenceKey.self) { height in
-                    draftNeedsExpanded = !draft.isEmpty && height > 36
-                }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1489,15 +1480,21 @@ struct ChatView: View {
         .accessibilityLabel("更多操作")
     }
 
-    /// 多行自增高输入框（iOS 26+ 唯一支持形态）。
+    /// 多行自增高输入框。走 UIKit marked-text，避免中文输入法组字被 SwiftUI Binding 打断。
     private var growingTextField: some View {
-        TextField(composerPlaceholder, text: $draft, axis: .vertical)
-            .lineLimit(1...5)
-            .font(.system(size: 16))
-            .foregroundColor(Theme.textPrimary)
-            .tint(Theme.brand)
-            .submitLabel(.send)
-            .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
+        IMEAwareComposerTextView(
+            text: $draft,
+            placeholder: composerPlaceholder,
+            isFocused: inputFocused,
+            onFocusChange: { inputFocused = $0 },
+            onCompositionChange: { composerIsComposing = $0 },
+            onSubmit: sendDraft,
+            onHeightChange: { height in
+                composerInputHeight = height
+                draftNeedsExpanded = !draft.isEmpty && height > 36
+            }
+        )
+        .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
     }
 
     private var composerPlaceholder: String {
@@ -1510,7 +1507,12 @@ struct ChatView: View {
     private var canSend: Bool {
         // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
         // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.attachments.isEmpty
+        // 组字未确认时不能发，否则会把拼音半成品送出去，或把候选确认键当成发送。
+        composerDraftIsSendable(
+            draft,
+            hasAttachments: !attachments.attachments.isEmpty,
+            isComposing: composerIsComposing
+        )
     }
 
     private func sendDraft() {

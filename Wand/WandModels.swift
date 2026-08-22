@@ -1221,12 +1221,13 @@ struct ServerConfigInfo: Decodable {
     let latestVersion: String?
     let updateAvailable: Bool?
     let updateChannel: String?
+    let canManageSettings: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case defaultCwd, defaultProvider, defaultSessionKind, defaultMode
         case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultModels
         case defaultThinkingEffort, cardDefaults
-        case currentVersion, latestVersion, updateAvailable, updateChannel
+        case currentVersion, latestVersion, updateAvailable, updateChannel, canManageSettings
     }
 
     init(from decoder: Decoder) throws {
@@ -1248,6 +1249,7 @@ struct ServerConfigInfo: Decodable {
         latestVersion = try? container.decode(String.self, forKey: .latestVersion)
         updateAvailable = try? container.decode(Bool.self, forKey: .updateAvailable)
         updateChannel = try? container.decode(String.self, forKey: .updateChannel)
+        canManageSettings = try? container.decode(Bool.self, forKey: .canManageSettings)
     }
 
     func defaultModelId(for provider: String) -> String {

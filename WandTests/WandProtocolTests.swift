@@ -164,6 +164,24 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: false, contentNeedsSpace: true))
     }
 
+    func testComposerIgnoresExternalTextWhileImeIsComposing() {
+        XCTAssertFalse(composerShouldApplyExternalText("你好", current: "ni", isComposing: true))
+        XCTAssertTrue(composerShouldApplyExternalText("", current: "你好", isComposing: false))
+        XCTAssertFalse(composerShouldApplyExternalText("你好", current: "你好", isComposing: false))
+    }
+
+    func testComposerDoesNotSubmitReturnWhileImeIsComposing() {
+        XCTAssertFalse(composerShouldSubmitReturn(isComposing: true))
+        XCTAssertTrue(composerShouldSubmitReturn(isComposing: false))
+    }
+
+    func testComposerSendRequiresCommittedImeText() {
+        XCTAssertFalse(composerDraftIsSendable("你好", hasAttachments: false, isComposing: true))
+        XCTAssertTrue(composerDraftIsSendable("你好", hasAttachments: false, isComposing: false))
+        XCTAssertTrue(composerDraftIsSendable("", hasAttachments: true, isComposing: false))
+        XCTAssertFalse(composerDraftIsSendable("   ", hasAttachments: false, isComposing: false))
+    }
+
     func testSessionTimeFormattingParsesIso8601AndFormatsDuration() {
         XCTAssertNotNil(SessionTimeFormatting.date(from: "2026-07-19T12:34:56Z"))
         XCTAssertNotNil(SessionTimeFormatting.date(from: "2026-07-19T12:34:56.789Z"))

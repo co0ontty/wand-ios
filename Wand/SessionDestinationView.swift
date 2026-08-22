@@ -48,6 +48,8 @@ private struct PtySessionView: View {
     @State private var voicePressed = false
     @State private var voiceCanceling = false
     @State private var draftNeedsExpanded = false
+    @State private var composerInputHeight: CGFloat = 34
+    @State private var composerIsComposing = false
     /// 底部快捷栏左上角的拉手控制：折叠时只露出快捷键栏，展开时在快捷键栏上方
     /// 滑出输入抽屉（文本框 + 发送 + 语音 + 附件）。默认折叠，给终端留出最大可视区。
     @State private var inputDrawerOpen = false
@@ -391,6 +393,7 @@ private struct PtySessionView: View {
     private func toggleInputDrawer() {
         inputDrawerOpen.toggle()
         if inputDrawerOpen {
+            terminalWebModel.suppressEmbeddedTerminalIme()
             // 展开后把焦点放进文本框，顺势唤起键盘；折叠时不强行收键盘，
             // 让系统的失焦逻辑自然处理。
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
@@ -501,32 +504,31 @@ private struct PtySessionView: View {
                     onRemove: attachments.remove
                 )
             }
-            TextField(ptyComposerPlaceholder, text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .font(.system(size: 16))
-                .foregroundColor(Theme.textPrimary)
-                .tint(Theme.brand)
-                .submitLabel(.send)
-                .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .focused($inputFocused)
-                .padding(.leading, inputExpanded ? 6 : 2)
-                .padding(.trailing, inputExpanded ? 4 : 0)
-                .padding(.vertical, inputExpanded ? 4 : 2)
-                .frame(minHeight: inputExpanded ? 32 : 34)
-                .contentShape(Rectangle())
-                .background {
-                    GeometryReader { geometry in
-                        Color.clear.preference(
-                            key: ComposerInputHeightPreferenceKey.self,
-                            value: geometry.size.height
-                        )
+            IMEAwareComposerTextView(
+                text: $draft,
+                placeholder: ptyComposerPlaceholder,
+                isFocused: inputFocused,
+                disableAutocorrect: true,
+                onFocusChange: { focused in
+                    inputFocused = focused
+                    if focused {
+                        terminalWebModel.suppressEmbeddedTerminalIme()
                     }
-                }
-                .onPreferenceChange(ComposerInputHeightPreferenceKey.self) { height in
+                },
+                onCompositionChange: { composerIsComposing = $0 },
+                onSubmit: sendDraft,
+                onHeightChange: { height in
+                    composerInputHeight = height
                     draftNeedsExpanded = !draft.isEmpty && height > 36
                 }
+            )
+            .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
+            .padding(.leading, inputExpanded ? 6 : 2)
+            .padding(.trailing, inputExpanded ? 4 : 0)
+            .padding(.vertical, inputExpanded ? 4 : 2)
+            .frame(minHeight: inputExpanded ? 32 : 34)
+            .frame(height: max(inputExpanded ? 32 : 34, composerInputHeight))
+            .contentShape(Rectangle())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -656,7 +658,11 @@ private struct PtySessionView: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.attachments.isEmpty
+        composerDraftIsSendable(
+            draft,
+            hasAttachments: !attachments.attachments.isEmpty,
+            isComposing: composerIsComposing
+        )
     }
 
     private func sendDraft() {
