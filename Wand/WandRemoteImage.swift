@@ -168,7 +168,9 @@ struct WandRemoteImage<Placeholder: View>: View {
                 failed = true
                 return
             }
-            Self.cache.setObject(decoded, forKey: cacheKey)
+            let pixelBytes = Int(decoded.size.width * decoded.scale)
+                * Int(decoded.size.height * decoded.scale) * 4
+            Self.cache.setObject(decoded, forKey: cacheKey, cost: pixelBytes)
             if !Task.isCancelled {
                 image = decoded
             }
@@ -202,6 +204,9 @@ enum WandImageCache {
     static let shared: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.countLimit = 120
+        // 成本按解码后像素字节数计（见 setObject 调用处），总量约 192MB，
+        // 防止少数超大图占满内存把常用小图全部挤掉。
+        cache.totalCostLimit = 192 * 1024 * 1024
         return cache
     }()
 }
@@ -361,7 +366,18 @@ struct WandImageViewer: View {
                             height: lastOffset.height + value.translation.height
                         )
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
+                        let translation = value.translation
+                        // 未放大时垂直下拉超过阈值 → 下滑关闭（对齐类注释承诺的行为）。
+                        if scale <= 1,
+                           translation.height > 90,
+                           abs(translation.height) > abs(translation.width) {
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                offset.height += 80
+                            }
+                            isPresented = false
+                            return
+                        }
                         lastOffset = offset
                     }
             )

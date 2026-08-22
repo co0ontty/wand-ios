@@ -69,6 +69,9 @@ final class ChatStore: ObservableObject {
     private var initialLoadInProgress = false
     private var queuePromotePending = false
     private var autoResumeAttempted = false
+    /// 所有 PTY 输入共用一条尾队列。普通提交的文本和回车作为同一个 operation，
+    /// 快捷键不能插进两者之间，连续点击也严格按用户操作顺序写入终端。
+    private var ptyInputTail: Task<Void, Never>?
     /// 模型、思考与模式设置各自只接受最后一次请求的回包。三个接口都会返回完整
     /// SessionSnapshot，不能让较早回包通过 apply(snapshot:) 覆盖另一项的新选择。
     private var modelUpdateRevision = 0
@@ -515,24 +518,54 @@ final class ChatStore: ObservableObject {
         try await sendPtyInput(text, view: "terminal")
     }
 
+    func sendPtyShortcut(_ input: String, shortcutKey: String) async throws {
+        guard !input.isEmpty else { return }
+        try await enqueuePtyInput { [self] in
+            try await ensurePtyRunningForInput()
+            try await api.sendPtyInputChunk(
+                id: sessionId,
+                input: input,
+                view: "terminal",
+                shortcutKey: shortcutKey
+            )
+        }
+    }
+
     private func sendPtyInput(_ text: String, view: String) async throws {
-        try await ensurePtyRunningForInput()
         let submission = ptyInputSubmission(text: text, view: view)
-        let textSnapshot = try await api.sendInput(
-            id: sessionId,
-            input: submission.text.input,
-            view: submission.text.view,
-            shortcutKey: submission.text.shortcutKey
-        )
-        apply(snapshot: textSnapshot)
-        try await Task.sleep(nanoseconds: 30_000_000)
-        let enterSnapshot = try await api.sendInput(
-            id: sessionId,
-            input: submission.enter.input,
-            view: submission.enter.view,
-            shortcutKey: submission.enter.shortcutKey
-        )
-        apply(snapshot: enterSnapshot)
+        try await enqueuePtyInput { [self] in
+            try await ensurePtyRunningForInput()
+            try await api.sendPtyInputChunk(
+                id: sessionId,
+                input: submission.text.input,
+                view: submission.text.view,
+                shortcutKey: submission.text.shortcutKey
+            )
+            try await Task.sleep(nanoseconds: 30_000_000)
+            try await api.sendPtyInputChunk(
+                id: sessionId,
+                input: submission.enter.input,
+                view: submission.enter.view,
+                shortcutKey: submission.enter.shortcutKey
+            )
+        }
+    }
+
+    private func enqueuePtyInput(
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let previous = ptyInputTail
+            ptyInputTail = Task { @MainActor in
+                await previous?.value
+                do {
+                    try await operation()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 
     private func ensurePtyRunningForInput() async throws {

@@ -202,10 +202,14 @@ enum SessionDirectoryNameValidation {
         guard value.unicodeScalars.count <= maximumCodePointCount else {
             throw ValidationError.tooLong
         }
+        // 与服务端 src/server-session-routes.ts 及 Android 的 isISOControl 校验对齐：
+        // 拒绝 C0/C1 控制符与行/段分隔符，允许零宽连接符（Cf）——ZWJ emoji 名称合法。
+        // CharacterSet.controlCharacters 额外包含 Cf，会误杀 🧑🏽‍💻 这类名称。
         guard !value.unicodeScalars.contains(where: { scalar in
-            scalar.value == 0x2028
+            scalar.value <= 0x1F
+                || (0x7F...0x9F).contains(scalar.value)
+                || scalar.value == 0x2028
                 || scalar.value == 0x2029
-                || CharacterSet.controlCharacters.contains(scalar)
         }) else {
             throw ValidationError.containsControlCharacter
         }

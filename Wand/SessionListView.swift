@@ -948,12 +948,7 @@ private struct PtySessionView: View {
         guard !bytes.isEmpty else { return }
         Task {
             do {
-                _ = try await api.sendInput(
-                    id: session.id,
-                    input: bytes,
-                    view: "terminal",
-                    shortcutKey: "ios-\(shortcut.id)"
-                )
+                try await store.sendPtyShortcut(bytes, shortcutKey: "ios-\(shortcut.id)")
             } catch {
                 store.toast = error.localizedDescription
             }
@@ -1236,11 +1231,9 @@ private struct PtySessionView: View {
     private func stopPtyInput() {
         Task {
             do {
-                try await api.sendInput(id: session.id, input: "\u{1B}", view: "terminal", shortcutKey: "esc")
+                try await store.sendPtyShortcut("\u{1B}", shortcutKey: "esc")
             } catch {
-                await MainActor.run {
-                    store.toast = error.localizedDescription
-                }
+                store.toast = error.localizedDescription
             }
         }
     }

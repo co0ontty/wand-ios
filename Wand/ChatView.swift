@@ -271,14 +271,23 @@ struct ChatView: View {
         .overlay(alignment: .top) { toastView }
         .overlay {
             if serverFileLinks.isDownloading {
-                Label("正在从服务器下载…", systemImage: "arrow.down.circle")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(.regularMaterial, in: Capsule())
-                    .shadow(color: .black.opacity(0.14), radius: 12, y: 4)
-                    .allowsHitTesting(false)
+                HStack(spacing: 10) {
+                    Label("正在从服务器下载…", systemImage: "arrow.down.circle")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(Theme.textPrimary)
+                    Button {
+                        serverFileLinks.cancel()
+                    } label: {
+                        Text("取消")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(Theme.brand)
+                    }
+                    .accessibilityLabel("取消下载")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.regularMaterial, in: Capsule())
+                .shadow(color: .black.opacity(0.14), radius: 12, y: 4)
             }
         }
         .environment(\.cardExpandDefaults, store.cardDefaults)

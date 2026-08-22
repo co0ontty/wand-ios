@@ -394,6 +394,24 @@ final class WandAPI {
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions/\(id)/input", body: body)
     }
 
+    /// PTY 输入只需要确认服务端已写入。请求轻量响应可避免每个按键下载并在
+    /// MainActor 解码最多 200 KB 的终端快照；旧服务端会忽略 responseMode，
+    /// requestData 仍能兼容其完整快照响应。
+    func sendPtyInputChunk(
+        id: String,
+        input: String,
+        view: String,
+        shortcutKey: String? = nil
+    ) async throws {
+        var body: [String: Any] = [
+            "input": input,
+            "view": view,
+            "responseMode": "accepted",
+        ]
+        if let shortcutKey { body["shortcutKey"] = shortcutKey }
+        _ = try await requestData(method: "POST", path: "/api/sessions/\(id)/input", body: body)
+    }
+
     @discardableResult
     func stopSession(id: String) async throws -> SessionSnapshot {
         try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions/\(id)/stop", body: [:])

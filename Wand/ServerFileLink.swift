@@ -89,7 +89,7 @@ enum WandServerFileLink {
 
         return try persistTemporaryFile(
             response.temporaryURL,
-            fileName: safeFileName((serverPath as NSString).lastPathComponent)
+            fileName: safeFileName(fileName(from: response.http, fallbackPath: serverPath))
         )
     }
 
@@ -106,6 +106,7 @@ enum WandServerFileLink {
             throw DownloadError.connectionClosed
         }
         guard let http = response as? HTTPURLResponse else {
+            try? FileManager.default.removeItem(at: temporaryURL)
             throw DownloadError.invalidResponse
         }
         return (temporaryURL, http)
@@ -180,6 +181,45 @@ enum WandServerFileLink {
         return cleaned.isEmpty || cleaned == "." || cleaned == ".." ? "wand-file" : cleaned
     }
 
+    /// 服务端 `Content-Disposition` 的文件名是权威值（正确解码 UTF-8）；缺失或解析
+    /// 失败时退回服务器路径的最后一段。两种来源最终都会经过 `safeFileName` 消毒。
+    private static func fileName(from response: HTTPURLResponse, fallbackPath: String) -> String {
+        guard let disposition = response.value(forHTTPHeaderField: "Content-Disposition"),
+              let parsed = fileNameParameter(in: disposition) else {
+            return (fallbackPath as NSString).lastPathComponent
+        }
+        return parsed
+    }
+
+    /// `filename*`（RFC 5987，形如 `UTF-8''%E6%8A%A5...`）优先于旧式 `filename="..."`。
+    private static func fileNameParameter(in disposition: String) -> String? {
+        var plain: String?
+        var extended: String?
+        for parameter in disposition.split(separator: ";") {
+            let trimmed = parameter.trimmingCharacters(in: .whitespaces)
+            guard let separator = trimmed.firstIndex(of: "=") else { continue }
+            let name = String(trimmed[..<separator]).trimmingCharacters(in: .whitespaces).lowercased()
+            let rawValue = String(trimmed[trimmed.index(after: separator)...])
+            guard !rawValue.isEmpty else { continue }
+            if name == "filename*" {
+                let segments = rawValue.split(
+                    separator: "'",
+                    maxSplits: 2,
+                    omittingEmptySubsequences: false
+                )
+                if let encoded = segments.last,
+                   let decoded = encoded.removingPercentEncoding,
+                   !decoded.isEmpty {
+                    extended = decoded
+                }
+            } else if name == "filename" {
+                let unquoted = rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                if !unquoted.isEmpty { plain = unquoted }
+            }
+        }
+        return extended ?? plain
+    }
+
     private enum DownloadError: LocalizedError {
         case invalidURL
         case invalidResponse
@@ -241,7 +281,10 @@ final class ServerFileLinkController: ObservableObject {
                 }
                 replacePreview(with: url)
             } catch is CancellationError {
-                // A newer link replaced this request; keep the UI quiet.
+                // The request was cancelled (superseded by a newer link or teardown); keep quiet.
+            } catch let urlError as URLError where urlError.code == .cancelled {
+                // URLSession 的 async API 在 Task 取消时抛 URLError(.cancelled) 而非
+                // CancellationError，这里同样静默。
             } catch {
                 if downloadGeneration == generation {
                     failure = ServerFileLinkFailure(message: error.localizedDescription)
@@ -314,6 +357,7 @@ private struct ServerFileQuickLook: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        guard context.coordinator.fileURL != fileURL else { return }
         context.coordinator.fileURL = fileURL
         controller.reloadData()
     }
