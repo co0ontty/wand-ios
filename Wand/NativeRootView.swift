@@ -13,6 +13,13 @@ func quickActionRequiresRootSessionRouting(
     }
 }
 
+func sessionListQuickActionsEnabled(
+    rootIsSessions: Bool,
+    hasPresentedSurface: Bool
+) -> Bool {
+    rootIsSessions && !hasPresentedSurface
+}
+
 /// 原生客户端根视图：先用 appToken 登录拿 session cookie（ephemeral 存储，
 /// 冷启动后为空），然后进入原生会话列表。WebView 仅作为「网页版」兜底入口保留，
 /// 覆盖设置、文件浏览等原生未实现的功能。
@@ -308,7 +315,11 @@ struct NativeRootView: View {
                             serverID: serverID,
                             selection: $selectedSessionID,
                             selectedSnapshot: $selectedSnapshot,
-                            openingSessionID: $openingSessionID
+                            openingSessionID: $openingSessionID,
+                            quickActionsEnabled: sessionListQuickActionsEnabled(
+                                rootIsSessions: rootSection == .sessions,
+                                hasPresentedSurface: showWebFallback || showSettings || showMissions
+                            )
                         )
                     } else {
                         WorkspaceListView(

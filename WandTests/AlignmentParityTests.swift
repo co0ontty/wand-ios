@@ -811,6 +811,23 @@ final class AlignmentParityTests: XCTestCase {
             rootIsSessions: false,
             hasPresentedSurface: false
         ))
+
+        for state in [
+            (rootIsSessions: true, hasPresentedSurface: false),
+            (rootIsSessions: false, hasPresentedSurface: false),
+            (rootIsSessions: true, hasPresentedSurface: true),
+        ] {
+            let rootOwns = quickActionRequiresRootSessionRouting(
+                targeted,
+                rootIsSessions: state.rootIsSessions,
+                hasPresentedSurface: state.hasPresentedSurface
+            )
+            let listOwns = sessionListQuickActionsEnabled(
+                rootIsSessions: state.rootIsSessions,
+                hasPresentedSurface: state.hasPresentedSurface
+            )
+            XCTAssertNotEqual(rootOwns, listOwns, "Exactly one router must own the action")
+        }
     }
 
     func testSessionActivityPiAndServerIDRoundTripAndLegacyDecode() throws {

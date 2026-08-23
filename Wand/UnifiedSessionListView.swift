@@ -4,6 +4,7 @@ import SwiftUI
 struct UnifiedSessionListView: View {
     let api: WandAPI
     let serverID: String
+    let quickActionsEnabled: Bool
 
     @Binding var selection: String?
     @Binding var selectedSnapshot: SessionSnapshot?
@@ -30,10 +31,12 @@ struct UnifiedSessionListView: View {
         serverID: String,
         selection: Binding<String?>,
         selectedSnapshot: Binding<SessionSnapshot?>,
-        openingSessionID: Binding<String?>
+        openingSessionID: Binding<String?>,
+        quickActionsEnabled: Bool = true
     ) {
         self.api = api
         self.serverID = serverID
+        self.quickActionsEnabled = quickActionsEnabled
         _selection = selection
         _selectedSnapshot = selectedSnapshot
         _openingSessionID = openingSessionID
@@ -445,6 +448,7 @@ struct UnifiedSessionListView: View {
     }
 
     private func handleQuickAction() {
+        guard quickActionsEnabled else { return }
         guard let action = quickActions.consume(where: { action in
             guard action.belongs(to: serverID) else { return false }
             switch action {
