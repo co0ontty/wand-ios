@@ -1285,7 +1285,7 @@ struct ChatView: View {
 
     /// 高权限模式（托管 / 全权限）用橙色提示，其余用次要色。
     private var modeTint: Color {
-        (store.mode == "full-access" || store.mode == "managed") ? .orange : Theme.textSecondary
+        (store.mode == "full-access" || store.mode == "managed") ? Theme.warning : Theme.textSecondary
     }
 
     private func modeChip(compact _: Bool = false) -> some View {
@@ -1366,8 +1366,8 @@ struct ChatView: View {
 
     private var thinkingTint: Color {
         switch store.thinkingEffort {
-        case "standard": return .green
-        case "deep": return .orange
+        case "standard": return Theme.success
+        case "deep": return Theme.warning
         case "max": return Theme.danger
         default: return Theme.brand
         }
@@ -3192,7 +3192,7 @@ private struct UnknownBlockCard: View {
         CollapsibleSection(
             icon: "questionmark.diamond",
             title: "未知内容 · \(displayType)",
-            tint: .orange
+            tint: Theme.warning
         ) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("类型  \(displayType)")
@@ -3258,7 +3258,7 @@ private struct MarkdownText: View {
             HStack(alignment: .top, spacing: 7) {
                 Text(checked.map { $0 ? "☑" : "☐" } ?? marker)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(checked == true ? .green : Theme.brand)
+                    .foregroundColor(checked == true ? Theme.success : Theme.brand)
                     .padding(.top, 2)
                 inlineText(content, size: 16)
             }
@@ -4125,7 +4125,7 @@ private struct PermissionCard: View {
             HStack(spacing: 8) {
                 Image(systemName: "lock.shield")
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.orange)
+                    .foregroundColor(Theme.permission)
                 Text(title)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
@@ -4175,7 +4175,7 @@ private struct PermissionCard: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.orange.opacity(0.55), lineWidth: 1.5)
+                .stroke(Theme.permission.opacity(0.55), lineWidth: 1.5)
         )
     }
 
@@ -4298,7 +4298,7 @@ private struct HistorySummaryCard: View {
 
 // MARK: - 共享语义色（Web 端 --success 同款 #4F7A58）
 
-private let chatSuccess = Color(red: 0.310, green: 0.478, blue: 0.345)
+private let chatSuccess = Theme.success
 
 // MARK: - AskUserQuestion 交互卡片（对齐 Web 端 ask-user 卡）
 
@@ -4819,8 +4819,8 @@ private struct TerminalCard: View {
         return result.isError ? Theme.danger : chatSuccess
     }
     // 终端卡固定深色，亮暗主题一致（对齐 Web）。
-    private let termBg = Color(red: 0.118, green: 0.118, blue: 0.118)
-    private let termText = Color(red: 0.85, green: 0.85, blue: 0.83)
+    private let termBg = Theme.terminalBackground
+    private let termText = Theme.terminalText
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -4839,7 +4839,7 @@ private struct TerminalCard: View {
                                  ? String(outputText.prefix(12_000)) + "\n…（本页仅展示前 12000 字）"
                                  : outputText)
                                 .font(.system(size: 12, design: .monospaced))
-                                .foregroundColor(result.isError ? Color(red: 0.95, green: 0.55, blue: 0.5) : termText.opacity(0.85))
+                                .foregroundColor(result.isError ? Theme.terminalError : termText.opacity(0.85))
                                 .textSelection(.enabled)
                         }
                     }
@@ -4898,7 +4898,7 @@ private struct TerminalCard: View {
                 .font(.system(size: 10))
                 .foregroundColor(outputLoadError == nil
                     ? termText.opacity(0.60)
-                    : Color(red: 0.95, green: 0.55, blue: 0.5))
+                    : Theme.terminalError)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: loadFullOutput) {
                 if loadingFullOutput {

@@ -66,9 +66,8 @@ enum WandAppearanceMode: String, CaseIterable, Identifiable {
     }
 }
 
-/// Claude 品牌配色与复用样式。颜色随系统明暗自适应。对称 macOS 的 Theme.swift，
-/// 把 NSColor 换成 UIColor、外观判断换成 UITraitCollection。
-/// 品牌主色取 Anthropic Claude 的珊瑚橙（#D97757），背景用暖米白（#FAF9F5）。
+/// 品牌配色与复用样式。颜色随系统明暗自适应。
+/// 与 Android WandColors / Web CSS token 共用同一组暖珊瑚色板。
 enum Theme {
     private static func rgb(_ r: Double, _ g: Double, _ b: Double) -> UIColor {
         UIColor(red: r, green: g, blue: b, alpha: 1)
@@ -88,23 +87,37 @@ enum Theme {
     // 品牌色（与 Android / macOS / Web 共用同一组暖珊瑚 token）
     static let brand = dynamic(light: rgb(0.773, 0.396, 0.239), dark: rgb(0.831, 0.459, 0.314)) // #C5653D / #D47550
     static let brandStrong = dynamic(light: rgb(0.627, 0.306, 0.180), dark: rgb(0.725, 0.392, 0.263))
-    /// Codex（OpenAI）标识蓝，与 Android 端 info 色对一致。
+    /// Codex（OpenAI）标识蓝，与 Android / Web info 色对一致。
     static let codex = dynamic(light: rgb(0.290, 0.435, 0.647), dark: rgb(0.494, 0.612, 0.769)) // #4A6FA5 / #7E9CC4
+    static let info = codex
 
     // 表面 / 文本（自适应）
     static let background = dynamic(light: rgb(0.961, 0.953, 0.933), dark: rgb(0.075, 0.067, 0.059)) // #F5F3EE / #13110F
+    static let elevated = dynamic(light: rgb(0.988, 0.980, 0.965), dark: rgb(0.114, 0.102, 0.090)) // #FCFAF6 / #1D1A17
     static let surface = dynamic(light: rgb(1.000, 0.992, 0.976), dark: rgb(0.129, 0.118, 0.102))    // #FFFDF9 / #211E1A
     static let border = dynamic(light: rgb(0.851, 0.824, 0.788), dark: rgb(0.239, 0.216, 0.188))     // #D9D2C9 / #3D3730
     static let textPrimary = dynamic(light: rgb(0.157, 0.137, 0.122), dark: rgb(0.953, 0.933, 0.906)) // #28231F / #F3EEE7
     static let textSecondary = dynamic(light: rgb(0.384, 0.353, 0.325), dark: rgb(0.780, 0.745, 0.706)) // #625A53 / #C7BEB4
     static let textMuted = dynamic(light: rgb(0.545, 0.510, 0.475), dark: rgb(0.584, 0.545, 0.506)) // #8B8279 / #958B81
-    /// 与 macOS / Web 对齐的成功语义色，用于已连接、已完成等状态。
-    static let success = Color(red: 0.310, green: 0.478, blue: 0.345) // #4F7A58
-    static let danger = dynamic(light: rgb(0.698, 0.310, 0.271), dark: rgb(0.878, 0.486, 0.447))
+    static let success = dynamic(light: rgb(0.310, 0.478, 0.345), dark: rgb(0.545, 0.729, 0.580)) // #4F7A58 / #8BBA94
+    static let warning = dynamic(light: rgb(0.663, 0.416, 0.184), dark: rgb(0.851, 0.631, 0.361)) // #A96A2F / #D9A15C
+    static let danger = dynamic(light: rgb(0.698, 0.310, 0.271), dark: rgb(0.878, 0.486, 0.447)) // #B24F45 / #E07C72
+    static let permission = dynamic(light: rgb(0.761, 0.541, 0.125), dark: rgb(0.902, 0.718, 0.353)) // #C28A20 / #E6B75A
+    static let thinking = dynamic(light: rgb(0.435, 0.427, 0.639), dark: rgb(0.659, 0.647, 0.831)) // #6F6DA3 / #A8A5D4
+    static let teal = dynamic(light: rgb(0.227, 0.541, 0.561), dark: rgb(0.420, 0.702, 0.718)) // #3A8A8F / #6BB3B7
+
+    /// PTY / 工具终端卡 / diff 共用的固定暖深色，不跟随亮暗主题。
+    static let terminalBackground = Color(red: 0.090, green: 0.071, blue: 0.059) // #17120F
+    static let terminalText = Color(red: 0.851, green: 0.851, blue: 0.831) // #D9D9D4
+    static let terminalError = Color(red: 0.949, green: 0.549, blue: 0.510) // #F28C82
 
     /// WKWebView overscroll 区域底色，避免加载前/回弹时露出白底。
     static var uiBackground: UIColor {
         dynamicUI(light: rgb(0.961, 0.953, 0.933), dark: rgb(0.075, 0.067, 0.059))
+    }
+
+    static var uiTerminalBackground: UIColor {
+        rgb(0.090, 0.071, 0.059)
     }
 }
 

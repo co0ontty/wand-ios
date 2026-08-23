@@ -103,8 +103,8 @@ private func renderMissionDiff(_ patch: String) -> [MissionRenderedDiffLine] {
 
 private func missionStatePresentation(_ state: String) -> (String, String, Color) {
     switch state {
-    case "needs_input": return ("等待输入", "questionmark.bubble.fill", .orange)
-    case "needs_permission": return ("等待权限", "lock.trianglebadge.exclamationmark.fill", .orange)
+    case "needs_input": return ("等待输入", "questionmark.bubble.fill", Theme.warning)
+    case "needs_permission": return ("等待权限", "lock.trianglebadge.exclamationmark.fill", Theme.permission)
     case "working", "running": return ("执行中", "bolt.horizontal.circle.fill", Theme.codex)
     case "queued", "dispatching": return ("准备中", "clock.fill", Theme.textMuted)
     case "done", "completed": return ("已完成", "checkmark.circle.fill", Theme.success)
@@ -484,7 +484,7 @@ private struct MissionDiffView: View {
             }
             if diff.truncated {
                 Label("Diff 过大，当前只显示前 2 MB。", systemImage: "exclamationmark.triangle")
-                    .foregroundColor(.orange)
+                    .foregroundColor(Theme.warning)
             } else {
                 Text("点按代码行可添加审阅意见，意见会先保存在本地任务中。")
                     .foregroundColor(Theme.textSecondary)

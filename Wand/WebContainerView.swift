@@ -148,7 +148,7 @@ struct WebContainerView: View {
     }
 
     private var containerBackground: Color {
-        embedTerminal ? Color(red: 0.090, green: 0.071, blue: 0.059) : Theme.background
+        embedTerminal ? Theme.terminalBackground : Theme.background
     }
 
     var body: some View {
@@ -574,7 +574,7 @@ struct WebViewRepresentable: UIViewRepresentable {
 
     private func applyAppearance(to webView: WKWebView) {
         let webBackground = embedTerminal
-            ? UIColor(red: 0.090, green: 0.071, blue: 0.059, alpha: 1)
+            ? Theme.uiTerminalBackground
             : Theme.uiBackground
         webView.overrideUserInterfaceStyle = embedTerminal
             ? .dark

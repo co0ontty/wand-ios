@@ -239,7 +239,7 @@ struct SettingsView: View {
                     Label("系统通知权限", systemImage: "bell.badge")
                     Spacer()
                     Text(notificationStatus)
-                        .foregroundStyle(notificationStatus == "已开启" ? .green : Theme.danger)
+                        .foregroundStyle(notificationStatus == "已开启" ? Theme.success : Theme.danger)
                     Image(systemName: "chevron.right")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.tertiary)

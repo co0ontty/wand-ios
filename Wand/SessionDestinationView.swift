@@ -59,7 +59,7 @@ private struct PtySessionView: View {
     @FocusState private var inputFocused: Bool
 
     private var ptyBackground: Color {
-        Color(red: 0.090, green: 0.071, blue: 0.059)
+        Theme.terminalBackground
     }
 
     init(session: SessionSnapshot, api: WandAPI) {
@@ -923,9 +923,9 @@ struct SessionRow: View {
     }
 
     private var statusTint: Color {
-        if session.hasPendingPermission { return .orange }
-        if session.isResponding || ["running", "thinking"].contains(session.status ?? "") { return .green }
-        if ["waiting-input", "waiting_input", "reconnecting"].contains(session.status ?? "") { return .orange }
+        if session.hasPendingPermission { return Theme.permission }
+        if session.isResponding || ["running", "thinking"].contains(session.status ?? "") { return Theme.success }
+        if ["waiting-input", "waiting_input", "reconnecting"].contains(session.status ?? "") { return Theme.warning }
         if session.status == "failed" { return Theme.danger }
         return Theme.textSecondary.opacity(0.62)
     }

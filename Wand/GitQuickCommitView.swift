@@ -62,7 +62,7 @@ struct GitChangesToolbarButton: View {
                                 Text("-\(counts.deleted)")
                                     .foregroundColor(Theme.danger)
                                 Text("+\(counts.added)")
-                                    .foregroundColor(.green)
+                                    .foregroundColor(Theme.success)
                             } else {
                                 Text("↑\(status?.ahead ?? 0)")
                             }
@@ -70,7 +70,7 @@ struct GitChangesToolbarButton: View {
                     }
                 }
                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundColor(phase == .done ? .green : (phase == .idle ? Theme.textSecondary : Theme.brand))
+                .foregroundColor(phase == .done ? Theme.success : (phase == .idle ? Theme.textSecondary : Theme.brand))
                 .frame(minWidth: 44, minHeight: 32)
                 .contentShape(Rectangle())
                 .transition(.opacity.combined(with: .scale(scale: 0.92)))
@@ -817,9 +817,9 @@ private struct MagneticDockView: View {
 
     private static let chipColors: [String: Color] = [
         "commit": Theme.brand,
-        "tag": Color(red: 0.290, green: 0.435, blue: 0.647),   // #4A6FA5
-        "push": Color(red: 0.310, green: 0.478, blue: 0.345),  // #4F7A58
-        "sub": Color(red: 0.227, green: 0.541, blue: 0.561),   // #3A8A8F
+        "tag": Theme.info,
+        "push": Theme.success,
+        "sub": Theme.teal,
     ]
     private static let chipLabels: [String: String] = [
         "commit": "Commit", "tag": "Tag", "push": "Push", "sub": "Sub",
