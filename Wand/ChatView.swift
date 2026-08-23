@@ -260,6 +260,11 @@ struct ChatView: View {
             if !showing { refreshGitStatus() }
         }
         .onDisappear {
+            voiceHoldWork?.cancel()
+            voiceHoldWork = nil
+            speech.stop(cancelled: true)
+            voicePressed = false
+            voiceCanceling = false
             store.shutdown()
             serverFileLinks.cancel()
         }

@@ -32,7 +32,15 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
     }
 
     func requestAuthorization() {
-        center.requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
+        Task { _ = await requestAuthorizationAndWait() }
+    }
+
+    func requestAuthorizationAndWait() async -> Bool {
+        await withCheckedContinuation { continuation in
+            center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
+                continuation.resume(returning: granted)
+            }
+        }
     }
 
     func clearPending() {
@@ -67,7 +75,7 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
             body: body,
             sessionId: sessionId,
             serverID: serverID,
-            interruptionLevel: tag.hasPrefix("permission:") ? .timeSensitive : .active
+            interruptionLevel: .active
         )
     }
 
@@ -96,7 +104,7 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
                         body: notificationBody(for: snapshot, fallback: "会话正在等待确认后继续"),
                         sessionId: snapshot.id,
                         serverID: serverID,
-                        interruptionLevel: .timeSensitive
+                        interruptionLevel: .active
                     )
                 } else if previous == .responding, current == .idle {
                     send(

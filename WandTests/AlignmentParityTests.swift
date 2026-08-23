@@ -558,6 +558,81 @@ final class AlignmentParityTests: XCTestCase {
         XCTAssertThrowsError(try ServerProfiles.canonicalBaseURL(
             "https://scope.invalid/reverse/wand/%2e%2e/outside"
         ))
+        XCTAssertThrowsError(try ServerProfiles.canonicalBaseURL(
+            "https://alice:secret@scope.invalid/reverse/wand"
+        ))
+        XCTAssertTrue(WandAuth.candidateURLs(
+            from: "https://alice:secret@scope.invalid/reverse/wand"
+        ).isEmpty)
+    }
+
+    func testSessionCheckRequiresWandJSONAndSameEndpointResponse() throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://probe.invalid:8443/wand"))
+        let validURL = try XCTUnwrap(URL(string: "https://probe.invalid:8443/wand/api/session-check"))
+        let crossURL = try XCTUnwrap(URL(string: "https://other.invalid/api/session-check"))
+        let validResponse = try XCTUnwrap(HTTPURLResponse(
+            url: validURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        let crossResponse = try XCTUnwrap(HTTPURLResponse(
+            url: crossURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+
+        XCTAssertTrue(WandAuth.isValidSessionCheckResponse(
+            data: Data(#"{"authed":false}"#.utf8),
+            response: validResponse,
+            baseURL: baseURL
+        ))
+        XCTAssertFalse(WandAuth.isValidSessionCheckResponse(
+            data: Data("<html>router</html>".utf8),
+            response: validResponse,
+            baseURL: baseURL
+        ))
+        XCTAssertFalse(WandAuth.isValidSessionCheckResponse(
+            data: Data(#"{"authed":true}"#.utf8),
+            response: crossResponse,
+            baseURL: baseURL
+        ))
+    }
+
+    func testCancelledConnectionAttemptCannotFinishOrCommit() {
+        let attempt = WandAuth.ConnectionAttempt()
+        var cleaned = false
+        var committed = false
+        attempt.setCleanup { cleaned = true }
+
+        attempt.cancel()
+
+        XCTAssertTrue(cleaned)
+        XCTAssertTrue(attempt.isCancelled())
+        XCTAssertFalse(attempt.finish { committed = true })
+        XCTAssertFalse(committed)
+    }
+
+    func testServerFileLinksPreserveNumericColonNamesAndParseQuotedSemicolons() {
+        XCTAssertEqual(WandServerFileLink.serverPath("/tmp/report:2025"), "/tmp/report:2025")
+        XCTAssertEqual(
+            WandServerFileLink.serverPath("file:///tmp/report%3A2025"),
+            "/tmp/report:2025"
+        )
+        XCTAssertEqual(WandServerFileLink.serverPath("/tmp/source.swift#L12C3"), "/tmp/source.swift")
+        XCTAssertEqual(
+            WandServerFileLink.fileNameParameter(
+                in: #"attachment; filename="report;2025.pdf""#
+            ),
+            "report;2025.pdf"
+        )
+        XCTAssertEqual(
+            WandServerFileLink.fileNameParameter(
+                in: "attachment; filename=legacy.txt; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf"
+            ),
+            "报告.pdf"
+        )
     }
 
     func testNewSessionEndpointMutationsAreFIFOAndDropCancelledWaiters() async throws {
@@ -683,6 +758,7 @@ final class AlignmentParityTests: XCTestCase {
             (nil, "claude"),
             ("CODEX", "codex"),
             ("open_code", "opencode"),
+            ("GROK", "grok"),
             ("qodercli", "qoder"),
             ("pi", "pi"),
             ("future-provider", "claude"),
@@ -701,7 +777,7 @@ final class AlignmentParityTests: XCTestCase {
         }
 
         // Unknown and missing providers intentionally share Claude's compatibility namespace.
-        XCTAssertEqual(identities.count, 5)
+        XCTAssertEqual(identities.count, 6)
     }
 
     func testQuickActionsRespectTheirTargetServer() {
@@ -714,6 +790,27 @@ final class AlignmentParityTests: XCTestCase {
         XCTAssertNil(legacy.targetServerID)
         XCTAssertTrue(legacy.belongs(to: "server-a"))
         XCTAssertTrue(QuickAction.newSession.belongs(to: "server-b"))
+
+        XCTAssertFalse(quickActionRequiresRootSessionRouting(
+            .newSession,
+            rootIsSessions: true,
+            hasPresentedSurface: false
+        ))
+        XCTAssertTrue(quickActionRequiresRootSessionRouting(
+            .newSession,
+            rootIsSessions: false,
+            hasPresentedSurface: false
+        ))
+        XCTAssertTrue(quickActionRequiresRootSessionRouting(
+            targeted,
+            rootIsSessions: true,
+            hasPresentedSurface: true
+        ))
+        XCTAssertTrue(quickActionRequiresRootSessionRouting(
+            targeted,
+            rootIsSessions: false,
+            hasPresentedSurface: false
+        ))
     }
 
     func testSessionActivityPiAndServerIDRoundTripAndLegacyDecode() throws {

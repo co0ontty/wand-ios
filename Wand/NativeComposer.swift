@@ -66,12 +66,6 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
                 .stroke(Color.white.opacity(0.32), lineWidth: 0.7)
                 .blendMode(.screen)
         }
-        .contentShape(shape)
-        .simultaneousGesture(
-            TapGesture().onEnded {
-                onFocusInput()
-            }
-        )
         .compositingGroup()
         .shadow(
             color: focused ? Theme.brand.opacity(0.12) : Color.black.opacity(0.05),

@@ -47,6 +47,11 @@ final class SelfSignedSession: NSObject, URLSessionTaskDelegate, @unchecked Send
         return endpointPool.value(for: key, baseURL: baseURL)
     }
 
+    /// 一次性认证尝试使用独立 cookie jar；只有调用方确认成功后才复制到正式端点。
+    static func temporary(forEndpoint baseURL: URL) -> SelfSignedSession {
+        SelfSignedSession(baseURL: baseURL)
+    }
+
     /// Retires every task and cookie for one endpoint. A later lookup creates a clean session.
     static func resetEndpoint(_ baseURL: URL) {
         let key = endpointKey(for: baseURL)
@@ -95,6 +100,18 @@ final class SelfSignedSession: NSObject, URLSessionTaskDelegate, @unchecked Send
     private init(baseURL: URL?) {
         self.endpointScope = baseURL.flatMap(WandEndpointScope.init)
         super.init()
+    }
+
+    func storeCookiesIfActive(_ cookies: [HTTPCookie]) -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard !retired else { return false }
+        for cookie in cookies { cookieStorage?.setCookie(cookie) }
+        return true
+    }
+
+    func invalidate() {
+        retire()
     }
 
     private func retire() {

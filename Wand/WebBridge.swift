@@ -270,6 +270,23 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         model.phase = .failed(title: "无法加载 wand 服务器", message: message, canRetry: true)
     }
 
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        wlog("web", "WebContent 进程已终止，自动重新加载 url=\(webView.url?.absoluteString ?? "?")")
+        hasLoadedOnce = false
+        model.phase = .loading
+        if webView.url != nil {
+            webView.reload()
+        } else if let serverURL {
+            webView.load(URLRequest(url: serverURL))
+        } else {
+            model.phase = .failed(
+                title: "无法恢复网页内容",
+                message: "服务器地址已失效，请返回后重新打开。",
+                canRetry: false
+            )
+        }
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         hasLoadedOnce = true
         model.phase = .ready

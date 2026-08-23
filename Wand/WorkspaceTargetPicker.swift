@@ -15,6 +15,9 @@ struct WorkspaceTargetPicker: View {
                         ForEach(WorkspaceSessionTarget.allCases) { target in
                             targetRow(target)
                         }
+                        if store.selectedTarget != .shell {
+                            kindPicker
+                        }
                         if let error = store.creationError {
                             errorBanner(error)
                                 .padding(.top, 8)
@@ -46,7 +49,7 @@ struct WorkspaceTargetPicker: View {
         let selected = store.selectedTarget == target
         return Button {
             guard !store.creating else { return }
-            store.selectedTarget = target
+            store.rememberCreationChoice(provider: target)
         } label: {
             HStack(spacing: 12) {
                 ZStack {
@@ -91,6 +94,47 @@ struct WorkspaceTargetPicker: View {
         .accessibilityLabel(target.title)
         .accessibilityValue(target.summary)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var kindPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("会话类型")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Theme.textSecondary)
+                .padding(.top, 8)
+            HStack(spacing: 8) {
+                ForEach(WorkspaceSessionKind.allCases) { option in
+                    let selected = store.selectedKind == option
+                    Button {
+                        guard !store.creating else { return }
+                        store.rememberCreationChoice(kind: option)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(option.title)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
+                            Text(option.summary)
+                                .font(.system(size: 12))
+                                .foregroundColor(Theme.textSecondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(selected ? Theme.brand.opacity(0.06) : Theme.surface.opacity(0.88))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(selected ? Theme.brand : Theme.border, lineWidth: selected ? 1.5 : 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(store.creating)
+                    .accessibilityLabel(option.title)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+        }
     }
 
     private var submitBar: some View {

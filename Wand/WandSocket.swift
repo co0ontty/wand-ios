@@ -23,6 +23,7 @@ final class WandSocket {
     private var watchdog: Timer?
     private var reconnectDelay: TimeInterval = 1
     private var closed = false
+    private var connectionReported = false
     /// 当前连接的代号，旧连接的回调用它识别后丢弃，避免互相干扰。
     private var generation = 0
 
@@ -39,6 +40,7 @@ final class WandSocket {
     // MARK: - 生命周期
 
     func connect() {
+        guard task == nil else { return }
         guard !endpointSession.isRetired else {
             closed = true
             onConnectionChange?(false)
@@ -56,6 +58,8 @@ final class WandSocket {
         generation += 1
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
+        connectionReported = false
+        onConnectionChange?(false)
     }
 
     func subscribe(sessionId: String) {
@@ -103,7 +107,6 @@ final class WandSocket {
         task = socket
         lastMessageAt = Date()
         socket.resume()
-        onConnectionChange?(true)
         // 重新订阅当前会话；服务端会推一份 init 快照，相当于天然 resync。
         if let id = subscribedSessionId {
             lastSeqBySession[id] = nil
@@ -130,6 +133,10 @@ final class WandSocket {
                 case .success(let message):
                     self.lastMessageAt = Date()
                     self.reconnectDelay = 1
+                    if !self.connectionReported {
+                        self.connectionReported = true
+                        self.onConnectionChange?(true)
+                    }
                     if case .string(let text) = message {
                         self.handleText(text)
                     }
@@ -191,6 +198,7 @@ final class WandSocket {
         }
         wlog("ws", "断线，\(reconnectDelay)s 后重连 session=\(subscribedSessionId ?? "nil")")
         onConnectionChange?(false)
+        connectionReported = false
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         let delay = reconnectDelay

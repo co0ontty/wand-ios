@@ -1,6 +1,26 @@
 import Foundation
 
-/// Workspace task windows intentionally support only PTY agents and a bare shell.
+enum WorkspaceSessionKind: String, CaseIterable, Identifiable {
+    case structured
+    case pty
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .structured: return "结构化"
+        case .pty: return "PTY"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .structured: return "智能对话模式"
+        case .pty: return "原始 CLI 终端"
+        }
+    }
+}
+
 enum WorkspaceSessionTarget: String, CaseIterable, Codable, Identifiable {
     case claude
     case codex
@@ -22,12 +42,12 @@ enum WorkspaceSessionTarget: String, CaseIterable, Codable, Identifiable {
 
     var summary: String {
         switch self {
-        case .claude: return "Claude Code PTY 工作窗口"
-        case .codex: return "Codex CLI PTY 工作窗口"
-        case .opencode: return "OpenCode TUI 工作窗口"
-        case .grok: return "Grok Build TUI 工作窗口"
-        case .qoder: return "Qoder CLI TUI 工作窗口"
-        case .pi: return "Pi TUI 工作窗口"
+        case .claude: return "Claude Code"
+        case .codex: return "OpenAI Codex CLI"
+        case .opencode: return "OpenCode CLI"
+        case .grok: return "Grok Build CLI"
+        case .qoder: return "Qoder CLI"
+        case .pi: return "Pi coding agent"
         case .shell: return "不启动 Agent 的交互式 Shell"
         }
     }
@@ -248,7 +268,7 @@ struct TaskWindowLayout: Codable, Equatable {
         if let container = try? decoder.container(keyedBy: CodingKeys.self),
            (try? container.decode(String.self, forKey: .type)) == "windows" {
             type = "windows"
-            windows = (try? container.decode([WorkWindowLayout].self, forKey: .windows)) ?? []
+            windows = try container.decodeIfPresent([WorkWindowLayout].self, forKey: .windows) ?? []
             activeWindowId = try? container.decodeIfPresent(String.self, forKey: .activeWindowId)
             return
         }
@@ -323,7 +343,7 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
         status = snapshot.status
         cwd = snapshot.cwd
         startedAt = snapshot.startedAt
-        workspaceTaskId = nil
+        workspaceTaskId = snapshot.workspaceTaskId
     }
 
     var providerLabel: String {
@@ -380,6 +400,50 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
 
     var id: String { workspaceId }
     var isSynthetic: Bool { synthetic ?? false }
+}
+
+struct SessionBatchDeleteResponse: Decodable {
+    let deleted: Int?
+}
+
+enum TaskListPresentation {
+    static func shortenWorkspacePath(_ path: String) -> String {
+        let normalized = path.replacingOccurrences(of: "\\", with: "/").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let rooted = path.hasPrefix("/")
+        let parts = normalized.split(separator: "/").map(String.init).filter { !$0.isEmpty }
+        if parts.count <= 2 {
+            let joined = parts.joined(separator: "/")
+            return rooted ? "/\(joined)" : (joined.isEmpty ? path : joined)
+        }
+        return "…/\(parts.suffix(2).joined(separator: "/"))"
+    }
+
+    static func directoryPathCaption(name: String, cwd: String) -> String? {
+        let shortened = shortenWorkspacePath(cwd)
+        if shortened.isEmpty || shortened == name { return nil }
+        return shortened
+    }
+
+    static func taskIsolationCaption(isolated: Bool) -> String {
+        isolated ? "隔离" : "共享"
+    }
+
+    static func listSessionLabel(
+        title: String?,
+        providerLabel: String,
+        cwd: String?,
+        index: Int,
+        parentNames: [String]
+    ) -> String {
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let leaf = (cwd ?? "").replacingOccurrences(of: "\\", with: "/").split(separator: "/").map(String.init).last ?? ""
+        let repeats = !trimmed.isEmpty && (
+            parentNames.contains { $0.caseInsensitiveCompare(trimmed) == .orderedSame } ||
+            (!leaf.isEmpty && leaf.caseInsensitiveCompare(trimmed) == .orderedSame)
+        )
+        if !trimmed.isEmpty && !repeats { return trimmed }
+        return "\(providerLabel) \(index + 1)"
+    }
 }
 
 struct WorkspaceTaskDetail: Codable, Equatable, Identifiable {

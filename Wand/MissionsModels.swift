@@ -56,6 +56,7 @@ struct MissionInfo: Decodable, Identifiable {
     let title: String
     let prompt: String
     let cwd: String
+    let taskId: String?
     let status: String
     let worktree: MissionWorktreeOptions
     let createdAt: String

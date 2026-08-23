@@ -37,8 +37,12 @@ final class SessionLiveActivityController {
         static var activity: Activity<SessionActivityAttributes>?
         static var entries: [SessionActivityAttributes.SessionEntry] = []
         static var publishedEntries: [SessionActivityAttributes.SessionEntry] = []
+        static var scheduledEntries: [SessionActivityAttributes.SessionEntry] = []
         static var doneRemovalTasks: [String: Task<Void, Never>] = [:]
         static var startedAtBySession: [String: Date] = [:]
+        static var operationTask: Task<Void, Never>?
+        static var operationRevision = 0
+        static var endingActivityIDs: Set<String> = []
     }
 
     private var enabled: Bool {
@@ -121,7 +125,7 @@ final class SessionLiveActivityController {
         for id in missingIds {
             end(sessionId: id, serverID: serverID, immediately: true)
         }
-        sync(allowCreate: false, refresh: true)
+        sync(allowCreate: !ActivityStore.entries.isEmpty, refresh: true)
     }
 
     func endAll() {
@@ -129,11 +133,17 @@ final class SessionLiveActivityController {
         ActivityStore.doneRemovalTasks.removeAll()
         ActivityStore.entries.removeAll()
         ActivityStore.publishedEntries.removeAll()
+        ActivityStore.scheduledEntries.removeAll()
         ActivityStore.startedAtBySession.removeAll()
+        ActivityStore.operationRevision &+= 1
         let activities = Activity<SessionActivityAttributes>.activities
         ActivityStore.activity = nil
-        for activity in activities {
-            Task { await activity.end(nil, dismissalPolicy: .immediate) }
+        ActivityStore.endingActivityIDs.formUnion(activities.map(\.id))
+        enqueueActivityOperation {
+            for activity in activities {
+                await activity.end(nil, dismissalPolicy: .immediate)
+                ActivityStore.endingActivityIDs.remove(activity.id)
+            }
         }
     }
 
@@ -143,12 +153,13 @@ final class SessionLiveActivityController {
         for entry in entries {
             removeImmediately(sessionId: entry.id, serverID: entry.serverID)
         }
-        sync(allowCreate: false, refresh: true)
+        sync(allowCreate: !ActivityStore.entries.isEmpty, refresh: true)
     }
 
     /// 结束：immediately = true（会话退出 / 被杀 / 离开页面）直接从条里移除；
     /// 否则视为成功完成，切「已完成」停留片刻再自动移除。
     func end(sessionId: String, serverID: String? = nil, immediately: Bool = false) {
+        restoreExistingActivityIfNeeded()
         let serverID = serverID ?? ServerStore.shared.activeServerID
         guard let index = ActivityStore.entries.firstIndex(where: {
             $0.id == sessionId && $0.serverID == serverID
@@ -272,10 +283,30 @@ final class SessionLiveActivityController {
 
     // MARK: - 内部
 
+    private func enqueueActivityOperation(
+        latestRevision: Int? = nil,
+        _ operation: @escaping @MainActor () async -> Void
+    ) {
+        let previous = ActivityStore.operationTask
+        ActivityStore.operationTask = Task { @MainActor in
+            if let previous { await previous.value }
+            guard !Task.isCancelled else { return }
+            if let latestRevision,
+               latestRevision != ActivityStore.operationRevision {
+                return
+            }
+            await operation()
+        }
+    }
+
     private func restoreExistingActivityIfNeeded() {
         guard ActivityStore.activity == nil else { return }
         let activities = Array(Activity<SessionActivityAttributes>.activities)
-        guard let activity = activities.first else { return }
+        let restorable = activities.filter {
+            !ActivityStore.endingActivityIDs.contains($0.id)
+                && ($0.activityState == .active || $0.activityState == .stale)
+        }
+        guard let activity = restorable.first else { return }
         ActivityStore.activity = activity
         ActivityStore.entries = activity.content.state.sessions
         let legacyServerID = ServerStore.shared.activeServerID
@@ -285,13 +316,18 @@ final class SessionLiveActivityController {
             return scoped
         }
         ActivityStore.publishedEntries = ActivityStore.entries
+        ActivityStore.scheduledEntries = ActivityStore.entries
         for entry in ActivityStore.entries {
             if let startedAt = entry.startedAt {
                 ActivityStore.startedAtBySession[scopedKey(entry.id, serverID: entry.serverID)] = startedAt
             }
         }
-        for duplicate in activities.dropFirst() {
-            Task { await duplicate.end(nil, dismissalPolicy: .immediate) }
+        for duplicate in restorable.dropFirst() {
+            ActivityStore.endingActivityIDs.insert(duplicate.id)
+            enqueueActivityOperation {
+                await duplicate.end(nil, dismissalPolicy: .immediate)
+                ActivityStore.endingActivityIDs.remove(duplicate.id)
+            }
         }
     }
 
@@ -369,39 +405,74 @@ final class SessionLiveActivityController {
         let entries = ActivityStore.entries.sorted { lhs, rhs in
             lhs.priority == rhs.priority ? lhs.id < rhs.id : lhs.priority < rhs.priority
         }
+
         if entries.isEmpty {
             guard let activity = ActivityStore.activity else { return }
+            ActivityStore.operationRevision &+= 1
             ActivityStore.activity = nil
             ActivityStore.publishedEntries.removeAll()
-            Task {
+            ActivityStore.scheduledEntries.removeAll()
+            ActivityStore.endingActivityIDs.insert(activity.id)
+            enqueueActivityOperation {
                 await activity.end(nil, dismissalPolicy: .immediate)
+                ActivityStore.endingActivityIDs.remove(activity.id)
             }
             return
         }
         restoreExistingActivityIfNeeded()
         guard let activity = ActivityStore.activity else {
             guard allowCreate else { return }
-            requestActivity(entries: entries)
+            ActivityStore.operationRevision &+= 1
+            let revision = ActivityStore.operationRevision
+            requestActivity(entries: entries, revision: revision)
             return
         }
-        guard refresh || entries != ActivityStore.publishedEntries else { return }
-        ActivityStore.publishedEntries = entries
+        guard refresh
+                || entries != ActivityStore.publishedEntries
+                || entries != ActivityStore.scheduledEntries else { return }
+        ActivityStore.operationRevision &+= 1
+        let revision = ActivityStore.operationRevision
+        ActivityStore.scheduledEntries = entries
         let state = SessionActivityAttributes.ContentState(sessions: entries, updatedAt: Date())
-        Task {
-            await activity.update(ActivityContent(state: state, staleDate: staleDate()))
+        enqueueActivityOperation(latestRevision: revision) {
+            guard ActivityStore.activity?.id == activity.id,
+                  activity.activityState == .active || activity.activityState == .stale else {
+                if ActivityStore.activity?.id == activity.id {
+                    ActivityStore.activity = nil
+                    ActivityStore.publishedEntries.removeAll()
+                    ActivityStore.scheduledEntries.removeAll()
+                }
+                if allowCreate {
+                    self.requestActivity(entries: entries, revision: revision)
+                }
+                return
+            }
+            await activity.update(ActivityContent(state: state, staleDate: self.staleDate()))
+            guard revision == ActivityStore.operationRevision,
+                  ActivityStore.activity?.id == activity.id else { return }
+            ActivityStore.publishedEntries = entries
         }
     }
 
-    private func requestActivity(entries: [SessionActivityAttributes.SessionEntry]) {
+    private func requestActivity(
+        entries: [SessionActivityAttributes.SessionEntry],
+        revision: Int
+    ) {
         let state = SessionActivityAttributes.ContentState(sessions: entries, updatedAt: Date())
-        do {
-            ActivityStore.activity = try Activity.request(
-                attributes: SessionActivityAttributes(),
-                content: ActivityContent(state: state, staleDate: staleDate())
-            )
-            ActivityStore.publishedEntries = entries
-        } catch {
-            logger.error("Live Activity 创建失败: \(error.localizedDescription, privacy: .public)")
+        ActivityStore.scheduledEntries = entries
+        enqueueActivityOperation(latestRevision: revision) {
+            guard ActivityStore.activity == nil, !ActivityStore.entries.isEmpty else { return }
+            do {
+                ActivityStore.activity = try Activity.request(
+                    attributes: SessionActivityAttributes(),
+                    content: ActivityContent(state: state, staleDate: self.staleDate())
+                )
+                if revision == ActivityStore.operationRevision {
+                    ActivityStore.publishedEntries = entries
+                }
+            } catch {
+                self.logger.error("Live Activity 创建失败: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 

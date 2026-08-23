@@ -34,14 +34,30 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var pendingCommit: ((String) -> Void)?
+    private var runtimeErrorHandler: ((String) -> Void)?
     private var commitFallback: DispatchWorkItem?
     /// 会话代数：旧任务的迟到回调用它过滤。
     private var generation = 0
+    private var audioPipelineStopped = true
     /// start() 是异步链（两次权限回调）；用户提前松手时置 false，阻止迟到的启动。
     private var startRequested = false
 
     /// 缓存的识别器：构造一次（遍历 Locale 候选），后续按下复用。
     private lazy var cachedRecognizer: SFSpeechRecognizer? = Self.makeRecognizer()
+
+    deinit {
+        let engine = audioEngine
+        let request = request
+        let task = task
+        audioQueue.async {
+            Self.teardownAudioPipeline(
+                engine: engine,
+                request: request,
+                task: task,
+                cancelTask: true
+            )
+        }
+    }
 
     /// 松手后等待 final 结果的最长时间，超时按当前 partial 提交，避免卡住。
     private static let finalResultGrace: TimeInterval = 0.9
@@ -111,7 +127,8 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
 
     /// 开始录音转写；失败时回调错误文案（主线程）。
     func start(onError: @escaping (String) -> Void) {
-        guard !isRecording else { return }
+        guard !isRecording, !startRequested else { return }
+        if pendingCommit != nil { finishCommitIfPending() }
         startRequested = true
 
         // 快路径：已授权 → 零异步 hop，直接进会话。
@@ -140,14 +157,24 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         startRequested = false
         guard isRecording || task != nil else { return }
         isRecording = false
-        stopEngine()
-        request?.endAudio()
+        let activeRequest = request
+        let activeTask = task
 
         if cancelled {
+            commitFallback?.cancel()
+            commitFallback = nil
+            pendingCommit = nil
+            runtimeErrorHandler = nil
             cleanup(cancelTask: true)
             transcript = ""
             return
         }
+        stopAudioPipeline(
+            request: activeRequest,
+            task: activeTask,
+            cancelTask: false
+        )
+        audioPipelineStopped = true
         pendingCommit = commit
         let work = DispatchWorkItem { [weak self] in self?.finishCommitIfPending() }
         commitFallback = work
@@ -170,6 +197,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
+        runtimeErrorHandler = onError
         if recognizer.supportsOnDeviceRecognition {
             // 端侧模型可用：强制不走网络。
             request.requiresOnDeviceRecognition = true
@@ -179,6 +207,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         }
         request.addsPunctuation = true
         self.request = request
+        audioPipelineStopped = false
 
         generation += 1
         let myGeneration = generation
@@ -198,9 +227,9 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
                     return
                 }
                 input.removeTap(onBus: 0)
-                input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-                    // tap 回调在音频后台线程；append 跨线程是 API 设计支持的用法。
-                    self?.request?.append(buffer)
+                input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+                    // request 是本轮不可变对象；不跨音频线程读取 self.request，避免清理竞态。
+                    request.append(buffer)
                 }
                 self.audioEngine.prepare()
                 try self.audioEngine.start()
@@ -216,7 +245,6 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
                 guard self.generation == myGeneration else { return }
                 // 用户在冷启窗口内已松手 → 这次 start 是迟到的，拆掉引擎、不进录音态。
                 guard self.startRequested else {
-                    self.stopEngine() // 派发到 audioQueue，保持 engine/session 调用串行
                     self.cleanup(cancelTask: true)
                     return
                 }
@@ -227,16 +255,20 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
                         if let result {
                             self.transcript = result.bestTranscription.formattedString
                             if result.isFinal {
-                                self.finishCommitIfPending()
+                                if self.pendingCommit != nil {
+                                    self.finishCommitIfPending()
+                                } else {
+                                    self.failRuntime("语音识别已结束，请松开后重试")
+                                }
                             }
                         }
-                        if error != nil {
-                            // 录音中出错则终止本次会话；松手后的取消/结束错误属预期，仅触发兜底提交。
+                        if let error {
+                            // 松手后的结束/取消错误属预期；按住期间失败必须复位页面手势状态。
                             if self.isRecording {
-                                self.isRecording = false
-                                self.stopEngine()
+                                self.failRuntime("语音识别失败：\(error.localizedDescription)")
+                            } else {
+                                self.finishCommitIfPending()
                             }
-                            self.finishCommitIfPending()
                         }
                     }
                 }
@@ -244,11 +276,22 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         }
     }
 
+    /// 运行期失败统一复位服务和调用页面，避免手势 UI 停在“正在聆听”。
+    private func failRuntime(_ message: String) {
+        guard isRecording else { return }
+        let handler = runtimeErrorHandler
+        runtimeErrorHandler = nil
+        startRequested = false
+        isRecording = false
+        cleanup(cancelTask: true)
+        transcript = ""
+        handler?(message)
+    }
+
     /// 后台启动失败的统一收尾（回主线程报错 + 清理）。
     private func failStart(generation: Int, message: String, onError: @escaping (String) -> Void) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.generation == generation else { return }
-            self.stopEngine() // 派发到 audioQueue，保持 engine/session 调用串行
             self.cleanup(cancelTask: true)
             self.startRequested = false
             self.isRecording = false
@@ -265,30 +308,61 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
             return
         }
         pendingCommit = nil
+        runtimeErrorHandler = nil
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         cleanup(cancelTask: true)
         transcript = ""
         if !text.isEmpty { commit(text) }
     }
 
-    /// 停掉音频引擎 + deactivate 会话。所有 engine/session 调用走 audioQueue 串行，
-    /// 保持「先 stop I/O 再 deactivate」顺序（否则触发 deactivate-with-running-I/O 的长阻塞报错）。
-    private func stopEngine() {
-        audioQueue.async { [weak self] in
-            self?.teardownEngine()
+    /// 停止硬件、结束 request、取消 task、释放音频会话全部在同一串行队列执行。
+    /// 闭包只捕获本轮对象，不依赖 self 存活，页面销毁后也能完成清理。
+    private func stopAudioPipeline(
+        request: SFSpeechAudioBufferRecognitionRequest?,
+        task: SFSpeechRecognitionTask?,
+        cancelTask: Bool
+    ) {
+        let engine = audioEngine
+        audioQueue.async {
+            Self.teardownAudioPipeline(
+                engine: engine,
+                request: request,
+                task: task,
+                cancelTask: cancelTask
+            )
         }
     }
 
-    /// 实际的引擎拆除（必须在 audioQueue 上执行）。
-    private func teardownEngine() {
-        if audioEngine.isRunning { audioEngine.stop() }
-        audioEngine.inputNode.removeTap(onBus: 0)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    private static func teardownAudioPipeline(
+        engine: AVAudioEngine,
+        request: SFSpeechAudioBufferRecognitionRequest?,
+        task: SFSpeechRecognitionTask?,
+        cancelTask: Bool
+    ) {
+        if engine.isRunning { engine.stop() }
+        engine.inputNode.removeTap(onBus: 0)
+        request?.endAudio()
+        if cancelTask { task?.cancel() }
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
     }
 
     private func cleanup(cancelTask: Bool) {
-        if cancelTask { task?.cancel() }
-        task = nil
+        let activeRequest = request
+        let activeTask = task
         request = nil
+        task = nil
+        if cancelTask {
+            generation &+= 1
+            let requestToEnd = audioPipelineStopped ? nil : activeRequest
+            audioPipelineStopped = true
+            stopAudioPipeline(
+                request: requestToEnd,
+                task: activeTask,
+                cancelTask: true
+            )
+        }
     }
 }

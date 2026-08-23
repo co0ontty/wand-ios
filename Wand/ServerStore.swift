@@ -159,6 +159,8 @@ enum ServerProfiles {
         guard var components = URLComponents(string: candidate),
               let scheme = components.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
+              components.user == nil,
+              components.password == nil,
               let host = components.host?.lowercased(),
               !host.isEmpty else {
             throw Failure.invalidURL

@@ -321,6 +321,117 @@ final class WorkspaceWorktreeTests: XCTestCase {
         XCTAssertTrue(groups[1].tasks.isEmpty)
     }
 
+    func testTaskDirectoryWorkspaceResolutionPreservesConfiguredProvider() throws {
+        let group = try taskGroup(workspaceId: "ws-provider", taskName: "Task")
+        let configured = try workspace(id: "ws-provider", defaultProviderJSON: #""codex""#)
+
+        let resolved = workspaceForTaskGroup(group, workspaces: [configured])
+        let fallback = workspaceForTaskGroup(group, workspaces: [])
+
+        XCTAssertEqual(resolved.defaultProvider, .codex)
+        XCTAssertNil(fallback.defaultProvider)
+        XCTAssertEqual(fallback.cwd, "/repo")
+    }
+
+    func testCreateTaskValidatesAndNormalizesDirectoryAndKeepsLocalAggregateOnRefreshFailure() async throws {
+        XCTAssertEqual(normalizeWorkspaceDirectory(" /repo/// "), "/repo")
+        XCTAssertEqual(normalizeWorkspaceDirectory("/"), "/")
+
+        let service = MockWorktreeMergeService()
+        service.workspaceList = [try workspace(id: "ws-a")]
+        let store = WorkspaceStore(api: service, serverID: "server-task-first")
+        await store.loadWorkspaceIndex()
+
+        do {
+            _ = try await store.createTask(name: "Invalid", directory: "   ", worktree: nil)
+            XCTFail("Blank directories must fail before any network mutation")
+        } catch is WorkspaceTaskCreationError {
+            XCTAssertTrue(service.createTaskRequests.isEmpty)
+        }
+
+        service.failTaskGroups = true
+        let outcome = try await store.createTask(
+            name: "修复登录",
+            directory: " /repo/// ",
+            worktree: false
+        )
+
+        XCTAssertEqual(outcome.workspace.id, "ws-a")
+        XCTAssertEqual(service.createTaskRequests.count, 1)
+        XCTAssertEqual(service.createTaskRequests[0].workspaceId, "ws-a")
+        XCTAssertEqual(service.createTaskRequests[0].worktree, false)
+        XCTAssertEqual(store.taskGroups.first?.tasks.map(\.id), ["task-created"])
+    }
+
+    func testTaskAggregateUpdatesImmediatelyAfterRenameAndDelete() async throws {
+        let service = MockWorktreeMergeService()
+        service.taskGroups = [try taskGroup(workspaceId: "ws-a", taskName: "旧名称")]
+        service.updatedTask = try decode(
+            WorkspaceTask.self,
+            from: #"{"id":"task-1","workspaceId":"ws-a","name":"新名称","worktree":null,"layout":null,"status":"active","createdAt":"2026-08-09T00:00:00Z","lastOpenedAt":null}"#
+        )
+        let store = WorkspaceStore(api: service, serverID: "server-aggregate")
+        await store.loadTaskGroups()
+
+        _ = try await store.renameWorkspaceTask(
+            workspaceId: "ws-a",
+            taskId: "task-1",
+            name: "新名称"
+        )
+        XCTAssertEqual(store.taskGroups.first?.tasks.first?.name, "新名称")
+
+        try await store.deleteWorkspaceTask(workspaceId: "ws-a", taskId: "task-1")
+        XCTAssertTrue(store.taskGroups.first?.tasks.isEmpty == true)
+    }
+
+    func testTaskAggregateRejectsRefreshStartedBeforeRename() async throws {
+        let service = MockWorktreeMergeService()
+        let oldGroup = try taskGroup(workspaceId: "ws-a", taskName: "旧名称")
+        service.taskGroups = [oldGroup]
+        service.updatedTask = try decode(
+            WorkspaceTask.self,
+            from: #"{"id":"task-1","workspaceId":"ws-a","name":"新名称","worktree":null,"layout":null,"status":"active","createdAt":"2026-08-09T00:00:00Z","lastOpenedAt":null}"#
+        )
+        let store = WorkspaceStore(api: service, serverID: "server-refresh-race")
+        await store.loadTaskGroups()
+
+        service.suspendTaskGroups = true
+        let staleRefresh = Task { await store.loadTaskGroups(force: true) }
+        while !service.taskGroupsRequestStarted { await Task.yield() }
+
+        _ = try await store.renameWorkspaceTask(
+            workspaceId: "ws-a",
+            taskId: "task-1",
+            name: "新名称"
+        )
+        service.resolveTaskGroups(with: [oldGroup])
+        await staleRefresh.value
+
+        XCTAssertEqual(store.taskGroups.first?.tasks.first?.name, "新名称")
+        XCTAssertFalse(store.taskGroupsLoading)
+    }
+
+    func testStandaloneSessionRequestCannotRepopulateCacheAfterIndexRefresh() async throws {
+        let service = MockWorktreeMergeService()
+        service.suspendWorkspaceDetail = true
+        let store = WorkspaceStore(api: service, serverID: "server-standalone-race")
+
+        let staleLoad = Task {
+            await store.loadWorkspaceSessions(workspaceId: "ws-a")
+        }
+        while !service.workspaceDetailRequestStarted { await Task.yield() }
+
+        await store.loadWorkspaceIndex()
+        let staleDetail = try decode(
+            WorkspaceDetail.self,
+            from: #"{"id":"ws-a","name":"Wand","cwd":"/repo","defaultProvider":null,"layout":null,"createdAt":"2026-08-09T00:00:00Z","lastOpenedAt":null,"sessions":[{"id":"stale-session","provider":"claude"}]}"#
+        )
+        service.resolveWorkspaceDetail(with: staleDetail)
+        await staleLoad.value
+
+        XCTAssertNil(store.standaloneSessions["ws-a"])
+    }
+
     // MARK: - Store flows
 
     func testStartWorktreeMergeAgentPrefersWorkspaceProviderThenServerDefault() async throws {
@@ -381,6 +492,13 @@ final class WorkspaceWorktreeTests: XCTestCase {
         try decode(
             WorkspaceTask.self,
             from: #"{"id":"\#(id)","workspaceId":"\#(workspaceId)","name":"修复登录","worktree":{"branch":"wand/fix-login","path":"/repo/.wand-worktrees/fix","baseRef":"main","repoRoot":"/repo"},"layout":null,"status":"active","createdAt":"2026-08-09T00:00:00Z","lastOpenedAt":null}"#
+        )
+    }
+
+    private func taskGroup(workspaceId: String, taskName: String) throws -> TaskDirectoryGroup {
+        try decode(
+            TaskDirectoryGroup.self,
+            from: #"{"workspaceId":"\#(workspaceId)","workspaceName":"Wand","workspaceCwd":"/repo","synthetic":false,"tasks":[{"id":"task-1","workspaceId":"\#(workspaceId)","name":"\#(taskName)","worktree":null,"layout":null,"status":"active","createdAt":"2026-08-09T00:00:00Z","lastOpenedAt":null,"cwd":"/repo","isolated":false,"worktreeError":null,"sessions":[]}],"standaloneSessions":[]}"#
         )
     }
 
@@ -453,7 +571,17 @@ private final class MockWorktreeMergeService: WorkspaceServing {
     }
 
     var defaultProvider: WandProvider = .claude
+    var workspaceList: [Workspace] = []
     var tasks: [WorkspaceTask] = []
+    var taskGroups: [TaskDirectoryGroup] = []
+    var failTaskGroups = false
+    var updatedTask: WorkspaceTask?
+    var suspendTaskGroups = false
+    var taskGroupsRequestStarted = false
+    private var taskGroupsContinuation: CheckedContinuation<[TaskDirectoryGroup], Never>?
+    var suspendWorkspaceDetail = false
+    var workspaceDetailRequestStarted = false
+    private var workspaceDetailContinuation: CheckedContinuation<WorkspaceDetail, Never>?
     var capturedProviders: [WandProvider] = []
     var capturedPrompts: [String] = []
     var createTaskRequests: [CreateTaskRequest] = []
@@ -465,12 +593,13 @@ private final class MockWorktreeMergeService: WorkspaceServing {
         )
     }
 
-    func listWorkspaces() async throws -> [Workspace] { [] }
+    func listWorkspaces() async throws -> [Workspace] { workspaceList }
 
     func listWorkspaceTasks(workspaceId: String) async throws -> [WorkspaceTask] { tasks }
 
     func updateWorkspaceTask(taskId: String, name: String?) async throws -> WorkspaceTask {
-        throw MockError.unavailable
+        guard let updatedTask else { throw MockError.unavailable }
+        return updatedTask
     }
 
     func deleteWorkspaceTask(taskId: String) async throws {}
@@ -486,7 +615,8 @@ private final class MockWorktreeMergeService: WorkspaceServing {
 
     func createWorkspaceTaskWindow(
         target: WorkspaceSessionTarget,
-        binding: WorkspaceBinding
+        binding: WorkspaceBinding,
+        kind: WorkspaceSessionKind
     ) async throws -> SessionSnapshot {
         throw MockError.unavailable
     }
@@ -498,7 +628,17 @@ private final class MockWorktreeMergeService: WorkspaceServing {
     func workspaceDefaultProvider() async throws -> WandProvider { defaultProvider }
 
     func getWorkspaceDetail(workspaceId: String) async throws -> WorkspaceDetail {
+        if suspendWorkspaceDetail {
+            workspaceDetailRequestStarted = true
+            return await withCheckedContinuation { workspaceDetailContinuation = $0 }
+        }
         throw MockError.unavailable
+    }
+
+    func resolveWorkspaceDetail(with detail: WorkspaceDetail) {
+        suspendWorkspaceDetail = false
+        workspaceDetailContinuation?.resume(returning: detail)
+        workspaceDetailContinuation = nil
     }
 
     func createWorkspace(
@@ -530,8 +670,23 @@ private final class MockWorktreeMergeService: WorkspaceServing {
         )
     }
 
+    func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int {
+        sessionIds.count
+    }
+
     func listTaskGroups() async throws -> [TaskDirectoryGroup] {
-        []
+        if failTaskGroups { throw MockError.unavailable }
+        if suspendTaskGroups {
+            taskGroupsRequestStarted = true
+            return await withCheckedContinuation { taskGroupsContinuation = $0 }
+        }
+        return taskGroups
+    }
+
+    func resolveTaskGroups(with groups: [TaskDirectoryGroup]) {
+        suspendTaskGroups = false
+        taskGroupsContinuation?.resume(returning: groups)
+        taskGroupsContinuation = nil
     }
 
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview {

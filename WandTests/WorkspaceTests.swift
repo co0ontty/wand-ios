@@ -4,6 +4,28 @@ import XCTest
 
 @MainActor
 final class WorkspaceTests: XCTestCase {
+    func testTaskListPresentationShortensPathsAndAvoidsSharedDirectoryLabel() {
+        XCTAssertEqual(
+            TaskListPresentation.shortenWorkspacePath("/Users/me/Self/vibe_coding/wand"),
+            "…/vibe_coding/wand"
+        )
+        XCTAssertEqual(
+            TaskListPresentation.directoryPathCaption(name: "wand", cwd: "/Users/me/Self/vibe_coding/wand"),
+            "…/vibe_coding/wand"
+        )
+        XCTAssertEqual(TaskListPresentation.taskIsolationCaption(isolated: false), "共享")
+        XCTAssertEqual(
+            TaskListPresentation.listSessionLabel(
+                title: "wand",
+                providerLabel: "Pi",
+                cwd: "/Users/me/wand",
+                index: 0,
+                parentNames: ["wand"]
+            ),
+            "Pi 1"
+        )
+    }
+
     func testWorkspaceDetailAndRecursiveLayoutDecodeUnknownTabs() throws {
         let detail = try decode(
             WorkspaceTaskDetail.self,
@@ -42,6 +64,21 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(roundTrip, detail.layout)
     }
 
+    func testTaskLayoutRejectsUnknownWindowWithoutClearingValidWindows() {
+        let json = #"""
+        {
+          "type":"windows",
+          "windows":[
+            {"id":"valid","layout":{"type":"pane","tabs":[],"active":0}},
+            {"id":"future","layout":{"type":"grid","children":[]}}
+          ],
+          "activeWindowId":"valid"
+        }
+        """#
+
+        XCTAssertThrowsError(try decode(TaskWindowLayout.self, from: json))
+    }
+
     func testSessionSnapshotDecodesWorkspaceBindingOptionally() throws {
         let bound = try decode(
             SessionSnapshot.self,
@@ -51,6 +88,7 @@ final class WorkspaceTests: XCTestCase {
 
         XCTAssertEqual(bound.workspaceId, "w1")
         XCTAssertEqual(bound.workspaceTaskId, "t1")
+        XCTAssertEqual(WorkspaceSessionSummary(snapshot: bound).workspaceTaskId, "t1")
         XCTAssertNil(legacy.workspaceId)
         XCTAssertNil(legacy.workspaceTaskId)
     }
@@ -63,22 +101,28 @@ final class WorkspaceTests: XCTestCase {
         )
 
         for target in WorkspaceSessionTarget.allCases {
-            let request = workspaceTaskWindowRequest(target: target, binding: binding)
-            XCTAssertEqual(request.path, "/api/commands")
-            XCTAssertEqual(request.body["cwd"], .string("/task/worktree"))
-            XCTAssertEqual(request.body["workspaceId"], .string("workspace-id"))
-            XCTAssertEqual(request.body["workspaceTaskId"], .string("task-id"))
+            let pty = workspaceTaskWindowRequest(target: target, binding: binding, kind: .pty)
+            XCTAssertEqual(pty.path, "/api/commands")
+            XCTAssertEqual(pty.body["cwd"], .string("/task/worktree"))
+            XCTAssertEqual(pty.body["workspaceId"], .string("workspace-id"))
+            XCTAssertEqual(pty.body["workspaceTaskId"], .string("task-id"))
             if target == .shell {
-                XCTAssertEqual(request.body["shell"], .bool(true))
-                XCTAssertNil(request.body["provider"])
-                XCTAssertNil(request.body["command"])
+                XCTAssertEqual(pty.body["shell"], .bool(true))
+                XCTAssertNil(pty.body["provider"])
+                XCTAssertNil(pty.body["command"])
             } else {
-                XCTAssertEqual(request.body["provider"], .string(target.rawValue))
+                XCTAssertEqual(pty.body["provider"], .string(target.rawValue))
                 XCTAssertEqual(
-                    request.body["command"],
+                    pty.body["command"],
                     .string(target == .qoder ? "qodercli" : target.rawValue)
                 )
-                XCTAssertNil(request.body["shell"])
+                XCTAssertNil(pty.body["shell"])
+
+                let structured = workspaceTaskWindowRequest(target: target, binding: binding, kind: .structured)
+                XCTAssertEqual(structured.path, "/api/structured-sessions")
+                XCTAssertEqual(structured.body["provider"], .string(target.rawValue))
+                XCTAssertNotNil(structured.body["runner"])
+                XCTAssertNil(structured.body["command"])
             }
         }
     }
@@ -360,7 +404,8 @@ private final class MockWorkspaceService: WorkspaceServing {
 
     func createWorkspaceTaskWindow(
         target: WorkspaceSessionTarget,
-        binding: WorkspaceBinding
+        binding: WorkspaceBinding,
+        kind: WorkspaceSessionKind
     ) async throws -> SessionSnapshot {
         createRequests.append(CreateRequest(target: target, binding: binding))
         guard let createdSnapshot else { throw MockError.createUnavailable }
@@ -414,6 +459,10 @@ private final class MockWorkspaceService: WorkspaceServing {
 
     func listTaskGroups() async throws -> [TaskDirectoryGroup] {
         []
+    }
+
+    func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int {
+        sessionIds.count
     }
 
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview {

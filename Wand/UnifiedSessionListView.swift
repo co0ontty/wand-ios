@@ -331,11 +331,12 @@ struct UnifiedSessionListView: View {
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
-                Text(node.path)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                if let caption = TaskListPresentation.directoryPathCaption(name: node.displayName, cwd: node.path) {
+                    Text(caption)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(Theme.textSecondary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 4)
             Text("\(node.totalCount)")

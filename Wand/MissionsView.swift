@@ -22,16 +22,8 @@ private struct MissionProviderMark: View {
     let size: CGFloat
 
     var body: some View {
-        Group {
-            if provider == "pi" {
-                Text("π")
-                    .font(.system(size: size * 0.78, weight: .bold, design: .rounded))
-                    .foregroundColor(color)
-            } else {
-                BrandLogo(provider: provider, color: color)
-            }
-        }
-        .frame(width: size, height: size)
+        BrandLogo(provider: provider, color: color)
+            .frame(width: size, height: size)
         .accessibilityLabel(provider.capitalized)
     }
 }
@@ -123,6 +115,7 @@ struct MissionsView: View {
     @State private var loading = true
     @State private var errorMessage: String?
     @State private var showCreate = false
+    @State private var refreshGeneration = 0
 
     private let refreshTimer = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
 
@@ -162,6 +155,8 @@ struct MissionsView: View {
         }
         .sheet(isPresented: $showCreate) {
             MissionCreateView(api: api) { mission in
+                refreshGeneration &+= 1
+                loading = false
                 missions.removeAll { $0.id == mission.id }
                 missions.insert(mission, at: 0)
             }
@@ -192,7 +187,16 @@ struct MissionsView: View {
         } else {
             List(missions) { mission in
                 NavigationLink {
-                    MissionDetailView(api: api, initialMission: mission, onOpenSession: openSessionAndDismiss)
+                    MissionDetailView(
+                        api: api,
+                        initialMission: mission,
+                        onOpenSession: openSessionAndDismiss,
+                        onArchived: { missionId in
+                            refreshGeneration &+= 1
+                            loading = false
+                            missions.removeAll { $0.id == missionId }
+                        }
+                    )
                 } label: {
                     MissionRow(mission: mission)
                 }
@@ -211,16 +215,21 @@ struct MissionsView: View {
     }
 
     private func refresh(showProgress: Bool) async {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
         if showProgress { loading = true }
         do {
-            missions = try await api.missions()
+            let loaded = try await api.missions()
+            guard generation == refreshGeneration, !Task.isCancelled else { return }
+            missions = loaded
             errorMessage = nil
         } catch {
+            guard generation == refreshGeneration, !Task.isCancelled else { return }
             if showProgress || missions.isEmpty {
                 errorMessage = error.localizedDescription
             }
         }
-        loading = false
+        if generation == refreshGeneration { loading = false }
     }
 }
 
@@ -261,17 +270,25 @@ private struct MissionDetailView: View {
     let api: WandAPI
     let initialMission: MissionInfo
     let onOpenSession: (String) -> Void
+    let onArchived: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var mission: MissionInfo
     @State private var errorMessage: String?
     @State private var archiving = false
     @State private var confirmArchive = false
+    @State private var refreshGeneration = 0
 
-    init(api: WandAPI, initialMission: MissionInfo, onOpenSession: @escaping (String) -> Void) {
+    init(
+        api: WandAPI,
+        initialMission: MissionInfo,
+        onOpenSession: @escaping (String) -> Void,
+        onArchived: @escaping (String) -> Void
+    ) {
         self.api = api
         self.initialMission = initialMission
         self.onOpenSession = onOpenSession
+        self.onArchived = onArchived
         _mission = State(initialValue: initialMission)
     }
 
@@ -346,20 +363,26 @@ private struct MissionDetailView: View {
     }
 
     private func refresh() async {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
         do {
             let loaded = try await api.missions()
+            guard generation == refreshGeneration, !Task.isCancelled else { return }
             if let current = loaded.first(where: { $0.id == mission.id }) {
                 mission = current
             }
         } catch {
+            guard generation == refreshGeneration, !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
         }
     }
 
     private func archive() async {
+        refreshGeneration &+= 1
         archiving = true
         do {
             _ = try await api.archiveMission(id: mission.id)
+            onArchived(mission.id)
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
@@ -690,13 +713,17 @@ private struct MissionCreateView: View {
             .navigationTitle("新建并行任务")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                        .disabled(submitting)
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("创建") { Task { await create() } }
                         .disabled(!canCreate || submitting)
                 }
             }
         }
+        .interactiveDismissDisabled(submitting)
         .task {
             if cwd.isEmpty { cwd = (try? await api.serverConfig().defaultCwd) ?? "" }
         }
@@ -721,6 +748,7 @@ private struct MissionCreateView: View {
     }
 
     private func create() async {
+        guard canCreate, !submitting else { return }
         submitting = true
         do {
             let mission = try await api.createMission(

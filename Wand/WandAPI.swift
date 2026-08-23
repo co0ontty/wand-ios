@@ -86,6 +86,32 @@ final class WandAPI {
         }
     }
 
+    /// 统一的认证请求执行：任意 URLRequest（JSON、multipart、下载）都在 401 时
+    /// 使用 endpoint-scoped appToken 重登一次并原样重放请求。
+    private func performAuthenticated(
+        _ req: URLRequest,
+        method: String,
+        path: String
+    ) async throws -> (Data, HTTPURLResponse) {
+        var (data, http) = try await perform(req)
+        if http.statusCode == 401, let token, !token.isEmpty {
+            wlog("api", "401 \(method) \(path)，用 appToken 重新登录后重试")
+            let relogged = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                WandAuth.loginWithToken(
+                    serverURL: baseURL,
+                    appToken: token,
+                    endpointSession: endpointSession
+                ) { result in
+                    if case .success = result { cont.resume(returning: true) }
+                    else { cont.resume(returning: false) }
+                }
+            }
+            guard relogged else { throw APIError.unauthorized }
+            (data, http) = try await perform(req)
+        }
+        return (data, http)
+    }
+
     /// 带 401 自动重登的请求入口。
     func requestData(
         method: String,
@@ -101,23 +127,11 @@ final class WandAPI {
             timeout: timeout,
             queryItems: queryItems
         )
-        var (data, http) = try await perform(req)
-        if http.statusCode == 401, let token, !token.isEmpty {
-            wlog("api", "401 \(method) \(path)，用 appToken 重新登录后重试")
-            // session cookie 过期：用 appToken 重新登录一次，cookie 注入共享存储后重试。
-            let relogged = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-                WandAuth.loginWithToken(
-                    serverURL: baseURL,
-                    appToken: token,
-                    endpointSession: endpointSession
-                ) { result in
-                    if case .success = result { cont.resume(returning: true) }
-                    else { cont.resume(returning: false) }
-                }
-            }
-            guard relogged else { throw APIError.unauthorized }
-            (data, http) = try await perform(req)
-        }
+        let (data, http) = try await performAuthenticated(
+            req,
+            method: method,
+            path: path
+        )
         guard (200...299).contains(http.statusCode) else {
             if http.statusCode == 401 {
                 wlog("api", "401 \(method) \(path)（重登后仍失败）")
@@ -218,13 +232,17 @@ final class WandAPI {
         async let claudeRequest = listClaudeHistory()
         async let codexRequest = listCodexHistory()
         async let openCodeRequest: [HistorySession] = (try? await listOpenCodeHistory()) ?? []
+        async let grokRequest: [HistorySession] = (try? await listGrokHistory()) ?? []
         async let qoderRequest: [HistorySession] = (try? await listQoderHistory()) ?? []
-        let (managed, claude, codex, openCode, qoder) = try await (
+        async let piRequest: [HistorySession] = (try? await listPiHistory()) ?? []
+        let (managed, claude, codex, openCode, grok, qoder, pi) = try await (
             managedRequest,
             claudeRequest,
             codexRequest,
             openCodeRequest,
-            qoderRequest
+            grokRequest,
+            qoderRequest,
+            piRequest
         )
 
         let managedHistoryKeys = Set(managed.compactMap { session -> String? in
@@ -242,7 +260,7 @@ final class WandAPI {
                 session: session
             )
         }
-        for history in claude + codex + openCode + qoder where
+        for history in claude + codex + openCode + grok + qoder + pi where
             (history.hasConversation ?? true)
                 && !(history.managedByWand ?? false)
                 && !managedHistoryKeys.contains("\(history.apiProvider):\(history.claudeSessionId)") {
@@ -372,8 +390,13 @@ final class WandAPI {
         req.timeoutInterval = 60
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
-        let (data, http) = try await perform(req)
+        let (data, http) = try await performAuthenticated(
+            req,
+            method: "POST",
+            path: "/api/sessions/\(id)/upload"
+        )
         guard (200...299).contains(http.statusCode) else {
+            if http.statusCode == 401 { throw APIError.unauthorized }
             throw APIError.server(status: http.statusCode, message: "附件上传失败")
         }
         return try JSONDecoder().decode(UploadResponse.self, from: data).files
@@ -434,17 +457,22 @@ final class WandAPI {
         )
     }
 
-    /// 删除第 index 条排队消息。
-    func deleteQueued(id: String, index: Int) async throws {
-        _ = try await requestData(
+    /// 删除第 index 条排队消息；expectedText 防止自动 flush 后 index 指向另一条。
+    @discardableResult
+    func deleteQueued(id: String, index: Int, expectedText: String) async throws -> SessionSnapshot {
+        try await request(
+            SessionSnapshot.self,
             method: "DELETE",
-            path: "/api/structured-sessions/\(id)/queued/\(index)"
+            path: "/api/structured-sessions/\(id)/queued/\(index)",
+            body: ["expectedText": expectedText]
         )
     }
 
     /// 清空全部排队消息。
-    func clearQueued(id: String) async throws {
-        _ = try await requestData(
+    @discardableResult
+    func clearQueued(id: String) async throws -> SessionSnapshot {
+        try await request(
+            SessionSnapshot.self,
             method: "DELETE",
             path: "/api/structured-sessions/\(id)/queued"
         )
@@ -466,6 +494,7 @@ final class WandAPI {
         switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "codex": return "codex"
         case "opencode", "open-code", "open_code": return "opencode"
+        case "grok": return "grok"
         case "qoder", "qodercli": return "qoder"
         case "pi": return "pi"
         default: return "claude"
@@ -492,6 +521,10 @@ final class WandAPI {
 
     func listOpenCodeHistory() async throws -> [HistorySession] {
         try await listHistory(provider: "opencode")
+    }
+
+    func listGrokHistory() async throws -> [HistorySession] {
+        try await listHistory(provider: "grok")
     }
 
     func listQoderHistory() async throws -> [HistorySession] {
@@ -698,6 +731,7 @@ final class WandAPI {
         title: String?,
         prompt: String,
         cwd: String,
+        taskId: String? = nil,
         providers: [String],
         baseRef: String?,
         sharedDirectories: [String],
@@ -711,6 +745,7 @@ final class WandAPI {
             "copyPaths": copyPaths,
         ]
         if let title, !title.isEmpty { body["title"] = title }
+        if let taskId, !taskId.isEmpty { body["taskId"] = taskId }
         if let baseRef, !baseRef.isEmpty { body["baseRef"] = baseRef }
         return try await request(MissionInfo.self, method: "POST", path: "/api/missions", body: body)
     }
@@ -795,7 +830,8 @@ final class WandAPI {
         provider: String = "claude",
         thinkingEffort: String? = nil,
         defaultProvider: String? = nil,
-        defaultSessionKind: String? = nil
+        defaultSessionKind: String? = nil,
+        defaultTaskWorktree: Bool? = nil
     ) async throws {
         var body: [String: Any] = [:]
         if let mode { body["defaultMode"] = mode }
@@ -824,6 +860,19 @@ final class WandAPI {
         if let thinkingEffort { body["defaultThinkingEffort"] = thinkingEffort }
         if let defaultProvider { body["defaultProvider"] = defaultProvider }
         if let defaultSessionKind { body["defaultSessionKind"] = defaultSessionKind }
+        if let defaultTaskWorktree { body["defaultTaskWorktree"] = defaultTaskWorktree }
         _ = try await requestData(method: "POST", path: "/api/settings/config", body: body)
+    }
+
+    func updateCreationDefaults(
+        defaultProvider: String? = nil,
+        defaultSessionKind: String? = nil,
+        defaultTaskWorktree: Bool? = nil
+    ) async throws {
+        try await updateNewSessionDefaults(
+            defaultProvider: defaultProvider,
+            defaultSessionKind: defaultSessionKind,
+            defaultTaskWorktree: defaultTaskWorktree
+        )
     }
 }

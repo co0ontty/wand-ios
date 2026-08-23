@@ -21,6 +21,19 @@ struct WorkspaceNewTaskSheet: View {
     @State private var errorMessage: String?
     @FocusState private var cwdFocused: Bool
 
+    init(
+        api: WandAPI,
+        store: WorkspaceStore,
+        initialCwd: String = "",
+        onCreated: @escaping (Workspace, WorkspaceTaskCreation) -> Void
+    ) {
+        self.api = api
+        self.store = store
+        self.initialCwd = initialCwd
+        self.onCreated = onCreated
+        _cwd = State(initialValue: initialCwd.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -60,10 +73,13 @@ struct WorkspaceNewTaskSheet: View {
             }
             .interactiveDismissDisabled(creating)
             .task {
+                if let config = try? await api.serverConfig() {
+                    worktreeEnabled = config.defaultTaskWorktree != false
+                }
                 if recentPaths.isEmpty, let recent = try? await api.workspaceRecentPaths() {
                     recentPaths = recent
                 }
-                if cwd.isEmpty && initialCwd.isEmpty, let recent = recentPaths.first {
+                if cwd.isEmpty, let recent = recentPaths.first {
                     cwd = recent.path
                 }
             }
@@ -92,16 +108,22 @@ struct WorkspaceNewTaskSheet: View {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var trimmedDirectory: String {
+        cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private var canSubmit: Bool {
-        !creating && !trimmedName.isEmpty && trimmedName.count <= 80
+        !creating && !trimmedName.isEmpty && trimmedName.count <= 80 && !trimmedDirectory.isEmpty
     }
 
     private func loadSuggestions() async {
-        let query = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = trimmedDirectory
         do {
             let result = try await api.workspacePathSuggestions(query: query)
+            guard query == trimmedDirectory, cwdFocused else { return }
             suggestions = result.filter(\.isDirectory).prefix(6).map { $0 }
         } catch {
+            guard query == trimmedDirectory else { return }
             suggestions = []
         }
     }
@@ -213,6 +235,9 @@ struct WorkspaceNewTaskSheet: View {
             Toggle("", isOn: $worktreeEnabled)
                 .labelsHidden()
                 .tint(Theme.brand)
+                .onChange(of: worktreeEnabled) { _, enabled in
+                    Task { try? await api.updateNewSessionDefaults(defaultTaskWorktree: enabled) }
+                }
         }
         .padding(14)
         .background(
@@ -243,10 +268,9 @@ struct WorkspaceNewTaskSheet: View {
         errorMessage = nil
         defer { creating = false }
         do {
-            let directory = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
             let (workspace, creation) = try await store.createTask(
                 name: trimmedName,
-                directory: directory,
+                directory: trimmedDirectory,
                 worktree: worktreeEnabled ? nil : false
             )
             dismiss()

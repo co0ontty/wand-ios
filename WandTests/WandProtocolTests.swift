@@ -220,7 +220,7 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(appendingVoiceTranscript("新内容", to: "  已有内容  "), "  已有内容 新内容")
     }
 
-    func testWindowedMessagesPreserveLoadedPrefixAndClearLeadingBlockOffset() {
+    func testWindowedMessagesReplacePrefixWhenIncomingLeadingTurnIsTruncated() {
         let current = messageWindow(
             messages: [turn("old"), turn("current")],
             loadedOffset: 5,
@@ -238,11 +238,180 @@ final class WandProtocolTests: XCTestCase {
             leadingTotal: 5
         )
 
+        XCTAssertEqual(result.messages.map(text), ["replacement"])
+        XCTAssertEqual(result.loadedOffset, 6)
+        XCTAssertEqual(result.messageTotal, 7)
+        XCTAssertEqual(result.leadingBlockOffset, 2)
+        XCTAssertEqual(result.leadingBlockTotal, 5)
+    }
+
+    func testWindowedMessagesPreserveLoadedPrefixWhenIncomingLeadingTurnIsComplete() {
+        let current = messageWindow(
+            messages: [turn("old"), turn("current")],
+            loadedOffset: 5,
+            messageTotal: 7,
+            leadingBlockOffset: 3,
+            leadingBlockTotal: 4
+        )
+
+        let result = mergingWindowedMessages(
+            current: current,
+            incoming: [turn("replacement")],
+            offset: 6,
+            total: 7,
+            leadingOffset: 0,
+            leadingTotal: 1
+        )
+
         XCTAssertEqual(result.messages.map(text), ["old", "replacement"])
         XCTAssertEqual(result.loadedOffset, 5)
         XCTAssertEqual(result.messageTotal, 7)
+        XCTAssertEqual(result.leadingBlockOffset, 3)
+        XCTAssertEqual(result.leadingBlockTotal, 4)
+    }
+
+    func testWindowedMessagesIgnoreStaleLowerTotalSnapshot() {
+        let current = messageWindow(
+            messages: [turn("new-1"), turn("new-2")],
+            loadedOffset: 8,
+            messageTotal: 10,
+            leadingBlockOffset: 0,
+            leadingBlockTotal: 1
+        )
+
+        let result = mergingWindowedMessages(
+            current: current,
+            incoming: [turn("stale-1"), turn("stale-2")],
+            offset: 5,
+            total: 7
+        )
+
+        XCTAssertEqual(result.messages.map(text), ["new-1", "new-2"])
+        XCTAssertEqual(result.loadedOffset, 8)
+        XCTAssertEqual(result.messageTotal, 10)
+    }
+
+    func testWindowedMessagesReplaceDisjointWindowWithoutInventingContinuousIndexes() {
+        let current = messageWindow(
+            messages: [turn("old-1"), turn("old-2")],
+            loadedOffset: 5,
+            messageTotal: 7,
+            leadingBlockOffset: 0,
+            leadingBlockTotal: 1
+        )
+
+        let result = mergingWindowedMessages(
+            current: current,
+            incoming: [turn("future")],
+            offset: 10,
+            total: 11,
+            leadingOffset: 2,
+            leadingTotal: 3
+        )
+
+        XCTAssertEqual(result.messages.map(text), ["future"])
+        XCTAssertEqual(result.loadedOffset, 10)
+        XCTAssertEqual(result.messageTotal, 11)
+        XCTAssertEqual(result.leadingBlockOffset, 2)
+        XCTAssertEqual(result.leadingBlockTotal, 3)
+    }
+
+    func testWindowedMessagesKeepMoreCompleteOverlappingAssistantTurn() {
+        let current = messageWindow(
+            messages: [turn("complete assistant response", role: "assistant")],
+            loadedOffset: 4,
+            messageTotal: 5,
+            leadingBlockOffset: 0,
+            leadingBlockTotal: 1
+        )
+
+        let result = mergingWindowedMessages(
+            current: current,
+            incoming: [turn("short", role: "assistant")],
+            offset: 4,
+            total: 5
+        )
+
+        XCTAssertEqual(result.messages.map(text), ["complete assistant response"])
+        XCTAssertEqual(result.loadedOffset, 4)
+        XCTAssertEqual(result.messageTotal, 5)
+    }
+
+    func testWindowedMessagesPreferIncomingFirstTurnWhenBlockTotalGrows() {
+        let local = ConversationTurn(
+            role: "assistant",
+            content: (0..<100).map { .text(text: "local-\($0)", subagent: nil) }
+        )
+        let incoming = ConversationTurn(
+            role: "assistant",
+            content: (41...100).map { .text(text: "incoming-\($0)", subagent: nil) }
+        )
+        let current = messageWindow(
+            messages: [local],
+            loadedOffset: 4,
+            messageTotal: 5,
+            leadingBlockOffset: 0,
+            leadingBlockTotal: 100
+        )
+
+        let result = mergingWindowedMessages(
+            current: current,
+            incoming: [incoming],
+            offset: 4,
+            total: 5,
+            leadingOffset: 41,
+            leadingTotal: 101
+        )
+
+        XCTAssertEqual(result.messages.first?.content.count, 101)
         XCTAssertEqual(result.leadingBlockOffset, 0)
-        XCTAssertEqual(result.leadingBlockTotal, 1)
+        XCTAssertEqual(result.leadingBlockTotal, 101)
+        guard case .text(let tail, _) = result.messages.first?.content.last else {
+            return XCTFail("Incoming tail block should be retained")
+        }
+        XCTAssertEqual(tail, "incoming-100")
+    }
+
+    func testWindowedMessagesMergeUpdatedTailWhenBlockTotalIsUnchanged() {
+        let local = ConversationTurn(
+            role: "assistant",
+            content: (0..<100).map { index in
+                .text(text: index == 99 ? "old" : "local-\(index)", subagent: nil)
+            }
+        )
+        let incoming = ConversationTurn(
+            role: "assistant",
+            content: (40..<100).map { index in
+                .text(
+                    text: index == 99 ? "updated tail text" : "incoming-\(index)",
+                    subagent: nil
+                )
+            }
+        )
+        let current = messageWindow(
+            messages: [local],
+            loadedOffset: 4,
+            messageTotal: 5,
+            leadingBlockOffset: 0,
+            leadingBlockTotal: 100
+        )
+
+        let result = mergingWindowedMessages(
+            current: current,
+            incoming: [incoming],
+            offset: 4,
+            total: 5,
+            leadingOffset: 40,
+            leadingTotal: 100
+        )
+
+        XCTAssertEqual(result.messages.first?.content.count, 100)
+        XCTAssertEqual(result.leadingBlockOffset, 0)
+        XCTAssertEqual(result.leadingBlockTotal, 100)
+        guard case .text(let tail, _) = result.messages.first?.content.last else {
+            return XCTFail("Updated tail block should be retained")
+        }
+        XCTAssertEqual(tail, "updated tail text")
     }
 
     func testWindowedMessagesIgnoreEmptyZeroTotalSnapshot() {
@@ -334,6 +503,45 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(result.messageTotal, 5)
         XCTAssertEqual(result.leadingBlockOffset, 0)
         XCTAssertEqual(result.leadingBlockTotal, 1)
+    }
+
+    func testIncrementalMessageKeepsMoreCompleteAssistantTurn() {
+        let current = messageWindow(
+            messages: [turn("complete assistant response", role: "assistant")],
+            loadedOffset: 4,
+            messageTotal: 5,
+            leadingBlockOffset: 2,
+            leadingBlockTotal: 3
+        )
+
+        let result = applyingIncrementalMessage(
+            turn("short", role: "assistant"),
+            expectedCount: 5,
+            to: current
+        )
+
+        XCTAssertEqual(result.messages.map(text), ["complete assistant response"])
+        XCTAssertEqual(result.leadingBlockOffset, 2)
+        XCTAssertEqual(result.leadingBlockTotal, 3)
+    }
+
+    func testIncrementalMessageWithoutExpectedCountStillAdvancesTotal() {
+        let current = messageWindow(
+            messages: [turn("user", role: "user")],
+            loadedOffset: 3,
+            messageTotal: 4,
+            leadingBlockOffset: 0,
+            leadingBlockTotal: 1
+        )
+
+        let result = applyingIncrementalMessage(
+            turn("assistant", role: "assistant"),
+            expectedCount: 0,
+            to: current
+        )
+
+        XCTAssertEqual(result.messages.map(text), ["user", "assistant"])
+        XCTAssertEqual(result.messageTotal, 5)
     }
 
     func testIncrementalMessageAppendsOnlyWhenHistoryHasRoom() {
@@ -730,11 +938,12 @@ final class WandProtocolTests: XCTestCase {
         )
         let mission = try decode(
             MissionInfo.self,
-            from: #"{"id":"m1","title":"Review API","prompt":"Review the API","cwd":"/repo","status":"needs_input","worktree":{"baseRef":"abc123","sharedDirectories":[],"copyPaths":[".env.local"]},"createdAt":"2026-08-05T00:00:00.000Z","updatedAt":"2026-08-05T00:00:01.000Z","attempts":[{"id":"a1","missionId":"m1","sessionId":"s1","provider":"codex","state":"needs_permission","branch":"wand/review","worktreePath":"/repo/.wand-worktrees/review","baseRef":"abc123","summary":null,"error":null,"createdAt":"2026-08-05T00:00:00.000Z","updatedAt":"2026-08-05T00:00:01.000Z"}],"comments":[{"id":"c1","missionId":"m1","attemptId":"a1","filePath":"src/api.ts","line":42,"side":"new","body":"Handle this error","status":"pending","createdAt":"2026-08-05T00:00:02.000Z","sentAt":null,"resolvedAt":null}]}"#
+            from: #"{"id":"m1","title":"Review API","prompt":"Review the API","cwd":"/repo","taskId":"task-1","status":"needs_input","worktree":{"baseRef":"abc123","sharedDirectories":[],"copyPaths":[".env.local"]},"createdAt":"2026-08-05T00:00:00.000Z","updatedAt":"2026-08-05T00:00:01.000Z","attempts":[{"id":"a1","missionId":"m1","sessionId":"s1","provider":"codex","state":"needs_permission","branch":"wand/review","worktreePath":"/repo/.wand-worktrees/review","baseRef":"abc123","summary":null,"error":null,"createdAt":"2026-08-05T00:00:00.000Z","updatedAt":"2026-08-05T00:00:01.000Z"}],"comments":[{"id":"c1","missionId":"m1","attemptId":"a1","filePath":"src/api.ts","line":42,"side":"new","body":"Handle this error","status":"pending","createdAt":"2026-08-05T00:00:02.000Z","sentAt":null,"resolvedAt":null}]}"#
         )
 
         XCTAssertTrue(activity.needsAttention)
         XCTAssertEqual(mission.attempts.first?.provider, "codex")
+        XCTAssertEqual(mission.taskId, "task-1")
         XCTAssertEqual(mission.worktree.copyPaths, [".env.local"])
         XCTAssertEqual(mission.pendingComments(for: "a1").first?.line, 42)
     }

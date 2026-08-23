@@ -140,7 +140,15 @@ private struct PtySessionView: View {
         .onChange(of: showQuickCommit) { _, showing in
             if !showing { refreshGitStatus() }
         }
-        .onDisappear { store.shutdown() }
+        .onDisappear {
+            voiceHoldWork?.cancel()
+            voiceHoldWork = nil
+            speech.stop(cancelled: true)
+            voicePressed = false
+            voiceCanceling = false
+            terminalWebModel.onEmbeddedTerminalTap = nil
+            store.shutdown()
+        }
         .overlay(alignment: .top) { connectionBanner }
         .overlay(alignment: .top) { toastView }
         .wandKeyboardShortcuts(ptyKeyboardShortcuts)
@@ -821,7 +829,7 @@ private struct PtySessionView: View {
         HStack(spacing: 8) {
             let provider = store.snapshot?.provider ?? session.provider
             // 与 Android 一致：透明底，只展示品牌 logo。
-            BrandLogo(provider: provider, color: Color.white.opacity(0.9))
+            BrandLogo(provider: provider, color: Color.white.opacity(0.9), onDark: true)
                 .frame(width: 18, height: 18)
                 .frame(width: 26, height: 26)
 

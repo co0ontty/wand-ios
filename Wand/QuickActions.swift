@@ -106,6 +106,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        WandServerFileLink.cleanupStaleTemporaryFiles()
         let isLiveActivityMock: Bool
 #if DEBUG
         isLiveActivityMock = ProcessInfo.processInfo.environment["WAND_MOCK_LIVE_ACTIVITY"] != nil

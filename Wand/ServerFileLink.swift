@@ -10,6 +10,65 @@ import UIKit
 enum WandServerFileLink {
     private static let webRoutePrefixes = ["/api", "/android", "/macos"]
 
+    private final class ConnectionAttemptBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var attempt: WandAuth.ConnectionAttempt?
+        private var continuation: CheckedContinuation<Void, Error>?
+        private var finished = false
+
+        func setContinuation(_ continuation: CheckedContinuation<Void, Error>) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                continuation.resume(throwing: CancellationError())
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+        }
+
+        func setAttempt(_ attempt: WandAuth.ConnectionAttempt) {
+            lock.lock()
+            if finished {
+                lock.unlock()
+                attempt.cancel()
+                return
+            }
+            self.attempt = attempt
+            lock.unlock()
+        }
+
+        func complete(_ result: Result<Void, Error>) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            let continuation = continuation
+            self.continuation = nil
+            attempt = nil
+            lock.unlock()
+            continuation?.resume(with: result)
+        }
+
+        func cancel() {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            let attempt = attempt
+            let continuation = continuation
+            self.attempt = nil
+            self.continuation = nil
+            lock.unlock()
+            attempt?.cancel()
+            continuation?.resume(throwing: CancellationError())
+        }
+    }
+
     /// Accepts explicit absolute server paths, including `:line[:column]`, `#LxCy`, and
     /// `file://localhost` forms. Ordinary web URLs and relative paths stay nil.
     static func serverPath(_ target: String?) -> String? {
@@ -37,60 +96,68 @@ enum WandServerFileLink {
             path = decodePercentPath(removingHashLineSuffix(from: value))
         }
 
-        let withoutLocation = removingColonLineSuffix(from: path)
-        guard withoutLocation.hasPrefix("/"),
-              !withoutLocation.unicodeScalars.contains(where: {
+        guard path.hasPrefix("/"),
+              !path.unicodeScalars.contains(where: {
                   CharacterSet.controlCharacters.contains($0)
               }) else { return nil }
-        return withoutLocation
+        return path
     }
 
     static func download(serverPath: String, api: WandAPI) async throws -> URL {
-        guard serverPath.hasPrefix("/"),
-              let url = WandEndpoint.url(
-                  baseURL: api.baseURL,
-                  route: "/api/file-raw",
-                  queryItems: [
-                      URLQueryItem(name: "download", value: "1"),
-                      URLQueryItem(name: "path", value: serverPath),
-                  ]
-              ) else {
-            throw DownloadError.invalidURL
-        }
-        guard WandEndpointScope(api.baseURL)?.contains(url) == true else {
-            throw DownloadError.invalidURL
-        }
+        guard serverPath.hasPrefix("/") else { throw DownloadError.invalidURL }
+        let stripped = removingColonLineSuffix(from: serverPath)
+        let candidates = stripped == serverPath ? [serverPath] : [serverPath, stripped]
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 60
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-
-        var response = try await perform(request, api: api)
-        if response.http.statusCode == 401, let token = api.token, !token.isEmpty {
-            try? FileManager.default.removeItem(at: response.temporaryURL)
-            try await relogin(
+        for (index, candidate) in candidates.enumerated() {
+            guard let url = WandEndpoint.url(
                 baseURL: api.baseURL,
-                token: token,
-                endpointSession: api.endpointSession
+                route: "/api/file-raw",
+                queryItems: [
+                    URLQueryItem(name: "download", value: "1"),
+                    URLQueryItem(name: "path", value: candidate),
+                ]
+            ), WandEndpointScope(api.baseURL)?.contains(url) == true else {
+                throw DownloadError.invalidURL
+            }
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.timeoutInterval = 60
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+
+            var response = try await perform(request, api: api)
+            if response.http.statusCode == 401, let token = api.token, !token.isEmpty {
+                try? FileManager.default.removeItem(at: response.temporaryURL)
+                try await relogin(
+                    baseURL: api.baseURL,
+                    token: token,
+                    endpointSession: api.endpointSession
+                )
+                response = try await perform(request, api: api)
+            }
+
+            if (response.http.statusCode == 400 || response.http.statusCode == 404),
+               index + 1 < candidates.count {
+                try? FileManager.default.removeItem(at: response.temporaryURL)
+                continue
+            }
+            defer { try? FileManager.default.removeItem(at: response.temporaryURL) }
+
+            guard (200...299).contains(response.http.statusCode) else {
+                if response.http.statusCode == 401 { throw DownloadError.unauthorized }
+                throw DownloadError.server(response.http.statusCode)
+            }
+            guard let finalURL = response.http.url,
+                  WandEndpointScope(api.baseURL)?.contains(finalURL) == true else {
+                throw DownloadError.crossEndpointRedirect
+            }
+
+            return try persistTemporaryFile(
+                response.temporaryURL,
+                fileName: safeFileName(fileName(from: response.http, fallbackPath: candidate))
             )
-            response = try await perform(request, api: api)
         }
-        defer { try? FileManager.default.removeItem(at: response.temporaryURL) }
-
-        guard (200...299).contains(response.http.statusCode) else {
-            if response.http.statusCode == 401 { throw DownloadError.unauthorized }
-            throw DownloadError.server(response.http.statusCode)
-        }
-        guard let finalURL = response.http.url,
-              WandEndpointScope(api.baseURL)?.contains(finalURL) == true else {
-            throw DownloadError.crossEndpointRedirect
-        }
-
-        return try persistTemporaryFile(
-            response.temporaryURL,
-            fileName: safeFileName(fileName(from: response.http, fallbackPath: serverPath))
-        )
+        throw DownloadError.server(404)
     }
 
     private static func perform(
@@ -117,31 +184,47 @@ enum WandServerFileLink {
         token: String,
         endpointSession: SelfSignedSession
     ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            WandAuth.loginWithToken(
-                serverURL: baseURL,
-                appToken: token,
-                endpointSession: endpointSession
-            ) { result in
-                switch result {
-                case .success:
-                    continuation.resume(returning: ())
-                case .failure(let error):
-                    continuation.resume(throwing: DownloadError.login(error.userMessage))
+        let box = ConnectionAttemptBox()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                box.setContinuation(continuation)
+                let attempt = WandAuth.authenticate(
+                    serverURL: baseURL,
+                    appToken: token,
+                    targetEndpointSession: endpointSession
+                ) { result in
+                    box.complete(result.mapError {
+                        DownloadError.login($0.userMessage) as Error
+                    })
                 }
+                box.setAttempt(attempt)
             }
+        } onCancel: {
+            box.cancel()
         }
+    }
+
+    static func cleanupStaleTemporaryFiles() {
+        try? FileManager.default.removeItem(at: temporaryFilesRoot)
+    }
+
+    private static var temporaryFilesRoot: URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("WandServerFiles", isDirectory: true)
     }
 
     private static func persistTemporaryFile(_ source: URL, fileName: String) throws -> URL {
         let manager = FileManager.default
-        let directory = manager.temporaryDirectory
-            .appendingPathComponent("WandServerFiles", isDirectory: true)
+        let directory = temporaryFilesRoot
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             let destination = directory.appendingPathComponent(fileName, isDirectory: false)
             try manager.moveItem(at: source, to: destination)
+            try? manager.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: destination.path
+            )
             return destination
         } catch {
             try? manager.removeItem(at: directory)
@@ -192,10 +275,10 @@ enum WandServerFileLink {
     }
 
     /// `filename*`（RFC 5987，形如 `UTF-8''%E6%8A%A5...`）优先于旧式 `filename="..."`。
-    private static func fileNameParameter(in disposition: String) -> String? {
+    static func fileNameParameter(in disposition: String) -> String? {
         var plain: String?
         var extended: String?
-        for parameter in disposition.split(separator: ";") {
+        for parameter in contentDispositionParameters(disposition) {
             let trimmed = parameter.trimmingCharacters(in: .whitespaces)
             guard let separator = trimmed.firstIndex(of: "=") else { continue }
             let name = String(trimmed[..<separator]).trimmingCharacters(in: .whitespaces).lowercased()
@@ -213,11 +296,45 @@ enum WandServerFileLink {
                     extended = decoded
                 }
             } else if name == "filename" {
-                let unquoted = rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                let unquoted: String
+                if rawValue.hasPrefix("\"") && rawValue.hasSuffix("\"") && rawValue.count >= 2 {
+                    unquoted = String(rawValue.dropFirst().dropLast())
+                        .replacingOccurrences(of: "\\\"", with: "\"")
+                        .replacingOccurrences(of: "\\\\", with: "\\")
+                } else {
+                    unquoted = rawValue
+                }
                 if !unquoted.isEmpty { plain = unquoted }
             }
         }
         return extended ?? plain
+    }
+
+    /// Content-Disposition 的分号只有在引号外才是参数分隔符。
+    private static func contentDispositionParameters(_ value: String) -> [String] {
+        var parameters: [String] = []
+        var current = ""
+        var quoted = false
+        var escaped = false
+        for character in value {
+            if escaped {
+                current.append(character)
+                escaped = false
+            } else if character == "\\", quoted {
+                current.append(character)
+                escaped = true
+            } else if character == "\"" {
+                quoted.toggle()
+                current.append(character)
+            } else if character == ";", !quoted {
+                parameters.append(current)
+                current = ""
+            } else {
+                current.append(character)
+            }
+        }
+        parameters.append(current)
+        return parameters
     }
 
     private enum DownloadError: LocalizedError {

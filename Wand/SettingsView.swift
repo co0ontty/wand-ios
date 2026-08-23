@@ -12,6 +12,7 @@ struct SettingsView: View {
 
     @EnvironmentObject private var store: ServerStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
 
     @State private var serverVersion: String?
@@ -54,6 +55,10 @@ struct SettingsView: View {
         .task {
             serverVersion = (try? await api.serverConfig())?.currentVersion
             await refreshNotificationStatus()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await refreshNotificationStatus() }
         }
         .confirmationDialog("返回连接页？", isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("返回连接页") {
@@ -220,12 +225,15 @@ struct SettingsView: View {
             Toggle("回复完成 / 等待授权通知", isOn: $store.notificationsEnabled)
                 .tint(Theme.brand)
                 .onChange(of: store.notificationsEnabled) { _, enabled in
-                    if enabled {
-                        SessionNotificationController.shared.requestAuthorization()
-                    } else {
-                        SessionNotificationController.shared.clearPending()
+                    Task {
+                        if enabled {
+                            _ = await SessionNotificationController.shared
+                                .requestAuthorizationAndWait()
+                        } else {
+                            SessionNotificationController.shared.clearPending()
+                        }
+                        await refreshNotificationStatus()
                     }
-                    Task { await refreshNotificationStatus() }
                 }
             Toggle("灵动岛与锁屏进度", isOn: $store.liveActivityEnabled)
                 .tint(Theme.brand)

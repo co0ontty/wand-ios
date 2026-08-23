@@ -24,7 +24,7 @@ final class ChatStore: ObservableObject {
     @Published var legacyPermissionPrompt: PermissionRequestInfo?
     @Published var permissionBlocked = false
     @Published var currentTaskTitle: String?
-    @Published var connected = true
+    @Published var connected = false
     @Published var loading = true
     @Published var loadError: String?
     @Published var toast: String?
@@ -67,7 +67,10 @@ final class ChatStore: ObservableObject {
     private var started = false
     private var active = false
     private var initialLoadInProgress = false
-    private var queuePromotePending = false
+    /// 每个 WS 状态事件都会前进；初始 REST 只能在此版本未变化时整体落地，
+    /// 避免晚到的旧快照覆盖 init/output/status 已经发布的新状态。
+    private var realtimeRevision = 0
+    private var queueMutationPending = false
     private var autoResumeAttempted = false
     /// 所有 PTY 输入共用一条尾队列。普通提交的文本和回车作为同一个 operation，
     /// 快捷键不能插进两者之间，连续点击也严格按用户操作顺序写入终端。
@@ -145,14 +148,21 @@ final class ChatStore: ObservableObject {
         connectSocket()
 
         Task {
+            let initialRealtimeRevision = realtimeRevision
             var initialSnapshot: SessionSnapshot?
             do {
                 let snap = try await api.getSession(id: sessionId)
-                apply(snapshot: snap)
-                initialSnapshot = snap
+                if realtimeRevision == initialRealtimeRevision {
+                    apply(snapshot: snap)
+                } else {
+                    wlog("session", "忽略晚到 REST 快照 session=\(sessionId) revision=\(initialRealtimeRevision)→\(realtimeRevision)")
+                }
+                initialSnapshot = snapshot ?? snap
                 wlog("session", "REST 快照 session=\(sessionId) msgs=\(snap.messages?.count ?? -1) status=\(snap.status ?? "?") structured=\(snap.isStructured) responding=\(snap.isResponding)")
             } catch {
-                loadError = error.localizedDescription
+                if snapshot == nil, realtimeRevision == initialRealtimeRevision {
+                    loadError = error.localizedDescription
+                }
                 wlog("session", "REST 快照失败 session=\(sessionId): \(error.localizedDescription)")
             }
             loading = false
@@ -305,6 +315,12 @@ final class ChatStore: ObservableObject {
             return
         }
         switch event.type {
+        case "init", "output", "status", "ended":
+            realtimeRevision &+= 1
+        default:
+            break
+        }
+        switch event.type {
         case "init":
             if let data = event.data {
                 applyWsSnapshot(data)
@@ -447,14 +463,20 @@ final class ChatStore: ObservableObject {
         guard !trimmed.isEmpty else { return }
         let structured = forcePtyChat ? false : isStructured
         let queueing = structured && isResponding && status == "running"
+        if queueing, queueMutationPending {
+            toast = "排队消息正在更新，请稍后再试。"
+            return
+        }
         if queueing, lastSubmittedStructuredInput() == trimmed {
             toast = "与上一条消息相同，已忽略，不会加入排队。"
             return
         }
+        let requestRevision = realtimeRevision
         let previousMessages = messages
         let previousQueue = queuedMessages
         if structured {
             if queueing {
+                queueMutationPending = true
                 queuedMessages.append(trimmed)
                 toast = "已加入排队，等当前回复完成会自动发送。"
             } else {
@@ -476,21 +498,26 @@ final class ChatStore: ObservableObject {
                     // HTTP 202 已包含服务端刚接受的 canonical snapshot。立刻应用它，
                     // 再向 socket 请求一次校准：这样 WS 正在重连/首帧丢失时，发送后也
                     // 不会停在乐观 loading 状态直到下一条推送到来。
-                    apply(snapshot: accepted)
+                    if realtimeRevision == requestRevision {
+                        apply(snapshot: accepted)
+                    }
                     socket.requestResync()
                 } else {
                     try await sendPtyChatInput(trimmed)
                 }
             } catch {
                 toast = error.localizedDescription
-                if structured {
+                if structured, realtimeRevision == requestRevision {
                     if queueing { queuedMessages = previousQueue }
                     else {
                         messages = previousMessages
                         isResponding = false
                     }
+                } else if structured {
+                    socket.requestResync()
                 }
             }
+            if queueing { queueMutationPending = false }
         }
     }
 
@@ -883,59 +910,97 @@ final class ChatStore: ObservableObject {
     /// 立即发送第 index 条排队消息（乐观剥掉本地、失败回滚）。对齐 Web queueBarPromoteIndex。
     func promoteQueued(index: Int) {
         guard isStructured else { return }
-        guard !queuePromotePending else { return }
+        guard !queueMutationPending else { return }
         let queue = queuedMessages
         guard index >= 0, index < queue.count else { return }
         let picked = queue[index]
+        let requestRevision = realtimeRevision
         let previous = queue
         let next = Array(queue[..<index]) + Array(queue[(index + 1)...])
         let inFlight = queueInFlight
-        queuePromotePending = true
+        queueMutationPending = true
         queuedMessages = next
         toast = inFlight ? "已请求中断当前回复，立即发送这条。" : "已立即发送这条消息。"
         Task {
             do {
                 let snap = try await api.promoteQueued(id: sessionId, index: index, expectedText: picked)
-                apply(snapshot: snap)
+                if realtimeRevision == requestRevision {
+                    apply(snapshot: snap)
+                } else {
+                    socket.requestResync()
+                }
             } catch {
-                queuedMessages = previous
+                if realtimeRevision == requestRevision {
+                    queuedMessages = previous
+                } else {
+                    socket.requestResync()
+                }
                 toast = error.localizedDescription
             }
-            queuePromotePending = false
+            queueMutationPending = false
         }
     }
 
     /// 删除第 index 条排队消息（乐观剥掉本地、失败回滚）。
     func deleteQueued(index: Int) {
-        guard isStructured else { return }
+        guard isStructured, !queueMutationPending else { return }
         let queue = queuedMessages
         guard index >= 0, index < queue.count else { return }
+        let picked = queue[index]
+        let requestRevision = realtimeRevision
         let previous = queue
+        queueMutationPending = true
         queuedMessages = Array(queue[..<index]) + Array(queue[(index + 1)...])
         Task {
             do {
-                try await api.deleteQueued(id: sessionId, index: index)
+                let snap = try await api.deleteQueued(
+                    id: sessionId,
+                    index: index,
+                    expectedText: picked
+                )
+                if realtimeRevision == requestRevision {
+                    apply(snapshot: snap)
+                } else {
+                    socket.requestResync()
+                }
             } catch {
-                queuedMessages = previous
+                if realtimeRevision == requestRevision {
+                    queuedMessages = previous
+                } else {
+                    socket.requestResync()
+                }
                 toast = error.localizedDescription
             }
+            queueMutationPending = false
         }
     }
 
     /// 清空全部排队消息（乐观清空、失败回滚）。
     func clearQueued() {
-        guard isStructured else { return }
+        guard isStructured, !queueMutationPending else { return }
+        let requestRevision = realtimeRevision
         let previous = queuedMessages
         guard !previous.isEmpty else { return }
+        queueMutationPending = true
         queuedMessages = []
         Task {
             do {
-                try await api.clearQueued(id: sessionId)
+                let snap = try await api.clearQueued(id: sessionId)
+                if realtimeRevision == requestRevision {
+                    apply(snapshot: snap)
+                } else {
+                    socket.requestResync()
+                }
                 toast = "已清空 \(previous.count) 条排队消息。"
             } catch {
-                queuedMessages = previous
+                if realtimeRevision == requestRevision {
+                    queuedMessages = previous
+                } else {
+                    socket.requestResync()
+                }
                 toast = error.localizedDescription
             }
+            queueMutationPending = false
         }
     }
 

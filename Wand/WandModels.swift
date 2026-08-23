@@ -944,6 +944,7 @@ struct HistorySession: Decodable, Identifiable {
         switch provider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "codex": return "codex"
         case "opencode", "open-code", "open_code": return "opencode"
+        case "grok": return "grok"
         case "qoder", "qodercli": return "qoder"
         case "pi": return "pi"
         default: return "claude"
@@ -1207,6 +1208,7 @@ struct ServerConfigInfo: Decodable {
     let defaultCwd: String?
     let defaultProvider: String?
     let defaultSessionKind: String?
+    let defaultTaskWorktree: Bool?
     let defaultMode: String?
     let defaultModel: String?
     let defaultCodexModel: String?
@@ -1224,7 +1226,7 @@ struct ServerConfigInfo: Decodable {
     let canManageSettings: Bool?
 
     private enum CodingKeys: String, CodingKey {
-        case defaultCwd, defaultProvider, defaultSessionKind, defaultMode
+        case defaultCwd, defaultProvider, defaultSessionKind, defaultTaskWorktree, defaultMode
         case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultModels
         case defaultThinkingEffort, cardDefaults
         case currentVersion, latestVersion, updateAvailable, updateChannel, canManageSettings
@@ -1235,6 +1237,7 @@ struct ServerConfigInfo: Decodable {
         defaultCwd = try? container.decode(String.self, forKey: .defaultCwd)
         defaultProvider = try? container.decode(String.self, forKey: .defaultProvider)
         defaultSessionKind = try? container.decode(String.self, forKey: .defaultSessionKind)
+        defaultTaskWorktree = try? container.decode(Bool.self, forKey: .defaultTaskWorktree)
         defaultMode = try? container.decode(String.self, forKey: .defaultMode)
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
         defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)

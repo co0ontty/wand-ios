@@ -24,7 +24,8 @@ struct WorkspaceTaskWindowRequest: Equatable {
 /// Pure request construction keeps provider-to-command mapping and workspace binding testable.
 func workspaceTaskWindowRequest(
     target: WorkspaceSessionTarget,
-    binding: WorkspaceBinding
+    binding: WorkspaceBinding,
+    kind: WorkspaceSessionKind = .structured
 ) -> WorkspaceTaskWindowRequest {
     var body: [String: WorkspaceRequestValue] = [
         "cwd": .string(binding.cwd),
@@ -33,6 +34,10 @@ func workspaceTaskWindowRequest(
     ]
     if let provider = target.provider {
         body["provider"] = .string(provider.rawValue)
+        if kind == .structured {
+            body["runner"] = .string(provider.structuredRunner)
+            return WorkspaceTaskWindowRequest(path: "/api/structured-sessions", body: body)
+        }
         body["command"] = .string(provider == .qoder ? "qodercli" : provider.rawValue)
     } else {
         body["shell"] = .bool(true)
@@ -150,6 +155,18 @@ extension WandAPI {
         _ = try await requestData(method: "DELETE", path: "/api/workspace-tasks/\(id)?cascade=1")
     }
 
+    func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int {
+        let ids = Array(Set(sessionIds.filter { !$0.isEmpty }))
+        guard !ids.isEmpty else { return 0 }
+        let response = try await request(
+            SessionBatchDeleteResponse.self,
+            method: "POST",
+            path: "/api/sessions/batch-delete",
+            body: ["sessionIds": ids]
+        )
+        return response.deleted ?? ids.count
+    }
+
     func getWorkspaceTask(taskId: String) async throws -> WorkspaceTaskDetail {
         let id = percentEncodePathComponent(taskId)
         return try await request(
@@ -183,9 +200,10 @@ extension WandAPI {
 
     func createWorkspaceTaskWindow(
         target: WorkspaceSessionTarget,
-        binding: WorkspaceBinding
+        binding: WorkspaceBinding,
+        kind: WorkspaceSessionKind
     ) async throws -> SessionSnapshot {
-        let requestSpec = workspaceTaskWindowRequest(target: target, binding: binding)
+        let requestSpec = workspaceTaskWindowRequest(target: target, binding: binding, kind: kind)
         return try await request(
             SessionSnapshot.self,
             method: "POST",

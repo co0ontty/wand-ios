@@ -9,11 +9,17 @@ struct QRScannerSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @State private var authState: AuthState = .checking
     @State private var handled = false
     @State private var scanProgress: CGFloat = 0
 
-    private enum AuthState { case checking, granted, denied }
+    private enum AuthState {
+        case checking
+        case granted
+        case denied
+        case failed(String)
+    }
 
     var body: some View {
         NavigationView {
@@ -24,14 +30,21 @@ struct QRScannerSheet: View {
                     ProgressView().tint(.white)
                 case .denied:
                     deniedView
+                case .failed(let message):
+                    scannerFailureView(message)
                 case .granted:
-                    CameraPreview { code in
-                        guard !handled else { return }
-                        handled = true
-                        UINotificationFeedbackGenerator().notificationOccurred(.success)
-                        dismiss()
-                        onScanned(code)
-                    }
+                    CameraPreview(
+                        onCode: { code in
+                            guard !handled else { return }
+                            handled = true
+                            UINotificationFeedbackGenerator().notificationOccurred(.success)
+                            dismiss()
+                            onScanned(code)
+                        },
+                        onFailure: { message in
+                            authState = .failed(message)
+                        }
+                    )
                     .ignoresSafeArea()
                     scanOverlay
                 }
@@ -47,6 +60,9 @@ struct QRScannerSheet: View {
         }
         .navigationViewStyle(.stack)
         .onAppear { checkPermission() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { checkPermission() }
+        }
         .wandKeyboardShortcuts(scannerKeyboardShortcuts)
     }
 
@@ -152,6 +168,29 @@ struct QRScannerSheet: View {
         .padding(32)
     }
 
+    private func scannerFailureView(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "camera.metering.unknown")
+                .font(.system(size: 34))
+                .foregroundColor(.white.opacity(0.7))
+            Text("无法启动扫码相机")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.white)
+            Text(message)
+                .font(.system(size: 13))
+                .foregroundColor(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+            Button("重试") {
+                handled = false
+                authState = .granted
+            }
+            .buttonStyle(WandPrimaryButtonStyle())
+            Button("返回手动输入") { dismiss() }
+                .foregroundColor(.white.opacity(0.8))
+        }
+        .padding(32)
+    }
+
     // MARK: - 权限
 
     private func checkPermission() {
@@ -196,27 +235,28 @@ private struct QRCornerMarks: Shape {
 /// AVCaptureSession 包装：后台队列配置/启停，主队列回调识别结果。
 private struct CameraPreview: UIViewControllerRepresentable {
     let onCode: (String) -> Void
+    let onFailure: (String) -> Void
 
     func makeUIViewController(context: Context) -> ScannerController {
         let vc = ScannerController()
         vc.onCode = onCode
+        vc.onFailure = onFailure
         return vc
     }
 
     func updateUIViewController(_ vc: ScannerController, context: Context) {}
 
+    static func dismantleUIViewController(_ vc: ScannerController, coordinator: ()) {
+        vc.shutdown()
+    }
+
     final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
         var onCode: ((String) -> Void)?
+        var onFailure: ((String) -> Void)?
 
         private let session = AVCaptureSession()
         private let sessionQueue = DispatchQueue(label: "wand.qr.session")
         private var previewLayer: AVCaptureVideoPreviewLayer?
-
-        deinit {
-            // viewWillDisappear 已停 session，但极端时序（直接 dealloc）可能漏；
-            // deinit 兜底，确保摄像头硬件释放、不耗电、不阻塞其他 App 用摄像头。
-            if session.isRunning { session.stopRunning() }
-        }
 
         override func viewDidLoad() {
             super.viewDidLoad()
@@ -235,27 +275,59 @@ private struct CameraPreview: UIViewControllerRepresentable {
 
         override func viewWillDisappear(_ animated: Bool) {
             super.viewWillDisappear(animated)
-            sessionQueue.async { [weak self] in
-                guard let self, self.session.isRunning else { return }
-                self.session.stopRunning()
+            shutdown()
+        }
+
+        func shutdown() {
+            onCode = nil
+            onFailure = nil
+            let session = session
+            sessionQueue.async {
+                if session.isRunning { session.stopRunning() }
             }
         }
 
         private func configureAndStart() {
-            guard let device = AVCaptureDevice.default(for: .video),
-                  let input = try? AVCaptureDeviceInput(device: device) else { return }
-            session.beginConfiguration()
-            if session.canAddInput(input) { session.addInput(input) }
-            let output = AVCaptureMetadataOutput()
-            if session.canAddOutput(output) {
-                session.addOutput(output)
-                output.setMetadataObjectsDelegate(self, queue: .main)
-                if output.availableMetadataObjectTypes.contains(.qr) {
-                    output.metadataObjectTypes = [.qr]
-                }
+            guard let device = AVCaptureDevice.default(for: .video) else {
+                reportFailure("当前设备没有可用相机，请返回手动粘贴连接码。")
+                return
             }
+            let input: AVCaptureDeviceInput
+            do {
+                input = try AVCaptureDeviceInput(device: device)
+            } catch {
+                reportFailure("无法打开相机：\(error.localizedDescription)")
+                return
+            }
+            session.beginConfiguration()
+            guard session.canAddInput(input) else {
+                session.commitConfiguration()
+                reportFailure("无法配置相机输入，请关闭其他占用相机的 App 后重试。")
+                return
+            }
+            session.addInput(input)
+            let output = AVCaptureMetadataOutput()
+            guard session.canAddOutput(output) else {
+                session.commitConfiguration()
+                reportFailure("当前设备无法配置二维码识别输出。")
+                return
+            }
+            session.addOutput(output)
+            output.setMetadataObjectsDelegate(self, queue: .main)
+            guard output.availableMetadataObjectTypes.contains(.qr) else {
+                session.commitConfiguration()
+                reportFailure("当前相机不支持二维码识别。")
+                return
+            }
+            output.metadataObjectTypes = [.qr]
             session.commitConfiguration()
             session.startRunning()
+        }
+
+        private func reportFailure(_ message: String) {
+            DispatchQueue.main.async { [weak self] in
+                self?.onFailure?(message)
+            }
         }
 
         func metadataOutput(_ output: AVCaptureMetadataOutput,

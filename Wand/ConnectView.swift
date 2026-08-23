@@ -14,6 +14,7 @@ struct ConnectView: View {
     @State private var isConnecting = false
     @State private var connectingProfileID: String?
     @State private var connectionGeneration = 0
+    @State private var connectionAttempt: WandAuth.ConnectionAttempt?
     @State private var showScanner = false
     @State private var showLocalNetworkHint = false
     @State private var pendingRemoval: ServerProfile?
@@ -208,6 +209,7 @@ struct ConnectView: View {
                             .font(.system(size: 15))
                             .foregroundColor(Theme.textSecondary)
                     }
+                    .disabled(isConnecting)
                 }
             }
             .padding(.horizontal, 12)
@@ -324,43 +326,57 @@ struct ConnectView: View {
         let active = profile.id == store.activeServerID
         let connecting = profile.id == connectingProfileID
         return HStack(spacing: 9) {
-            Image(systemName: "server.rack")
-                .font(.system(size: 13))
-                .foregroundColor(active ? Theme.brand : Theme.textSecondary)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(profile.displayName)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(active ? Theme.brand : Theme.textPrimary)
-                        .lineLimit(1)
-                    if active {
-                        Text("当前")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(Theme.brand)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Theme.brand.opacity(0.12)))
+            Button {
+                connect(to: profile)
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "server.rack")
+                        .font(.system(size: 13))
+                        .foregroundColor(active ? Theme.brand : Theme.textSecondary)
+                        .frame(width: 18)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(profile.displayName)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(active ? Theme.brand : Theme.textPrimary)
+                                .lineLimit(1)
+                            if active {
+                                Text("当前")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(Theme.brand)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Theme.brand.opacity(0.12)))
+                            }
+                        }
+                        HStack(spacing: 6) {
+                            Text(safeDisplayURL(profile.baseURL))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(Theme.textSecondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(profile.hasToken ? "已认证" : "直接连接")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(profile.hasToken ? Theme.success : Theme.textSecondary)
+                        }
+                    }
+                    Spacer(minLength: 4)
+                    if connecting {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(Theme.brand)
+                            .padding(8)
                     }
                 }
-                HStack(spacing: 6) {
-                    Text(profile.baseURL.absoluteString)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(Theme.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(profile.hasToken ? "已认证" : "直接连接")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(profile.hasToken ? Theme.success : Theme.textSecondary)
-                }
+                .contentShape(Rectangle())
             }
-            Spacer(minLength: 4)
-            if connecting {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(Theme.brand)
-                    .padding(8)
-            } else {
+            .buttonStyle(.plain)
+            .disabled(isConnecting)
+            .accessibilityLabel(
+                "连接服务器 \(profile.displayName)，\(profile.hasToken ? "已认证" : "直接连接")\(active ? "，当前服务器" : "")"
+            )
+
+            if !connecting {
                 Button {
                     pendingRemoval = profile
                 } label: {
@@ -383,11 +399,15 @@ struct ConnectView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(Theme.border, lineWidth: 1)
         )
-        .contentShape(Rectangle())
-        .onTapGesture { connect(to: profile) }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(profile.displayName)，\(profile.hasToken ? "已认证" : "直接连接")\(active ? "，当前服务器" : "")")
-        .accessibilityAddTraits(.isButton)
+    }
+
+    private func safeDisplayURL(_ url: URL) -> String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url.absoluteString
+        }
+        components.user = nil
+        components.password = nil
+        return components.url?.absoluteString ?? "无效服务器地址"
     }
 
     private var footerHint: some View {
@@ -403,6 +423,7 @@ struct ConnectView: View {
     private func connect() {
         let raw = trimmedInput
         guard !raw.isEmpty, !isConnecting else { return }
+        connectionAttempt?.cancel()
         connectionGeneration &+= 1
         let generation = connectionGeneration
         isConnecting = true
@@ -411,9 +432,10 @@ struct ConnectView: View {
         showLocalNetworkHint = false
         inputFocused = false
 
-        WandAuth.resolve(rawInput: raw) { result in
+        connectionAttempt = WandAuth.resolve(rawInput: raw) { result in
             DispatchQueue.main.async {
                 guard generation == connectionGeneration else { return }
+                connectionAttempt = nil
                 isConnecting = false
                 switch result {
                 case .success(let target):
@@ -433,21 +455,30 @@ struct ConnectView: View {
 
     private func connect(to profile: ServerProfile) {
         guard !isConnecting else { return }
+        connectionAttempt?.cancel()
         connectionGeneration &+= 1
         let generation = connectionGeneration
         isConnecting = true
         connectingProfileID = profile.id
         error = nil
         showLocalNetworkHint = false
+        let expectedConnectionIdentity = profile.connectionIdentity
+        let targetEndpointSession = SelfSignedSession.forEndpoint(profile.baseURL)
 
         let finish: (Result<Void, WandAuth.Failure>) -> Void = { result in
             DispatchQueue.main.async {
                 guard generation == connectionGeneration else { return }
+                connectionAttempt = nil
                 isConnecting = false
                 connectingProfileID = nil
                 switch result {
                 case .success:
-                    store.activateProfile(id: profile.id)
+                    guard let current = store.profile(id: profile.id),
+                          current.connectionIdentity == expectedConnectionIdentity,
+                          store.activateProfile(id: profile.id) else {
+                        error = "服务器信息已变化，请按最新列表重试。"
+                        return
+                    }
                     onDismiss?()
                 case .failure(let failure):
                     error = failure.userMessage
@@ -459,12 +490,17 @@ struct ConnectView: View {
         }
 
         if let token = profile.token, !token.isEmpty {
-            WandAuth.loginWithToken(serverURL: profile.baseURL, appToken: token) { result in
-                finish(result.map { _ in () })
-            }
+            connectionAttempt = WandAuth.authenticate(
+                serverURL: profile.baseURL,
+                appToken: token,
+                targetEndpointSession: targetEndpointSession,
+                completion: finish
+            )
         } else {
-            WandAuth.probe(url: profile.baseURL) { reachable in
-                finish(reachable ? .success(()) : .failure(.network("无法连接到已保存的服务器")))
+            connectionAttempt = WandAuth.probeConnection(url: profile.baseURL) { reachable in
+                finish(reachable ? .success(()) : .failure(.network(
+                    "无法连接到已保存的服务器"
+                )))
             }
         }
     }
@@ -476,6 +512,8 @@ struct ConnectView: View {
 
     private func invalidateConnectionAttempt() {
         connectionGeneration &+= 1
+        connectionAttempt?.cancel()
+        connectionAttempt = nil
         isConnecting = false
         connectingProfileID = nil
     }

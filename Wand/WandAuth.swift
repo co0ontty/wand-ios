@@ -39,16 +39,85 @@ enum WandAuth {
         }
     }
 
+    final class ConnectionAttempt {
+        private let lock = NSLock()
+        private var task: URLSessionTask?
+        private var cleanup: (() -> Void)?
+        private var cancelled = false
+        private var finished = false
+
+        func setTask(_ task: URLSessionTask?) {
+            lock.lock()
+            if cancelled || finished {
+                lock.unlock()
+                task?.cancel()
+                return
+            }
+            self.task = task
+            lock.unlock()
+        }
+
+        func setCleanup(_ cleanup: @escaping () -> Void) {
+            lock.lock()
+            if cancelled {
+                lock.unlock()
+                cleanup()
+                return
+            }
+            self.cleanup = cleanup
+            lock.unlock()
+        }
+
+        func isCancelled() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        /// 只有第一个未取消的终态回调可以提交 cookie 并通知 UI。
+        func finish(commit: () -> Void = {}) -> Bool {
+            lock.lock()
+            guard !cancelled, !finished else {
+                lock.unlock()
+                return false
+            }
+            // commit 与取消共用同一把锁，消除“已 finish 但尚未写 cookie”的窗口。
+            commit()
+            finished = true
+            task = nil
+            cleanup = nil
+            lock.unlock()
+            return true
+        }
+
+        func cancel() {
+            lock.lock()
+            guard !cancelled, !finished else {
+                lock.unlock()
+                return
+            }
+            cancelled = true
+            let task = task
+            let cleanup = cleanup
+            self.task = nil
+            self.cleanup = nil
+            lock.unlock()
+            task?.cancel()
+            cleanup?()
+        }
+    }
+
     /// POST /api/login with `{ "appToken": ... }`，回调返回解析出的 `wand_session` cookie。
     /// 使用 `SelfSignedSession` 以放行自签名证书。
+    @discardableResult
     static func loginWithToken(serverURL: URL,
                                appToken: String,
                                timeout: TimeInterval = 15,
                                endpointSession: SelfSignedSession? = nil,
-                               completion: @escaping (Result<[HTTPCookie], Failure>) -> Void) {
+                               completion: @escaping (Result<[HTTPCookie], Failure>) -> Void) -> URLSessionDataTask? {
         guard let loginURL = WandEndpoint.url(baseURL: serverURL, route: "/api/login") else {
             completion(.failure(.invalidURL))
-            return
+            return nil
         }
 
         var req = URLRequest(url: loginURL)
@@ -59,13 +128,13 @@ enum WandAuth {
             req.httpBody = try JSONSerialization.data(withJSONObject: ["appToken": appToken])
         } catch {
             completion(.failure(.network(error.localizedDescription)))
-            return
+            return nil
         }
 
         let sessionHandle = endpointSession ?? SelfSignedSession.forEndpoint(serverURL)
         guard !sessionHandle.isRetired else {
             completion(.failure(.network("服务器连接已关闭")))
-            return
+            return nil
         }
         let task = sessionHandle.session.dataTask(with: req) { _, response, error in
             guard !sessionHandle.isRetired else {
@@ -110,6 +179,7 @@ enum WandAuth {
             }
         }
         task.resume()
+        return task
     }
 
     // MARK: - 连接码解码
@@ -133,21 +203,25 @@ enum WandAuth {
         let token: String?
     }
 
-    static func resolve(rawInput: String,
-                        completion: @escaping (Result<ConnectTarget, Failure>) -> Void) {
+    @discardableResult
+    static func resolve(
+        rawInput: String,
+        completion: @escaping (Result<ConnectTarget, Failure>) -> Void
+    ) -> ConnectionAttempt {
         let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { completion(.failure(.invalidURL)); return }
+        guard !trimmed.isEmpty else {
+            let attempt = ConnectionAttempt()
+            _ = attempt.finish()
+            completion(.failure(.invalidURL))
+            return attempt
+        }
 
         if let decoded = decodeConnectCode(trimmed) {
-            loginWithToken(serverURL: decoded.url, appToken: decoded.token) { result in
-                switch result {
-                case .success:
-                    completion(.success(ConnectTarget(url: decoded.url, token: decoded.token)))
-                case .failure(let err):
-                    completion(.failure(err))
-                }
+            return authenticate(serverURL: decoded.url, appToken: decoded.token) { result in
+                completion(result.map {
+                    ConnectTarget(url: decoded.url, token: decoded.token)
+                })
             }
-            return
         }
 
         // Compatibility with the old recent-connections screen: it now displays only a
@@ -155,71 +229,161 @@ enum WandAuth {
         // from the endpoint-scoped profile before falling back to an unauthenticated probe.
         if let saved = ServerStore.shared.profile(matching: trimmed),
            let savedToken = saved.token {
-            loginWithToken(serverURL: saved.baseURL, appToken: savedToken) { result in
-                switch result {
-                case .success:
-                    completion(.success(ConnectTarget(url: saved.baseURL, token: savedToken)))
-                case .failure(let error):
-                    completion(.failure(error))
-                }
+            return authenticate(serverURL: saved.baseURL, appToken: savedToken) { result in
+                completion(result.map {
+                    ConnectTarget(url: saved.baseURL, token: savedToken)
+                })
             }
-            return
         }
 
         let candidates = candidateURLs(from: trimmed)
-        guard !candidates.isEmpty else { completion(.failure(.invalidURL)); return }
-        probeSequential(candidates, index: 0, completion: completion)
+        guard !candidates.isEmpty else {
+            let attempt = ConnectionAttempt()
+            _ = attempt.finish()
+            completion(.failure(.invalidURL))
+            return attempt
+        }
+        let attempt = ConnectionAttempt()
+        probeSequential(candidates, index: 0, attempt: attempt, completion: completion)
+        return attempt
     }
 
-    /// 把裸输入展开成候选 URL：已带 scheme 则原样；否则 http 在前、https 在后。
+    /// Token 连接先在临时 cookie jar 中校验；只有未取消的成功尝试才提交到正式端点。
+    @discardableResult
+    static func authenticate(
+        serverURL: URL,
+        appToken: String,
+        targetEndpointSession: SelfSignedSession? = nil,
+        completion: @escaping (Result<Void, Failure>) -> Void
+    ) -> ConnectionAttempt {
+        let attempt = ConnectionAttempt()
+        let temporarySession = SelfSignedSession.temporary(forEndpoint: serverURL)
+        attempt.setCleanup { temporarySession.invalidate() }
+        let task = loginWithToken(
+            serverURL: serverURL,
+            appToken: appToken,
+            endpointSession: temporarySession
+        ) { result in
+            defer { temporarySession.invalidate() }
+            switch result {
+            case .success(let cookies):
+                let endpointSession = targetEndpointSession
+                    ?? SelfSignedSession.forEndpoint(serverURL)
+                var committed = false
+                guard attempt.finish(commit: {
+                    committed = endpointSession.storeCookiesIfActive(cookies)
+                }) else { return }
+                guard committed else {
+                    completion(.failure(.network("服务器连接已关闭")))
+                    return
+                }
+                completion(.success(()))
+            case .failure(let error):
+                guard attempt.finish() else { return }
+                completion(.failure(error))
+            }
+        }
+        attempt.setTask(task)
+        return attempt
+    }
+
+    /// 把裸输入展开成规范化候选 URL：已带 scheme 只尝试该地址，否则 http→https。
     static func candidateURLs(from input: String) -> [URL] {
-        var s = input
-        while s.hasSuffix("/") { s.removeLast() }
-        guard !s.isEmpty else { return [] }
-        let lower = s.lowercased()
+        var value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        while value.count > 1 && value.hasSuffix("/") { value.removeLast() }
+        guard !value.isEmpty else { return [] }
+        let lower = value.lowercased()
         if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
-            if let u = URL(string: s), u.host != nil { return [u] }
-            return []
+            return (try? ServerProfiles.canonicalBaseURL(value)).map { [$0] } ?? []
         }
-        return ["http://\(s)", "https://\(s)"].compactMap { raw -> URL? in
-            guard let u = URL(string: raw), u.host != nil else { return nil }
-            return u
+        return ["http://\(value)", "https://\(value)"].compactMap {
+            try? ServerProfiles.canonicalBaseURL($0)
         }
     }
 
-    private static func probeSequential(_ urls: [URL], index: Int,
-                                        completion: @escaping (Result<ConnectTarget, Failure>) -> Void) {
+    @discardableResult
+    static func probeConnection(
+        url: URL,
+        completion: @escaping (Bool) -> Void
+    ) -> ConnectionAttempt {
+        let attempt = ConnectionAttempt()
+        let task = probe(url: url) { reachable in
+            guard attempt.finish() else { return }
+            completion(reachable)
+        }
+        attempt.setTask(task)
+        return attempt
+    }
+
+    private static func probeSequential(
+        _ urls: [URL],
+        index: Int,
+        attempt: ConnectionAttempt,
+        completion: @escaping (Result<ConnectTarget, Failure>) -> Void
+    ) {
+        guard !attempt.isCancelled() else { return }
         guard index < urls.count else {
-            completion(.failure(.network("无法连接到服务器，请确认地址和端口，以及 wand 服务是否在运行")))
+            guard attempt.finish() else { return }
+            completion(.failure(.network(
+                "无法连接到服务器，请确认地址和端口，以及 wand 服务是否在运行"
+            )))
             return
         }
         let url = urls[index]
-        probe(url: url) { reachable in
+        let task = probe(url: url) { reachable in
+            guard !attempt.isCancelled() else { return }
             if reachable {
+                guard attempt.finish() else { return }
                 completion(.success(ConnectTarget(url: url, token: nil)))
             } else {
-                probeSequential(urls, index: index + 1, completion: completion)
+                probeSequential(
+                    urls,
+                    index: index + 1,
+                    attempt: attempt,
+                    completion: completion
+                )
             }
         }
+        attempt.setTask(task)
     }
 
-    /// 用公开端点 `/api/session-check` 探测可达性（始终返回 200，不会污染失败登录计数）。
-    static func probe(url: URL, timeout: TimeInterval = 6, completion: @escaping (Bool) -> Void) {
+    /// 公开探测必须返回 Wand 契约 `{"authed": Bool}`，且最终响应仍位于同一端点。
+    @discardableResult
+    static func probe(
+        url: URL,
+        timeout: TimeInterval = 6,
+        completion: @escaping (Bool) -> Void
+    ) -> URLSessionDataTask? {
         guard let checkURL = WandEndpoint.url(baseURL: url, route: "/api/session-check") else {
-            completion(false); return
+            completion(false)
+            return nil
         }
         var req = URLRequest(url: checkURL)
         req.timeoutInterval = timeout
         req.cachePolicy = .reloadIgnoringLocalCacheData
-        let task = SelfSignedSession.forEndpoint(url).session.dataTask(with: req) { _, response, error in
-            if error != nil { completion(false); return }
-            // 200（公开探测）或 401（旧版服务把 /api 全锁了）都说明服务器可达。
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 401 {
-                completion(true)
-            } else {
-                completion(false)
-            }
+        let task = SelfSignedSession.forEndpoint(url).session.dataTask(with: req) { data, response, error in
+            completion(error == nil && isValidSessionCheckResponse(
+                data: data,
+                response: response,
+                baseURL: url
+            ))
         }
         task.resume()
+        return task
+    }
+
+    static func isValidSessionCheckResponse(
+        data: Data?,
+        response: URLResponse?,
+        baseURL: URL
+    ) -> Bool {
+        guard let data,
+              let http = response as? HTTPURLResponse,
+              http.statusCode == 200,
+              let finalURL = http.url,
+              WandEndpointScope(baseURL)?.contains(finalURL) == true,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["authed"] is Bool else { return false }
+        return true
     }
 }

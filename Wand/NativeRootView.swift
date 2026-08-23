@@ -1,5 +1,18 @@
 import SwiftUI
 
+func quickActionRequiresRootSessionRouting(
+    _ action: QuickAction,
+    rootIsSessions: Bool,
+    hasPresentedSurface: Bool
+) -> Bool {
+    switch action {
+    case .newSession, .openSession:
+        return !rootIsSessions || hasPresentedSurface
+    case .openWeb, .showSessions:
+        return true
+    }
+}
+
 /// 原生客户端根视图：先用 appToken 登录拿 session cookie（ephemeral 存储，
 /// 冷启动后为空），然后进入原生会话列表。WebView 仅作为「网页版」兜底入口保留，
 /// 覆盖设置、文件浏览等原生未实现的功能。
@@ -137,7 +150,7 @@ struct NativeRootView: View {
             get: {
                 rootSection == .sessions
                     ? selectedSessionID
-                    : selectedWorkspaceTask?.task.id
+                    : selectedWorkspaceTask?.task.id ?? selectedSessionID
             },
             set: { value in
                 guard value == nil else { return }
@@ -147,6 +160,9 @@ struct NativeRootView: View {
                     openingSessionID = nil
                 } else {
                     selectedWorkspaceTask = nil
+                    selectedSessionID = nil
+                    selectedSnapshot = nil
+                    openingSessionID = nil
                 }
             }
         )
@@ -300,6 +316,9 @@ struct NativeRootView: View {
                             api: api,
                             selectedTaskId: selectedWorkspaceTask?.task.id,
                             onOpenTask: { workspace, task in
+                                selectedSessionID = nil
+                                selectedSnapshot = nil
+                                openingSessionID = nil
                                 selectedWorkspaceTask = WorkspaceTaskSelection(
                                     workspace: workspace,
                                     task: task
@@ -521,19 +540,52 @@ struct NativeRootView: View {
     }
 
     private func handleQuickAction() {
-        guard phase == .ready else { return }
-        if quickActions.consume(where: { $0 == .openWeb && $0.belongs(to: serverID) }) != nil {
+        guard phase == .ready,
+              let pending = quickActions.pending,
+              pending.belongs(to: serverID) else { return }
+        let hasPresentedSurface = showWebFallback || showSettings || showMissions
+
+        switch pending {
+        case .openWeb:
+            guard quickActions.consume(where: { $0 == pending }) != nil else { return }
             showSettings = false
             showWebFallback = true
-        } else if quickActions.consume(where: { $0 == .showSessions && $0.belongs(to: serverID) }) != nil {
-            rootSection = .sessions
+        case .showSessions:
+            guard quickActions.consume(where: { $0 == pending }) != nil else { return }
+            showSessionsRoot()
+        case .newSession:
+            guard quickActionRequiresRootSessionRouting(
+                pending,
+                rootIsSessions: rootSection == .sessions,
+                hasPresentedSurface: hasPresentedSurface
+            ), quickActions.consume(where: { $0 == pending }) != nil else { return }
+            showSessionsRoot()
+            // UnifiedSessionListView owns the sheet; remount it first, then deterministically
+            // republish instead of relying on Published's initial-subscription timing.
+            DispatchQueue.main.async {
+                QuickActionCoordinator.shared.enqueue(.newSession)
+            }
+        case .openSession(let id, _):
+            guard quickActionRequiresRootSessionRouting(
+                pending,
+                rootIsSessions: rootSection == .sessions,
+                hasPresentedSurface: hasPresentedSurface
+            ), quickActions.consume(where: { $0 == pending }) != nil else { return }
             showSettings = false
             showMissions = false
             showWebFallback = false
-            selectedSessionID = nil
-            selectedSnapshot = nil
-            openingSessionID = nil
+            openSessionFromMissions(id)
         }
+    }
+
+    private func showSessionsRoot() {
+        rootSection = .sessions
+        showSettings = false
+        showMissions = false
+        showWebFallback = false
+        selectedSessionID = nil
+        selectedSnapshot = nil
+        openingSessionID = nil
     }
 
     /// SwiftUI 没有为 navigationDestination(isPresented:) 提供转场完成回调。用一个短暂、
