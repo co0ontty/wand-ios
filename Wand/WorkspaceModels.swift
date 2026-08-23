@@ -384,8 +384,53 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
     let isolated: Bool?
     let worktreeError: String?
     let sessions: [WorkspaceSessionSummary]
+    let totalSessions: Int?
 
     var isIsolated: Bool { isolated ?? (worktree != nil) }
+    var listedSessionCount: Int { totalSessions ?? sessions.count }
+
+    init(
+        id: String,
+        workspaceId: String,
+        name: String,
+        worktree: WorkspaceTaskWorktree?,
+        layout: TaskWindowLayout?,
+        status: String,
+        createdAt: String,
+        lastOpenedAt: String?,
+        cwd: String,
+        isolated: Bool?,
+        worktreeError: String?,
+        sessions: [WorkspaceSessionSummary],
+        totalSessions: Int? = nil
+    ) {
+        self.id = id
+        self.workspaceId = workspaceId
+        self.name = name
+        self.worktree = worktree
+        self.layout = layout
+        self.status = status
+        self.createdAt = createdAt
+        self.lastOpenedAt = lastOpenedAt
+        self.cwd = cwd
+        self.isolated = isolated
+        self.worktreeError = worktreeError
+        self.sessions = sessions
+        self.totalSessions = totalSessions ?? sessions.count
+    }
+
+    func asTask() -> WorkspaceTask {
+        WorkspaceTask(
+            id: id,
+            workspaceId: workspaceId,
+            name: name,
+            worktree: worktree,
+            layout: layout,
+            status: status,
+            createdAt: createdAt,
+            lastOpenedAt: lastOpenedAt
+        )
+    }
 }
 
 /// 目录组一级容器：任务归属目录；未绑定任务的会话归入 standaloneSessions。

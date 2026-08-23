@@ -108,6 +108,9 @@ private func missionStatePresentation(_ state: String) -> (String, String, Color
 
 struct MissionsView: View {
     let api: WandAPI
+    var linkedTaskId: String? = nil
+    var linkedTaskName: String? = nil
+    var linkedTaskCwd: String? = nil
     let onOpenSession: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -154,7 +157,12 @@ struct MissionsView: View {
             }
         }
         .sheet(isPresented: $showCreate) {
-            MissionCreateView(api: api) { mission in
+            MissionCreateView(
+                api: api,
+                linkedTaskId: linkedTaskId,
+                linkedTaskName: linkedTaskName,
+                linkedTaskCwd: linkedTaskCwd
+            ) { mission in
                 refreshGeneration &+= 1
                 loading = false
                 missions.removeAll { $0.id == mission.id }
@@ -643,6 +651,9 @@ private struct MissionReviewComposer: View {
 
 private struct MissionCreateView: View {
     let api: WandAPI
+    var linkedTaskId: String? = nil
+    var linkedTaskName: String? = nil
+    var linkedTaskCwd: String? = nil
     let onCreated: (MissionInfo) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -659,6 +670,13 @@ private struct MissionCreateView: View {
     var body: some View {
         NavigationStack {
             Form {
+                if let linkedTaskName, !linkedTaskName.isEmpty {
+                    Section {
+                        Text("将关联任务「\(linkedTaskName)」。派发会话会落在该任务目录，不再叠加隔离 worktree。")
+                            .font(.footnote)
+                            .foregroundColor(Theme.textSecondary)
+                    }
+                }
                 Section("任务") {
                     TextField("标题（可选）", text: $title)
                     TextEditor(text: $prompt)
@@ -725,7 +743,13 @@ private struct MissionCreateView: View {
         }
         .interactiveDismissDisabled(submitting)
         .task {
-            if cwd.isEmpty { cwd = (try? await api.serverConfig().defaultCwd) ?? "" }
+            if cwd.isEmpty {
+                if let linkedTaskCwd, !linkedTaskCwd.isEmpty {
+                    cwd = linkedTaskCwd
+                } else {
+                    cwd = (try? await api.serverConfig().defaultCwd) ?? ""
+                }
+            }
         }
         .alert("无法创建任务", isPresented: Binding(
             get: { errorMessage != nil },
@@ -755,6 +779,7 @@ private struct MissionCreateView: View {
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines),
                 prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines),
                 cwd: cwd.trimmingCharacters(in: .whitespacesAndNewlines),
+                taskId: linkedTaskId,
                 providers: MissionProviderOption.all.map(\.id).filter { providers.contains($0) },
                 baseRef: baseRef.trimmingCharacters(in: .whitespacesAndNewlines),
                 sharedDirectories: paths(sharedPaths),

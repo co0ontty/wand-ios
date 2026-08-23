@@ -294,6 +294,7 @@ final class WorkspaceWorktreeTests: XCTestCase {
             "lastOpenedAt": null,
             "cwd": "/wt/login",
             "isolated": true,
+            "totalSessions": 4,
             "sessions": [{"id": "s1", "provider": "claude", "title": "登录会话"}]
           }],
           "standaloneSessions": [{"id": "s2", "sessionKind": "pty"}],
@@ -316,9 +317,28 @@ final class WorkspaceWorktreeTests: XCTestCase {
         XCTAssertTrue(groups[0].tasks[0].isIsolated)
         XCTAssertEqual(groups[0].tasks[0].cwd, "/wt/login")
         XCTAssertEqual(groups[0].tasks[0].sessions.first?.title, "登录会话")
+        XCTAssertEqual(groups[0].tasks[0].totalSessions, 4)
+        XCTAssertEqual(groups[0].tasks[0].listedSessionCount, 4)
         XCTAssertEqual(groups[0].standaloneSessions.count, 1)
         XCTAssertTrue(groups[1].isSynthetic)
         XCTAssertTrue(groups[1].tasks.isEmpty)
+    }
+
+    func testTaskSummaryFallsBackToEmbeddedSessionCountWhenTotalSessionsOmitted() throws {
+        let json = """
+        {
+          "id": "task-1",
+          "workspaceId": "ws-1",
+          "name": "修复登录",
+          "status": "active",
+          "createdAt": "2026-08-23T00:00:00.000Z",
+          "cwd": "/repo",
+          "sessions": [{"id": "s1"}, {"id": "s2"}]
+        }
+        """
+        let summary = try JSONDecoder().decode(WorkspaceTaskSummary.self, from: Data(json.utf8))
+        XCTAssertNil(summary.totalSessions)
+        XCTAssertEqual(summary.listedSessionCount, 2)
     }
 
     func testTaskDirectoryWorkspaceResolutionPreservesConfiguredProvider() throws {
