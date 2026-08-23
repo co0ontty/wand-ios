@@ -163,6 +163,10 @@ final class SessionListStore: ObservableObject {
             publishManagedSessions()
             return true
         } catch WandAPI.APIError.server(let status, _) where status == 409 {
+            // 409 = 服务端目录版本已前进而本地 revision 已过期。恢复刷新必须
+            // 丢弃过期 revision 再拉首页：带着旧 revision 会再次 409 或被服务端
+            // 以错误基线判定 unchanged，永远回不到一致状态。
+            revision = nil
             return await loadInsideOperation(silent: true)
         } catch {
             loadError = error.localizedDescription

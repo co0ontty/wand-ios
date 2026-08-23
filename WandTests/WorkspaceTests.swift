@@ -406,9 +406,14 @@ private final class MockWorkspaceService: WorkspaceServing {
     func createWorkspaceTask(
         workspaceId: String,
         name: String,
-        baseRef: String?
+        baseRef: String?,
+        worktree: Bool?
     ) async throws -> WorkspaceTaskCreation {
         throw MockError.createUnavailable
+    }
+
+    func listTaskGroups() async throws -> [TaskDirectoryGroup] {
+        []
     }
 
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview {

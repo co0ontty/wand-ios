@@ -28,8 +28,10 @@ protocol WorkspaceServing: AnyObject {
     func createWorkspaceTask(
         workspaceId: String,
         name: String,
-        baseRef: String?
+        baseRef: String?,
+        worktree: Bool?
     ) async throws -> WorkspaceTaskCreation
+    func listTaskGroups() async throws -> [TaskDirectoryGroup]
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview
     func startWorktreeMergeAgent(
         workspace: Workspace,
@@ -71,6 +73,9 @@ final class WorkspaceStore: ObservableObject {
     /// 项目直属会话（未绑定任务的会话），按项目缓存，展开项目行时加载。
     @Published private(set) var standaloneSessions: [String: [WorkspaceSessionSummary]] = [:]
     @Published private(set) var standaloneSessionErrors: [String: String] = [:]
+    /// 跨目录任务聚合（GET /api/tasks）；加载失败时置空并回退到逐项目拉取。
+    @Published private(set) var taskGroups: [TaskDirectoryGroup] = []
+    @Published private(set) var taskGroupsError: String?
 
     @Published private(set) var currentWorkspace: Workspace?
     @Published private(set) var currentTask: WorkspaceTask?
@@ -213,7 +218,8 @@ final class WorkspaceStore: ObservableObject {
         let creation = try await api.createWorkspaceTask(
             workspaceId: workspaceId,
             name: name,
-            baseRef: nil
+            baseRef: nil,
+            worktree: nil
         )
         var refreshed: [WorkspaceTask] = []
         do {
@@ -247,6 +253,62 @@ final class WorkspaceStore: ObservableObject {
                 lastOpenedAt: nil
             )
         return (creation, task)
+    }
+
+    /// 跨目录任务聚合：任务视图数据源；失败不阻塞项目树。
+    func loadTaskGroups(force: Bool = false) async {
+        if !force && !taskGroups.isEmpty { return }
+        do {
+            let groups = try await api.listTaskGroups()
+            taskGroups = groups
+            taskGroupsError = nil
+        } catch {
+            // 保留旧数据，仅记错误供 UI 提示；老服务端无该接口时静默降级。
+            if taskGroups.isEmpty { taskGroupsError = error.localizedDescription }
+        }
+    }
+
+    /// 任务一级入口：按目录 find-or-create 项目，再建任务（可选 worktree 隔离）。
+    @discardableResult
+    func createTask(
+        name: String,
+        directory: String,
+        worktree: Bool?
+    ) async throws -> (workspace: Workspace, creation: WorkspaceTaskCreation) {
+        let trimmedDirectory = directory.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmedDirectory.hasSuffix("/") && trimmedDirectory.count > 1
+            ? String(trimmedDirectory.dropLast())
+            : trimmedDirectory
+        let workspace: Workspace
+        if let existing = workspaces.first(where: { $0.cwd == normalized }) {
+            workspace = existing
+        } else {
+            let directoryName = normalized.split(separator: "/").last.map(String.init) ?? normalized
+            workspace = try await api.createWorkspace(
+                name: directoryName,
+                cwd: normalized,
+                defaultProvider: nil
+            )
+            workspaces.append(workspace)
+        }
+        let creation = try await api.createWorkspaceTask(
+            workspaceId: workspace.id,
+            name: name,
+            baseRef: nil,
+            worktree: worktree
+        )
+        tasksByWorkspace[workspace.id] = (tasksByWorkspace[workspace.id] ?? []) + [WorkspaceTask(
+            id: creation.id,
+            workspaceId: creation.workspaceId,
+            name: creation.name,
+            worktree: creation.worktree,
+            layout: nil,
+            status: creation.status,
+            createdAt: "",
+            lastOpenedAt: nil
+        )]
+        await loadTaskGroups(force: true)
+        return (workspace, creation)
     }
 
     /// Worktree 合并：用审查结果生成任务书并启动只绑定项目的托管 Agent 会话。

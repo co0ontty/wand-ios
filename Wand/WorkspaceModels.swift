@@ -350,6 +350,38 @@ struct WorkspaceTask: Codable, Equatable, Identifiable {
     let lastOpenedAt: String?
 }
 
+/// GET /api/tasks 聚合行：任务 + 运行期派生字段；目录信息在 TaskDirectoryGroup 上。
+struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
+    let id: String
+    let workspaceId: String
+    let name: String
+    let worktree: WorkspaceTaskWorktree?
+    let layout: TaskWindowLayout?
+    let status: String
+    let createdAt: String
+    let lastOpenedAt: String?
+    let cwd: String
+    let isolated: Bool?
+    let worktreeError: String?
+    let sessions: [WorkspaceSessionSummary]
+
+    var isIsolated: Bool { isolated ?? (worktree != nil) }
+}
+
+/// 目录组一级容器：任务归属目录；未绑定任务的会话归入 standaloneSessions。
+/// synthetic 表示该目录没有项目实体，仅用于展示。
+struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
+    let workspaceId: String
+    let workspaceName: String
+    let workspaceCwd: String
+    let synthetic: Bool?
+    let tasks: [WorkspaceTaskSummary]
+    let standaloneSessions: [WorkspaceSessionSummary]
+
+    var id: String { workspaceId }
+    var isSynthetic: Bool { synthetic ?? false }
+}
+
 struct WorkspaceTaskDetail: Codable, Equatable, Identifiable {
     let id: String
     let workspaceId: String

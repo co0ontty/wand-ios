@@ -51,7 +51,7 @@ struct NativeRootView: View {
         case workspaces
 
         var id: String { rawValue }
-        var title: String { self == .sessions ? "会话" : "项目" }
+        var title: String { self == .sessions ? "会话" : "任务" }
         var icon: String { self == .sessions ? "bubble.left.and.bubble.right" : "folder" }
     }
 
