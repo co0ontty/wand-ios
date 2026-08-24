@@ -49,9 +49,9 @@ struct WorkspaceListView: View {
     @State private var deleteError: String?
     @State private var newTaskSheetPresented = false
     @State private var newTaskSheetCwd = ""
-    @State private var expandedTaskGroups = Set<String>()
-    @State private var expandedTaskIds = Set<String>()
-    @State private var expandedLooseGroups = Set<String>()
+    @State private var collapsedTaskGroups = Set<String>()
+    @State private var collapsedTaskIds = Set<String>()
+    @State private var collapsedLooseGroups = Set<String>()
     @State private var clearTarget: WorkspaceTaskSummary?
     @State private var clearBusy = false
     @State private var renameWorkspaceTarget: Workspace?
@@ -103,7 +103,7 @@ struct WorkspaceListView: View {
                 }
             }
             .onChange(of: selectedTaskId) { _, taskId in
-                if let taskId { expandedTaskIds.insert(taskId) }
+                if let taskId { collapsedTaskIds.remove(taskId) }
             }
             .onChange(of: requestNewTask.wrappedValue) { _, requested in
                 guard requested else { return }
@@ -467,7 +467,7 @@ struct WorkspaceListView: View {
                 .listRowSeparator(.hidden)
             }
             ForEach(visible) { group in
-                taskGroupSection(group)
+                taskGroupSection(group, directoryCount: visible.count)
             }
         }
         .listStyle(.plain)
@@ -477,81 +477,111 @@ struct WorkspaceListView: View {
         }
     }
 
-    private func taskGroupSection(_ group: TaskDirectoryGroup) -> some View {
-        DisclosureGroup(
-            isExpanded: Binding(
-                get: { expandedTaskGroups.contains(group.id) },
-                set: { expanded in
-                    if expanded { expandedTaskGroups.insert(group.id) } else { expandedTaskGroups.remove(group.id) }
-                }
-            )
-        ) {
+    @ViewBuilder
+    private func taskGroupSection(_ group: TaskDirectoryGroup, directoryCount: Int) -> some View {
+        let expanded = TaskListPresentation.isDirectoryExpanded(
+            userCollapsed: collapsedTaskGroups.contains(group.id),
+            directoryCount: directoryCount
+        )
+        let collapsible = TaskListPresentation.showsDirectoryDisclosure(directoryCount: directoryCount)
+        taskGroupHeader(group, expanded: expanded, collapsible: collapsible)
+            .listRowBackground(Theme.background)
+            .listRowSeparator(.hidden)
+        if expanded {
             ForEach(group.tasks) { summary in
                 taskSummaryRow(summary, group: group)
+                    .listRowBackground(Theme.background)
+                    .listRowSeparator(.hidden)
             }
             if group.tasks.isEmpty && group.standaloneSessions.isEmpty {
                 Text("这个目录还没有任务。")
                     .font(.footnote)
                     .foregroundColor(Theme.textMuted)
                     .padding(.vertical, 10)
+                    .listRowBackground(Theme.background)
+                    .listRowSeparator(.hidden)
             }
             if !group.standaloneSessions.isEmpty {
-                DisclosureGroup(
-                    isExpanded: Binding(
-                        get: { expandedLooseGroups.contains(group.id) },
-                        set: { expanded in
-                            if expanded { expandedLooseGroups.insert(group.id) } else { expandedLooseGroups.remove(group.id) }
-                        }
-                    )
-                ) {
-                    ForEach(group.standaloneSessions) { session in
-                        standaloneSessionRow(session, workspace: workspace(from: group))
-                    }
-                } label: {
-                    Text("未分组会话（\(group.standaloneSessions.count)）")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Theme.textMuted)
-                }
-                .padding(.vertical, 3)
+                standaloneSessionSection(group)
             }
-        } label: {
-            taskGroupHeader(group)
         }
-        .listRowBackground(Theme.background)
-        .listRowSeparator(.hidden)
     }
 
-    private func taskGroupHeader(_ group: TaskDirectoryGroup) -> some View {
-        HStack(spacing: 11) {
-            Image(systemName: group.isSynthetic ? "folder.badge.questionmark" : "folder.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(Theme.brand)
-                .frame(width: 32, height: 32)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Theme.brand.opacity(0.10))
-                )
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(group.workspaceName)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                    if group.isSynthetic {
-                        Text("未归档目录")
-                            .font(.system(size: 10, weight: .medium))
+    @ViewBuilder
+    private func standaloneSessionSection(_ group: TaskDirectoryGroup) -> some View {
+        let expanded = !collapsedLooseGroups.contains(group.id)
+        Button {
+            toggleCollapsedLooseGroup(group.id)
+        } label: {
+            HStack {
+                Text("未分组会话（\(group.standaloneSessions.count)）")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Theme.textMuted)
+                Spacer(minLength: 6)
+                treeDisclosureCaret(expanded: expanded)
+            }
+            .padding(.vertical, 3)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(expanded ? "收起未分组会话" : "展开未分组会话")
+        .listRowBackground(Theme.background)
+        .listRowSeparator(.hidden)
+        if expanded {
+            ForEach(group.standaloneSessions) { session in
+                standaloneSessionRow(session, workspace: workspace(from: group))
+                    .listRowBackground(Theme.background)
+                    .listRowSeparator(.hidden)
+            }
+        }
+    }
+
+    private func taskGroupHeader(_ group: TaskDirectoryGroup, expanded: Bool, collapsible: Bool) -> some View {
+        let sessionTotal = group.tasks.reduce(0) { $0 + $1.listedSessionCount } + group.standaloneSessions.count
+        return HStack(spacing: 11) {
+            HStack(spacing: 11) {
+                Image(systemName: group.isSynthetic ? "folder.badge.questionmark" : "folder.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(Theme.brand)
+                    .frame(width: 32, height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Theme.brand.opacity(0.10))
+                    )
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(group.workspaceName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(Theme.textPrimary)
+                            .lineLimit(1)
+                        if group.isSynthetic {
+                            Text("未归档目录")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(Theme.textMuted)
+                        }
+                    }
+                    if let caption = TaskListPresentation.directoryPathCaption(name: group.workspaceName, cwd: group.workspaceCwd) {
+                        Text(caption)
+                            .font(.system(size: 10, design: .monospaced))
                             .foregroundColor(Theme.textMuted)
+                            .lineLimit(1)
                     }
                 }
-                if let caption = TaskListPresentation.directoryPathCaption(name: group.workspaceName, cwd: group.workspaceCwd) {
-                    Text(caption)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(Theme.textMuted)
-                        .lineLimit(1)
-                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard collapsible else { return }
+                toggleCollapsedTaskGroup(group.id)
             }
             Spacer(minLength: 6)
-            let sessionTotal = group.tasks.reduce(0) { $0 + $1.listedSessionCount } + group.standaloneSessions.count
+            if collapsible {
+                Button {
+                    toggleCollapsedTaskGroup(group.id)
+                } label: {
+                    treeDisclosureCaret(expanded: expanded)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(expanded ? "收起目录" : "展开目录")
+            }
             Text("\(group.tasks.count) 任务 · \(sessionTotal) 会话")
                 .font(.system(size: 10))
                 .foregroundColor(Theme.textMuted)
@@ -573,59 +603,69 @@ struct WorkspaceListView: View {
         .accessibilityLabel("目录 \(group.workspaceName)，\(group.tasks.count) 个任务")
     }
 
+    private func treeDisclosureCaret(expanded: Bool) -> some View {
+        Image(systemName: "chevron.down")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(Theme.textMuted)
+            .rotationEffect(.degrees(expanded ? 0 : -90))
+            .frame(width: 18, height: 22)
+    }
+
+    private func toggleCollapsedTaskGroup(_ id: String) {
+        if collapsedTaskGroups.contains(id) {
+            collapsedTaskGroups.remove(id)
+        } else {
+            collapsedTaskGroups.insert(id)
+        }
+    }
+
+    private func toggleCollapsedTask(_ id: String) {
+        if collapsedTaskIds.contains(id) {
+            collapsedTaskIds.remove(id)
+        } else {
+            collapsedTaskIds.insert(id)
+        }
+    }
+
+    private func toggleCollapsedLooseGroup(_ id: String) {
+        if collapsedLooseGroups.contains(id) {
+            collapsedLooseGroups.remove(id)
+        } else {
+            collapsedLooseGroups.insert(id)
+        }
+    }
+
     private func taskSummaryRow(_ summary: WorkspaceTaskSummary, group: TaskDirectoryGroup) -> some View {
         let selected = selectedTaskId == summary.id
-        let expanded = expandedTaskIds.contains(summary.id) || selected
+        let canCollapseSessions = TaskListPresentation.showsTaskSessionDisclosure(sessionCount: summary.listedSessionCount)
+        let expanded = TaskListPresentation.isTaskSessionsExpanded(
+            userCollapsed: collapsedTaskIds.contains(summary.id),
+            sessionCount: summary.listedSessionCount
+        )
         let workspace = workspace(from: group)
         let task = summary.asTask()
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
                 Button {
-                    if expandedTaskIds.contains(summary.id) {
-                        expandedTaskIds.remove(summary.id)
-                    } else {
-                        expandedTaskIds.insert(summary.id)
-                    }
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(Theme.textMuted)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                        .frame(width: 22, height: 30)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(expanded ? "收起终端" : "展开终端")
-
-                Button {
-                    expandedTaskIds.insert(summary.id)
+                    collapsedTaskIds.remove(summary.id)
                     onOpenTask(workspace, task)
                 } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: summary.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(summary.status == "done" ? Theme.success : Theme.textSecondary)
-                            .frame(width: 30, height: 30)
-                            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.surface))
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(summary.name)
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundColor(Theme.textPrimary)
-                                .lineLimit(2)
-                            Text(TaskListPresentation.taskIsolationCaption(isolated: summary.isIsolated))
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(Theme.textMuted)
-                                .lineLimit(1)
+                    HStack(spacing: 8) {
+                        if summary.isIsolated || summary.status == "done" {
+                            Image(systemName: summary.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(summary.status == "done" ? Theme.success : Theme.textMuted)
+                                .frame(width: 18, height: 18)
                         }
+                        Text(summary.name)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(Theme.textPrimary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
                         Spacer(minLength: 4)
-                        if summary.listedSessionCount > 0 {
-                            Text("\(summary.listedSessionCount)")
-                                .font(.system(size: 11, weight: .semibold))
-                                .monospacedDigit()
-                                .foregroundColor(Theme.textMuted)
-                        }
                         if selected {
                             Image(systemName: "checkmark")
-                                .font(.system(size: 12, weight: .bold))
+                                .font(.system(size: 11, weight: .bold))
                                 .foregroundColor(Theme.brand)
                         }
                     }
@@ -633,30 +673,44 @@ struct WorkspaceListView: View {
                 }
                 .buttonStyle(.plain)
 
+                if canCollapseSessions {
+                    Button {
+                        toggleCollapsedTask(summary.id)
+                    } label: {
+                        HStack(spacing: 2) {
+                            Text("\(summary.listedSessionCount)")
+                                .font(.system(size: 11, weight: .semibold))
+                                .monospacedDigit()
+                                .foregroundColor(Theme.textMuted)
+                            treeDisclosureCaret(expanded: expanded)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(expanded ? "收起终端" : "展开终端")
+                }
+
                 Button {
-                    expandedTaskIds.insert(summary.id)
+                    collapsedTaskIds.remove(summary.id)
                     onRequestNewSession?(workspace, task)
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(Theme.brand)
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(Theme.brand.opacity(0.10)))
+                        .frame(width: 22, height: 22)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("在任务 \(summary.name) 中新建终端")
             }
-            .padding(.leading, 8)
             .padding(.vertical, 4)
             .contextMenu {
                 Button {
-                    expandedTaskIds.insert(summary.id)
+                    collapsedTaskIds.remove(summary.id)
                     onOpenTask(workspace, task)
                 } label: {
                     Label("打开任务", systemImage: "arrow.forward")
                 }
                 Button {
-                    expandedTaskIds.insert(summary.id)
+                    collapsedTaskIds.remove(summary.id)
                     onRequestNewSession?(workspace, task)
                 } label: {
                     Label("新建终端", systemImage: "plus")
@@ -705,7 +759,7 @@ struct WorkspaceListView: View {
                     .tint(.orange)
                 }
                 Button {
-                    expandedTaskIds.insert(summary.id)
+                    collapsedTaskIds.remove(summary.id)
                     onRequestNewSession?(workspace, task)
                 } label: {
                     Label("新建", systemImage: "plus")
@@ -718,7 +772,7 @@ struct WorkspaceListView: View {
                     Text("还没有终端。点右侧「＋」新建。")
                         .font(.footnote)
                         .foregroundColor(Theme.textMuted)
-                        .padding(.leading, 46)
+                        .padding(.leading, 8)
                         .padding(.vertical, 6)
                 } else {
                     ForEach(Array(summary.sessions.enumerated()), id: \.element.id) { index, session in
@@ -728,7 +782,7 @@ struct WorkspaceListView: View {
                         Text("列表仅显示 \(summary.sessions.count)/\(summary.listedSessionCount) 个会话，打开任务可查看全部。")
                             .font(.caption)
                             .foregroundColor(Theme.textMuted)
-                            .padding(.leading, 46)
+                            .padding(.leading, 8)
                             .padding(.vertical, 6)
                     }
                 }
@@ -771,8 +825,13 @@ struct WorkspaceListView: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.leading, 46)
+            .padding(.leading, 10)
+            .padding(.trailing, 8)
             .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(selected ? Theme.brand.opacity(0.10) : Color.clear)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1045,24 +1104,17 @@ struct WorkspaceListView: View {
             onOpenTask(workspace, task)
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: task.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(task.status == "done" ? Theme.success : Theme.textSecondary)
-                    .frame(width: 30, height: 30)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(Theme.surface)
-                    )
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(task.name)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(2)
-                    Text(TaskListPresentation.taskIsolationCaption(isolated: task.worktree != nil))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(Theme.textMuted)
-                        .lineLimit(1)
+                if task.status == "done" || task.worktree != nil {
+                    Image(systemName: task.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(task.status == "done" ? Theme.success : Theme.textMuted)
+                        .frame(width: 18, height: 18)
                 }
+                Text(task.name)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
                 Spacer(minLength: 4)
                 if selectedTaskId == task.id {
                     Image(systemName: "checkmark")

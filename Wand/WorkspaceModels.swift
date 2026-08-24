@@ -469,8 +469,24 @@ enum TaskListPresentation {
         return shortened
     }
 
-    static func taskIsolationCaption(isolated: Bool) -> String {
-        isolated ? "隔离" : "共享"
+    static func taskIsolationCaption(isolated: Bool) -> String? {
+        isolated ? "隔离" : nil
+    }
+
+    static func showsDirectoryDisclosure(directoryCount: Int) -> Bool {
+        directoryCount > 1
+    }
+
+    static func showsTaskSessionDisclosure(sessionCount: Int) -> Bool {
+        sessionCount > 0
+    }
+
+    static func isDirectoryExpanded(userCollapsed: Bool, directoryCount: Int) -> Bool {
+        !showsDirectoryDisclosure(directoryCount: directoryCount) || !userCollapsed
+    }
+
+    static func isTaskSessionsExpanded(userCollapsed: Bool, sessionCount: Int) -> Bool {
+        !showsTaskSessionDisclosure(sessionCount: sessionCount) || !userCollapsed
     }
 
     static func listSessionLabel(

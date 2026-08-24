@@ -4,6 +4,16 @@ import XCTest
 
 @MainActor
 final class WorkspaceTests: XCTestCase {
+    func testWorkspaceTaskNavigationChromeAvoidsDuplicateNames() {
+        XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "修顶栏", workspaceName: "wand").title, "修顶栏")
+        XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "修顶栏", workspaceName: "wand").subtitle, "wand")
+        XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "wand", workspaceName: "wand").title, "wand")
+        XCTAssertNil(workspaceTaskNavigationChrome(taskName: "wand", workspaceName: "wand").subtitle)
+        XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "  ", workspaceName: "wand").title, "wand")
+        XCTAssertNil(workspaceTaskNavigationChrome(taskName: "  ", workspaceName: "wand").subtitle)
+        XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "", workspaceName: "").title, "任务")
+    }
+
     func testTaskListPresentationShortensPathsAndAvoidsSharedDirectoryLabel() {
         XCTAssertEqual(
             TaskListPresentation.shortenWorkspacePath("/Users/me/Self/vibe_coding/wand"),
@@ -13,7 +23,8 @@ final class WorkspaceTests: XCTestCase {
             TaskListPresentation.directoryPathCaption(name: "wand", cwd: "/Users/me/Self/vibe_coding/wand"),
             "…/vibe_coding/wand"
         )
-        XCTAssertEqual(TaskListPresentation.taskIsolationCaption(isolated: false), "共享")
+        XCTAssertNil(TaskListPresentation.taskIsolationCaption(isolated: false))
+        XCTAssertEqual(TaskListPresentation.taskIsolationCaption(isolated: true), "隔离")
         XCTAssertEqual(
             TaskListPresentation.listSessionLabel(
                 title: "wand",
@@ -24,6 +35,17 @@ final class WorkspaceTests: XCTestCase {
             ),
             "Pi 1"
         )
+    }
+
+    func testTaskTreeHidesNeedlessCaretsAndKeepsTerminalsOpen() {
+        XCTAssertFalse(TaskListPresentation.showsDirectoryDisclosure(directoryCount: 1))
+        XCTAssertTrue(TaskListPresentation.showsDirectoryDisclosure(directoryCount: 2))
+        XCTAssertTrue(TaskListPresentation.isDirectoryExpanded(userCollapsed: true, directoryCount: 1))
+        XCTAssertFalse(TaskListPresentation.isDirectoryExpanded(userCollapsed: true, directoryCount: 2))
+        XCTAssertFalse(TaskListPresentation.showsTaskSessionDisclosure(sessionCount: 0))
+        XCTAssertTrue(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: true, sessionCount: 0))
+        XCTAssertFalse(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: true, sessionCount: 2))
+        XCTAssertTrue(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: false, sessionCount: 2))
     }
 
     func testWorkspaceDetailAndRecursiveLayoutDecodeUnknownTabs() throws {

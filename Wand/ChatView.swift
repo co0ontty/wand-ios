@@ -62,6 +62,9 @@ private extension EnvironmentValues {
 struct ChatView: View {
     private let sessionId: String
     private let api: WandAPI
+    /// 工作区任务页已经有系统返回键和任务标题。嵌套时再往导航栏塞 badge / 路径，
+    /// 会和 iOS 26 圆形返回键叠在一起，浅色背景下看起来像残影。
+    private let showsNavigationChrome: Bool
 
     @StateObject private var store: ChatStore
     @StateObject private var keyboard = KeyboardObserver()
@@ -107,11 +110,14 @@ struct ChatView: View {
     /// 应用前后台感知：回前台做连接健康检查 + 拉最新快照，避免半死连接苦等 40s 看门狗。
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @FocusState private var inputFocused: Bool
+    /// 不用 @FocusState：输入框是 UIKit UITextView，没有挂 .focused()。
+    /// FocusState 在没有绑定视图时会把 true 立刻打回 false，updateUIView 再 resign，键盘就弹不出来。
+    @State private var inputFocused = false
 
-    init(sessionId: String, api: WandAPI) {
+    init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true) {
         self.sessionId = sessionId
         self.api = api
+        self.showsNavigationChrome = showsNavigationChrome
         _store = StateObject(wrappedValue: ChatStore(sessionId: sessionId, api: api))
         _attachments = StateObject(wrappedValue: ComposerAttachmentController(sessionId: sessionId, api: api))
     }
@@ -174,21 +180,19 @@ struct ChatView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                providerBadge
+            if showsNavigationChrome {
+                ToolbarItem(placement: .principal) {
+                    navigationStatus
+                }
+                .sharedBackgroundVisibility(.hidden)
             }
-            .sharedBackgroundVisibility(.hidden)
-
-            ToolbarItem(placement: .principal) {
-                navigationStatus
-            }
-            .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .navigationBarTrailing) {
                 GitChangesToolbarButton(status: gitStatus, phase: quickCommitFeedback.phase) {
                     showQuickCommit = true
                 }
             }
         }
+        .wandToolbarSurface(enabled: showsNavigationChrome)
         // 关掉系统键盘避让，统一交给 KeyboardObserver 手动抬升（见 bottomBar），
         // 避免「系统抬一次 + 手动抬一次」叠加或两边都不抬的不确定行为。
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -986,7 +990,8 @@ struct ChatView: View {
         (thinkingLevels.first { $0.id == id } ?? thinkingLevels.first)?.shortLabel ?? "自"
     }
 
-    /// 顶栏左侧 provider 标识：与会话列表 / Android 一致，仅展示透明底品牌 logo。
+    /// 顶栏身份：logo 放在标题左侧，不要再塞进 navigationBarLeading。
+    /// iOS 26 圆形返回键会占掉 leading 区域，badge / 路径叠在返回键下面会变成浅色残影。
     private var providerBadge: some View {
         let provider = currentProvider
         let tint = providerTint
@@ -997,18 +1002,20 @@ struct ChatView: View {
     }
 
     private var navigationStatus: some View {
-        VStack(spacing: 0) {
-            Text(navigationStatusTitle)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: 190)
-                .topicTitleRhythm(store.titleGenerating)
-            if let cwd = store.snapshot?.cwd, !cwd.isEmpty {
-                WandPathRevealText(path: cwd, fontSize: 8, color: Theme.textMuted, staggerWindow: 0)
-                    .frame(width: 190)
+        HStack(spacing: 8) {
+            providerBadge
+            VStack(alignment: .leading, spacing: 1) {
+                Text(navigationStatusTitle)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .topicTitleRhythm(store.titleGenerating)
+                if let cwd = store.snapshot?.cwd, !cwd.isEmpty {
+                    WandPathRevealText(path: cwd, fontSize: 10, color: Theme.textSecondary, staggerWindow: 0)
+                }
             }
+            .frame(maxWidth: 220, alignment: .leading)
         }
         .accessibilityElement(children: .combine)
     }
@@ -1527,8 +1534,8 @@ struct ChatView: View {
         attachments.attachments.removeAll()
         scrollMode = .stickToBottom
         store.send(text: text)
-        // 清空 draft 后，权限卡/todo bar 的插入移除可能让 @FocusState 丢焦点、键盘收起，
-        // 用户得再点一次输入框才能继续。发送后主动保持焦点。
+        // 清空 draft 后，权限卡/todo bar 的插入移除可能让输入框丢焦点。
+        // 发送后主动保持焦点，方便连续输入。
         inputFocused = true
     }
 

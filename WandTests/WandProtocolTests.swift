@@ -182,6 +182,18 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertFalse(composerDraftIsSendable("   ", hasAttachments: false, isComposing: false))
     }
 
+    func testComposerOnlyResignsFocusAfterSwiftUITurnsItOff() {
+        XCTAssertTrue(composerShouldRequestFocus(isFocused: true, isFirstResponder: false))
+        XCTAssertFalse(composerShouldRequestFocus(isFocused: true, isFirstResponder: true))
+        XCTAssertFalse(composerShouldRequestFocus(isFocused: false, isFirstResponder: false))
+        XCTAssertFalse(composerShouldRequestFocus(isFocused: false, isFirstResponder: true))
+
+        XCTAssertFalse(composerShouldResignFocus(isFocused: false, wasFocused: false, isFirstResponder: true))
+        XCTAssertTrue(composerShouldResignFocus(isFocused: false, wasFocused: true, isFirstResponder: true))
+        XCTAssertFalse(composerShouldResignFocus(isFocused: true, wasFocused: true, isFirstResponder: true))
+        XCTAssertFalse(composerShouldResignFocus(isFocused: false, wasFocused: true, isFirstResponder: false))
+    }
+
     func testSessionTimeFormattingParsesIso8601AndFormatsDuration() {
         XCTAssertNotNil(SessionTimeFormatting.date(from: "2026-07-19T12:34:56Z"))
         XCTAssertNotNil(SessionTimeFormatting.date(from: "2026-07-19T12:34:56.789Z"))

@@ -1,5 +1,49 @@
 import SwiftUI
 
+func workspaceTaskNavigationChrome(taskName: String, workspaceName: String) -> (title: String, subtitle: String?) {
+    let task = taskName.trimmingCharacters(in: .whitespacesAndNewlines)
+    let workspace = workspaceName.trimmingCharacters(in: .whitespacesAndNewlines)
+    if task.isEmpty {
+        return (workspace.isEmpty ? "任务" : workspace, nil)
+    }
+    if workspace.isEmpty || workspace.compare(task, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame {
+        return (task, nil)
+    }
+    return (task, workspace)
+}
+
+/// 任务 Tab 条的铬色：结构化对话跟随亮暗主题；PTY 终端页固定深色铬，
+/// 与下方终端视口 / 深色导航栏保持一致，避免浅色主题下 Tab 条孤立发白。
+struct SessionStripPalette {
+    let background: Color
+    let chipFill: Color
+    let chipBorder: Color
+    let text: Color
+    let muted: Color
+    let plusFill: Color
+
+    static func palette(terminalChrome: Bool) -> SessionStripPalette {
+        if terminalChrome {
+            return SessionStripPalette(
+                background: Theme.terminalBackground,
+                chipFill: Color.white.opacity(0.07),
+                chipBorder: Color.white.opacity(0.14),
+                text: Theme.terminalText.opacity(0.78),
+                muted: Theme.terminalText.opacity(0.45),
+                plusFill: Color.white.opacity(0.06)
+            )
+        }
+        return SessionStripPalette(
+            background: Theme.background,
+            chipFill: Theme.surface,
+            chipBorder: Theme.border,
+            text: Theme.textSecondary,
+            muted: Theme.textMuted,
+            plusFill: Theme.surface
+        )
+    }
+}
+
 struct WorkspaceTaskView: View {
     let workspace: Workspace
     let task: WorkspaceTask
@@ -15,7 +59,11 @@ struct WorkspaceTaskView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if store.currentTask?.id == task.id, store.taskState.detail != nil {
+            ToolbarItem(placement: .principal) {
+                workspaceNavigationTitle
+            }
+            .sharedBackgroundVisibility(.hidden)
+            if showsToolbarPlus {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { store.presentTargetPicker() } label: {
                         Image(systemName: "plus.circle.fill")
@@ -27,6 +75,7 @@ struct WorkspaceTaskView: View {
                 }
             }
         }
+        .wandToolbarSurface()
         .sheet(isPresented: pickerBinding) {
             WorkspaceTargetPicker(store: store, taskId: task.id)
                 .presentationDetents([.large])
@@ -49,6 +98,29 @@ struct WorkspaceTaskView: View {
         } message: {
             Text("终端会结束并被删除，此操作无法撤销。")
         }
+    }
+
+    private var showsToolbarPlus: Bool {
+        guard store.currentTask?.id == task.id else { return false }
+        if case .empty = store.taskState { return true }
+        return false
+    }
+
+    private var workspaceNavigationTitle: some View {
+        let chrome = workspaceTaskNavigationChrome(taskName: task.name, workspaceName: workspace.name)
+        return VStack(spacing: 1) {
+            Text(chrome.title)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+                .lineLimit(1)
+            if let subtitle = chrome.subtitle {
+                Text(subtitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(1)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private var pickerBinding: Binding<Bool> {
@@ -162,13 +234,30 @@ struct WorkspaceTaskView: View {
             if let warning = store.layoutWarning {
                 warningBanner(warning)
             }
-            sessionStrip(detail.sessions)
-            Divider().overlay(Theme.border)
+            // PTY 终端页固定深色铬（terminalBackground + 深色导航栏），Tab 条必须跟随
+            // 当前会话的铬色，否则浅色主题下会出现「页面全黑、Tab 条还是米白」的割裂。
+            sessionStrip(detail.sessions, palette: SessionStripPalette.palette(terminalChrome: showsTerminalChrome))
+            Divider().overlay(showsTerminalChrome ? AnyShapeStyle(Color.white.opacity(0.12)) : AnyShapeStyle(Theme.border))
             sessionContent
         }
     }
 
-    private func sessionStrip(_ sessions: [WorkspaceSessionSummary]) -> some View {
+    /// 当前可见会话是否为 PTY 终端（终端页固定深色铬；结构化对话跟随亮暗主题）。
+    private var showsTerminalChrome: Bool {
+        if let snapshot = store.visibleSnapshot, snapshot.id == store.visibleSessionID {
+            return !snapshot.isStructured
+        }
+        guard let id = store.visibleSessionID,
+              let summary = currentDetail?.sessions.first(where: { $0.id == id }) else { return false }
+        return (summary.sessionKind ?? "pty") != "structured"
+    }
+
+    private var currentDetail: WorkspaceTaskDetail? {
+        if case .ready(let detail) = store.taskState { return detail }
+        return nil
+    }
+
+    private func sessionStrip(_ sessions: [WorkspaceSessionSummary], palette: SessionStripPalette) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
@@ -180,19 +269,19 @@ struct WorkspaceTaskView: View {
                             HStack(spacing: 7) {
                                 BrandLogo(
                                     provider: session.provider ?? "terminal",
-                                    color: selected ? Theme.brand : Theme.textSecondary
+                                    color: selected ? Theme.brand : palette.text
                                 )
                                 .frame(width: 14, height: 14)
                                 Text(sessionLabel(session, index: index))
                                     .font(.system(size: 12, weight: selected ? .semibold : .medium))
                                     .lineLimit(1)
+                                    .foregroundColor(selected ? Theme.brand : palette.text)
                                 if ["initializing", "running", "thinking"].contains(session.status ?? "") {
                                     Circle()
                                         .fill(Theme.success)
                                         .frame(width: 6, height: 6)
                                 }
                             }
-                            .foregroundColor(selected ? Theme.brand : Theme.textSecondary)
                             .padding(.leading, 10)
                             .padding(.trailing, 6)
                             .frame(height: 34)
@@ -206,7 +295,7 @@ struct WorkspaceTaskView: View {
                         } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(Theme.textMuted)
+                                .foregroundColor(palette.muted)
                                 .frame(width: 22, height: 34)
                         }
                         .buttonStyle(.plain)
@@ -214,11 +303,11 @@ struct WorkspaceTaskView: View {
                     }
                     .background(
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(selected ? Theme.brand.opacity(0.09) : Theme.surface)
+                            .fill(selected ? Theme.brand.opacity(0.16) : palette.chipFill)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(selected ? Theme.brand.opacity(0.55) : Theme.border, lineWidth: 1)
+                            .stroke(selected ? Theme.brand.opacity(0.55) : palette.chipBorder, lineWidth: 1)
                     )
                     .contextMenu {
                         Button(role: .destructive) {
@@ -236,11 +325,11 @@ struct WorkspaceTaskView: View {
                         .frame(width: 34, height: 34)
                         .background(
                             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(Theme.surface)
+                                .fill(palette.plusFill)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .stroke(Theme.border, lineWidth: 1)
+                                .stroke(palette.chipBorder, lineWidth: 1)
                         )
                 }
                 .buttonStyle(.plain)
@@ -249,14 +338,14 @@ struct WorkspaceTaskView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        .background(Theme.background)
+        .background(palette.background)
     }
 
     @ViewBuilder
     private var sessionContent: some View {
         if let snapshot = store.visibleSnapshot,
            snapshot.id == store.visibleSessionID {
-            SessionDestinationView(session: snapshot, api: api)
+            SessionDestinationView(session: snapshot, api: api, showsNavigationChrome: false)
                 .id(snapshot.id)
         } else if store.sessionLoading {
             loadingState("正在加载工作窗口…")

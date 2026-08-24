@@ -38,7 +38,13 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
                 if !expanded {
                     collapsedLeading()
                 }
-                inputContent()
+                ZStack {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: onFocusInput)
+                    inputContent()
+                }
+                .frame(maxWidth: .infinity)
                 if !expanded {
                     collapsedTrailing()
                 }
@@ -243,6 +249,17 @@ func composerDraftIsSendable(_ draft: String, hasAttachments: Bool, isComposing:
     )
 }
 
+/// SwiftUI 刷新时 `isFocused` 可能仍是旧值，不能因为「当前不是 focused」就立刻 resign。
+/// 只在 SwiftUI 明确经历过 true → false 时收键盘，避免点输入框刚成为 first responder
+/// 就被同一帧的 updateUIView 打回去。
+func composerShouldRequestFocus(isFocused: Bool, isFirstResponder: Bool) -> Bool {
+    isFocused && !isFirstResponder
+}
+
+func composerShouldResignFocus(isFocused: Bool, wasFocused: Bool, isFirstResponder: Bool) -> Bool {
+    !isFocused && wasFocused && isFirstResponder
+}
+
 /// UITextView 走 UIKit 的 marked-text 管线。SwiftUI TextField 在中文输入法组字时会把
 /// 半成品写进 Binding，父视图一刷新就重置组字，表现为「输不进去」或候选确认后重复插入。
 /// 对齐 macOS IMEAwareComposerTextView：组字期间不回写 Binding，也不把确认键当成发送。
@@ -287,6 +304,9 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
             textView.spellCheckingType = .no
         }
         textView.adjustsFontForContentSizeCategory = true
+        textView.delaysContentTouches = false
+        textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        textView.setContentHuggingPriority(.defaultLow, for: .vertical)
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         textView.accessibilityLabel = "消息输入"
         context.coordinator.reportHeight(for: textView)
@@ -317,19 +337,21 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
             context.coordinator.reportHeight(for: textView)
         }
 
-        if isFocused {
-            if !textView.isFirstResponder {
-                // 不能只调一次 becomeFirstResponder：抽屉转场动画中段、或从
-                // WKWebView 手里抢 first responder 时，单次调用会静默失败，
-                // 键盘永远弹不出来。交给带重试的聚焦（见 Coordinator）。
-                context.coordinator.requestFocus(textView)
-            }
-        } else {
-            context.coordinator.cancelFocusRetry()
-            if textView.isFirstResponder {
-                textView.resignFirstResponder()
-            }
+        let coordinator = context.coordinator
+        if composerShouldRequestFocus(isFocused: isFocused, isFirstResponder: textView.isFirstResponder) {
+            // 不能只调一次 becomeFirstResponder：抽屉转场动画中段、或从
+            // WKWebView 手里抢 first responder 时，单次调用会静默失败，
+            // 键盘永远弹不出来。交给带重试的聚焦（见 Coordinator）。
+            coordinator.requestFocus(textView)
+        } else if composerShouldResignFocus(
+            isFocused: isFocused,
+            wasFocused: coordinator.lastKnownFocused,
+            isFirstResponder: textView.isFirstResponder
+        ) {
+            coordinator.cancelFocusRetry()
+            textView.resignFirstResponder()
         }
+        coordinator.lastKnownFocused = isFocused
     }
 
     static func dismantleUIView(_ textView: ComposerUITextView, coordinator: Coordinator) {
@@ -341,6 +363,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: IMEAwareComposerTextView
         var isApplyingBinding = false
+        var lastKnownFocused = false
         private var lastReportedHeight: CGFloat = 0
         private var lastComposing = false
         /// 带重试的聚焦任务列表：覆盖抽屉 .move 转场（~0.22s）、WKWebView 让出
@@ -441,6 +464,8 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
 final class ComposerUITextView: UITextView {
     var onMarkedTextChange: ((Bool) -> Void)?
     private let placeholderLabel = UILabel()
+
+    override var canBecomeFirstResponder: Bool { true }
 
     var placeholder = "" {
         didSet {

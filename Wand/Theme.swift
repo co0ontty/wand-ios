@@ -135,6 +135,28 @@ extension View {
         modifier(WandPreferredAppearanceModifier())
     }
 
+    /// 给系统导航栏一块不透明表面，避免 iOS 26 液态玻璃把标题/路径洗成浅色残影。
+    @ViewBuilder
+    func wandToolbarSurface(enabled: Bool = true, colorScheme: ColorScheme? = nil) -> some View {
+        if enabled {
+            if let colorScheme {
+                self
+                    .toolbarBackground(
+                        colorScheme == .dark ? Theme.terminalBackground : Theme.elevated,
+                        for: .navigationBar
+                    )
+                    .toolbarBackground(.visible, for: .navigationBar)
+                    .toolbarColorScheme(colorScheme, for: .navigationBar)
+            } else {
+                self
+                    .toolbarBackground(Theme.elevated, for: .navigationBar)
+                    .toolbarBackground(.visible, for: .navigationBar)
+            }
+        } else {
+            self
+        }
+    }
+
     /// 点击空白区域收起键盘。挂在滚动容器 / 背景层上：
     /// 输入框、按钮等可交互控件优先消费点击，不会被误伤；
     /// 与 scrollDismissesKeyboard 互补（滚动收起 + 点击收起）。

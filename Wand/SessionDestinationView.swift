@@ -19,12 +19,13 @@ extension Notification.Name {
 struct SessionDestinationView: View {
     let session: SessionSnapshot
     let api: WandAPI
+    var showsNavigationChrome: Bool = true
 
     @ViewBuilder var body: some View {
         if session.isStructured {
-            ChatView(sessionId: session.id, api: api)
+            ChatView(sessionId: session.id, api: api, showsNavigationChrome: showsNavigationChrome)
         } else {
-            PtySessionView(session: session, api: api)
+            PtySessionView(session: session, api: api, showsNavigationChrome: showsNavigationChrome)
         }
     }
 }
@@ -36,6 +37,7 @@ struct SessionDestinationView: View {
 private struct PtySessionView: View {
     let session: SessionSnapshot
     let api: WandAPI
+    let showsNavigationChrome: Bool
 
     @StateObject private var store: ChatStore
     @StateObject private var terminalWebModel = WebViewModel()
@@ -56,15 +58,17 @@ private struct PtySessionView: View {
     @State private var voiceHoldWork: DispatchWorkItem?
     @State private var gitStatus: GitStatusResult?
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
-    @FocusState private var inputFocused: Bool
+    /// 与 ChatView 相同：UIKit 输入框不能绑 @FocusState，否则键盘会被立刻 resign。
+    @State private var inputFocused = false
 
     private var ptyBackground: Color {
         Theme.terminalBackground
     }
 
-    init(session: SessionSnapshot, api: WandAPI) {
+    init(session: SessionSnapshot, api: WandAPI, showsNavigationChrome: Bool = true) {
         self.session = session
         self.api = api
+        self.showsNavigationChrome = showsNavigationChrome
         _store = StateObject(wrappedValue: ChatStore(sessionId: session.id, api: api))
         _attachments = StateObject(wrappedValue: ComposerAttachmentController(sessionId: session.id, api: api))
     }
@@ -97,16 +101,17 @@ private struct PtySessionView: View {
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .principal) { titleStatus }
+            if showsNavigationChrome {
+                ToolbarItem(placement: .principal) { titleStatus }
+                    .sharedBackgroundVisibility(.hidden)
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 GitChangesToolbarButton(status: gitStatus, phase: quickCommitFeedback.phase) {
                     showQuickCommit = true
                 }
             }
         }
-        .toolbarBackground(ptyBackground, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
-        .toolbarColorScheme(.dark, for: .navigationBar)
+        .wandToolbarSurface(enabled: showsNavigationChrome, colorScheme: .dark)
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .sheet(isPresented: $showQuickCommit) {
             GitQuickCommitView(
