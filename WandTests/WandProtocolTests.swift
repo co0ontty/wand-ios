@@ -157,6 +157,38 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(compactReplyPreviewText("`snake_case`"), "snake_case")
     }
 
+    func testKeyboardLiftUsesDockedOverlapAboveSafeArea() {
+        let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+
+        XCTAssertEqual(
+            keyboardLift(
+                for: CGRect(x: 0, y: 553, width: 390, height: 291),
+                windowBounds: bounds,
+                safeAreaBottom: 34
+            ),
+            257
+        )
+        XCTAssertEqual(
+            keyboardLift(
+                for: CGRect(x: 0, y: 844, width: 390, height: 291),
+                windowBounds: bounds,
+                safeAreaBottom: 34
+            ),
+            0
+        )
+    }
+
+    func testKeyboardLiftIgnoresFloatingKeyboard() {
+        XCTAssertEqual(
+            keyboardLift(
+                for: CGRect(x: 90, y: 420, width: 300, height: 220),
+                windowBounds: CGRect(x: 0, y: 0, width: 834, height: 1194),
+                safeAreaBottom: 20
+            ),
+            0
+        )
+    }
+
     func testComposerExpansionFollowsFocusVoiceOrContentHeight() {
         XCTAssertFalse(composerShouldExpand(focused: false, voiceMode: false))
         XCTAssertTrue(composerShouldExpand(focused: true, voiceMode: false))

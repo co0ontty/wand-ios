@@ -2,6 +2,21 @@ import Combine
 import SwiftUI
 import UIKit
 
+/// 把窗口坐标系里的键盘结束帧换算成输入栏需要额外抬升的高度。
+/// 只处理贴住窗口底边的键盘；浮动键盘和窗口外的键盘不推动整页布局。
+func keyboardLift(
+    for keyboardFrame: CGRect,
+    windowBounds: CGRect,
+    safeAreaBottom: CGFloat
+) -> CGFloat {
+    guard !keyboardFrame.isNull, !keyboardFrame.isInfinite else { return 0 }
+    let intersection = windowBounds.intersection(keyboardFrame)
+    guard !intersection.isNull, intersection.height > 0 else { return 0 }
+    let bottomTolerance = max(1, safeAreaBottom)
+    guard keyboardFrame.maxY >= windowBounds.maxY - bottomTolerance else { return 0 }
+    return max(0, intersection.height - safeAreaBottom)
+}
+
 /// 手动跟踪键盘高度，驱动聊天输入栏抬升。
 ///
 /// ChatView 原本把输入栏放在 safeAreaInset(edge: .bottom) 里、依赖系统自动键盘避让，
@@ -49,9 +64,11 @@ final class KeyboardObserver: ObservableObject {
         // 键盘 frame 在屏幕坐标系；转换到窗口坐标后只处理贴住窗口底边的键盘。
         // 浮动键盘若按普通交集计算，会把整条输入栏异常推到页面上方。
         let frame = window.convert(endValue.cgRectValue, from: window.screen.coordinateSpace)
-        let touchesBottom = frame.maxY >= window.bounds.maxY - 1
-        let overlap = touchesBottom ? max(0, window.bounds.maxY - frame.minY) : 0
-        let lift = max(0, overlap - window.safeAreaInsets.bottom)
+        let lift = keyboardLift(
+            for: frame,
+            windowBounds: window.bounds,
+            safeAreaBottom: window.safeAreaInsets.bottom
+        )
         apply(lift, note: note)
     }
 

@@ -31,10 +31,6 @@ final class WebViewModel: ObservableObject {
     var requestClose: (() -> Void)?
     /// WebBridge attach 时回填，供"重试"调用 reload()。
     weak var webView: WKWebView?
-    /// 嵌入终端被点击时触发（nativeInput 模式）：网页侧 xterm textarea 已被锁成
-    /// readonly，点终端不可能弹网页键盘，由原生壳接管（PtySessionView 展开输入
-    /// 抽屉并聚焦，唤起系统键盘）。
-    var onEmbeddedTerminalTap: (() -> Void)?
 
     func retry() {
         phase = .loading
@@ -67,6 +63,37 @@ final class WebViewModel: ObservableObject {
               if (typeof el.blur === 'function') el.blur();
             }
           } catch (e) {}
+        })();
+        """
+        webView?.evaluateJavaScript(script, completionHandler: nil)
+    }
+
+    /// 原生输入抽屉关闭后恢复 xterm 的直通输入，但不主动聚焦，避免再次弹出软键盘。
+    func restoreEmbeddedTerminalInput() {
+        let script = """
+        (function() {
+          try {
+            if (!document.documentElement.classList.contains('is-wand-terminal-passthrough')) return;
+            var nodes = document.querySelectorAll('.xterm-helper-textarea');
+            for (var i = 0; i < nodes.length; i++) {
+              nodes[i].readOnly = false;
+              nodes[i].removeAttribute('aria-readonly');
+            }
+          } catch (e) {}
+        })();
+        """
+        webView?.evaluateJavaScript(script, completionHandler: nil)
+    }
+
+    /// SwiftUI 已按键盘重叠高度调整 WebView 后，再通知网页重新计算终端行列数。
+    /// 延迟批次覆盖系统键盘动画的中段和结束帧。
+    func refitEmbeddedTerminalViewport() {
+        let script = """
+        (function() {
+          function refit() {
+            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+          }
+          [0, 80, 220, 420].forEach(function(delay) { setTimeout(refit, delay); });
         })();
         """
         webView?.evaluateJavaScript(script, completionHandler: nil)
@@ -590,12 +617,18 @@ struct WebViewRepresentable: UIViewRepresentable {
             return serverURL
         }
         var items = components.queryItems ?? []
-        items.removeAll { $0.name == "session" || $0.name == "embed" || $0.name == "nativeInput" }
+        items.removeAll {
+            $0.name == "session"
+                || $0.name == "embed"
+                || $0.name == "nativeInput"
+                || $0.name == "passthrough"
+        }
         items.append(URLQueryItem(name: "session", value: sessionId))
         if embedTerminal {
             items.append(URLQueryItem(name: "embed", value: "terminal"))
             if embedNativeInput {
                 items.append(URLQueryItem(name: "nativeInput", value: "1"))
+                items.append(URLQueryItem(name: "passthrough", value: "1"))
             }
         }
         guard let encodedQuery = WandEndpoint.percentEncodedQuery(items) else { return serverURL }
@@ -608,6 +641,7 @@ struct WebViewRepresentable: UIViewRepresentable {
       try {
         var root = document.documentElement;
         root.classList.add('is-wand-app-native-insets');
+        root.classList.add('is-wand-terminal-passthrough');
         root.style.setProperty('--app-inset-top', '0px');
         root.style.setProperty('--app-inset-bottom', '0px');
         root.style.setProperty('--app-inset-left', '0px');
@@ -640,7 +674,7 @@ struct WebViewRepresentable: UIViewRepresentable {
           document.head.appendChild(style);
         }
 
-        if (!window.__wandNativeInputImeGuard) {
+        if (!root.classList.contains('is-wand-terminal-passthrough') && !window.__wandNativeInputImeGuard) {
           window.__wandNativeInputImeGuard = true;
           function lockXtermIme() {
             try {
@@ -688,21 +722,6 @@ struct WebViewRepresentable: UIViewRepresentable {
               } catch (e) {}
             }, true);
           });
-        }
-
-        if (!window.__wandNativeTerminalTapGuard) {
-          window.__wandNativeTerminalTapGuard = true;
-          // 点击终端窗口：xterm textarea 已锁 readonly，弹不出网页键盘，改报给
-          // 原生壳展开原生输入抽屉。用 click 而非 touchstart/end，滚动/选择时
-          // touchmove 会取消 click，不会误触发键盘。
-          document.addEventListener('click', function(event) {
-            try {
-              var target = event.target;
-              if (!target || !target.closest) return;
-              if (!target.closest('.terminal-container')) return;
-              window.webkit.messageHandlers.wandNative.postMessage({ type: 'terminalTap' });
-            } catch (e) {}
-          }, true);
         }
 
         function fitTerminal() {

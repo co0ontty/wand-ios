@@ -138,12 +138,17 @@ private struct PtySessionView: View {
         }
         .onAppear {
             attachments.setToastHandler { store.toast = $0 }
-            terminalWebModel.onEmbeddedTerminalTap = handleEmbeddedTerminalTap
             store.start()
             refreshGitStatus()
         }
         .onChange(of: showQuickCommit) { _, showing in
             if !showing { refreshGitStatus() }
+        }
+        .onChange(of: keyboard.lift) {
+            terminalWebModel.refitEmbeddedTerminalViewport()
+        }
+        .onChange(of: inputDrawerOpen) {
+            terminalWebModel.refitEmbeddedTerminalViewport()
         }
         .onDisappear {
             voiceHoldWork?.cancel()
@@ -151,7 +156,6 @@ private struct PtySessionView: View {
             speech.stop(cancelled: true)
             voicePressed = false
             voiceCanceling = false
-            terminalWebModel.onEmbeddedTerminalTap = nil
             store.shutdown()
         }
         .overlay(alignment: .top) { connectionBanner }
@@ -408,6 +412,9 @@ private struct PtySessionView: View {
         inputDrawerOpen.toggle()
         if inputDrawerOpen {
             focusNativeInput()
+        } else {
+            inputFocused = false
+            terminalWebModel.restoreEmbeddedTerminalInput()
         }
     }
 
@@ -417,12 +424,6 @@ private struct PtySessionView: View {
     private func focusNativeInput() {
         terminalWebModel.suppressEmbeddedTerminalIme()
         if inputDrawerOpen { inputFocused = true }
-    }
-
-    /// 点终端黑窗：nativeInput 模式下网页侧不可能弹键盘，直接展开输入抽屉并聚焦。
-    private func handleEmbeddedTerminalTap() {
-        if !inputDrawerOpen { inputDrawerOpen = true }
-        focusNativeInput()
     }
 
     private func sendTerminalShortcut(_ shortcut: TerminalShortcut) {
