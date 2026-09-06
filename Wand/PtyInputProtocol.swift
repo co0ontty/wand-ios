@@ -13,7 +13,7 @@ struct PtyInputSubmission: Equatable {
 
 func ptyInputSubmission(text: String, view: String) -> PtyInputSubmission {
     PtyInputSubmission(
-        text: PtyInputChunk(input: text, view: view, shortcutKey: nil),
+        text: PtyInputChunk(input: text, view: view, shortcutKey: "enter_text"),
         enter: PtyInputChunk(input: "\r", view: view, shortcutKey: "enter_text")
     )
 }

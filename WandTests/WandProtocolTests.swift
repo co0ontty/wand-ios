@@ -618,14 +618,14 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(
             ptyInputSubmission(text: "git status", view: "terminal"),
             PtyInputSubmission(
-                text: PtyInputChunk(input: "git status", view: "terminal", shortcutKey: nil),
+                text: PtyInputChunk(input: "git status", view: "terminal", shortcutKey: "enter_text"),
                 enter: PtyInputChunk(input: "\r", view: "terminal", shortcutKey: "enter_text")
             )
         )
         XCTAssertEqual(
             ptyInputSubmission(text: "continue", view: "chat"),
             PtyInputSubmission(
-                text: PtyInputChunk(input: "continue", view: "chat", shortcutKey: nil),
+                text: PtyInputChunk(input: "continue", view: "chat", shortcutKey: "enter_text"),
                 enter: PtyInputChunk(input: "\r", view: "chat", shortcutKey: "enter_text")
             )
         )

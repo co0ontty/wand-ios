@@ -288,7 +288,7 @@ struct WorkspaceTaskView: View {
                                         .foregroundColor(Theme.textPrimary)
                                         .frame(maxWidth: 180)
                                 }
-                                if ["initializing", "running", "thinking"].contains(session.status ?? "") {
+                                if ["running", "thinking"].contains(session.activityStatus) {
                                     Circle()
                                         .fill(Theme.success)
                                         .frame(width: 6, height: 6)

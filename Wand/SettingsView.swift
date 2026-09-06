@@ -22,6 +22,10 @@ struct SettingsView: View {
     @State private var logExportEmpty = false
     @State private var showRenameServer = false
     @State private var serverNameDraft = ""
+    @State private var iosUpdate: IosIpaUpdateInfo?
+    @State private var iosUpdateChecking = false
+    @State private var iosUpdateError: String?
+    @State private var confirmUnsignedInstall = false
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
 
@@ -55,6 +59,7 @@ struct SettingsView: View {
         .task {
             serverVersion = (try? await api.serverConfig())?.currentVersion
             await refreshNotificationStatus()
+            await checkIosUpdate()
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
@@ -78,6 +83,12 @@ struct SettingsView: View {
             Button("好", role: .cancel) {}
         } message: {
             Text("打开会话、收发消息或复现问题后再导出，才能捕获到有用的上下文。")
+        }
+        .alert("IPA 尚未签名", isPresented: $confirmUnsignedInstall) {
+            Button("继续安装") { openIosUpdate() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("系统安装器可能会失败。签发后的包放到服务器 ~/.wand/ios/ 即可覆盖安装。")
         }
         .alert("服务器名称", isPresented: $showRenameServer) {
             TextField("留空使用地址", text: $serverNameDraft)
@@ -283,8 +294,6 @@ struct SettingsView: View {
         }
     }
 
-    /// iOS 不存在安全的应用内安装 API；把版本与正确的更新路径放在设置中，
-    /// 但不伪造 Android 那种可下载 / 安装的流程。
     private var clientUpdateSection: some View {
         Section {
             HStack(spacing: 12) {
@@ -294,20 +303,102 @@ struct SettingsView: View {
                     .frame(width: 34, height: 34)
                     .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.success.opacity(0.13)))
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("通过签名工具更新")
+                    Text(iosUpdateTitle)
                         .font(.system(size: 14, weight: .semibold))
-                    Text("当前 \(appVersion)")
+                    Text(iosUpdateSubtitle)
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(Theme.textSecondary)
                 }
                 Spacer(minLength: 0)
+                if iosUpdateChecking {
+                    ProgressView()
+                }
             }
             .padding(.vertical, 4)
+            if iosUpdate?.updateAvailable == true {
+                Button {
+                    requestIosInstall()
+                } label: {
+                    Label(iosUpdate?.otaReadyValue == true ? "安装更新" : "打开安装页", systemImage: "arrow.down.app")
+                        .font(.system(size: 15))
+                }
+            }
+            Button {
+                Task { await checkIosUpdate() }
+            } label: {
+                Label("检查更新", systemImage: "arrow.clockwise")
+                    .font(.system(size: 15))
+            }
+            .disabled(iosUpdateChecking)
         } header: {
             Text("应用与更新")
         } footer: {
-            Text("iOS 自签名应用无法在 App 内下载安装更新。请使用安装 Wand 时的 SideStore、AltStore 或 Sideloadly 刷新签名并安装新版本。")
+            Text(iosUpdateFooter)
         }
+    }
+
+    private var iosUpdateTitle: String {
+        if iosUpdateChecking { return "正在检查更新" }
+        if let latest = iosUpdate?.latestVersion, iosUpdate?.updateAvailable == true {
+            return "发现新版本 v\(latest)"
+        }
+        if iosUpdateError != nil { return "检查更新失败" }
+        if iosUpdate != nil { return "已是最新版本" }
+        return "检查客户端更新"
+    }
+
+    private var iosUpdateSubtitle: String {
+        if let error = iosUpdateError { return error }
+        return "当前 \(appVersion)"
+    }
+
+    private var iosUpdateFooter: String {
+        if iosUpdate?.updateAvailable == true, iosUpdate?.otaReadyValue != true {
+            return "已检测到新包，但还不能直接 OTA 安装（未签名或不是 HTTPS）。签发后放到服务器 ~/.wand/ios/，并用 Safari / 本页安装。"
+        }
+        return "签发后的 IPA 会通过系统安装器覆盖更新，无需第三方分发站。未签名包仍可用 SideStore / AltStore 安装。"
+    }
+
+    private var marketingVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+    }
+
+    private func checkIosUpdate() async {
+        iosUpdateChecking = true
+        iosUpdateError = nil
+        defer { iosUpdateChecking = false }
+        do {
+            iosUpdate = try await api.iosIpaUpdate(currentVersion: marketingVersion)
+        } catch {
+            iosUpdate = nil
+            iosUpdateError = error.localizedDescription
+        }
+    }
+
+    private func requestIosInstall() {
+        guard iosUpdate?.updateAvailable == true else { return }
+        if iosUpdate?.signedValue != true || iosUpdate?.otaReadyValue != true {
+            confirmUnsignedInstall = true
+            return
+        }
+        openIosUpdate()
+    }
+
+    private func openIosUpdate() {
+        guard let info = iosUpdate else { return }
+        if let raw = info.installUrl, let url = URL(string: raw) {
+            UIApplication.shared.open(url)
+            return
+        }
+        if let url = resolvedUpdateURL(info.installPageUrl) ?? resolvedUpdateURL("/ios/install") {
+            UIApplication.shared.open(url)
+        }
+    }
+
+    private func resolvedUpdateURL(_ raw: String?) -> URL? {
+        guard let raw, !raw.isEmpty else { return nil }
+        if let url = URL(string: raw), url.scheme != nil { return url }
+        return URL(string: raw, relativeTo: serverURL)?.absoluteURL
     }
 
     /// 拼最近 5 分钟日志写临时文件并弹系统分享面板；窗口内没有日志时给出提示。

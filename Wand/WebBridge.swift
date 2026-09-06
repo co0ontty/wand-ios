@@ -2,8 +2,7 @@ import UIKit
 import WebKit
 
 /// JS → 原生消息处理 + 自签名证书 + WKWebView 委托。导航状态通过 `WebViewModel`
-/// 驱动 SwiftUI 覆盖层（加载中 / 出错）。对称 macOS 的 WebBridge，但去掉了应用内
-/// 自动更新（DmgInstaller / UpdateChecker / NSAlert）——iOS 自签名应用无法自我安装更新。
+/// 驱动 SwiftUI 覆盖层（加载中 / 出错）。IPA 更新由系统 itms-services 安装器接手。
 final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
     private let model: WebViewModel
     private weak var webView: WKWebView?
@@ -86,8 +85,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
 
     // MARK: - JS → Native
 
-    /// 前端可能发 downloadUpdate 等消息；iOS 端没有应用内更新通道，统一忽略，
-    /// 仅保留通道以兼容前端共用代码，不报错。
+    /// 网页版把 IPA 更新发成 downloadUpdate / 直接跳 itms-services；原生侧打开系统安装器。
     func userContentController(_ uc: WKUserContentController, didReceive msg: WKScriptMessage) {
         guard let dict = msg.body as? [String: Any], let type = dict["type"] as? String else { return }
         switch type {
@@ -107,6 +105,13 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
                 tag: tag,
                 serverID: serverID
             )
+        case "downloadUpdate":
+            guard let raw = dict["url"] as? String else { return }
+            DispatchQueue.main.async { [weak self] in
+                let url = URL(string: raw)
+                    ?? URL(string: raw, relativeTo: self?.webView?.url)?.absoluteURL
+                if let url { UIApplication.shared.open(url) }
+            }
         default:
             wlog("web", "ignored native message type=\(type) (no-op on iOS)")
         }

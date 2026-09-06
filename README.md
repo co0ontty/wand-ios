@@ -14,11 +14,13 @@ iOS 端原生化是为了根治 WebView 在移动端的键盘重叠、状态栏�
 - 与 macOS/Android 壳共享同一套连接逻辑：连接码（base64 `url#token`）→ `/api/login` 拿 cookie；
   原生界面用同一份 cookie 调 `/api/*` 与 `/ws`（兜底 WebView 同样注入这份 cookie）
 
-## 与 macOS/Android 壳的关键差异：没有应用内自动更新
+## 客户端更新
 
-iOS 的自签名应用**无法自我安装更新**——安装新版本必须重新走一次签名 + 描述文件流程，这是系统层面的限制，应用自己做不到。所以本壳**删掉了** DMG/APK 那套「检查更新 → 下载 → 弹窗安装」逻辑（没有 `UpdateChecker` / `DmgInstaller`）。
+设置页会请求公开接口 `GET /api/ios-ipa-update?currentVersion=`。有新包时打开系统 `itms-services` 安装器（或 `/ios/install` 落地页），**不会**在 App 内静默装包。
 
-更新方式改为：用你装它时用的同一个工具（AltStore/SideStore）**后台自动刷新签名**，或者出新版后**重新 sideload 一次**。
+- 签发后的 IPA 放到服务器 `~/.wand/ios/`，客户端即可检查并覆盖安装。
+- 未签名包只能被检查到；系统安装会失败，仍可用 SideStore / AltStore / Sideloadly。
+- 网页版关于页的「安装」走同一套 OTA 协议。
 
 ---
 
@@ -189,5 +191,5 @@ ios/
 
 ## 注意
 
-- 服务端目前**没有** iOS 的更新检查端点（不像 `/api/macos-dmg-update`），因为 iOS 不做应用内更新。若以后要做「提示有新版，请到 SideStore 刷新」之类的轻提醒，可以另加一个只读端点，但不要尝试在应用内直接安装。
+- 客户端更新检查：`GET /api/ios-ipa-update`；安装走 `itms-services` + `/ios/manifest.plist`。不要在 App 内自己解包安装 IPA。
 - 不要随意更换 bundle id 或签名身份的预期：用同一工具、同一 Apple ID 续签才能平滑升级；换了就要先删旧 App 再装。

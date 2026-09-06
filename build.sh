@@ -38,14 +38,37 @@ resolve_xcode_dir() {
   return 1
 }
 
-VERSION="${1:?usage: build.sh <version> (例如 1.16.0)}"
+latest_tag_version() {
+  local tag_source="."
+  local tag
+  if [[ "$(git -C .. ls-files --stage -- ios 2>/dev/null | awk 'NR == 1 { print $1 }')" == "160000" ]]; then
+    tag_source=".."
+  fi
+  tag="$(git -C "$tag_source" tag --sort=-v:refname --list 'v[0-9]*' | head -1 | sed 's/^v//' || true)"
+  if [[ -z "$tag" ]]; then
+    tag="$(git tag --sort=-v:refname --list 'v[0-9]*' | head -1 | sed 's/^v//' || true)"
+  fi
+  echo "${tag:-0.0.0}"
+}
+
+if [[ $# -ge 1 ]]; then
+  VERSION="$1"
+else
+  VERSION="$(latest_tag_version)-debug.$(date +%m%d%H%M)"
+fi
 BUILD_STAMP="${WAND_BUILD_STAMP:-}"
+if [[ -z "$BUILD_STAMP" && "$VERSION" =~ -debug\.([0-9]{8})$ ]]; then
+  BUILD_STAMP="$(date +%Y)${BASH_REMATCH[1]}"
+fi
 if [[ -n "$BUILD_STAMP" && ! "$BUILD_STAMP" =~ ^[0-9]{12}$ ]]; then
   echo "❌ WAND_BUILD_STAMP 必须是 YYYYMMDDHHMM（收到：$BUILD_STAMP）" >&2
   exit 1
 fi
-# 数字 build 号：major*10000 + minor*100 + patch
+# 数字 build 号：major*10000 + minor*100 + patch；debug 再附时间戳，避免同号无法覆盖安装。
 VERSION_CODE=$(echo "$VERSION" | awk -F. '{patch=$3; sub(/[-+].*/, "", patch); printf "%d", $1*10000+$2*100+patch}')
+if [[ "$VERSION" == *-* ]]; then
+  VERSION_CODE="${VERSION_CODE}.$(date +%m%d%H%M)"
+fi
 
 cd "$(dirname "$0")"
 PROJECT_ROOT="$(pwd)"
@@ -118,10 +141,22 @@ IPA_OUT="$DIST_DIR/wand-v${VERSION}.ipa"
 # -X 不存额外属性，-q 安静；IPA 本质就是个 zip
 ( cd "$STAGING" && zip -qry "$IPA_OUT" Payload )
 
+IPA_DIST_DIR="${IPA_DIST_DIR:-}"
+if [[ -n "$IPA_DIST_DIR" ]]; then
+  mkdir -p "$IPA_DIST_DIR"
+  DIST_IPA="$IPA_DIST_DIR/wand-v${VERSION}.ipa"
+  cp "$IPA_OUT" "$DIST_IPA"
+  printf '%s\n' "$VERSION" > "$IPA_DIST_DIR/.last-debug-version"
+  echo "==> 本地分发 IPA: $DIST_IPA"
+fi
+
 echo ""
 echo "✅ 完成"
 echo "   .app: $APP_DST"
 echo "   IPA : $IPA_OUT  （未签名）"
+if [[ -n "${DIST_IPA:-}" ]]; then
+  echo "   dist: $DIST_IPA"
+fi
 echo ""
-echo "下一步：用 AltStore / SideStore / Sideloadly 把这个 IPA 装进 iPhone，"
-echo "        安装时它会用你的免费 Apple ID 现场签名。详见 README.md。"
+echo "下一步：签发后放到 ~/.wand/ios/，客户端即可检查并 OTA 安装。"
+echo "        未签名包仍可用 SideStore / AltStore / Sideloadly 安装。详见 README.md。"

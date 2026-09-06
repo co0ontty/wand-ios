@@ -930,7 +930,7 @@ struct SessionRow: View {
     }
 
     private var trailingTimeLabel: String {
-        if session.status == "running" || session.isResponding || session.hasPendingPermission {
+        if session.isResponding || session.hasPendingPermission {
             return durationLabel.isEmpty ? "" : "已运行 \(durationLabel)"
         }
         return SessionTimeFormatting.relativeTime(for: session.endedAt ?? session.startedAt)

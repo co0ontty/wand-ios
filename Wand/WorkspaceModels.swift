@@ -333,6 +333,9 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
     let cwd: String?
     let startedAt: String?
     let workspaceTaskId: String?
+    let ptyBusy: Bool?
+    let providerCliActive: Bool?
+    let inFlight: Bool?
 
     init(snapshot: SessionSnapshot) {
         id = snapshot.id
@@ -344,6 +347,20 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
         cwd = snapshot.cwd
         startedAt = snapshot.startedAt
         workspaceTaskId = snapshot.workspaceTaskId
+        ptyBusy = snapshot.ptyBusy
+        providerCliActive = snapshot.providerCliActive
+        inFlight = snapshot.structuredState?.inFlight
+    }
+
+    var activityStatus: String {
+        effectiveSessionStatus(
+            sessionKind: sessionKind,
+            status: status,
+            provider: provider,
+            ptyBusy: ptyBusy,
+            providerCliActive: providerCliActive,
+            inFlight: inFlight
+        )
     }
 
     var providerLabel: String {

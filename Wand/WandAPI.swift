@@ -820,6 +820,15 @@ final class WandAPI {
         try await request(ServerConfigInfo.self, method: "GET", path: "/api/config")
     }
 
+    func iosIpaUpdate(currentVersion: String) async throws -> IosIpaUpdateInfo {
+        try await request(
+            IosIpaUpdateInfo.self,
+            method: "GET",
+            path: "/api/ios-ipa-update",
+            queryItems: [URLQueryItem(name: "currentVersion", value: currentVersion)]
+        )
+    }
+
     func installServerUpdate() async throws {
         _ = try await requestData(method: "POST", path: "/api/update", body: [:], timeout: 180)
     }

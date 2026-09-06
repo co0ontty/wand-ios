@@ -382,6 +382,7 @@ final class ChatStore: ObservableObject {
             snapshot?.title = data.title
             snapshot?.description = data.description
             snapshot?.titleGenerating = data.titleGenerating
+            snapshot?.ptyBusy = data.ptyBusy
             snapshot?.providerCliActive = data.providerCliActive
             snapshot?.providerCliExitCode = data.providerCliExitCode
         }
@@ -430,10 +431,14 @@ final class ChatStore: ObservableObject {
             }
         }
         if let generating = data.titleGenerating { snapshot?.titleGenerating = generating }
+        if let busy = data.ptyBusy {
+            snapshot?.ptyBusy = busy
+            isResponding = snapshot?.isResponding ?? isResponding
+        }
         if let s = data.structuredState { isResponding = s.inFlight ?? isResponding }
         if let active = data.providerCliActive {
             snapshot?.providerCliActive = active
-            if !active { isResponding = false }
+            isResponding = snapshot?.isResponding ?? isResponding
         }
         if let exitCode = data.providerCliExitCode { snapshot?.providerCliExitCode = exitCode }
         if let q = data.queuedMessages { queuedMessages = q }

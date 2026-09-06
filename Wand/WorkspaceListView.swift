@@ -1136,7 +1136,7 @@ struct WorkspaceListView: View {
                 }
                 Spacer(minLength: 4)
                 Circle()
-                    .fill(session.status == "running" ? Theme.success : Theme.textMuted.opacity(0.5))
+                    .fill(["running", "thinking"].contains(session.activityStatus) ? Theme.success : Theme.textMuted.opacity(0.5))
                     .frame(width: 7, height: 7)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .semibold))
