@@ -281,22 +281,27 @@ struct WorkspaceTaskView: View {
                                     color: selected ? Theme.brand : palette.text
                                 )
                                 .frame(width: 14, height: 14)
-                                Text(sessionLabel(session, index: index))
-                                    .font(.system(size: 12, weight: selected ? .semibold : .medium))
-                                    .lineLimit(1)
-                                    .foregroundColor(selected ? Theme.brand : palette.text)
+                                if selected {
+                                    Text(sessionLabel(session, index: index))
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .lineLimit(1)
+                                        .foregroundColor(Theme.textPrimary)
+                                        .frame(maxWidth: 180)
+                                }
                                 if ["initializing", "running", "thinking"].contains(session.status ?? "") {
                                     Circle()
                                         .fill(Theme.success)
                                         .frame(width: 6, height: 6)
                                 }
                             }
-                            .padding(.leading, 10)
-                            .padding(.trailing, 6)
+                            .padding(.leading, selected ? 10 : 8)
+                            .padding(.trailing, selected && pendingDeleteSession != nil ? 2 : 10)
                             .frame(height: 34)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("工作窗口 \(sessionLabel(session, index: index))")
+                        .accessibilityLabel(selected
+                            ? "当前工作窗口 \(sessionLabel(session, index: index))"
+                            : "切换到 \(sessionLabel(session, index: index))")
                         .accessibilityAddTraits(selected ? .isSelected : [])
 
                         if selected {

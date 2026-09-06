@@ -329,52 +329,53 @@ private struct PtySessionView: View {
         .animation(.easeOut(duration: 0.22), value: inputDrawerOpen)
     }
 
-    /// 终端快捷键栏：始终可见，左端第一个是输入抽屉的拉手（上箭头/键盘图标），
-    /// 点击或上拉展开输入抽屉；其后是高频 PTY 按键。对称 Android PtyShortcutBar。
-    /// 包在水平 ScrollView 里：拉手 + 9 个按键的最小宽度合计远超 iPhone 屏宽，
-    /// 若用固定 HStack 会把整条 bottomBar（以及 WebView、输入抽屉）撑到 ~750pt 宽，
-    /// 导致横向溢出 + 抽屉里发送按钮被推到屏幕外「无法发送」。横向滚动后栏宽恒等于屏宽。
+    /// 终端快捷键栏：输入入口固定在左侧，只有快捷键区域横向滚动，避免窄屏时输入入口被带走。
     private var terminalShortcutBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 7) {
-                inputDrawerHandle
-                ForEach(TerminalShortcuts.defaults) { shortcut in
-                    terminalShortcutKey(shortcut)
+        HStack(spacing: 0) {
+            inputDrawerHandle
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 7) {
+                    ForEach(TerminalShortcuts.defaults) { shortcut in
+                        terminalShortcutKey(shortcut)
+                    }
                 }
+                .padding(.horizontal, 6)
             }
-            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
         }
-        .frame(height: 50)
-        .background(ptyBackground)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.white.opacity(0.07))
-                .frame(height: 0.5)
-        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(ptyBackground.opacity(0.92))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Theme.border.opacity(0.8), lineWidth: 0.7)
+        )
+        .padding(.horizontal, 8)
     }
 
     private var inputDrawerHandle: some View {
         let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
-        return HStack(spacing: 5) {
+        return HStack(spacing: 2) {
             Image(systemName: inputDrawerOpen ? "keyboard.fill" : "keyboard")
                 .font(.system(size: 13, weight: .semibold))
             Image(systemName: inputDrawerOpen ? "chevron.down" : "chevron.up")
                 .font(.system(size: 11, weight: .bold))
         }
-        .foregroundColor(inputDrawerOpen ? Theme.brand : Color.white.opacity(0.82))
+        .foregroundColor(inputDrawerOpen ? Theme.brand : Theme.textPrimary)
         .frame(height: 40)
-        .frame(minWidth: 56)
-        .padding(.horizontal, 6)
+        .frame(minWidth: 44)
+        .padding(.horizontal, 8)
         .background(
             shape.fill(inputDrawerOpen
                 ? Theme.brand.opacity(0.18)
-                : Color.white.opacity(0.08))
+                : Theme.surface.opacity(0.92))
         )
         .overlay(
-            shape.stroke(
-                inputDrawerOpen ? Theme.brand.opacity(0.45) : Color.white.opacity(0.14),
-                lineWidth: 0.7
-            )
+            shape.stroke(Theme.border.opacity(0.85), lineWidth: 0.6)
         )
         .contentShape(shape)
         .accessibilityLabel(inputDrawerOpen ? "收起输入框" : "展开输入框")
@@ -382,7 +383,6 @@ private struct PtySessionView: View {
         .gesture(
             DragGesture(minimumDistance: 12)
                 .onEnded { value in
-                    // 向上拉展开、向下拉收起，给「拉手」一个真实的方向手势。
                     if value.translation.height < -10, !inputDrawerOpen {
                         toggleInputDrawer()
                     } else if value.translation.height > 10, inputDrawerOpen {

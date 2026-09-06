@@ -703,6 +703,11 @@ struct WorkspaceListView: View {
                 }
                 .buttonStyle(.plain)
 
+                Text(summary.status == "done" ? "已完成" : "进行中")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(summary.status == "done" ? Theme.textMuted : Theme.success)
+                    .padding(.trailing, 4)
+
                 if canCollapseSessions {
                     Button {
                         toggleCollapsedTask(summary.id)
@@ -818,6 +823,7 @@ struct WorkspaceListView: View {
                 }
             }
         }
+        .opacity(summary.status == "done" ? 0.76 : 1)
         .accessibilityLabel("任务 \(summary.name)")
     }
 
