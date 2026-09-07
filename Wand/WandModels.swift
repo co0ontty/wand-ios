@@ -1072,6 +1072,18 @@ struct ModelInfo: Decodable, Identifiable {
     let defaultReasoningEffort: String?
 }
 
+func matchesModelKeyword(_ query: String, id: String, label: String) -> Bool {
+    let needles = query
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+        .split { $0.isWhitespace || $0.isNewline }
+        .map(String.init)
+        .filter { !$0.isEmpty }
+    guard !needles.isEmpty else { return true }
+    let haystack = (id + " " + label).lowercased()
+    return needles.allSatisfy { haystack.contains($0) }
+}
+
 struct ReasoningEffortInfo: Decodable {
     let effort: String
     let description: String?

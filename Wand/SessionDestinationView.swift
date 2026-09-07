@@ -60,6 +60,8 @@ private struct PtySessionView: View {
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
     /// 与 ChatView 相同：UIKit 输入框不能绑 @FocusState，否则键盘会被立刻 resign。
     @State private var inputFocused = false
+    /// 首帧先让原生铬稳定，再挂 WebView，避免和打开会话抢同一帧。
+    @State private var allowWebView = false
 
     private var ptyBackground: Color {
         Theme.terminalBackground
@@ -79,14 +81,18 @@ private struct PtySessionView: View {
                 ptyBackground.ignoresSafeArea()
                 VStack(spacing: 0) {
                     ZStack(alignment: .topTrailing) {
-                        WebContainerView(
-                            serverURL: api.baseURL,
-                            token: api.token,
-                            sessionId: session.id,
-                            embedTerminal: true,
-                            embedNativeInput: true,
-                            webViewModel: terminalWebModel
-                        )
+                        if allowWebView {
+                            WebContainerView(
+                                serverURL: api.baseURL,
+                                token: api.token,
+                                sessionId: session.id,
+                                embedTerminal: true,
+                                embedNativeInput: true,
+                                webViewModel: terminalWebModel
+                            )
+                        } else {
+                            ptyBackground
+                        }
                         terminalScaleControls
                             .padding(.top, 10)
                             .padding(.trailing, 10)
@@ -140,6 +146,11 @@ private struct PtySessionView: View {
             attachments.setToastHandler { store.toast = $0 }
             store.start()
             refreshGitStatus()
+            allowWebView = false
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(220))
+                allowWebView = true
+            }
         }
         .onChange(of: showQuickCommit) { _, showing in
             if !showing { refreshGitStatus() }
@@ -159,7 +170,7 @@ private struct PtySessionView: View {
             store.shutdown()
         }
         .overlay(alignment: .top) { connectionBanner }
-        .overlay(alignment: .top) { toastView }
+        .overlay(alignment: .bottom) { toastView }
         .wandKeyboardShortcuts(ptyKeyboardShortcuts)
     }
 
@@ -820,11 +831,12 @@ private struct PtySessionView: View {
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Capsule().fill(Color.black.opacity(0.78)))
-                .padding(.top, 8)
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.82)))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 88)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
                 .onAppear {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + wandNoticeDuration(toast)) {
                         if store.toast == toast { store.toast = nil }
                     }
                 }

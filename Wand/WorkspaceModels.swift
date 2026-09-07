@@ -506,6 +506,20 @@ enum TaskListPresentation {
         !showsTaskSessionDisclosure(sessionCount: sessionCount) || !userCollapsed
     }
 
+    /// 任务行左滑只保留破坏性操作。新建终端已经在行尾「＋」，再塞进滑动区会挤成一排点不到。
+    enum TrailingSwipeAction: String, Equatable, Hashable {
+        case delete
+        case clearSessions
+    }
+
+    static func taskTrailingSwipeActions(sessionCount: Int) -> [TrailingSwipeAction] {
+        var actions: [TrailingSwipeAction] = [.delete]
+        if sessionCount > 0 {
+            actions.append(.clearSessions)
+        }
+        return actions
+    }
+
     static func listSessionLabel(
         title: String?,
         providerLabel: String,

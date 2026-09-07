@@ -37,6 +37,68 @@ final class WorkspaceTests: XCTestCase {
         )
     }
 
+    func testHorizontalSwipeSelectsAdjacentTaskSession() {
+        let sessions = [
+            summary(id: "session-1", startedAt: "2026-08-09T00:00:01Z"),
+            summary(id: "session-2", startedAt: "2026-08-09T00:00:02Z"),
+            summary(id: "session-3", startedAt: "2026-08-09T00:00:03Z"),
+        ]
+
+        XCTAssertEqual(
+            taskSessionSwipeTarget(sessions: sessions, currentSessionId: "session-1", horizontalTranslation: -80)?.id,
+            "session-2"
+        )
+        XCTAssertEqual(
+            taskSessionSwipeTarget(sessions: sessions, currentSessionId: "session-2", horizontalTranslation: 80)?.id,
+            "session-1"
+        )
+        XCTAssertNil(taskSessionSwipeTarget(sessions: sessions, currentSessionId: "session-1", horizontalTranslation: -40))
+        XCTAssertNil(taskSessionSwipeTarget(sessions: sessions, currentSessionId: "session-3", horizontalTranslation: -80))
+        XCTAssertNil(taskSessionSwipeTarget(sessions: sessions, currentSessionId: "missing", horizontalTranslation: 80))
+    }
+
+    func testTaskSessionTransitionDirectionMatchesTabMovement() {
+        let sessions = [
+            summary(id: "session-1", startedAt: "2026-08-09T00:00:01Z"),
+            summary(id: "session-2", startedAt: "2026-08-09T00:00:02Z"),
+            summary(id: "session-3", startedAt: "2026-08-09T00:00:03Z"),
+        ]
+
+        XCTAssertEqual(
+            taskSessionTransitionDirection(
+                fromSessionId: "session-1",
+                toSessionId: "session-2",
+                sessions: sessions
+            ),
+            1
+        )
+        XCTAssertEqual(
+            taskSessionTransitionDirection(
+                fromSessionId: "session-3",
+                toSessionId: "session-2",
+                sessions: sessions
+            ),
+            -1
+        )
+        XCTAssertNil(
+            taskSessionTransitionDirection(
+                fromSessionId: "session-1",
+                toSessionId: "session-1",
+                sessions: sessions
+            )
+        )
+        XCTAssertEqual(sessionTabTitleMaxWidth(selected: true), 168)
+        XCTAssertEqual(sessionTabTitleMaxWidth(selected: false), 112)
+    }
+
+    func testTaskSwipeActionsKeepDeleteAndClearOnly() {
+        XCTAssertEqual(TaskListPresentation.taskTrailingSwipeActions(sessionCount: 0), [.delete])
+        XCTAssertEqual(
+            TaskListPresentation.taskTrailingSwipeActions(sessionCount: 2),
+            [.delete, .clearSessions]
+        )
+    }
+
     func testTaskTreeHidesNeedlessCaretsAndKeepsTerminalsOpen() {
         XCTAssertFalse(TaskListPresentation.showsDirectoryDisclosure(directoryCount: 1))
         XCTAssertTrue(TaskListPresentation.showsDirectoryDisclosure(directoryCount: 2))

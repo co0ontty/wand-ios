@@ -107,6 +107,7 @@ struct NewSessionView: View {
     @State private var creating = false
     @State private var errorMessage: String?
     @State private var showBrowser = false
+    @State private var showModelPicker = false
     /// 选择变化的 debounce 所有者；真正开始的 HTTP mutation 由 endpoint queue 接管，
     /// 不会随下一次选择的 debounce 取消。
     @State private var defaultsSaveTask: Task<Void, Never>?
@@ -285,29 +286,12 @@ struct NewSessionView: View {
 
                             sectionHeader("模型与思考")
                             HStack(spacing: 10) {
-                                optionMenuCard(
+                                optionPickerCard(
                                     title: "模型",
                                     value: selectedModelLabel,
                                     icon: "cpu"
                                 ) {
-                                    Section("模型") {
-                                        Button {
-                                            selectModel("")
-                                        } label: {
-                                            selectedModel.isEmpty
-                                                ? Label("默认 · \(defaultModelLabel)", systemImage: "checkmark")
-                                                : Label("默认 · \(defaultModelLabel)", systemImage: "circle")
-                                        }
-                                        ForEach(providerModels.filter { $0.id != "default" }) { model in
-                                            Button {
-                                                selectModel(model.id)
-                                            } label: {
-                                                selectedModel == model.id
-                                                    ? Label(model.label, systemImage: "checkmark")
-                                                    : Label(model.label, systemImage: "circle")
-                                            }
-                                        }
-                                    }
+                                    showModelPicker = true
                                 }
                                 optionMenuCard(
                                     title: "思考深度",
@@ -408,6 +392,24 @@ struct NewSessionView: View {
                     cwd = picked
                     showBrowser = false
                 }
+            }
+            .sheet(isPresented: $showModelPicker) {
+                SearchableChoiceSheet(
+                    title: "选择模型",
+                    searchPrompt: "搜索模型",
+                    sections: [
+                        SearchableChoiceSection(
+                            id: "model",
+                            items: newSessionModelItems,
+                            selectedId: selectedModel,
+                            searchable: true
+                        )
+                    ]
+                ) { _, itemId in
+                    selectModel(itemId)
+                }
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
             }
         }
         .navigationViewStyle(.stack)
@@ -583,6 +585,14 @@ struct NewSessionView: View {
         ]
     }
 
+    private var newSessionModelItems: [SearchableChoiceItem] {
+        var items = [SearchableChoiceItem(id: "", label: "默认 · \(defaultModelLabel)")]
+        items.append(contentsOf: providerModels.filter { $0.id != "default" }.map {
+            SearchableChoiceItem(id: $0.id, label: $0.label)
+        })
+        return items
+    }
+
     private var selectedModelLabel: String {
         guard !selectedModel.isEmpty, selectedModel != "default" else { return defaultModelLabel }
         return providerModels.first(where: { $0.id == selectedModel })?.label ?? "默认"
@@ -634,6 +644,44 @@ struct NewSessionView: View {
             )
     }
 
+    private func optionPickerChrome(title: String, value: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(Theme.brand)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Theme.brand.opacity(0.1)))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                Text(value)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(Theme.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(minHeight: 44)
+        .background(cardBackground(selected: false))
+    }
+
+    private func optionPickerCard(title: String, value: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            optionPickerChrome(title: title, value: value, icon: icon)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
+        .accessibilityHint("轻点选择\(title)")
+    }
+
     private func optionMenuCard<Content: View>(
         title: String,
         value: String,
@@ -641,31 +689,7 @@ struct NewSessionView: View {
         @ViewBuilder content: () -> Content
     ) -> some View {
         Menu(content: content) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(Theme.brand)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(Theme.brand.opacity(0.1)))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
-                    Text(value)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .frame(minHeight: 44)
-            .background(cardBackground(selected: false))
+            optionPickerChrome(title: title, value: value, icon: icon)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)

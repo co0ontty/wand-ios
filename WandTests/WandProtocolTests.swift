@@ -3,6 +3,39 @@ import XCTest
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
+    func testFailureAndDisconnectUseLongNotice() {
+        XCTAssertTrue(wandNoticeIsLong("发送失败"))
+        XCTAssertTrue(wandNoticeIsLong("加载更早消息失败"))
+        XCTAssertTrue(wandNoticeIsLong("终端命令发送失败"))
+        XCTAssertTrue(wandNoticeIsLong("连接已断开，正在重连"))
+        XCTAssertTrue(wandNoticeIsLong("出现未知错误"))
+        XCTAssertFalse(wandNoticeIsLong("已加入排队，等当前回复完成会自动发送。"))
+        XCTAssertFalse(wandNoticeIsLong("会话已恢复"))
+        XCTAssertFalse(wandNoticeIsLong("已上传 2 个附件"))
+        XCTAssertEqual(wandNoticeDuration("发送失败"), 4.0)
+        XCTAssertEqual(wandNoticeDuration("会话已恢复"), 2.6)
+    }
+
+    func testConversationTurnPreviewAndScrubberLookBackToUser() {
+        let user = ConversationTurn(role: "user", content: [.text(text: "# Hello\n- **world**", subagent: nil)])
+        let assistant = ConversationTurn(
+            role: "assistant",
+            content: [.toolUse(id: "t1", name: "read", description: nil, input: [:], subagent: nil)]
+        )
+        XCTAssertEqual(conversationTurnPreview(user), "Hello world")
+        XCTAssertEqual(conversationTurnPreview(assistant), "1 个工具调用")
+        XCTAssertEqual(scrubberUserPreview(turns: [user, assistant], index: 1), "Hello world")
+        XCTAssertEqual(scrubberUserPreview(turns: [assistant], index: 0), "")
+    }
+
+    func testModelKeywordMatching() {
+        XCTAssertTrue(matchesModelKeyword("opus", id: "claude-opus-4-6", label: "Opus 4.6"))
+        XCTAssertTrue(matchesModelKeyword("GPT 5.4", id: "openai/gpt-5.4", label: "GPT-5.4"))
+        XCTAssertTrue(matchesModelKeyword("默认", id: "", label: "默认 · Claude Sonnet 4.6"))
+        XCTAssertFalse(matchesModelKeyword("kimi xyz", id: "openai/gpt-5.4", label: "GPT-5.4"))
+        XCTAssertTrue(matchesModelKeyword("  ", id: "anything", label: "label"))
+    }
+
     func testSessionOpenGateRejectsDuplicateAndConcurrentNavigation() {
         XCTAssertTrue(shouldBeginSessionOpen(
             requestedID: "a", currentSelection: nil, openingSessionID: nil

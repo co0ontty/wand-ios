@@ -662,7 +662,9 @@ struct WebViewRepresentable: UIViewRepresentable {
               --term-row-height:15px!important;
             }
             .is-wand-embed-terminal .input-panel{display:none!important;}
-            .is-wand-embed-terminal .notification-bubble.update-card{display:none!important;}
+            .is-wand-embed-terminal .notification-bubble,
+            .is-wand-embed-terminal .wand-ui-toast-viewport,
+            .is-wand-embed-terminal .wand-ui-toast{display:none!important;}
             .is-wand-embed-terminal .terminal-container{
               margin:0!important;
               border-left:0!important;

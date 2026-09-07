@@ -18,7 +18,10 @@ struct SessionStripPalette {
     let background: Color
     let chipFill: Color
     let chipBorder: Color
+    let selectedFill: Color
+    let selectedBorder: Color
     let text: Color
+    let selectedText: Color
     let muted: Color
     let plusFill: Color
 
@@ -28,7 +31,10 @@ struct SessionStripPalette {
                 background: Theme.terminalBackground,
                 chipFill: Color.white.opacity(0.07),
                 chipBorder: Color.white.opacity(0.14),
+                selectedFill: Theme.brand.opacity(0.22),
+                selectedBorder: Theme.brand.opacity(0.55),
                 text: Theme.terminalText.opacity(0.78),
+                selectedText: Theme.terminalText,
                 muted: Theme.terminalText.opacity(0.45),
                 plusFill: Color.white.opacity(0.06)
             )
@@ -37,11 +43,44 @@ struct SessionStripPalette {
             background: Theme.background,
             chipFill: Theme.surface,
             chipBorder: Theme.border,
+            selectedFill: Theme.brand.opacity(0.16),
+            selectedBorder: Theme.brand.opacity(0.55),
             text: Theme.textSecondary,
+            selectedText: Theme.textPrimary,
             muted: Theme.textMuted,
             plusFill: Theme.surface
         )
     }
+}
+
+func sessionTabTitleMaxWidth(selected: Bool) -> CGFloat {
+    selected ? 168 : 112
+}
+
+/// 左滑切到下一个工作窗口，右滑回到上一个。位移不足阈值时不切换。
+func taskSessionSwipeTarget(
+    sessions: [WorkspaceSessionSummary],
+    currentSessionId: String,
+    horizontalTranslation: CGFloat,
+    minDistance: CGFloat = 72
+) -> WorkspaceSessionSummary? {
+    guard abs(horizontalTranslation) >= minDistance else { return nil }
+    guard let currentIndex = sessions.firstIndex(where: { $0.id == currentSessionId }) else { return nil }
+    let targetIndex = currentIndex + (horizontalTranslation < 0 ? 1 : -1)
+    guard sessions.indices.contains(targetIndex) else { return nil }
+    return sessions[targetIndex]
+}
+
+func taskSessionTransitionDirection(
+    fromSessionId: String?,
+    toSessionId: String?,
+    sessions: [WorkspaceSessionSummary]
+) -> Int? {
+    guard let fromSessionId, let toSessionId, fromSessionId != toSessionId else { return nil }
+    guard let fromIndex = sessions.firstIndex(where: { $0.id == fromSessionId }),
+          let toIndex = sessions.firstIndex(where: { $0.id == toSessionId }),
+          fromIndex != toIndex else { return nil }
+    return toIndex > fromIndex ? 1 : -1
 }
 
 struct WorkspaceTaskView: View {
@@ -248,7 +287,12 @@ struct WorkspaceTaskView: View {
             sessionStrip(detail.sessions, palette: SessionStripPalette.palette(terminalChrome: showsTerminalChrome))
             Divider().overlay(showsTerminalChrome ? AnyShapeStyle(Color.white.opacity(0.12)) : AnyShapeStyle(Theme.border))
             sessionContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func switchTaskSession(_ session: WorkspaceSessionSummary) {
+        Task { await store.selectSession(id: session.id) }
     }
 
     /// 当前可见会话是否为 PTY 终端（终端页固定深色铬；结构化对话跟随亮暗主题）。
@@ -267,94 +311,124 @@ struct WorkspaceTaskView: View {
     }
 
     private func sessionStrip(_ sessions: [WorkspaceSessionSummary], palette: SessionStripPalette) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
-                    let selected = store.visibleSessionID == session.id
-                    HStack(spacing: 0) {
-                        Button {
-                            Task { await store.selectSession(id: session.id) }
-                        } label: {
-                            HStack(spacing: 7) {
-                                BrandLogo(
-                                    provider: session.provider ?? "terminal",
-                                    color: selected ? Theme.brand : palette.text
-                                )
-                                .frame(width: 14, height: 14)
-                                if selected {
-                                    Text(sessionLabel(session, index: index))
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .lineLimit(1)
-                                        .foregroundColor(Theme.textPrimary)
-                                        .frame(maxWidth: 180)
-                                }
-                                if ["running", "thinking"].contains(session.activityStatus) {
-                                    Circle()
-                                        .fill(Theme.success)
-                                        .frame(width: 6, height: 6)
-                                }
-                            }
-                            .padding(.leading, selected ? 10 : 8)
-                            .padding(.trailing, selected && pendingDeleteSession != nil ? 2 : 10)
-                            .frame(height: 34)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(selected
-                            ? "当前工作窗口 \(sessionLabel(session, index: index))"
-                            : "切换到 \(sessionLabel(session, index: index))")
-                        .accessibilityAddTraits(selected ? .isSelected : [])
-
-                        if selected {
-                            Button {
-                                requestDeleteSession(session)
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(palette.muted)
-                                    .frame(width: 22, height: 34)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("删除终端 \(sessionLabel(session, index: index))")
+        HStack(spacing: 8) {
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Array(sessions.enumerated()), id: \.element.id) { index, session in
+                            sessionTab(session, index: index, palette: palette)
+                                .id(session.id)
                         }
                     }
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(selected ? Theme.brand.opacity(0.16) : palette.chipFill)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(selected ? Theme.brand.opacity(0.55) : palette.chipBorder, lineWidth: 1)
-                    )
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            requestDeleteSession(session)
-                        } label: {
-                            Label("删除终端", systemImage: "trash")
-                        }
-                    }
+                    .padding(.leading, 12)
+                    .padding(.vertical, 8)
                 }
-
-                Button { store.presentTargetPicker() } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(Theme.brand)
-                        .frame(width: 34, height: 34)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(palette.plusFill)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .stroke(palette.chipBorder, lineWidth: 1)
-                        )
+                .onAppear { scrollSessionTab(proxy, id: store.visibleSessionID, animated: false) }
+                .onChange(of: store.visibleSessionID) { _, id in
+                    scrollSessionTab(proxy, id: id, animated: true)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("新建工作窗口")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            sessionAddButton(palette: palette)
+                .padding(.trailing, 10)
         }
         .background(palette.background)
+    }
+
+    private func scrollSessionTab(_ proxy: ScrollViewProxy, id: String?, animated: Bool) {
+        guard let id else { return }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo(id, anchor: .center)
+            }
+        } else {
+            proxy.scrollTo(id, anchor: .center)
+        }
+    }
+
+    private func sessionTab(
+        _ session: WorkspaceSessionSummary,
+        index: Int,
+        palette: SessionStripPalette
+    ) -> some View {
+        let selected = store.visibleSessionID == session.id
+        let label = sessionLabel(session, index: index)
+        return HStack(spacing: 0) {
+            Button {
+                switchTaskSession(session)
+            } label: {
+                HStack(spacing: 7) {
+                    BrandLogo(
+                        provider: session.provider ?? "terminal",
+                        color: selected ? Theme.brand : palette.text
+                    )
+                    .frame(width: 14, height: 14)
+                    Text(label)
+                        .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                        .lineLimit(1)
+                        .foregroundColor(selected ? palette.selectedText : palette.text)
+                        .frame(maxWidth: sessionTabTitleMaxWidth(selected: selected), alignment: .leading)
+                    if ["running", "thinking"].contains(session.activityStatus) {
+                        Circle()
+                            .fill(Theme.success)
+                            .frame(width: 6, height: 6)
+                    }
+                }
+                .padding(.leading, 10)
+                .padding(.trailing, selected ? 2 : 10)
+                .frame(height: 34)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(selected ? "当前工作窗口 \(label)" : "切换到 \(label)")
+            .accessibilityAddTraits(selected ? .isSelected : [])
+
+            if selected {
+                Button {
+                    requestDeleteSession(session)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(palette.muted)
+                        .frame(width: 22, height: 34)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("删除终端 \(label)")
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(selected ? palette.selectedFill : palette.chipFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(selected ? palette.selectedBorder : palette.chipBorder, lineWidth: 1)
+        )
+        .contextMenu {
+            Button(role: .destructive) {
+                requestDeleteSession(session)
+            } label: {
+                Label("删除终端", systemImage: "trash")
+            }
+        }
+    }
+
+    private func sessionAddButton(palette: SessionStripPalette) -> some View {
+        Button { store.presentTargetPicker() } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(store.creating ? palette.muted : Theme.brand)
+                .frame(width: 34, height: 34)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(palette.plusFill)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(palette.chipBorder, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(store.creating)
+        .accessibilityLabel("新建工作窗口")
     }
 
     @ViewBuilder

@@ -23,6 +23,22 @@ func workspaceForTaskGroup(
     )
 }
 
+private enum TaskListConfirm: Identifiable {
+    case deleteTask(WorkspaceTask)
+    case clearSessions(WorkspaceTaskSummary)
+    case deleteSession(WorkspaceSessionSummary)
+    case deleteWorkspace(Workspace)
+
+    var id: String {
+        switch self {
+        case .deleteTask(let task): return "delete-task-\(task.id)"
+        case .clearSessions(let task): return "clear-\(task.id)"
+        case .deleteSession(let session): return "delete-session-\(session.id)"
+        case .deleteWorkspace(let workspace): return "delete-workspace-\(workspace.id)"
+        }
+    }
+}
+
 struct WorkspaceListView: View {
     @ObservedObject var store: WorkspaceStore
     let api: WandAPI
@@ -44,25 +60,20 @@ struct WorkspaceListView: View {
     @State private var renameDraft = ""
     @State private var renameError: String?
     @State private var renameBusy = false
-    @State private var deleteTarget: WorkspaceTask?
-    @State private var deleteBusy = false
-    @State private var deleteError: String?
+    @State private var pendingConfirm: TaskListConfirm?
+    @State private var confirmBusy = false
+    @State private var confirmError: String?
     @State private var newTaskSheetPresented = false
     @State private var newTaskSheetCwd = ""
     @State private var collapsedTaskGroups = Set<String>()
     @State private var collapsedTaskIds = Set<String>()
     @State private var collapsedLooseGroups = Set<String>()
-    @State private var clearTarget: WorkspaceTaskSummary?
-    @State private var clearBusy = false
-    @State private var deleteSessionTarget: WorkspaceSessionSummary?
-    @State private var deleteSessionBusy = false
+
     @State private var renameWorkspaceTarget: Workspace?
     @State private var renameWorkspaceDraft = ""
     @State private var renameWorkspaceError: String?
     @State private var renameWorkspaceBusy = false
-    @State private var deleteWorkspaceTarget: Workspace?
-    @State private var deleteWorkspaceBusy = false
-    @State private var deleteWorkspaceError: String?
+
     @State private var reviewTarget: Workspace?
     @State private var createWorkspacePresented = false
     @State private var toastMessage: String?
@@ -122,40 +133,17 @@ struct WorkspaceListView: View {
                     Text("修改任务的显示名称。")
                 }
             }
-            .alert("删除任务？", isPresented: deleteTaskPresented) {
-                deleteTaskAlertContent
+            .alert(confirmTitle, isPresented: confirmPresented) {
+                Button("取消", role: .cancel) {
+                    pendingConfirm = nil
+                    confirmError = nil
+                }
+                Button(confirmBusy ? "处理中…" : confirmActionTitle, role: .destructive) {
+                    Task { await performPendingConfirm() }
+                }
+                .disabled(confirmBusy)
             } message: {
-                if let deleteError {
-                    Text(deleteError)
-                } else if let target = deleteTarget {
-                    Text("任务「\(target.name)」及其会话和独立 worktree 将被删除，此操作无法撤销。")
-                }
-            }
-            .confirmationDialog(
-                "清空全部终端？",
-                isPresented: Binding(
-                    get: { clearTarget != nil },
-                    set: { if !$0 { clearTarget = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button(clearBusy ? "清空中…" : "确认清空", role: .destructive) {
-                    Task { await confirmClearSessions() }
-                }
-                Button("取消", role: .cancel) { clearTarget = nil }
-            } message: {
-                if let target = clearTarget {
-                    Text("将结束并删除「\(target.name)」的 \(target.listedSessionCount) 个终端，此操作无法撤销。")
-                }
-            }
-            .alert("删除终端？", isPresented: deleteSessionPresented) {
-                deleteSessionAlertContent
-            } message: {
-                if let deleteError, deleteSessionTarget != nil {
-                    Text(deleteError)
-                } else if let target = deleteSessionTarget {
-                    Text("终端「\(sessionDeleteLabel(target))」会结束并被删除，此操作无法撤销。")
-                }
+                Text(confirmMessage)
             }
     }
 
@@ -209,15 +197,7 @@ struct WorkspaceListView: View {
                     Text("修改项目的显示名称。")
                 }
             }
-            .alert("删除项目？", isPresented: deleteWorkspacePresented) {
-                deleteWorkspaceAlertContent
-            } message: {
-                if let deleteWorkspaceError {
-                    Text(deleteWorkspaceError)
-                } else if let target = deleteWorkspaceTarget {
-                    Text("项目「\(target.name)」及其任务、会话与独立 worktree 将被删除，此操作无法撤销。")
-                }
-            }
+
     }
 
     @ViewBuilder
@@ -279,58 +259,57 @@ struct WorkspaceListView: View {
         }
     }
 
-    private var deleteTaskPresented: Binding<Bool> {
+    private var confirmPresented: Binding<Bool> {
         Binding(
-            get: { deleteTarget != nil },
-            set: { if !$0 { deleteTarget = nil } }
+            get: { pendingConfirm != nil },
+            set: { if !$0 && !confirmBusy { pendingConfirm = nil; confirmError = nil } }
         )
     }
 
-    @ViewBuilder
-    private var deleteTaskAlertContent: some View {
-        if let target = deleteTarget {
-            Button("取消", role: .cancel) { deleteTarget = nil }
-            Button("删除", role: .destructive) {
-                guard !deleteBusy else { return }
-                deleteBusy = true
-                let workspaceId = target.workspaceId
-                let taskId = target.id
-                Task {
-                    do {
-                        try await store.deleteWorkspaceTask(
-                            workspaceId: workspaceId,
-                            taskId: taskId
-                        )
-                        deleteTarget = nil
-                        deleteBusy = false
-                        onTaskDeleted?(taskId)
-                    } catch {
-                        deleteError = error.localizedDescription
-                        deleteBusy = false
-                    }
-                }
-            }
-            .disabled(deleteBusy)
+    private var confirmTitle: String {
+        switch pendingConfirm {
+        case .deleteTask: return "删除任务？"
+        case .clearSessions: return "清空全部终端？"
+        case .deleteSession: return "删除终端？"
+        case .deleteWorkspace: return "删除项目？"
+        case .none: return ""
         }
     }
 
-    private var deleteSessionPresented: Binding<Bool> {
-        Binding(
-            get: { deleteSessionTarget != nil },
-            set: { if !$0 && !deleteSessionBusy { deleteSessionTarget = nil } }
-        )
+    private var confirmActionTitle: String {
+        switch pendingConfirm {
+        case .clearSessions: return "确认清空"
+        default: return "删除"
+        }
     }
 
-    @ViewBuilder
-    private var deleteSessionAlertContent: some View {
-        Button("取消", role: .cancel) {
-            deleteSessionTarget = nil
-            deleteError = nil
+    private var confirmMessage: String {
+        if let confirmError { return confirmError }
+        switch pendingConfirm {
+        case .deleteTask(let task):
+            return "任务「\(task.name)」及其会话和独立 worktree 将被删除，此操作无法撤销。"
+        case .clearSessions(let task):
+            return "将结束并删除「\(task.name)」的 \(task.listedSessionCount) 个终端，此操作无法撤销。"
+        case .deleteSession(let session):
+            return "终端「\(sessionDeleteLabel(session))」会结束并被删除，此操作无法撤销。"
+        case .deleteWorkspace(let workspace):
+            return "项目「\(workspace.name)」及其任务、会话与独立 worktree 将被删除，此操作无法撤销。"
+        case .none:
+            return ""
         }
-        Button(deleteSessionBusy ? "删除中…" : "删除", role: .destructive) {
-            Task { await confirmDeleteSession() }
-        }
-        .disabled(deleteSessionBusy)
+    }
+
+    /// 左滑收起动画和 alert 抢同一帧时，确认框会被直接吞掉。
+    private func presentAfterSwipe(_ action: @escaping () -> Void) {
+        renameTarget = nil
+        renameWorkspaceTarget = nil
+        pendingConfirm = nil
+        confirmError = nil
+        DispatchQueue.main.async(execute: action)
+    }
+
+    private func presentConfirm(_ confirm: TaskListConfirm) {
+        presentAfterSwipe { pendingConfirm = confirm }
     }
 
     private var renameWorkspacePresented: Binding<Bool> {
@@ -371,37 +350,6 @@ struct WorkspaceListView: View {
                 }
             }
             .disabled(renameWorkspaceBusy || renameWorkspaceDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        }
-    }
-
-    private var deleteWorkspacePresented: Binding<Bool> {
-        Binding(
-            get: { deleteWorkspaceTarget != nil },
-            set: { if !$0 { deleteWorkspaceTarget = nil } }
-        )
-    }
-
-    @ViewBuilder
-    private var deleteWorkspaceAlertContent: some View {
-        if let target = deleteWorkspaceTarget {
-            Button("取消", role: .cancel) { deleteWorkspaceTarget = nil }
-            Button("删除", role: .destructive) {
-                guard !deleteWorkspaceBusy else { return }
-                deleteWorkspaceBusy = true
-                let workspaceId = target.id
-                Task {
-                    do {
-                        try await store.deleteWorkspace(workspaceId: workspaceId)
-                        deleteWorkspaceTarget = nil
-                        deleteWorkspaceBusy = false
-                        onWorkspaceDeleted?(workspaceId)
-                    } catch {
-                        deleteWorkspaceError = error.localizedDescription
-                        deleteWorkspaceBusy = false
-                    }
-                }
-            }
-            .disabled(deleteWorkspaceBusy)
         }
     }
 
@@ -519,9 +467,7 @@ struct WorkspaceListView: View {
             .listRowSeparator(.hidden)
         if expanded {
             ForEach(group.tasks) { summary in
-                taskSummaryRow(summary, group: group)
-                    .listRowBackground(Theme.background)
-                    .listRowSeparator(.hidden)
+                taskRows(summary, group: group)
             }
             if group.tasks.isEmpty && group.standaloneSessions.isEmpty {
                 Text("这个目录还没有任务。")
@@ -665,6 +611,47 @@ struct WorkspaceListView: View {
         }
     }
 
+    @ViewBuilder
+    private func taskRows(_ summary: WorkspaceTaskSummary, group: TaskDirectoryGroup) -> some View {
+        let expanded = TaskListPresentation.isTaskSessionsExpanded(
+            userCollapsed: collapsedTaskIds.contains(summary.id),
+            sessionCount: summary.listedSessionCount
+        )
+        let workspace = workspace(from: group)
+        taskSummaryRow(summary, group: group)
+            .opacity(summary.status == "done" ? 0.76 : 1)
+            .listRowBackground(Theme.background)
+            .listRowSeparator(.hidden)
+
+        if expanded {
+            if summary.sessions.isEmpty {
+                Text("还没有终端。点右侧「＋」新建。")
+                    .font(.footnote)
+                    .foregroundColor(Theme.textMuted)
+                    .padding(.leading, 8)
+                    .padding(.vertical, 6)
+                    .listRowBackground(Theme.background)
+                    .listRowSeparator(.hidden)
+            } else {
+                ForEach(Array(summary.sessions.enumerated()), id: \.element.id) { index, session in
+                    taskOwnedSessionRow(session, summary: summary, workspace: workspace, index: index)
+                        .listRowInsets(EdgeInsets(top: 1, leading: 28, bottom: 1, trailing: 12))
+                        .listRowBackground(Theme.background)
+                        .listRowSeparator(.hidden)
+                }
+                if summary.listedSessionCount > summary.sessions.count {
+                    Text("列表仅显示 \(summary.sessions.count)/\(summary.listedSessionCount) 个会话，打开任务可查看全部。")
+                        .font(.caption)
+                        .foregroundColor(Theme.textMuted)
+                        .padding(.leading, 8)
+                        .padding(.vertical, 6)
+                        .listRowBackground(Theme.background)
+                        .listRowSeparator(.hidden)
+                }
+            }
+        }
+    }
+
     private func taskSummaryRow(_ summary: WorkspaceTaskSummary, group: TaskDirectoryGroup) -> some View {
         let selected = selectedTaskId == summary.id
         let canCollapseSessions = TaskListPresentation.showsTaskSessionDisclosure(sessionCount: summary.listedSessionCount)
@@ -674,157 +661,126 @@ struct WorkspaceListView: View {
         )
         let workspace = workspace(from: group)
         let task = summary.asTask()
-        return VStack(alignment: .leading, spacing: 2) {
+        return HStack(spacing: 8) {
             HStack(spacing: 8) {
-                Button {
-                    collapsedTaskIds.remove(summary.id)
-                    onOpenTask(workspace, task)
-                } label: {
-                    HStack(spacing: 8) {
-                        if summary.isIsolated || summary.status == "done" {
-                            Image(systemName: summary.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(summary.status == "done" ? Theme.success : Theme.textMuted)
-                                .frame(width: 18, height: 18)
-                        }
-                        Text(summary.name)
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundColor(Theme.textPrimary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                        Spacer(minLength: 4)
-                        if selected {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(Theme.brand)
-                        }
-                    }
-                    .contentShape(Rectangle())
+                if summary.isIsolated || summary.status == "done" {
+                    Image(systemName: summary.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(summary.status == "done" ? Theme.success : Theme.textMuted)
+                        .frame(width: 18, height: 18)
                 }
-                .buttonStyle(.plain)
-
-                Text(summary.status == "done" ? "已完成" : "进行中")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(summary.status == "done" ? Theme.textMuted : Theme.success)
-                    .padding(.trailing, 4)
-
-                if canCollapseSessions {
-                    Button {
-                        toggleCollapsedTask(summary.id)
-                    } label: {
-                        HStack(spacing: 2) {
-                            Text("\(summary.listedSessionCount)")
-                                .font(.system(size: 11, weight: .semibold))
-                                .monospacedDigit()
-                                .foregroundColor(Theme.textMuted)
-                            treeDisclosureCaret(expanded: expanded)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(expanded ? "收起终端" : "展开终端")
-                }
-
-                Button {
-                    collapsedTaskIds.remove(summary.id)
-                    onRequestNewSession?(workspace, task)
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 13, weight: .bold))
+                Text(summary.name)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 4)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundColor(Theme.brand)
-                        .frame(width: 22, height: 22)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                collapsedTaskIds.remove(summary.id)
+                onOpenTask(workspace, task)
+            }
+
+            Text(summary.status == "done" ? "已完成" : "进行中")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(summary.status == "done" ? Theme.textMuted : Theme.success)
+                .padding(.trailing, 4)
+
+            if canCollapseSessions {
+                Button {
+                    toggleCollapsedTask(summary.id)
+                } label: {
+                    HStack(spacing: 2) {
+                        Text("\(summary.listedSessionCount)")
+                            .font(.system(size: 11, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundColor(Theme.textMuted)
+                        treeDisclosureCaret(expanded: expanded)
+                    }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("在任务 \(summary.name) 中新建终端")
+                .accessibilityLabel(expanded ? "收起终端" : "展开终端")
             }
-            .padding(.vertical, 4)
-            .contextMenu {
-                Button {
-                    collapsedTaskIds.remove(summary.id)
-                    onOpenTask(workspace, task)
-                } label: {
-                    Label("打开任务", systemImage: "arrow.forward")
-                }
-                Button {
-                    collapsedTaskIds.remove(summary.id)
-                    onRequestNewSession?(workspace, task)
-                } label: {
-                    Label("新建终端", systemImage: "plus")
-                }
-                Button {
+
+            Button {
+                collapsedTaskIds.remove(summary.id)
+                onRequestNewSession?(workspace, task)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(Theme.brand)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("在任务 \(summary.name) 中新建终端")
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("任务 \(summary.name)")
+        .accessibilityAddTraits(.isButton)
+        .contextMenu {
+            Button {
+                collapsedTaskIds.remove(summary.id)
+                onOpenTask(workspace, task)
+            } label: {
+                Label("打开任务", systemImage: "arrow.forward")
+            }
+            Button {
+                collapsedTaskIds.remove(summary.id)
+                onRequestNewSession?(workspace, task)
+            } label: {
+                Label("新建终端", systemImage: "plus")
+            }
+            Button {
+                presentAfterSwipe {
                     renameDraft = summary.name
                     renameError = nil
                     renameTarget = task
-                } label: {
-                    Label("重命名", systemImage: "pencil")
                 }
-                if summary.listedSessionCount > 0 {
-                    Button(role: .destructive) {
-                        clearTarget = summary
-                    } label: {
-                        Label("清空会话(\(summary.listedSessionCount))", systemImage: "trash.slash")
-                    }
-                }
-                if onOpenParallel != nil {
-                    Button {
-                        onOpenParallel?(workspace, task)
-                    } label: {
-                        Label("并行任务", systemImage: "square.stack.3d.up")
-                    }
-                }
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
+            if summary.listedSessionCount > 0 {
                 Button(role: .destructive) {
-                    deleteError = nil
-                    deleteTarget = task
+                    presentConfirm(.clearSessions(summary))
                 } label: {
-                    Label("删除", systemImage: "trash")
+                    Label("清空会话(\(summary.listedSessionCount))", systemImage: "trash.slash")
                 }
             }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                Button(role: .destructive) {
-                    deleteError = nil
-                    deleteTarget = task
-                } label: {
-                    Label("删除", systemImage: "trash")
-                }
-                if summary.listedSessionCount > 0 {
-                    Button {
-                        clearTarget = summary
-                    } label: {
-                        Label("清空", systemImage: "trash.slash")
-                    }
-                    .tint(.orange)
-                }
+            if onOpenParallel != nil {
                 Button {
-                    collapsedTaskIds.remove(summary.id)
-                    onRequestNewSession?(workspace, task)
+                    onOpenParallel?(workspace, task)
                 } label: {
-                    Label("新建", systemImage: "plus")
+                    Label("并行任务", systemImage: "square.stack.3d.up")
                 }
-                .tint(Theme.brand)
             }
-
-            if expanded {
-                if summary.sessions.isEmpty {
-                    Text("还没有终端。点右侧「＋」新建。")
-                        .font(.footnote)
-                        .foregroundColor(Theme.textMuted)
-                        .padding(.leading, 8)
-                        .padding(.vertical, 6)
-                } else {
-                    ForEach(Array(summary.sessions.enumerated()), id: \.element.id) { index, session in
-                        taskOwnedSessionRow(session, summary: summary, workspace: workspace, index: index)
-                    }
-                    if summary.listedSessionCount > summary.sessions.count {
-                        Text("列表仅显示 \(summary.sessions.count)/\(summary.listedSessionCount) 个会话，打开任务可查看全部。")
-                            .font(.caption)
-                            .foregroundColor(Theme.textMuted)
-                            .padding(.leading, 8)
-                            .padding(.vertical, 6)
-                    }
-                }
+            Button(role: .destructive) {
+                presentConfirm(.deleteTask(task))
+            } label: {
+                Label("删除", systemImage: "trash")
             }
         }
-        .opacity(summary.status == "done" ? 0.76 : 1)
-        .accessibilityLabel("任务 \(summary.name)")
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                presentConfirm(.deleteTask(task))
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+            if summary.listedSessionCount > 0 {
+                Button {
+                    presentConfirm(.clearSessions(summary))
+                } label: {
+                    Label("清空", systemImage: "trash")
+                }
+                .tint(Theme.warning)
+            }
+        }
     }
 
     private func taskOwnedSessionRow(
@@ -841,36 +797,37 @@ struct WorkspaceListView: View {
             index: index,
             parentNames: [workspace.name, summary.name]
         )
-        return Button {
-            onOpenTaskSession?(workspace, summary.asTask(), session)
-        } label: {
-            HStack(spacing: 10) {
-                BrandLogo(provider: session.provider ?? "terminal", color: selected ? Theme.brand : Theme.textSecondary)
-                    .frame(width: 14, height: 14)
-                    .frame(width: 22, height: 22)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(label)
-                        .font(.system(size: 13, weight: selected ? .semibold : .medium))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                    if session.sessionKind == "pty" {
-                        Text("终端")
-                            .font(.system(size: 10))
-                            .foregroundColor(Theme.textMuted)
-                    }
+        return HStack(spacing: 10) {
+            BrandLogo(provider: session.provider ?? "terminal", color: selected ? Theme.brand : Theme.textSecondary)
+                .frame(width: 14, height: 14)
+                .frame(width: 22, height: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                if session.sessionKind == "pty" {
+                    Text("终端")
+                        .font(.system(size: 10))
+                        .foregroundColor(Theme.textMuted)
                 }
-                Spacer(minLength: 0)
             }
-            .padding(.leading, 10)
-            .padding(.trailing, 8)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(selected ? Theme.brand.opacity(0.10) : Color.clear)
-            )
-            .contentShape(Rectangle())
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(selected ? Theme.brand.opacity(0.10) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onOpenTaskSession?(workspace, summary.asTask(), session)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("会话 \(label)")
+        .accessibilityAddTraits(.isButton)
         .contextMenu {
             Button(role: .destructive) {
                 requestDeleteSession(session)
@@ -888,8 +845,7 @@ struct WorkspaceListView: View {
     }
 
     private func requestDeleteSession(_ session: WorkspaceSessionSummary) {
-        deleteError = nil
-        deleteSessionTarget = session
+        presentConfirm(.deleteSession(session))
     }
 
     private func sessionDeleteLabel(_ session: WorkspaceSessionSummary) -> String {
@@ -902,31 +858,32 @@ struct WorkspaceListView: View {
         )
     }
 
-    private func confirmDeleteSession() async {
-        guard let target = deleteSessionTarget, !deleteSessionBusy else { return }
-        deleteSessionBusy = true
+    private func performPendingConfirm() async {
+        guard let pendingConfirm, !confirmBusy else { return }
+        confirmBusy = true
+        confirmError = nil
         do {
-            try await store.deleteSessions([target.id])
-            showToast("已删除终端「\(sessionDeleteLabel(target))」")
-            deleteSessionTarget = nil
-            deleteError = nil
+            switch pendingConfirm {
+            case .deleteTask(let task):
+                try await store.deleteWorkspaceTask(workspaceId: task.workspaceId, taskId: task.id)
+                onTaskDeleted?(task.id)
+                showToast("已删除任务「\(task.name)」")
+            case .clearSessions(let task):
+                try await store.clearTaskSessions(taskId: task.id)
+                showToast("已清空「\(task.name)」的会话")
+            case .deleteSession(let session):
+                try await store.deleteSessions([session.id])
+                showToast("已删除终端「\(sessionDeleteLabel(session))」")
+            case .deleteWorkspace(let workspace):
+                try await store.deleteWorkspace(workspaceId: workspace.id)
+                onWorkspaceDeleted?(workspace.id)
+                showToast("已删除项目「\(workspace.name)」")
+            }
+            self.pendingConfirm = nil
         } catch {
-            deleteError = error.localizedDescription
+            confirmError = error.localizedDescription
         }
-        deleteSessionBusy = false
-    }
-
-    private func confirmClearSessions() async {
-        guard let target = clearTarget, !clearBusy else { return }
-        clearBusy = true
-        do {
-            try await store.clearTaskSessions(taskId: target.id)
-            showToast("已清空「\(target.name)」的会话")
-            clearTarget = nil
-        } catch {
-            deleteError = error.localizedDescription
-        }
-        clearBusy = false
+        confirmBusy = false
     }
 
     /// 聚合接口为列表体积省略了项目级配置；优先复用索引中的完整实体，
@@ -998,26 +955,17 @@ struct WorkspaceListView: View {
                 Label("重命名项目", systemImage: "pencil")
             }
             Button(role: .destructive) {
-                deleteWorkspaceError = nil
-                deleteWorkspaceTarget = workspace
+                presentConfirm(.deleteWorkspace(workspace))
             } label: {
                 Label("删除项目", systemImage: "trash")
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
-                deleteWorkspaceError = nil
-                deleteWorkspaceTarget = workspace
+                presentConfirm(.deleteWorkspace(workspace))
             } label: {
                 Label("删除", systemImage: "trash")
             }
-            Button {
-                newTaskSheetCwd = workspace.cwd
-                newTaskSheetPresented = true
-            } label: {
-                Label("新任务", systemImage: "plus")
-            }
-            .tint(Theme.brand)
         }
     }
 
@@ -1104,50 +1052,50 @@ struct WorkspaceListView: View {
         _ session: WorkspaceSessionSummary,
         workspace: Workspace
     ) -> some View {
-        Button {
-            onOpenSession?(workspace, session)
-        } label: {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(Theme.surface)
-                    BrandLogo(
-                        provider: session.provider ?? "terminal",
-                        color: Theme.textSecondary
-                    )
-                    .frame(width: 17, height: 17)
-                }
-                .frame(width: 30, height: 30)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(TaskListPresentation.listSessionLabel(
-                        title: session.title,
-                        providerLabel: session.providerLabel,
-                        cwd: session.cwd,
-                        index: 0,
-                        parentNames: [workspace.name]
-                    ))
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                    Text(session.providerLabel)
-                        .font(.system(size: 10))
-                        .foregroundColor(Theme.textMuted)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 4)
-                Circle()
-                    .fill(["running", "thinking"].contains(session.activityStatus) ? Theme.success : Theme.textMuted.opacity(0.5))
-                    .frame(width: 7, height: 7)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(Theme.textMuted)
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Theme.surface)
+                BrandLogo(
+                    provider: session.provider ?? "terminal",
+                    color: Theme.textSecondary
+                )
+                .frame(width: 17, height: 17)
             }
-            .padding(.leading, 14)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
+            .frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(TaskListPresentation.listSessionLabel(
+                    title: session.title,
+                    providerLabel: session.providerLabel,
+                    cwd: session.cwd,
+                    index: 0,
+                    parentNames: [workspace.name]
+                ))
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                Text(session.providerLabel)
+                    .font(.system(size: 10))
+                    .foregroundColor(Theme.textMuted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Circle()
+                .fill(["running", "thinking"].contains(session.activityStatus) ? Theme.success : Theme.textMuted.opacity(0.5))
+                .frame(width: 7, height: 7)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(Theme.textMuted)
         }
-        .buttonStyle(.plain)
+        .padding(.leading, 14)
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onOpenSession?(workspace, session)
+        }
+        .accessibilityElement(children: .combine)
         .accessibilityLabel("会话 \(session.title ?? session.providerLabel)")
+        .accessibilityAddTraits(.isButton)
         .contextMenu {
             Button(role: .destructive) {
                 requestDeleteSession(session)
@@ -1206,27 +1154,17 @@ struct WorkspaceListView: View {
                 Label("重命名", systemImage: "pencil")
             }
             Button(role: .destructive) {
-                deleteError = nil
-                deleteTarget = task
+                presentConfirm(.deleteTask(task))
             } label: {
                 Label("删除", systemImage: "trash")
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
-                deleteError = nil
-                deleteTarget = task
+                presentConfirm(.deleteTask(task))
             } label: {
                 Label("删除", systemImage: "trash")
             }
-            Button {
-                renameDraft = task.name
-                renameError = nil
-                renameTarget = task
-            } label: {
-                Label("重命名", systemImage: "pencil")
-            }
-            .tint(Theme.brand)
         }
     }
 

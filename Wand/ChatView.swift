@@ -28,6 +28,18 @@ private enum ChatScrollMode {
     case manual
 }
 
+private enum ModelPickerPresentation: String, Identifiable {
+    case launch
+    case session
+    var id: String { rawValue }
+}
+
+private enum ComposerChoicePresentation: String, Identifiable {
+    case mode
+    case attachments
+    var id: String { rawValue }
+}
+
 private struct CardExpandDefaultsEnvironmentKey: EnvironmentKey {
     static let defaultValue = CardExpandDefaults()
 }
@@ -113,6 +125,9 @@ struct ChatView: View {
     /// 不用 @FocusState：输入框是 UIKit UITextView，没有挂 .focused()。
     /// FocusState 在没有绑定视图时会把 true 立刻打回 false，updateUIView 再 resign，键盘就弹不出来。
     @State private var inputFocused = false
+    @State private var modelPicker: ModelPickerPresentation?
+    @State private var composerChoice: ComposerChoicePresentation?
+    @State private var visibleTurnIndex = 0
 
     init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true) {
         self.sessionId = sessionId
@@ -175,6 +190,7 @@ struct ChatView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(Theme.background)
         // 点消息区任意空白处收起键盘；输入栏作为底部 overlay 不受影响，
         // 点发送 / 权限按钮不会误收。
         .navigationTitle("")
@@ -248,6 +264,26 @@ struct ChatView: View {
         }) { item in
             ServerFilePreviewView(item: item)
         }
+        .sheet(item: $modelPicker) { picker in
+            SearchableChoiceSheet(
+                title: picker == .session ? "模型与思考" : "选择模型",
+                searchPrompt: "搜索模型",
+                sections: modelPickerSections(for: picker)
+            ) { sectionId, itemId in
+                if sectionId == "thinking" {
+                    store.setThinkingEffort(itemId)
+                } else {
+                    store.setModel(itemId.isEmpty ? nil : itemId)
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $composerChoice) { choice in
+            composerChoiceSheet(choice)
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        }
         .alert(item: $serverFileLinks.failure) { failure in
             Alert(
                 title: Text("文件下载失败"),
@@ -279,7 +315,7 @@ struct ChatView: View {
         }
         .overlay(alignment: .top) { connectionBanner }
         .animation(.easeInOut(duration: 0.2), value: store.connected)
-        .overlay(alignment: .top) { toastView }
+        .overlay(alignment: .bottom) { toastView }
         .overlay {
             if serverFileLinks.isDownloading {
                 HStack(spacing: 10) {
@@ -374,6 +410,8 @@ struct ChatView: View {
             && !attachments.showPhotoPicker
             && !showStopConfirm
             && activitySheet == nil
+            && modelPicker == nil
+            && composerChoice == nil
     }
 
     @ViewBuilder private var mainContent: some View {
@@ -445,6 +483,12 @@ struct ChatView: View {
                         // 什么都渲染不出来。摊平后 LazyVStack 只实例化进入视口的行。
                         ForEach(identifiedMessageItems(presentedMessageItems, turnOffset: store.loadedOffset)) { row in
                             messageItemView(row.item, proxy: proxy)
+                                .onAppear {
+                                    let index = itemTurnIndex(row.item)
+                                    if store.messages.indices.contains(index) {
+                                        visibleTurnIndex = index
+                                    }
+                                }
                         }
                         if store.isResponding {
                             LiveTurnStatusRow(
@@ -460,6 +504,7 @@ struct ChatView: View {
                     .padding(.top, 12)
                     .padding(.bottom, 6)
                 }
+                .scrollContentBackground(.hidden)
                 .modifier(DismissKeyboardOnDrag())
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
@@ -473,6 +518,29 @@ struct ChatView: View {
                             }
                         }
                 )
+                .overlay(alignment: .trailing) {
+                    if store.messages.count >= 2 {
+                        ConversationTurnScrubber(
+                            itemCount: store.messages.count,
+                            currentItem: visibleTurnIndex,
+                            currentPreview: scrubberUserPreview(turns: store.messages, index: visibleTurnIndex)
+                        ) { index, animate in
+                            guard store.messages.indices.contains(index) else { return }
+                            visibleTurnIndex = index
+                            scrollMode = .manual
+                            let targetID = scrubberScrollID(for: index)
+                            if animate {
+                                withAnimation(.easeOut(duration: 0.18)) {
+                                    proxy.scrollTo(targetID, anchor: .top)
+                                }
+                            } else {
+                                proxy.scrollTo(targetID, anchor: .top)
+                            }
+                        }
+                        .padding(.trailing, 3)
+                        .padding(.vertical, 12)
+                    }
+                }
                 .overlay(alignment: .bottomTrailing) {
                     if scrollMode == .manual {
                         jumpToLatestButton(proxy)
@@ -861,18 +929,15 @@ struct ChatView: View {
     }
 
     private var launchModelMenu: some View {
-        launchOptionMenu(
-            title: "模型",
-            value: launchModelLabel,
-            icon: "cpu"
-        ) {
-            Section("模型") {
-                modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
-                ForEach(store.availableModels.filter { $0.id != "default" }) { model in
-                    modelButton(id: model.id, label: model.label)
-                }
-            }
+        Button {
+            modelPicker = .launch
+        } label: {
+            launchOptionChrome(title: "模型", value: launchModelLabel, icon: "cpu")
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("模型")
+        .accessibilityValue(launchModelLabel)
+        .accessibilityHint("轻点选择模型")
     }
 
     private var launchThinkingMenu: some View {
@@ -909,6 +974,39 @@ struct ChatView: View {
         return store.availableModels.first(where: { $0.id == "default" })?.label ?? "默认"
     }
 
+    private func launchOptionChrome(title: String, value: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Theme.brand)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                Text(value)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(Theme.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .frame(minHeight: 44)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        )
+    }
+
     private func launchOptionMenu<Content: View>(
         title: String,
         value: String,
@@ -916,36 +1014,7 @@ struct ChatView: View {
         @ViewBuilder content: () -> Content
     ) -> some View {
         Menu(content: content) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.brand)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
-                    Text(value)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 9)
-            .frame(minHeight: 44)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Theme.surface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Theme.border, lineWidth: 1)
-            )
+            launchOptionChrome(title: title, value: value, icon: icon)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
@@ -953,20 +1022,41 @@ struct ChatView: View {
         .accessibilityHint("轻点选择\(title)")
     }
 
-    private func modelButton(id: String?, label: String) -> some View {
-        Button {
-            store.setModel(id)
-        } label: {
-            let currentModel = store.selectedModel
-            let selected = id == nil
-                ? (currentModel == nil || currentModel?.isEmpty == true || currentModel == "default")
-                : currentModel == id
-            if selected {
-                Label(label, systemImage: "checkmark")
-            } else {
-                Text(label)
-            }
+    private var modelChoiceItems: [SearchableChoiceItem] {
+        var items = [SearchableChoiceItem(id: "", label: "默认 · \(defaultModelLabel)")]
+        items.append(contentsOf: store.availableModels.filter { $0.id != "default" }.map {
+            SearchableChoiceItem(id: $0.id, label: $0.label)
+        })
+        return items
+    }
+
+    private var selectedModelChoiceId: String {
+        guard let selected = store.selectedModel, !selected.isEmpty, selected != "default" else { return "" }
+        return selected
+    }
+
+    private func modelPickerSections(for picker: ModelPickerPresentation) -> [SearchableChoiceSection] {
+        var sections = [
+            SearchableChoiceSection(
+                id: "model",
+                title: picker == .session ? "模型" : nil,
+                items: modelChoiceItems,
+                selectedId: selectedModelChoiceId,
+                searchable: true
+            )
+        ]
+        if picker == .session {
+            sections.append(
+                SearchableChoiceSection(
+                    id: "thinking",
+                    title: "思考深度",
+                    items: thinkingLevels.map { SearchableChoiceItem(id: $0.id, label: $0.menuLabel) },
+                    selectedId: store.thinkingEffort,
+                    searchable: false
+                )
+            )
         }
+        return sections
     }
 
     private var thinkingLevels: [ThinkingEffortOption] {
@@ -1303,20 +1393,9 @@ struct ChatView: View {
     private func modeChip(compact _: Bool = false) -> some View {
         let provider = currentProvider
         let isCodex = provider == .codex
-        let supportedModeIDs = provider.supportedModeIDs
         let currentModeLabel = Self.modeLabel(store.mode)
-        return Menu {
-            ForEach(Self.sessionModes.filter { supportedModeIDs.contains($0.id) }, id: \.id) { option in
-                Button {
-                    store.setMode(option.id)
-                } label: {
-                    if store.mode == option.id {
-                        Label(option.label, systemImage: "checkmark")
-                    } else {
-                        Text(option.label)
-                    }
-                }
-            }
+        return Button {
+            composerChoice = .mode
         } label: {
             chipLabel(
                 icon: Self.modeIcon(store.mode),
@@ -1333,29 +1412,12 @@ struct ChatView: View {
                 ? "执行模式：\(currentModeLabel)，Codex 会话固定"
                 : "执行模式：\(currentModeLabel)"
         )
+        .accessibilityHint(isCodex ? "" : "轻点选择执行模式")
     }
 
     private func modelThinkingChip(compact: Bool = false) -> some View {
-        Menu {
-            Section("模型") {
-                modelButton(id: nil, label: "默认 · \(defaultModelLabel)")
-                ForEach(store.availableModels.filter { $0.id != "default" }) { model in
-                    modelButton(id: model.id, label: model.label)
-                }
-            }
-            Section("思考深度") {
-                ForEach(thinkingLevels) { level in
-                    Button {
-                        store.setThinkingEffort(level.id)
-                    } label: {
-                        if effectiveThinkingOption?.id == level.id {
-                            Label(level.menuLabel, systemImage: "checkmark")
-                        } else {
-                            Text(level.menuLabel)
-                        }
-                    }
-                }
-            }
+        Button {
+            modelPicker = .session
         } label: {
             chipLabel(
                 icon: "cpu",
@@ -1458,20 +1520,8 @@ struct ChatView: View {
     }
 
     private var composerActionsMenu: some View {
-        Menu {
-            Button {
-                attachments.showPhotoPicker = true
-            } label: {
-                Label("从相册选择", systemImage: "photo.on.rectangle")
-            }
-            .disabled(attachments.isUploading)
-
-            Button {
-                attachments.showFileImporter = true
-            } label: {
-                Label("从文件选择", systemImage: "paperclip")
-            }
-            .disabled(attachments.isUploading)
+        Button {
+            composerChoice = .attachments
         } label: {
             if attachments.isUploading {
                 ProgressView()
@@ -1487,9 +1537,11 @@ struct ChatView: View {
                     .contentShape(Rectangle())
             }
         }
+        .disabled(attachments.isUploading)
         .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
         .buttonStyle(.plain)
-        .accessibilityLabel("更多操作")
+        .accessibilityLabel("添加附件")
+        .accessibilityHint("轻点从相册或文件选择")
     }
 
     /// 多行自增高输入框。走 UIKit marked-text，避免中文输入法组字被 SwiftUI Binding 打断。
@@ -1656,15 +1708,66 @@ struct ChatView: View {
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Capsule().fill(Color.black.opacity(0.78)))
-                .padding(.top, 8)
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.82)))
+                .padding(.horizontal, 12)
+                .padding(.bottom, max(8, bottomBarHeight + subagentShelfHeight + 8))
+                .transition(.move(edge: .bottom).combined(with: .opacity))
                 .onAppear {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + wandNoticeDuration(toast)) {
                         if store.toast == toast { store.toast = nil }
                     }
                 }
         }
+    }
+
+    private func composerChoiceSheet(_ choice: ComposerChoicePresentation) -> some View {
+        switch choice {
+        case .mode:
+            SearchableChoiceSheet(
+                title: "执行模式",
+                sections: [
+                    SearchableChoiceSection(
+                        id: "mode",
+                        items: Self.sessionModes
+                            .filter { currentProvider.supportedModeIDs.contains($0.id) }
+                            .map { SearchableChoiceItem(id: $0.id, label: $0.label) },
+                        selectedId: store.mode
+                    )
+                ]
+            ) { _, itemId in
+                store.setMode(itemId)
+            }
+        case .attachments:
+            SearchableChoiceSheet(
+                title: "添加附件",
+                sections: [
+                    SearchableChoiceSection(
+                        id: "attach",
+                        items: [
+                            SearchableChoiceItem(id: "photo", label: "从相册选择"),
+                            SearchableChoiceItem(id: "file", label: "从文件选择"),
+                        ],
+                        selectedId: ""
+                    )
+                ]
+            ) { _, itemId in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    if itemId == "photo" {
+                        attachments.showPhotoPicker = true
+                    } else {
+                        attachments.showFileImporter = true
+                    }
+                }
+            }
+        }
+    }
+
+    private func scrubberScrollID(for localIndex: Int) -> String {
+        let absolute = absoluteTurnIndex(localIndex: localIndex, loadedOffset: store.loadedOffset)
+        guard store.messages.indices.contains(localIndex), store.messages[localIndex].role != "user" else {
+            return "turn:\(absolute)"
+        }
+        return "assistant-header:\(absolute)"
     }
 }
 
@@ -2307,6 +2410,39 @@ func shouldCompactUserBody(_ text: String) -> Bool {
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .prefix(3)
             .count > 2
+}
+
+func conversationTurnPreview(_ turn: ConversationTurn) -> String {
+    let rawText = turn.content.compactMap { block -> String? in
+        if case .text(let text, _) = block { return text }
+        return nil
+    }.joined(separator: " ")
+    if !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if turn.role == "user" {
+            let parsed = parseUserAttachmentMessage(rawText)
+            let body = compactReplyPreviewText(parsed.body)
+            if !body.isEmpty { return body }
+            if !parsed.attachmentPaths.isEmpty { return "\(parsed.attachmentPaths.count) 个附件" }
+        } else {
+            let body = compactReplyPreviewText(rawText)
+            if !body.isEmpty { return body }
+        }
+    }
+    let toolCount = turn.content.reduce(into: 0) { count, block in
+        if case .toolUse = block { count += 1 }
+    }
+    return toolCount > 0 ? "\(toolCount) 个工具调用" : ""
+}
+
+func scrubberUserPreview(turns: [ConversationTurn], index: Int) -> String {
+    for position in stride(from: min(index, turns.count - 1), through: 0, by: -1) {
+        guard turns.indices.contains(position) else { continue }
+        let turn = turns[position]
+        guard turn.role == "user" else { continue }
+        let preview = conversationTurnPreview(turn)
+        return preview.isEmpty ? "用户消息" : preview
+    }
+    return ""
 }
 
 func compactReplyPreviewText(_ source: String) -> String {
@@ -5408,5 +5544,200 @@ private struct QueueBar: View {
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+}
+
+private struct ConversationTurnScrubber: View {
+    let itemCount: Int
+    let currentItem: Int
+    let currentPreview: String
+    let onSelect: (Int, Bool) -> Void
+
+    @State private var dragging = false
+    @State private var lastEmittedIndex = -1
+
+    private var displayedItem: Int {
+        min(max(currentItem, 0), max(itemCount - 1, 0))
+    }
+
+    private var railHeight: CGFloat {
+        CGFloat(min(max(itemCount * 5, 48), 240))
+    }
+
+    var body: some View {
+        rail
+            .overlay(alignment: .trailing) {
+                if dragging && !currentPreview.isEmpty {
+                    Text(currentPreview)
+                        .font(.system(size: 13))
+                        .foregroundColor(Theme.textPrimary)
+                        .lineLimit(2)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .frame(minWidth: 120, maxWidth: 280, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Theme.elevated.opacity(0.96))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Theme.border.opacity(0.55), lineWidth: 0.55)
+                        )
+                        .offset(x: -44)
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+
+    private var rail: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<itemCount, id: \.self) { index in
+                let distance = abs(index - displayedItem)
+                let width: CGFloat = {
+                    switch distance {
+                    case 0: return 30
+                    case 1: return 16
+                    case 2: return 11
+                    default: return 7
+                    }
+                }()
+                Capsule()
+                    .fill(
+                        distance == 0
+                            ? Theme.brand.opacity(0.88)
+                            : Theme.textMuted.opacity(0.25)
+                    )
+                    .frame(width: width, height: distance == 0 ? 3 : 2)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                    .contentShape(Rectangle())
+                    .onTapGesture { onSelect(index, true) }
+            }
+        }
+        .scaleEffect(dragging ? 1.18 : 1, anchor: .trailing)
+        .animation(.easeOut(duration: 0.12), value: dragging)
+        .animation(.easeOut(duration: 0.12), value: displayedItem)
+        .frame(width: 40, height: railHeight)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { value in
+                    dragging = true
+                    let ratio = itemCount == 0 ? 0 : value.location.y / max(railHeight, 1)
+                    let index = min(max(Int(ratio * CGFloat(itemCount)), 0), itemCount - 1)
+                    if index != lastEmittedIndex {
+                        lastEmittedIndex = index
+                        onSelect(index, false)
+                    }
+                }
+                .onEnded { _ in
+                    dragging = false
+                    lastEmittedIndex = -1
+                }
+        )
+    }
+}
+
+struct SearchableChoiceItem: Identifiable, Hashable {
+    let id: String
+    let label: String
+}
+
+struct SearchableChoiceSection: Identifiable {
+    let id: String
+    var title: String? = nil
+    let items: [SearchableChoiceItem]
+    let selectedId: String
+    var searchable: Bool = false
+}
+
+struct SearchableChoiceSheet: View {
+    let title: String
+    var searchPrompt: String = "搜索"
+    let sections: [SearchableChoiceSection]
+    let onSelect: (String, String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+
+    private var visibleSections: [SearchableChoiceSection] {
+        let searching = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return sections.compactMap { section in
+            if searching && !section.searchable { return nil }
+            let items = section.searchable
+                ? section.items.filter { matchesModelKeyword(query, id: $0.id, label: $0.label) }
+                : section.items
+            return SearchableChoiceSection(
+                id: section.id,
+                title: section.title,
+                items: items,
+                selectedId: section.selectedId,
+                searchable: section.searchable
+            )
+        }
+    }
+
+    private var allowsSearch: Bool {
+        sections.contains(where: \.searchable)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(visibleSections) { section in
+                    Section {
+                        if section.items.isEmpty {
+                            Text(allowsSearch ? "没有匹配的\(title)" : "没有可选项")
+                                .foregroundColor(Theme.textSecondary)
+                        } else {
+                            ForEach(section.items) { item in
+                                Button {
+                                    onSelect(section.id, item.id)
+                                    dismiss()
+                                } label: {
+                                    HStack {
+                                        Text(item.label)
+                                            .foregroundColor(Theme.textPrimary)
+                                        Spacer()
+                                        if item.id == section.selectedId {
+                                            Image(systemName: "checkmark")
+                                                .foregroundColor(Theme.brand)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } header: {
+                        if let title = section.title {
+                            Text(title)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if allowsSearch {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(Theme.textMuted)
+                        TextField(searchPrompt, text: $query)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Theme.surface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Theme.border, lineWidth: 1)
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                }
+            }
+        }
     }
 }

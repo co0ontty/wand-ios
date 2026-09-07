@@ -121,6 +121,14 @@ enum Theme {
     }
 }
 
+func wandNoticeIsLong(_ message: String) -> Bool {
+    message.contains("失败") || message.contains("错误") || message.contains("断开")
+}
+
+func wandNoticeDuration(_ message: String) -> TimeInterval {
+    wandNoticeIsLong(message) ? 4.0 : 2.6
+}
+
 extension View {
     @ViewBuilder
     func wandGlassSurface() -> some View {
