@@ -358,6 +358,91 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(detail.sessions.map(\.id), ["created"])
     }
 
+    func testNewTaskAutoCreatesStructuredWindowAfterOpen() async throws {
+        let service = MockWorkspaceService()
+        let workspace = try workspace(id: "workspace-auto")
+        let task = try task(id: "task-auto", workspaceId: workspace.id)
+        service.taskDetails[task.id] = try taskDetail(
+            id: task.id,
+            workspaceId: workspace.id,
+            sessions: []
+        )
+        service.createdSnapshot = try decode(
+            SessionSnapshot.self,
+            from: #"{"id":"structured-window","sessionKind":"structured","provider":"codex","cwd":"/task/worktree","workspaceId":"workspace-auto","workspaceTaskId":"task-auto"}"#
+        )
+        let store = WorkspaceStore(api: service, serverID: "server-auto")
+        store.selectedTarget = .codex
+        store.selectedKind = .structured
+        store.scheduleAutoCreateWindow(taskId: task.id)
+
+        await store.openTask(workspace: workspace, task: task)
+
+        XCTAssertEqual(service.createRequests.count, 1)
+        XCTAssertEqual(service.createRequests.first?.target, .codex)
+        XCTAssertEqual(service.createRequests.first?.kind, .structured)
+        XCTAssertEqual(store.visibleSessionID, "structured-window")
+        XCTAssertEqual(store.visibleSnapshot?.id, "structured-window")
+        XCTAssertEqual(store.visibleSnapshot?.sessionKind, "structured")
+        XCTAssertTrue(store.visibleSnapshot?.isStructured == true)
+        guard case .ready(let detail) = store.taskState else {
+            return XCTFail("Auto-created structured window must enter the ready state")
+        }
+        XCTAssertEqual(detail.sessions.map(\.id), ["structured-window"])
+    }
+
+    func testAutoCreateIsSkippedWhenTaskAlreadyHasWindows() async throws {
+        let service = MockWorkspaceService()
+        let workspace = try workspace(id: "workspace-existing")
+        let task = try task(id: "task-existing", workspaceId: workspace.id)
+        service.taskDetails[task.id] = try taskDetail(
+            id: task.id,
+            workspaceId: workspace.id,
+            sessions: [summary(id: "already-open", startedAt: "2026-08-09T00:00:01Z")]
+        )
+        service.sessions["already-open"] = try decode(
+            SessionSnapshot.self,
+            from: #"{"id":"already-open","sessionKind":"structured","provider":"claude"}"#
+        )
+        service.createdSnapshot = try decode(
+            SessionSnapshot.self,
+            from: #"{"id":"should-not-create","sessionKind":"structured","provider":"claude"}"#
+        )
+        let store = WorkspaceStore(api: service, serverID: "server-existing")
+        store.scheduleAutoCreateWindow(taskId: task.id)
+
+        await store.openTask(workspace: workspace, task: task)
+
+        XCTAssertTrue(service.createRequests.isEmpty)
+        XCTAssertEqual(store.visibleSessionID, "already-open")
+        XCTAssertEqual(store.visibleSnapshot?.id, "already-open")
+    }
+
+    func testDuplicateOpenTaskStillShowsAutoCreatedStructuredWindow() async throws {
+        let service = MockWorkspaceService()
+        let workspace = try workspace(id: "workspace-dup")
+        let task = try task(id: "task-dup", workspaceId: workspace.id)
+        service.taskDetails[task.id] = try taskDetail(
+            id: task.id,
+            workspaceId: workspace.id,
+            sessions: []
+        )
+        service.createdSnapshot = try decode(
+            SessionSnapshot.self,
+            from: #"{"id":"dup-window","sessionKind":"structured","provider":"claude","cwd":"/task/worktree","workspaceId":"workspace-dup","workspaceTaskId":"task-dup"}"#
+        )
+        let store = WorkspaceStore(api: service, serverID: "server-dup")
+        store.scheduleAutoCreateWindow(taskId: task.id)
+
+        await store.openTask(workspace: workspace, task: task)
+        await store.openTask(workspace: workspace, task: task)
+
+        XCTAssertEqual(service.createRequests.count, 1)
+        XCTAssertEqual(store.visibleSessionID, "dup-window")
+        XCTAssertEqual(store.visibleSnapshot?.sessionKind, "structured")
+        XCTAssertTrue(store.visibleSnapshot?.isStructured == true)
+    }
+
     private func workspace(id: String) throws -> Workspace {
         try decode(
             Workspace.self,
@@ -403,6 +488,7 @@ private final class MockWorkspaceService: WorkspaceServing {
     struct CreateRequest {
         let target: WorkspaceSessionTarget
         let binding: WorkspaceBinding
+        let kind: WorkspaceSessionKind
     }
 
     enum MockError: LocalizedError {
@@ -491,7 +577,7 @@ private final class MockWorkspaceService: WorkspaceServing {
         binding: WorkspaceBinding,
         kind: WorkspaceSessionKind
     ) async throws -> SessionSnapshot {
-        createRequests.append(CreateRequest(target: target, binding: binding))
+        createRequests.append(CreateRequest(target: target, binding: binding, kind: kind))
         guard let createdSnapshot else { throw MockError.createUnavailable }
         sessions[createdSnapshot.id] = createdSnapshot
         if let detail = taskDetails[binding.workspaceTaskId] {
@@ -536,6 +622,15 @@ private final class MockWorkspaceService: WorkspaceServing {
         workspaceId: String,
         name: String,
         baseRef: String?,
+        worktree: Bool?,
+        cwd: String?
+    ) async throws -> WorkspaceTaskCreation {
+        throw MockError.createUnavailable
+    }
+
+    func createStandaloneTask(
+        name: String,
+        cwd: String?,
         worktree: Bool?
     ) async throws -> WorkspaceTaskCreation {
         throw MockError.createUnavailable

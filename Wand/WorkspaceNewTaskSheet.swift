@@ -8,12 +8,15 @@ struct WorkspaceNewTaskSheet: View {
     @ObservedObject var store: WorkspaceStore
     /// 预填目录（从项目组「＋」进入时为项目 cwd；全局入口为空）。
     var initialCwd: String = ""
+    var workspaceId: String? = nil
     let onCreated: (Workspace, WorkspaceTaskCreation) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var cwd = ""
     @State private var worktreeEnabled = true
+    @State private var target: WorkspaceSessionTarget = .claude
+    @State private var sessionKind: WorkspaceSessionKind = .structured
     @State private var suggestions: [WorkspacePathSuggestion] = []
     @State private var recentPaths: [WorkspaceRecentPath] = []
     @State private var showingSuggestions = false
@@ -25,11 +28,13 @@ struct WorkspaceNewTaskSheet: View {
         api: WandAPI,
         store: WorkspaceStore,
         initialCwd: String = "",
+        workspaceId: String? = nil,
         onCreated: @escaping (Workspace, WorkspaceTaskCreation) -> Void
     ) {
         self.api = api
         self.store = store
         self.initialCwd = initialCwd
+        self.workspaceId = workspaceId
         self.onCreated = onCreated
         _cwd = State(initialValue: initialCwd.trimmingCharacters(in: .whitespacesAndNewlines))
     }
@@ -47,7 +52,10 @@ struct WorkspaceNewTaskSheet: View {
                                 .font(.system(size: 15))
                         }
                         directoryCard
-                        worktreeCard
+                        if !trimmedDirectory.isEmpty {
+                            worktreeCard
+                        }
+                        cliCard
                         if let errorMessage {
                             errorBanner(errorMessage)
                         }
@@ -79,7 +87,7 @@ struct WorkspaceNewTaskSheet: View {
                 if recentPaths.isEmpty, let recent = try? await api.workspaceRecentPaths() {
                     recentPaths = recent
                 }
-                if cwd.isEmpty, let recent = recentPaths.first {
+                if cwd.isEmpty, workspaceId != nil, let recent = recentPaths.first {
                     cwd = recent.path
                 }
             }
@@ -113,7 +121,7 @@ struct WorkspaceNewTaskSheet: View {
     }
 
     private var canSubmit: Bool {
-        !creating && !trimmedName.isEmpty && trimmedName.count <= 80 && !trimmedDirectory.isEmpty
+        !creating && !trimmedName.isEmpty && trimmedName.count <= 80
     }
 
     private func loadSuggestions() async {
@@ -149,7 +157,7 @@ struct WorkspaceNewTaskSheet: View {
     private var directoryCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             fieldCard(title: "任务目录（服务器上的路径）") {
-                TextField(initialCwd.isEmpty ? "例如：/home/user/wand" : initialCwd, text: $cwd)
+                TextField(initialCwd.isEmpty ? "留空则使用全局临时目录" : initialCwd, text: $cwd)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .font(.system(size: 15, design: .monospaced))
@@ -211,6 +219,65 @@ struct WorkspaceNewTaskSheet: View {
         }
     }
 
+    private var cliCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("CLI 工具")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Theme.textSecondary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(WorkspaceSessionTarget.allCases) { option in
+                        let selected = target == option
+                        Button {
+                            target = option
+                            store.rememberCreationChoice(provider: option)
+                        } label: {
+                            Text(option.title)
+                                .font(.system(size: 13, weight: .semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
+                                .background(
+                                    Capsule().fill(selected ? Theme.brand.opacity(0.14) : Theme.surface)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            if target != .shell {
+                Text("会话类型")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                HStack(spacing: 8) {
+                    ForEach(WorkspaceSessionKind.allCases) { option in
+                        let selected = sessionKind == option
+                        Button {
+                            sessionKind = option
+                            store.rememberCreationChoice(kind: option)
+                        } label: {
+                            Text(option.title)
+                                .font(.system(size: 13, weight: .semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(selected ? Theme.brand.opacity(0.12) : Theme.surface)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.surface)
+        )
+    }
+
     private var worktreeCard: some View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: "arrow.triangle.branch")
@@ -268,10 +335,12 @@ struct WorkspaceNewTaskSheet: View {
         errorMessage = nil
         defer { creating = false }
         do {
+            store.rememberCreationChoice(provider: target, kind: sessionKind)
             let (workspace, creation) = try await store.createTask(
                 name: trimmedName,
                 directory: trimmedDirectory,
-                worktree: worktreeEnabled ? nil : false
+                worktree: trimmedDirectory.isEmpty ? false : (worktreeEnabled ? nil : false),
+                workspaceId: workspaceId
             )
             dismiss()
             onCreated(workspace, creation)

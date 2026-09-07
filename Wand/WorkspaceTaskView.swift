@@ -97,6 +97,7 @@ struct WorkspaceTaskView: View {
             WandAmbientBackground()
             content
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -150,7 +151,7 @@ struct WorkspaceTaskView: View {
 
     private var showsToolbarPlus: Bool {
         guard store.currentTask?.id == task.id else { return false }
-        if case .empty = store.taskState { return true }
+        if case .ready = store.taskState { return true }
         return false
     }
 
@@ -226,20 +227,14 @@ struct WorkspaceTaskView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 24)
 
-                Text(detail.isIsolated ? "独立 worktree 已就绪" : "在任务目录中运行")
+                Text("选择 CLI 工具，以及结构化或 PTY，开始这个任务。")
                     .font(.system(size: 13))
                     .foregroundColor(Theme.textSecondary)
                     .padding(.top, 8)
 
-                Button {
-                    store.presentTargetPicker()
-                } label: {
-                    Label("选择工作窗口", systemImage: "plus")
-                        .frame(maxWidth: 320)
-                }
-                .buttonStyle(WandPrimaryButtonStyle())
-                .padding(.top, 26)
-                .padding(.horizontal, 24)
+                WorkspaceTargetPicker(store: store, taskId: task.id, embedded: true)
+                    .padding(.top, 26)
+                    .padding(.horizontal, 24)
 
                 VStack(alignment: .leading, spacing: 7) {
                     Text("工作目录")
@@ -288,7 +283,9 @@ struct WorkspaceTaskView: View {
             Divider().overlay(showsTerminalChrome ? AnyShapeStyle(Color.white.opacity(0.12)) : AnyShapeStyle(Theme.border))
             sessionContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func switchTaskSession(_ session: WorkspaceSessionSummary) {
@@ -437,6 +434,7 @@ struct WorkspaceTaskView: View {
            snapshot.id == store.visibleSessionID {
             SessionDestinationView(session: snapshot, api: api, showsNavigationChrome: false)
                 .id(snapshot.id)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if store.sessionLoading {
             loadingState("正在加载工作窗口…")
         } else if let error = store.sessionError {

@@ -22,11 +22,14 @@ struct SessionDestinationView: View {
     var showsNavigationChrome: Bool = true
 
     @ViewBuilder var body: some View {
-        if session.isStructured {
-            ChatView(sessionId: session.id, api: api, showsNavigationChrome: showsNavigationChrome)
-        } else {
-            PtySessionView(session: session, api: api, showsNavigationChrome: showsNavigationChrome)
+        Group {
+            if session.isStructured {
+                ChatView(sessionId: session.id, api: api, showsNavigationChrome: showsNavigationChrome)
+            } else {
+                PtySessionView(session: session, api: api, showsNavigationChrome: showsNavigationChrome)
+            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

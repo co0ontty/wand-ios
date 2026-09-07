@@ -30,6 +30,12 @@ protocol WorkspaceServing: AnyObject {
         workspaceId: String,
         name: String,
         baseRef: String?,
+        worktree: Bool?,
+        cwd: String?
+    ) async throws -> WorkspaceTaskCreation
+    func createStandaloneTask(
+        name: String,
+        cwd: String?,
         worktree: Bool?
     ) async throws -> WorkspaceTaskCreation
     func listTaskGroups() async throws -> [TaskDirectoryGroup]
@@ -121,6 +127,13 @@ final class WorkspaceStore: ObservableObject {
     private var sessionGeneration = 0
     private var loadingStandaloneSessions = Set<String>()
     private var standaloneSessionGenerations: [String: Int] = [:]
+    private var pendingWindowCreation: PendingWindowCreation?
+
+    private struct PendingWindowCreation {
+        let taskId: String
+        let target: WorkspaceSessionTarget
+        let kind: WorkspaceSessionKind
+    }
 
     init(api: WorkspaceServing, serverID: String) {
         self.api = api
@@ -276,7 +289,8 @@ final class WorkspaceStore: ObservableObject {
             workspaceId: workspaceId,
             name: name,
             baseRef: nil,
-            worktree: nil
+            worktree: nil,
+            cwd: nil
         )
         var refreshed: [WorkspaceTask] = []
         do {
@@ -333,35 +347,44 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    /// 任务一级入口：按目录 find-or-create 项目，再建任务（可选 worktree 隔离）。
+    /// 任务入口：独立任务走 POST /api/tasks（目录可空，使用全局临时目录）；
+    /// 指定 workspaceId 时在该项目下创建。
     @discardableResult
     func createTask(
         name: String,
         directory: String,
-        worktree: Bool?
+        worktree: Bool?,
+        workspaceId: String? = nil
     ) async throws -> (workspace: Workspace, creation: WorkspaceTaskCreation) {
         let normalized = normalizeWorkspaceDirectory(directory)
-        guard !normalized.isEmpty else { throw WorkspaceTaskCreationError.missingDirectory }
+        let creation: WorkspaceTaskCreation
         let workspace: Workspace
-        if let existing = workspaces.first(where: {
-            normalizeWorkspaceDirectory($0.cwd) == normalized
-        }) {
+        if let workspaceId, let existing = workspaces.first(where: { $0.id == workspaceId }) {
+            creation = try await api.createWorkspaceTask(
+                workspaceId: existing.id,
+                name: name,
+                baseRef: nil,
+                worktree: worktree,
+                cwd: normalized.isEmpty ? nil : normalized
+            )
             workspace = existing
         } else {
-            let directoryName = normalized.split(separator: "/").last.map(String.init) ?? normalized
-            workspace = try await api.createWorkspace(
-                name: directoryName,
-                cwd: normalized,
-                defaultProvider: nil
+            creation = try await api.createStandaloneTask(
+                name: name,
+                cwd: normalized.isEmpty ? nil : normalized,
+                worktree: normalized.isEmpty ? false : worktree
             )
-            workspaces.append(workspace)
+            workspace = workspaces.first(where: { $0.id == creation.workspaceId })
+                ?? Workspace(
+                    id: creation.workspaceId,
+                    name: "",
+                    cwd: creation.cwd,
+                    defaultProvider: nil,
+                    layout: nil,
+                    createdAt: "",
+                    lastOpenedAt: nil
+                )
         }
-        let creation = try await api.createWorkspaceTask(
-            workspaceId: workspace.id,
-            name: name,
-            baseRef: nil,
-            worktree: worktree
-        )
         tasksByWorkspace[workspace.id] = (tasksByWorkspace[workspace.id] ?? []) + [WorkspaceTask(
             id: creation.id,
             workspaceId: creation.workspaceId,
@@ -520,11 +543,24 @@ final class WorkspaceStore: ObservableObject {
         try await deleteSessions(ids)
     }
 
+    /// 新建任务后由任务页的 `openTask` 消费：避免列表回调和详情 `.task` 各开一次
+    /// 任务，把刚创建的结构化窗口冲掉。
+    func scheduleAutoCreateWindow(taskId: String) {
+        pendingWindowCreation = PendingWindowCreation(
+            taskId: taskId,
+            target: selectedTarget,
+            kind: selectedKind
+        )
+    }
+
     func openTask(
         workspace: Workspace,
         task: WorkspaceTask,
         preferredSessionId: String? = nil
     ) async {
+        if let pending = pendingWindowCreation, pending.taskId != task.id {
+            pendingWindowCreation = nil
+        }
         taskGeneration &+= 1
         sessionGeneration &+= 1
         let generation = taskGeneration
@@ -538,15 +574,18 @@ final class WorkspaceStore: ObservableObject {
         layoutWarning = nil
         creationError = nil
         pickerPresented = false
-        selectedTarget = WorkspaceSessionTarget(
-            provider: workspace.defaultProvider ?? serverDefaultProvider
-        )
-        selectedKind = .structured
+        if pendingWindowCreation?.taskId != task.id {
+            selectedTarget = WorkspaceSessionTarget(
+                provider: workspace.defaultProvider ?? serverDefaultProvider
+            )
+            selectedKind = .structured
+        }
 
         do {
             let detail = try await api.getWorkspaceTask(taskId: task.id)
             guard isCurrentTask(task.id, generation: generation), !Task.isCancelled else { return }
             await applyLoadedDetail(detail, preferredSessionId: preferredSessionId, generation: generation)
+            await consumePendingWindowCreationIfNeeded(generation: generation)
         } catch {
             guard isCurrentTask(task.id, generation: generation), !Task.isCancelled else { return }
             taskState = .failed(error.localizedDescription)
@@ -555,6 +594,7 @@ final class WorkspaceStore: ObservableObject {
 
     func openTaskAndPresentPicker(workspace: Workspace, task: WorkspaceTask) async {
         await openTask(workspace: workspace, task: task)
+        if case .empty = taskState { return }
         presentTargetPicker()
     }
 
@@ -755,5 +795,21 @@ final class WorkspaceStore: ObservableObject {
 
     private func isCurrentTask(_ taskId: String, generation: Int) -> Bool {
         taskGeneration == generation && currentTask?.id == taskId
+    }
+
+    private func consumePendingWindowCreationIfNeeded(generation: Int) async {
+        guard let pending = pendingWindowCreation,
+              isCurrentTask(pending.taskId, generation: generation) else { return }
+        if case .empty = taskState {
+            selectedTarget = pending.target
+            selectedKind = pending.kind
+            await createSelectedWindow(expectedTaskId: pending.taskId)
+            guard isCurrentTask(pending.taskId, generation: generation) else { return }
+            if visibleSnapshot != nil || creationError != nil {
+                pendingWindowCreation = nil
+            }
+            return
+        }
+        pendingWindowCreation = nil
     }
 }

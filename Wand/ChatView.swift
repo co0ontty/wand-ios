@@ -5,24 +5,11 @@ import UIKit
 import UniformTypeIdentifiers
 
 /// 原生聊天视图：结构化消息渲染 + 原生输入栏 + 权限审批卡片。
-/// 输入栏放在底部 overlay；键盘避让不走系统自动机制
+/// 输入栏放在内容区下方的 VStack 里（不要用 overlay + PreferenceKey 量高：嵌在任务窗口里
+/// 量到的高度会把对话区挤成 0）。键盘避让不走系统自动机制
 /// （NavigationView push 页面 + 多行 TextField 组合下系统避让会漏抬、键盘盖住输入栏），
 /// 而是 .ignoresSafeArea(.keyboard) 关掉系统行为，由 KeyboardObserver
 /// 监听键盘 frame 手动抬升，行为确定。
-private struct ChatBottomBarHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-private struct SubagentShelfHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 private enum ChatScrollMode {
     case stickToBottom
     case manual
@@ -108,10 +95,6 @@ struct ChatView: View {
     @State private var expandedHistoricalAssistantTurns: Set<Int> = []
     /// 连续工具 / 思考 / 终端活动的详情 sheet。
     @State private var activitySheet: ActivitySheetItem?
-    /// 底部 overlay 的实际占位高度。ChatView 不使用 safeAreaInset 放输入栏，
-    /// 避免 SwiftUI 键盘避让和 KeyboardObserver 手动抬升叠加。
-    @State private var bottomBarHeight: CGFloat = 0
-    @State private var subagentShelfHeight: CGFloat = 0
     /// 每次贴底请求递增；较旧的下一帧任务看到代次变化后自行退出，避免连续事件抢滚动。
     @State private var scrollRequestGeneration = 0
     /// 顶部分页哨兵是否在视口内。只有用户主动向历史方向拖动后才允许触发，避免页面
@@ -140,14 +123,15 @@ struct ChatView: View {
     var body: some View {
         GeometryReader { root in
             ZStack(alignment: .bottom) {
-            WandAmbientBackground()
-
-                mainContent
-                    .padding(.bottom, bottomBarHeight + subagentShelfHeight)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .dismissKeyboardOnTap()
-
+                if showsNavigationChrome {
+                    WandAmbientBackground()
+                }
                 VStack(spacing: 0) {
+                    mainContent
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .dismissKeyboardOnTap()
+                        .overlay(alignment: .bottom) { toastView }
+
                     if shouldShowSubagentShelf {
                         SubagentActivityShelf(
                             activities: subagentActivities,
@@ -167,32 +151,19 @@ struct ChatView: View {
                         )
                         .padding(.horizontal, 12)
                         .padding(.bottom, 6)
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear.preference(
-                                    key: SubagentShelfHeightKey.self,
-                                    value: proxy.size.height + 6
-                                )
-                            }
-                        )
                     }
-                    bottomBarOverlay(safeBottom: root.safeAreaInsets.bottom)
+
+                    bottomBar
+                        .padding(.bottom, root.safeAreaInsets.bottom)
+                        .animation(.easeOut(duration: 0.2), value: keyboard.lift)
                 }
-                .onPreferenceChange(SubagentShelfHeightKey.self) { height in
-                    let next = shouldShowSubagentShelf ? height : 0
-                    if abs(next - subagentShelfHeight) > 0.5 {
-                        subagentShelfHeight = next
-                    }
-                }
-                .onChange(of: shouldShowSubagentShelf) { _, showing in
-                    if !showing { subagentShelfHeight = 0 }
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Theme.background)
-        // 点消息区任意空白处收起键盘；输入栏作为底部 overlay 不受影响，
-        // 点发送 / 权限按钮不会误收。
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(showsNavigationChrome ? Theme.background : Color.clear)
+        // 点消息区任意空白处收起键盘；输入栏在 VStack 底部，不受 dismiss 手势误伤。
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -315,7 +286,6 @@ struct ChatView: View {
         }
         .overlay(alignment: .top) { connectionBanner }
         .animation(.easeInOut(duration: 0.2), value: store.connected)
-        .overlay(alignment: .bottom) { toastView }
         .overlay {
             if serverFileLinks.isDownloading {
                 HStack(spacing: 10) {
@@ -417,6 +387,7 @@ struct ChatView: View {
     @ViewBuilder private var mainContent: some View {
         if store.loading {
             ProgressView().tint(Theme.brand)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let error = store.loadError {
             VStack(spacing: 12) {
                 Text("加载失败").font(.headline).foregroundColor(Theme.textPrimary)
@@ -424,6 +395,7 @@ struct ChatView: View {
                     .multilineTextAlignment(.center)
             }
             .padding(32)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if store.isStructured && store.messages.isEmpty && !store.isResponding {
             sessionLaunchPanel
         } else {
@@ -574,8 +546,13 @@ struct ChatView: View {
                 .onChange(of: keyboard.lift) {
                     scrollToActiveTarget(proxy)
                 }
-                .onChange(of: bottomBarHeight) {
-                    // 聚焦、语音模式、附件和权限卡都会改变输入区高度。
+                .onChange(of: inputExpanded) {
+                    scrollToActiveTarget(proxy)
+                }
+                .onChange(of: store.queuedMessages.count) {
+                    scrollToActiveTarget(proxy)
+                }
+                .onChange(of: store.pendingEscalation != nil) {
                     scrollToActiveTarget(proxy)
                 }
         }
@@ -823,7 +800,7 @@ struct ChatView: View {
         }
         .accessibilityLabel("回到列表底部")
         .padding(.trailing, 16)
-        .padding(.bottom, 12 + subagentShelfHeight)
+        .padding(.bottom, 12)
         .transition(.scale(scale: 0.85).combined(with: .opacity))
     }
 
@@ -899,6 +876,7 @@ struct ChatView: View {
         let provider = currentProvider
         let tint = providerTint
         return VStack(spacing: 14) {
+            Spacer(minLength: 12)
             BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
                 .frame(width: 36, height: 36)
             Text("开始新的 \(provider.title) 对话")
@@ -908,8 +886,10 @@ struct ChatView: View {
                 .font(.system(size: 13))
                 .foregroundColor(Theme.textSecondary)
             launchContextControls
+            Spacer(minLength: 12)
         }
         .padding(.horizontal, 32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder private var launchContextControls: some View {
@@ -1147,25 +1127,6 @@ struct ChatView: View {
         guard !todos.isEmpty else { return [] }
         let completed = todos.filter { $0.status == "completed" }.count
         return completed == todos.count ? [] : todos
-    }
-
-    private func bottomBarOverlay(safeBottom: CGFloat) -> some View {
-        bottomBar
-            .padding(.bottom, safeBottom)
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: ChatBottomBarHeightKey.self,
-                        value: proxy.size.height
-                    )
-                }
-            )
-            .onPreferenceChange(ChatBottomBarHeightKey.self) { height in
-                if abs(height - bottomBarHeight) > 0.5 {
-                    bottomBarHeight = height
-                }
-            }
-            .animation(.easeOut(duration: 0.2), value: keyboard.lift)
     }
 
     private var bottomBar: some View {
@@ -1710,7 +1671,7 @@ struct ChatView: View {
                 .padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.82)))
                 .padding(.horizontal, 12)
-                .padding(.bottom, max(8, bottomBarHeight + subagentShelfHeight + 8))
+                .padding(.bottom, 12)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .onAppear {
                     DispatchQueue.main.asyncAfter(deadline: .now() + wandNoticeDuration(toast)) {

@@ -103,11 +103,15 @@ func createWorkspaceTaskRequest(
     workspaceId: String,
     name: String,
     baseRef: String?,
-    worktree: Bool? = nil
+    worktree: Bool? = nil,
+    cwd: String? = nil
 ) -> WorkspaceTaskWindowRequest {
     var body: [String: WorkspaceRequestValue] = ["name": .string(name)]
     if let baseRef, !baseRef.isEmpty {
         body["baseRef"] = .string(baseRef)
+    }
+    if let cwd, !cwd.isEmpty {
+        body["cwd"] = .string(cwd)
     }
     // 仅在显式关掉时传 worktree:false；缺省交由服务端默认（git 仓库自动隔离）。
     if worktree == false {
@@ -117,6 +121,23 @@ func createWorkspaceTaskRequest(
         path: "/api/workspaces/\(workspaceId)/tasks",
         body: body
     )
+}
+
+func createStandaloneTaskRequest(
+    name: String,
+    cwd: String? = nil,
+    worktree: Bool? = nil
+) -> WorkspaceTaskWindowRequest {
+    var body: [String: WorkspaceRequestValue] = ["name": .string(name)]
+    if let cwd, !cwd.isEmpty {
+        body["cwd"] = .string(cwd)
+    }
+    if worktree == false {
+        body["worktree"] = .bool(false)
+    } else if worktree == true {
+        body["worktree"] = .bool(true)
+    }
+    return WorkspaceTaskWindowRequest(path: "/api/tasks", body: body)
 }
 
 private struct WorkspaceLayoutResponse: Decodable {
@@ -258,14 +279,30 @@ extension WandAPI {
         workspaceId: String,
         name: String,
         baseRef: String? = nil,
-        worktree: Bool? = nil
+        worktree: Bool? = nil,
+        cwd: String? = nil
     ) async throws -> WorkspaceTaskCreation {
         let requestSpec = createWorkspaceTaskRequest(
             workspaceId: workspaceId,
             name: name,
             baseRef: baseRef,
-            worktree: worktree
+            worktree: worktree,
+            cwd: cwd
         )
+        return try await request(
+            WorkspaceTaskCreation.self,
+            method: "POST",
+            path: requestSpec.path,
+            body: requestSpec.foundationBody
+        )
+    }
+
+    func createStandaloneTask(
+        name: String,
+        cwd: String? = nil,
+        worktree: Bool? = nil
+    ) async throws -> WorkspaceTaskCreation {
+        let requestSpec = createStandaloneTaskRequest(name: name, cwd: cwd, worktree: worktree)
         return try await request(
             WorkspaceTaskCreation.self,
             method: "POST",

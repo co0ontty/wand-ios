@@ -65,6 +65,7 @@ struct WorkspaceListView: View {
     @State private var confirmError: String?
     @State private var newTaskSheetPresented = false
     @State private var newTaskSheetCwd = ""
+    @State private var newTaskSheetWorkspaceId: String?
     @State private var collapsedTaskGroups = Set<String>()
     @State private var collapsedTaskIds = Set<String>()
     @State private var collapsedLooseGroups = Set<String>()
@@ -87,6 +88,7 @@ struct WorkspaceListView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         newTaskSheetCwd = ""
+                        newTaskSheetWorkspaceId = nil
                         newTaskSheetPresented = true
                     } label: {
                         Image(systemName: "plus.circle.fill")
@@ -121,6 +123,7 @@ struct WorkspaceListView: View {
             .onChange(of: requestNewTask.wrappedValue) { _, requested in
                 guard requested else { return }
                 newTaskSheetCwd = ""
+                newTaskSheetWorkspaceId = nil
                 newTaskSheetPresented = true
                 requestNewTask.wrappedValue = false
             }
@@ -162,16 +165,38 @@ struct WorkspaceListView: View {
             .sheet(isPresented: $createWorkspacePresented) {
                 WorkspaceCreateView(api: api, store: store) { created in
                     showToast("已创建项目「\(created.name)」")
+                    Task {
+                        do {
+                            let (workspace, creation) = try await store.createTask(
+                                name: "新任务",
+                                directory: created.cwd,
+                                worktree: false,
+                                workspaceId: created.id
+                            )
+                            onOpenTask(workspace, WorkspaceTask(
+                                id: creation.id,
+                                workspaceId: creation.workspaceId,
+                                name: creation.name,
+                                worktree: creation.worktree,
+                                layout: nil,
+                                status: creation.status,
+                                createdAt: "",
+                                lastOpenedAt: nil
+                            ))
+                        } catch {
+                            showToast(error.localizedDescription)
+                        }
+                    }
                 }
             }
             .sheet(isPresented: $newTaskSheetPresented) {
-                WorkspaceNewTaskSheet(api: api, store: store, initialCwd: newTaskSheetCwd) { workspace, creation in
+                WorkspaceNewTaskSheet(api: api, store: store, initialCwd: newTaskSheetCwd, workspaceId: newTaskSheetWorkspaceId) { workspace, creation in
                     if !creation.isIsolated, let worktreeError = creation.worktreeError {
                         showToast("已创建任务「\(creation.name)」：\(worktreeError)")
                     } else {
                         showToast("已创建任务「\(creation.name)」\(creation.isIsolated ? "（独立 worktree）" : "")")
                     }
-                    onOpenTask(workspace, WorkspaceTask(
+                    let task = WorkspaceTask(
                         id: creation.id,
                         workspaceId: creation.workspaceId,
                         name: creation.name,
@@ -180,7 +205,9 @@ struct WorkspaceListView: View {
                         status: creation.status,
                         createdAt: "",
                         lastOpenedAt: nil
-                    ))
+                    )
+                    store.scheduleAutoCreateWindow(taskId: creation.id)
+                    onOpenTask(workspace, task)
                 }
                 .presentationDetents([.medium, .large])
             }
@@ -432,6 +459,7 @@ struct WorkspaceListView: View {
                         .multilineTextAlignment(.center)
                     Button {
                         newTaskSheetCwd = ""
+                        newTaskSheetWorkspaceId = nil
                         newTaskSheetPresented = true
                     } label: {
                         Label("新建任务", systemImage: "plus")
@@ -563,6 +591,7 @@ struct WorkspaceListView: View {
                 .foregroundColor(Theme.textMuted)
             Button {
                 newTaskSheetCwd = group.workspaceCwd
+                newTaskSheetWorkspaceId = group.synthetic == true ? nil : group.workspaceId
                 newTaskSheetPresented = true
             } label: {
                 Image(systemName: "plus")
@@ -938,6 +967,7 @@ struct WorkspaceListView: View {
         .contextMenu {
             Button {
                 newTaskSheetCwd = workspace.cwd
+                newTaskSheetWorkspaceId = workspace.id
                 newTaskSheetPresented = true
             } label: {
                 Label("新任务", systemImage: "plus")
@@ -1001,6 +1031,7 @@ struct WorkspaceListView: View {
             worktreeBadge(workspace)
             Button {
                 newTaskSheetCwd = workspace.cwd
+                newTaskSheetWorkspaceId = workspace.id
                 newTaskSheetPresented = true
             } label: {
                 Image(systemName: "plus")

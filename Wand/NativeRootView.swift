@@ -792,14 +792,22 @@ private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
     @Binding var selection: String?
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let detail: () -> Detail
+    @State private var containerSize = CGSize.zero
 
     var body: some View {
-        GeometryReader { geometry in
-            if usesWideListDetail(width: geometry.size.width, height: geometry.size.height) {
+        Group {
+            if usesWideListDetail(width: containerSize.width, height: containerSize.height) {
                 wideLayout
             } else {
                 narrowLayout
             }
+        }
+        .onGeometryChange(for: CGSize.self) { proxy in
+            proxy.size
+        } action: { newSize in
+            guard abs(newSize.width - containerSize.width) > 0.5
+                    || abs(newSize.height - containerSize.height) > 0.5 else { return }
+            containerSize = newSize
         }
     }
 

@@ -3,30 +3,26 @@ import SwiftUI
 struct WorkspaceTargetPicker: View {
     @ObservedObject var store: WorkspaceStore
     let taskId: String
+    var embedded: Bool = false
 
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        if embedded {
+            VStack(spacing: 12) {
+                pickerFields
+                submitBar
+            }
+        } else {
         NavigationStack {
             ZStack(alignment: .bottom) {
                 WandAmbientBackground()
                 ScrollView {
-                    VStack(spacing: 8) {
-                        ForEach(WorkspaceSessionTarget.allCases) { target in
-                            targetRow(target)
-                        }
-                        if store.selectedTarget != .shell {
-                            kindPicker
-                        }
-                        if let error = store.creationError {
-                            errorBanner(error)
-                                .padding(.top, 8)
-                        }
-                    }
-                    .padding(16)
-                    .padding(.bottom, 76)
-                    .accessibilityElement(children: .contain)
-                    .accessibilityLabel("工作窗口类型")
+                    pickerFields
+                        .padding(16)
+                        .padding(.bottom, 76)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("工作窗口类型")
                 }
                 submitBar
             }
@@ -43,6 +39,22 @@ struct WorkspaceTargetPicker: View {
             }
         }
         .interactiveDismissDisabled(store.creating)
+        }
+    }
+
+    private var pickerFields: some View {
+        VStack(spacing: 8) {
+            ForEach(WorkspaceSessionTarget.allCases) { target in
+                targetRow(target)
+            }
+            if store.selectedTarget != .shell {
+                kindPicker
+            }
+            if let error = store.creationError {
+                errorBanner(error)
+                    .padding(.top, 8)
+            }
+        }
     }
 
     private func targetRow(_ target: WorkspaceSessionTarget) -> some View {

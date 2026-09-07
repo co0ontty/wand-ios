@@ -276,6 +276,18 @@ final class WorkspaceWorktreeTests: XCTestCase {
         XCTAssertEqual(sharedTask.body["worktree"], .bool(false))
     }
 
+    func testStandaloneTaskRequestUsesGlobalTasksEndpoint() {
+        let scratch = createStandaloneTaskRequest(name: "随口问问", cwd: nil, worktree: false)
+        XCTAssertEqual(scratch.path, "/api/tasks")
+        XCTAssertEqual(scratch.body["name"], .string("随口问问"))
+        XCTAssertNil(scratch.body["cwd"])
+        XCTAssertEqual(scratch.body["worktree"], .bool(false))
+
+        let mounted = createStandaloneTaskRequest(name: "挂目录", cwd: "/tmp/work", worktree: true)
+        XCTAssertEqual(mounted.body["cwd"], .string("/tmp/work"))
+        XCTAssertEqual(mounted.body["worktree"], .bool(true))
+    }
+
     func testTaskDirectoryGroupsDecodeAggregateShape() throws {
         // GET /api/tasks 的目录组形状：任务带运行期字段，未分组会话归 standaloneSessions。
         let json = """
@@ -362,21 +374,26 @@ final class WorkspaceWorktreeTests: XCTestCase {
         let store = WorkspaceStore(api: service, serverID: "server-task-first")
         await store.loadWorkspaceIndex()
 
-        do {
-            _ = try await store.createTask(name: "Invalid", directory: "   ", worktree: nil)
-            XCTFail("Blank directories must fail before any network mutation")
-        } catch is WorkspaceTaskCreationError {
-            XCTAssertTrue(service.createTaskRequests.isEmpty)
-        }
-
         service.failTaskGroups = true
-        let outcome = try await store.createTask(
+        let standalone = try await store.createTask(
+            name: "随口问问",
+            directory: "",
+            worktree: nil
+        )
+        XCTAssertEqual(standalone.workspace.id, "wand-global")
+        XCTAssertEqual(service.standaloneTaskRequests.count, 1)
+        XCTAssertEqual(service.standaloneTaskRequests[0].cwd, nil)
+        XCTAssertEqual(service.standaloneTaskRequests[0].worktree, false)
+        XCTAssertTrue(service.createTaskRequests.isEmpty)
+
+        let underProject = try await store.createTask(
             name: "修复登录",
             directory: " /repo/// ",
-            worktree: false
+            worktree: false,
+            workspaceId: "ws-a"
         )
 
-        XCTAssertEqual(outcome.workspace.id, "ws-a")
+        XCTAssertEqual(underProject.workspace.id, "ws-a")
         XCTAssertEqual(service.createTaskRequests.count, 1)
         XCTAssertEqual(service.createTaskRequests[0].workspaceId, "ws-a")
         XCTAssertEqual(service.createTaskRequests[0].worktree, false)
@@ -582,6 +599,13 @@ private final class MockWorktreeMergeService: WorkspaceServing {
         let name: String
         let baseRef: String?
         var worktree: Bool?
+        var cwd: String?
+    }
+
+    struct StandaloneTaskRequest {
+        let name: String
+        let cwd: String?
+        let worktree: Bool?
     }
 
     enum MockError: LocalizedError {
@@ -605,6 +629,7 @@ private final class MockWorktreeMergeService: WorkspaceServing {
     var capturedProviders: [WandProvider] = []
     var capturedPrompts: [String] = []
     var createTaskRequests: [CreateTaskRequest] = []
+    var standaloneTaskRequests: [StandaloneTaskRequest] = []
 
     private func mergeSnapshot() throws -> SessionSnapshot {
         try JSONDecoder().decode(
@@ -679,14 +704,28 @@ private final class MockWorktreeMergeService: WorkspaceServing {
         workspaceId: String,
         name: String,
         baseRef: String?,
-        worktree: Bool? = nil
+        worktree: Bool? = nil,
+        cwd: String? = nil
     ) async throws -> WorkspaceTaskCreation {
         createTaskRequests.append(
-            CreateTaskRequest(workspaceId: workspaceId, name: name, baseRef: baseRef, worktree: worktree)
+            CreateTaskRequest(workspaceId: workspaceId, name: name, baseRef: baseRef, worktree: worktree, cwd: cwd)
         )
         return try JSONDecoder().decode(
             WorkspaceTaskCreation.self,
             from: Data(#"{"id":"task-created","workspaceId":"\#(workspaceId)","name":"\#(name)","worktree":{"branch":"wand/new","path":"/repo/.wand-worktrees/new","baseRef":"main","repoRoot":"/repo"},"status":"active","cwd":"/repo/.wand-worktrees/new","isolated":true,"worktreeError":null}"#.utf8)
+        )
+    }
+
+    func createStandaloneTask(
+        name: String,
+        cwd: String?,
+        worktree: Bool?
+    ) async throws -> WorkspaceTaskCreation {
+        standaloneTaskRequests.append(StandaloneTaskRequest(name: name, cwd: cwd, worktree: worktree))
+        let directory = cwd?.isEmpty == false ? cwd! : "/scratch"
+        return try JSONDecoder().decode(
+            WorkspaceTaskCreation.self,
+            from: Data(#"{"id":"task-created","workspaceId":"wand-global","name":"\#(name)","worktree":null,"status":"active","cwd":"\#(directory)","isolated":false,"worktreeError":null}"#.utf8)
         )
     }
 
