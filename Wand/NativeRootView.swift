@@ -793,6 +793,7 @@ private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let detail: () -> Detail
     @State private var containerSize = CGSize.zero
+    @State private var detailPresented = false
 
     var body: some View {
         Group {
@@ -823,18 +824,18 @@ private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
     private var narrowLayout: some View {
         NavigationStack {
             sidebar()
-                .navigationDestination(isPresented: isDetailPresented) {
+                .navigationDestination(isPresented: $detailPresented) {
                     detail()
                 }
         }
-    }
-
-    /// NavigationStack 的呈现绑定：selection 有值即 push detail，置空即 pop。
-    private var isDetailPresented: Binding<Bool> {
-        Binding(
-            get: { selection != nil },
-            set: { presented in if !presented { selection = nil } }
-        )
+        .onChange(of: selection) { newValue in
+            // 同步 detailPresented 状态，确保 NavigationStack 正确响应选择变化
+            detailPresented = newValue != nil
+        }
+        .onAppear {
+            // 初始化状态
+            detailPresented = selection != nil
+        }
     }
 }
 

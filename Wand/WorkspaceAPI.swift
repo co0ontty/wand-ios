@@ -146,7 +146,19 @@ private struct WorkspaceLayoutResponse: Decodable {
 
 extension WandAPI {
     func listWorkspaces() async throws -> [Workspace] {
-        try await request([Workspace].self, method: "GET", path: "/api/workspaces")
+        let workspaces = try await request([Workspace].self, method: "GET", path: "/api/workspaces")
+        return workspaces.sorted { lhs, rhs in
+            switch (lhs.createdAt.isEmpty, rhs.createdAt.isEmpty) {
+            case (false, false) where lhs.createdAt != rhs.createdAt:
+                return lhs.createdAt < rhs.createdAt
+            case (false, true):
+                return true
+            case (true, false):
+                return false
+            default:
+                return lhs.id < rhs.id
+            }
+        }
     }
 
     func listWorkspaceTasks(workspaceId: String) async throws -> [WorkspaceTask] {

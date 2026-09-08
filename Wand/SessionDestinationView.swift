@@ -53,7 +53,7 @@ private struct PtySessionView: View {
     @State private var voicePressed = false
     @State private var voiceCanceling = false
     @State private var draftNeedsExpanded = false
-    @State private var composerInputHeight: CGFloat = 34
+    @State private var composerInputHeight: CGFloat = 32
     @State private var composerIsComposing = false
     /// 底部快捷栏左上角的拉手控制：折叠时只露出快捷键栏，展开时在快捷键栏上方
     /// 滑出输入抽屉（文本框 + 发送 + 语音 + 附件）。默认折叠，给终端留出最大可视区。
@@ -170,6 +170,10 @@ private struct PtySessionView: View {
             speech.stop(cancelled: true)
             voicePressed = false
             voiceCanceling = false
+            inputDrawerOpen = false
+            inputFocused = false
+            composerInputHeight = 32
+            draftNeedsExpanded = false
             store.shutdown()
         }
         .overlay(alignment: .top) { connectionBanner }
@@ -423,9 +427,14 @@ private struct PtySessionView: View {
     }
 
     private func toggleInputDrawer() {
-        inputDrawerOpen.toggle()
-        if inputDrawerOpen {
-            focusNativeInput()
+        let opening = !inputDrawerOpen
+        inputDrawerOpen = opening
+        if opening {
+            // 先压住网页侧 xterm 隐藏 textarea（readonly + blur），再展开抽屉并聚焦。
+            // 顺序很重要：inputDrawerOpen 与 inputFocused 同帧置位，避免 inputExpanded
+            // 用旧值算错一帧高度（抽屉刚展开却按折叠态布局，输入框看起来异常大）。
+            terminalWebModel.suppressEmbeddedTerminalIme()
+            inputFocused = true
         } else {
             inputFocused = false
             terminalWebModel.restoreEmbeddedTerminalInput()
@@ -435,6 +444,8 @@ private struct PtySessionView: View {
     /// 唤起原生输入：先压住网页侧 xterm 隐藏 textarea（readonly + blur），再把
     /// 焦点交给抽屉里的文本框。IMEAwareComposerTextView 内部带多次重试，
     /// 转场动画/WKWebView 抢焦点导致的单次失败会自动补上。
+    /// 注意：inputDrawerOpen 必须先于本次调用置位（见 toggleInputDrawer / 快捷键），
+    /// 否则 inputFocused 与 inputDrawerOpen 不同帧会导致布局闪烁。
     private func focusNativeInput() {
         terminalWebModel.suppressEmbeddedTerminalIme()
         if inputDrawerOpen { inputFocused = true }
@@ -564,8 +575,10 @@ private struct PtySessionView: View {
             .padding(.leading, inputExpanded ? 6 : 2)
             .padding(.trailing, inputExpanded ? 4 : 0)
             .padding(.vertical, inputExpanded ? 4 : 2)
-            .frame(minHeight: inputExpanded ? 32 : 34)
-            .frame(height: max(inputExpanded ? 32 : 34, composerInputHeight))
+            // 折叠态固定 34pt，展开态才随 composerInputHeight 增高；用 min/max 双保险
+            // 避免折叠时因残留高度值撑大输入框。
+            .frame(minHeight: 34)
+            .frame(height: inputExpanded ? max(32, composerInputHeight) : 34)
             .contentShape(Rectangle())
         }
         .frame(maxWidth: .infinity, alignment: .leading)

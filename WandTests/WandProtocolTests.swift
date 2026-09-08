@@ -1,8 +1,33 @@
 import Foundation
+import SwiftUI
+import UIKit
 import XCTest
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
+    @MainActor
+    func testComposerHeightDoesNotConsumeRemainingScreenSpace() {
+        for expanded in [false, true] {
+            let shell = NativeComposerShell(
+                expanded: expanded,
+                focused: expanded,
+                onFocusInput: {},
+                collapsedLeading: { Color.clear.frame(width: 44, height: 44) },
+                inputContent: { Text("消息输入").frame(height: 34) },
+                collapsedTrailing: { Color.clear.frame(width: 44, height: 44) },
+                expandedControls: { Color.clear.frame(height: 44) }
+            )
+            let host = UIHostingController(rootView: shell)
+            for width: CGFloat in [320, 402, 768] {
+                for height: CGFloat in [300, 874] {
+                    let fitted = host.sizeThatFits(in: CGSize(width: width, height: height))
+                    XCTAssertEqual(fitted.height, expanded ? 108 : 68, accuracy: 1,
+                                   "expanded=\(expanded), proposal=\(width)x\(height)")
+                }
+            }
+        }
+    }
+
     func testFailureAndDisconnectUseLongNotice() {
         XCTAssertTrue(wandNoticeIsLong("发送失败"))
         XCTAssertTrue(wandNoticeIsLong("加载更早消息失败"))
@@ -49,7 +74,7 @@ final class WandProtocolTests: XCTestCase {
     }
 
     func testSessionActivityRecognizesPtyAndStructuredStates() throws {
-        let pty = try decode(SessionSnapshot.self, from: #"{"id":"pty","sessionKind":"pty","status":"thinking"}"#)
+        let pty = try decode(SessionSnapshot.self, from: #"{"id":"pty","sessionKind":"pty","provider":"claude","status":"running","ptyBusy":true}"#)
         let structuredActive = try decode(SessionSnapshot.self, from: #"{"id":"structured-active","sessionKind":"structured","status":"running","structuredState":{"inFlight":true}}"#)
         let structuredIdle = try decode(SessionSnapshot.self, from: #"{"id":"structured-idle","sessionKind":"structured","status":"running","structuredState":{"inFlight":false}}"#)
         let blocked = try decode(SessionSnapshot.self, from: #"{"id":"blocked","sessionKind":"pty","status":"running","permissionBlocked":true}"#)

@@ -52,6 +52,16 @@ struct WandApp: App {
     @MainActor
     private func installMockLiveActivityIfRequested() async {
         let environment = ProcessInfo.processInfo.environment
+        if let sessionId = environment["WAND_DEBUG_OPEN_SESSION"], !sessionId.isEmpty {
+            let serverID = environment["WAND_DEBUG_OPEN_SERVER"]
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            QuickActionCoordinator.shared.enqueue(
+                .openSession(
+                    id: sessionId,
+                    serverID: serverID?.isEmpty == false ? serverID : nil
+                )
+            )
+        }
         guard let scenario = environment["WAND_MOCK_LIVE_ACTIVITY"],
               !scenario.isEmpty,
               scenario != "0" else { return }

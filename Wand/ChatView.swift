@@ -592,7 +592,7 @@ struct ChatView: View {
             let historical = turnIndex < lastUserTurnIndex
             let collapsed = historical
                 ? !expandedHistoricalAssistantTurns.contains(absoluteTurn)
-                : collapsedAssistantTurns.contains(absoluteTurn)
+                : false
             AssistantReplyDisclosure(
                 preview: preview,
                 collapsed: collapsed,

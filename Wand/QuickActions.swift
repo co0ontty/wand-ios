@@ -108,14 +108,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         WandServerFileLink.cleanupStaleTemporaryFiles()
         let isLiveActivityMock: Bool
+        let skipPermissionPrompts: Bool
 #if DEBUG
         isLiveActivityMock = ProcessInfo.processInfo.environment["WAND_MOCK_LIVE_ACTIVITY"] != nil
+        skipPermissionPrompts = isLiveActivityMock || ProcessInfo.processInfo.environment["WAND_DEBUG_OPEN_SESSION"]?.isEmpty == false
 #else
         isLiveActivityMock = false
+        skipPermissionPrompts = false
 #endif
-        SessionNotificationController.shared.configure(requestPermission: !isLiveActivityMock)
+        SessionNotificationController.shared.configure(requestPermission: !skipPermissionPrompts)
 #if DEBUG
-        guard !isLiveActivityMock else {
+        guard !skipPermissionPrompts else {
             return true
         }
 #endif

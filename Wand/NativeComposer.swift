@@ -38,13 +38,14 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
                 if !expanded {
                     collapsedLeading()
                 }
-                ZStack {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture(perform: onFocusInput)
-                    inputContent()
-                }
-                .frame(maxWidth: .infinity)
+                inputContent()
+                    .frame(maxWidth: .infinity)
+                    // 点击层跟随内容尺寸，不能作为 ZStack 子项占满剩余高度。
+                    .background {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture(perform: onFocusInput)
+                    }
                 if !expanded {
                     collapsedTrailing()
                 }
