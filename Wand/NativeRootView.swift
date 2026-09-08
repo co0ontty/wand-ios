@@ -793,7 +793,7 @@ private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let detail: () -> Detail
     @State private var containerSize = CGSize.zero
-    @State private var detailPresented = false
+    @State private var navigationPath: [String] = []
 
     var body: some View {
         Group {
@@ -822,19 +822,29 @@ private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
     }
 
     private var narrowLayout: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             sidebar()
-                .navigationDestination(isPresented: $detailPresented) {
+                .navigationDestination(for: String.self) { _ in
                     detail()
                 }
         }
-        .onChange(of: selection) { newValue in
-            // 同步 detailPresented 状态，确保 NavigationStack 正确响应选择变化
-            detailPresented = newValue != nil
+        .onChange(of: selection) { _, newValue in
+            // 用 NavigationPath 驱动 push，而不是 isPresented。后者在 List 内部
+            // 连续点击/切换任务时可能只更新布尔值，不会重新创建 destination。
+            let target = newValue.map { [$0] } ?? []
+            if navigationPath != target {
+                navigationPath = target
+            }
+        }
+        .onChange(of: navigationPath) { _, newPath in
+            // 系统返回手势会直接清空 path，必须同步根视图的 selection。
+            let current = newPath.last
+            if selection != current {
+                selection = current
+            }
         }
         .onAppear {
-            // 初始化状态
-            detailPresented = selection != nil
+            navigationPath = selection.map { [$0] } ?? []
         }
     }
 }

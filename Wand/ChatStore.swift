@@ -199,8 +199,7 @@ final class ChatStore: ObservableObject {
     /// connect() 每次会 generation += 1 新建 task，幂等但有握手成本，所以用 connected 守卫；
     /// 无论是否重连都拉一份最新快照（requestResync 未订阅时自身 no-op），消除后台期间可能的过期状态。
     func handleEnterForeground() {
-        if !connected { socket.connect() }
-        socket.requestResync()
+        socket.reconnectForForeground()
         if snapshot != nil {
             Task { [weak self] in await self?.loadModels() }
         }
@@ -385,6 +384,11 @@ final class ChatStore: ObservableObject {
             snapshot?.ptyBusy = data.ptyBusy
             snapshot?.providerCliActive = data.providerCliActive
             snapshot?.providerCliExitCode = data.providerCliExitCode
+        }
+        // WS init 常先于 REST。PTY 的 isResponding 看 ptyBusy / providerCliActive，
+        // 不能只信 structuredState.inFlight（PTY 上经常是 nil/false）。
+        if let snapshot {
+            isResponding = snapshot.isResponding
         }
         publishPresence()
     }

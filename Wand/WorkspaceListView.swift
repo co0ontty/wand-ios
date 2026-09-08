@@ -541,8 +541,8 @@ struct WorkspaceListView: View {
 
     private func taskGroupHeader(_ group: TaskDirectoryGroup, expanded: Bool, collapsible: Bool) -> some View {
         let sessionTotal = group.tasks.reduce(0) { $0 + $1.listedSessionCount } + group.standaloneSessions.count
-        return HStack(spacing: 11) {
-            HStack(spacing: 11) {
+        return HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 Image(systemName: group.isSynthetic ? "folder.badge.questionmark" : "folder.fill")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(Theme.brand)
@@ -586,9 +586,13 @@ struct WorkspaceListView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(expanded ? "收起目录" : "展开目录")
             }
-            Text("\(group.tasks.count) 任务 · \(sessionTotal) 会话")
-                .font(.system(size: 10))
-                .foregroundColor(Theme.textMuted)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("\(group.tasks.count) 任务")
+                Text("\(sessionTotal) 会话")
+            }
+            .font(.system(size: 10))
+            .foregroundColor(Theme.textMuted)
+            .fixedSize(horizontal: true, vertical: true)
             Button {
                 newTaskSheetCwd = group.workspaceCwd
                 newTaskSheetWorkspaceId = group.synthetic == true ? nil : group.workspaceId
@@ -603,8 +607,8 @@ struct WorkspaceListView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("在 \(group.workspaceName) 新建任务")
         }
-        .padding(.vertical, 5)
-        .accessibilityElement(children: .combine)
+        .padding(.vertical, 7)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("目录 \(group.workspaceName)，\(group.tasks.count) 个任务")
     }
 

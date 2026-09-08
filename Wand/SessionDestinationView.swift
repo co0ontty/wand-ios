@@ -65,6 +65,7 @@ private struct PtySessionView: View {
     @State private var inputFocused = false
     /// 首帧先让原生铬稳定，再挂 WebView，避免和打开会话抢同一帧。
     @State private var allowWebView = false
+    @Environment(\.scenePhase) private var scenePhase
 
     private var ptyBackground: Color {
         Theme.terminalBackground
@@ -175,6 +176,10 @@ private struct PtySessionView: View {
             composerInputHeight = 32
             draftNeedsExpanded = false
             store.shutdown()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active { store.handleEnterForeground() }
+            else if newPhase == .background { store.handleEnterBackground() }
         }
         .overlay(alignment: .top) { connectionBanner }
         .overlay(alignment: .bottom) { toastView }

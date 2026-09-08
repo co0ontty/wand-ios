@@ -51,6 +51,21 @@ final class WandSocket {
         startWatchdog()
     }
 
+    /// iOS 进后台会冻结 URLSessionWebSocketTask，但 `task` 仍非 nil、`connected` 仍可能为 true。
+    /// `connect()` 此时直接 return，回前台只能干等 40s 看门狗。前台恢复必须拆掉旧 task 再建。
+    func reconnectForForeground() {
+        guard !closed, !endpointSession.isRetired else { return }
+        wlog("ws", "回前台强制重建 socket session=\(subscribedSessionId ?? "nil")")
+        connectionReported = false
+        onConnectionChange?(false)
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        reconnectDelay = 1
+        lastMessageAt = Date()
+        openSocket()
+        startWatchdog()
+    }
+
     func close() {
         closed = true
         watchdog?.invalidate()
