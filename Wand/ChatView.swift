@@ -658,7 +658,8 @@ struct ChatView: View {
                 baseURL: store.api.baseURL,
                 running: store.isResponding
                     && lastTurnIndex == store.messages.count - 1
-                    && tools.contains { $0.result == nil }
+                    && tools.contains { $0.result == nil },
+                expandAll: lastTurnIndex == store.messages.count - 1
             )
         case .activityGroup(let turnIndex, let group, let id):
             if store.cardDefaults.toolGroup {
@@ -3154,7 +3155,8 @@ private struct AssistantItemView: View {
             ExplorationGroupCard(
                 tools: tools,
                 baseURL: baseURL,
-                running: isLastTurn && isResponding && tools.contains { $0.result == nil }
+                running: isLastTurn && isResponding && tools.contains { $0.result == nil },
+                expandAll: isLastTurn
             )
         }
     }
@@ -3692,6 +3694,7 @@ private struct ExplorationGroupCard: View {
     let tools: [ExplorationToolItem]
     var baseURL: URL? = nil
     let running: Bool
+    var expandAll = false
 
     @State private var expanded = false
 
@@ -3797,7 +3800,10 @@ private struct ExplorationGroupCard: View {
         .shadow(color: Color.black.opacity(0.035), radius: 7, y: 2)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onAppear {
-            if cardDefaults.toolGroup { expanded = true }
+            if expandAll || cardDefaults.toolGroup { expanded = true }
+        }
+        .onChange(of: expandAll) { _, shouldExpand in
+            if shouldExpand { expanded = true }
         }
     }
 
@@ -4168,7 +4174,7 @@ private func prettyStructuredToolText(_ text: String) -> String {
     return output
 }
 
-/// 可折叠区块（thinking / tool_result 共用）。工具结果默认折叠，思考过程默认展开。
+/// 可折叠区块（thinking / tool_result 共用）。具体内容默认折叠，点击标题后展开。
 private struct CollapsibleSection<Content: View>: View {
     let icon: String
     let title: String

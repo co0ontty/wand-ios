@@ -357,12 +357,15 @@ final class WorkspaceStore: ObservableObject {
         workspaceId: String? = nil
     ) async throws -> (workspace: Workspace, creation: WorkspaceTaskCreation) {
         let normalized = normalizeWorkspaceDirectory(directory)
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "未命名任务"
+            : name
         let creation: WorkspaceTaskCreation
         let workspace: Workspace
         if let workspaceId, let existing = workspaces.first(where: { $0.id == workspaceId }) {
             creation = try await api.createWorkspaceTask(
                 workspaceId: existing.id,
-                name: name,
+                name: normalizedName,
                 baseRef: nil,
                 worktree: worktree,
                 cwd: normalized.isEmpty ? nil : normalized
@@ -370,7 +373,7 @@ final class WorkspaceStore: ObservableObject {
             workspace = existing
         } else {
             creation = try await api.createStandaloneTask(
-                name: name,
+                name: normalizedName,
                 cwd: normalized.isEmpty ? nil : normalized,
                 worktree: normalized.isEmpty ? false : worktree
             )

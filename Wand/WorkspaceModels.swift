@@ -506,6 +506,92 @@ enum TaskListPresentation {
         !showsTaskSessionDisclosure(sessionCount: sessionCount) || !userCollapsed
     }
 
+    struct TaskListMetrics: Equatable {
+        let directoryCount: Int
+        let taskCount: Int
+        let sessionCount: Int
+    }
+
+    static func metrics(for groups: [TaskDirectoryGroup]) -> TaskListMetrics {
+        let visible = groups.filter { !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
+        var directoryKeys = Set<String>()
+        var taskIDs = Set<String>()
+        for group in visible {
+            let cwd = group.workspaceCwd
+                .replacingOccurrences(of: "\\", with: "/")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            directoryKeys.insert(cwd.isEmpty ? "id:\(group.id)" : "cwd:\(cwd)")
+            group.tasks.forEach { taskIDs.insert($0.id) }
+        }
+        return TaskListMetrics(
+            directoryCount: directoryKeys.count,
+            taskCount: taskIDs.count,
+            sessionCount: visible.reduce(0) { total, group in
+                total + group.standaloneSessions.count
+                    + group.tasks.reduce(0) { $0 + $1.listedSessionCount }
+            }
+        )
+    }
+
+    static func homeTaskSummaryLabel(_ metrics: TaskListMetrics) -> String {
+        if metrics.directoryCount == 0 { return "按工作目录整理你的任务" }
+        if metrics.taskCount == 0 { return "\(metrics.directoryCount) 个目录 · 暂无任务" }
+        return "\(metrics.directoryCount) 个目录 · \(metrics.taskCount) 个任务"
+    }
+
+    static func orderedDirectoryGroups(_ groups: [TaskDirectoryGroup]) -> [TaskDirectoryGroup] {
+        groups
+            .filter { !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
+            .enumerated()
+            .sorted { lhs, rhs in
+                let leftActive = hasLiveActivity(lhs.element)
+                let rightActive = hasLiveActivity(rhs.element)
+                if leftActive != rightActive { return leftActive }
+                let leftRecent = lhs.element.tasks.compactMap(\.lastOpenedAt).max()
+                let rightRecent = rhs.element.tasks.compactMap(\.lastOpenedAt).max()
+                if leftRecent != rightRecent { return compareTimestamps(rightRecent, leftRecent) }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
+    static func orderedTaskSummaries(_ tasks: [WorkspaceTaskSummary]) -> [WorkspaceTaskSummary] {
+        tasks
+            .enumerated()
+            .sorted { lhs, rhs in
+                let leftLive = lhs.element.sessions.contains(where: hasLiveActivity)
+                let rightLive = rhs.element.sessions.contains(where: hasLiveActivity)
+                if leftLive != rightLive { return leftLive }
+                let leftActive = lhs.element.status == "active"
+                let rightActive = rhs.element.status == "active"
+                if leftActive != rightActive { return leftActive }
+                if lhs.element.lastOpenedAt != rhs.element.lastOpenedAt {
+                    return compareTimestamps(rhs.element.lastOpenedAt, lhs.element.lastOpenedAt)
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
+    static func hasLiveActivity(_ group: TaskDirectoryGroup) -> Bool {
+        group.standaloneSessions.contains(where: hasLiveActivity)
+            || group.tasks.contains { $0.sessions.contains(where: hasLiveActivity) }
+    }
+
+    static func hasLiveActivity(_ session: WorkspaceSessionSummary) -> Bool {
+        session.inFlight == true || ["running", "thinking", "permission", "waiting-input", "reconnecting"].contains(session.activityStatus)
+    }
+
+    private static func compareTimestamps(_ lhs: String?, _ rhs: String?) -> Bool {
+        switch (lhs?.isEmpty == false, rhs?.isEmpty == false) {
+        case (false, false): return false
+        case (false, true): return false
+        case (true, false): return true
+        case (true, true): return lhs! > rhs!
+        }
+    }
+
     /// 任务行左滑只保留破坏性操作。新建终端已经在行尾「＋」，再塞进滑动区会挤成一排点不到。
     enum TrailingSwipeAction: String, Equatable, Hashable {
         case delete

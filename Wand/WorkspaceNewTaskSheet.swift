@@ -22,6 +22,12 @@ struct WorkspaceNewTaskSheet: View {
     @State private var showingSuggestions = false
     @State private var creating = false
     @State private var errorMessage: String?
+    @State private var defaultCwd = ""
+    @State private var directoryPickerPresented = false
+    @State private var directoryPickerPath = "/"
+    @State private var directoryListing: DirectoryListing?
+    @State private var directoryLoading = false
+    @State private var directoryError: String?
     @FocusState private var cwdFocused: Bool
 
     init(
@@ -45,12 +51,9 @@ struct WorkspaceNewTaskSheet: View {
                 WandAmbientBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        fieldCard(title: "任务名称") {
-                            TextField("例如：重构会话恢复流程", text: $name)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .font(.system(size: 15))
-                        }
+                        Text("先选工作目录，再决定是否归入已有项目。任务名称由系统自动生成。")
+                            .font(.footnote)
+                            .foregroundColor(Theme.textSecondary)
                         directoryCard
                         if !trimmedDirectory.isEmpty {
                             worktreeCard
@@ -80,15 +83,26 @@ struct WorkspaceNewTaskSheet: View {
                 }
             }
             .interactiveDismissDisabled(creating)
+            .sheet(isPresented: $directoryPickerPresented) {
+                directoryPicker
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
             .task {
                 if let config = try? await api.serverConfig() {
                     worktreeEnabled = config.defaultTaskWorktree != false
+                    defaultCwd = config.defaultCwd ?? ""
+                    if let raw = config.defaultProvider,
+                       let provider = WorkspaceSessionTarget(rawValue: raw), provider != .shell {
+                        target = provider
+                    }
+                    sessionKind = config.defaultSessionKind == "pty" ? .pty : .structured
                 }
                 if recentPaths.isEmpty, let recent = try? await api.workspaceRecentPaths() {
                     recentPaths = recent
                 }
-                if cwd.isEmpty, workspaceId != nil, let recent = recentPaths.first {
-                    cwd = recent.path
+                if cwd.isEmpty {
+                    cwd = defaultCwd.isEmpty ? (recentPaths.first?.path ?? "") : defaultCwd
                 }
             }
             .task(id: debounceKey) {
@@ -121,7 +135,7 @@ struct WorkspaceNewTaskSheet: View {
     }
 
     private var canSubmit: Bool {
-        !creating && !trimmedName.isEmpty && trimmedName.count <= 80
+        !creating && !trimmedDirectory.isEmpty && trimmedName.count <= 80
     }
 
     private func loadSuggestions() async {
@@ -156,12 +170,25 @@ struct WorkspaceNewTaskSheet: View {
 
     private var directoryCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            fieldCard(title: "任务目录（服务器上的路径）") {
-                TextField(initialCwd.isEmpty ? "留空则使用全局临时目录" : initialCwd, text: $cwd)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .font(.system(size: 15, design: .monospaced))
-                    .focused($cwdFocused)
+            fieldCard(title: "工作目录（服务器上的路径）") {
+                HStack(spacing: 8) {
+                    TextField("点击浏览或输入路径", text: $cwd)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(size: 15, design: .monospaced))
+                        .focused($cwdFocused)
+                    Button {
+                        openDirectoryPicker()
+                    } label: {
+                        Image(systemName: "folder")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(Theme.brand)
+                            .frame(width: 32, height: 32)
+                            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Theme.brand.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("浏览工作目录")
+                }
             }
             if showingSuggestions, cwdFocused, !suggestions.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
@@ -217,6 +244,125 @@ struct WorkspaceNewTaskSheet: View {
                 }
             }
         }
+    }
+
+    private var directoryPicker: some View {
+        NavigationStack {
+            ZStack {
+                WandAmbientBackground()
+                if directoryLoading {
+                    ProgressView("读取目录…").tint(Theme.brand)
+                } else if let directoryError {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 28))
+                            .foregroundColor(Theme.danger)
+                        Text(directoryError)
+                            .font(.footnote)
+                            .foregroundColor(Theme.textSecondary)
+                            .multilineTextAlignment(.center)
+                        Button("重试") { browseDirectory(directoryPickerPath) }
+                            .buttonStyle(WandSecondaryButtonStyle())
+                    }
+                    .padding(24)
+                } else {
+                    List {
+                        Button {
+                            cwd = directoryPickerPath
+                            directoryPickerPresented = false
+                        } label: {
+                            Label("选择此目录", systemImage: "checkmark.circle")
+                                .foregroundColor(Theme.brand)
+                        }
+                        .listRowBackground(Theme.surface)
+                        if directoryPickerPath != "/" {
+                            Button {
+                                browseDirectory(parentDirectory(directoryPickerPath))
+                            } label: {
+                                Label("返回上级目录", systemImage: "arrow.up")
+                                    .foregroundColor(Theme.textSecondary)
+                            }
+                            .listRowBackground(Theme.background)
+                        }
+                        ForEach((directoryListing?.items ?? []).filter(\.isDirectory)) { item in
+                            Button {
+                                browseDirectory(item.path)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "folder.fill")
+                                        .foregroundColor(Theme.brand)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.name)
+                                            .foregroundColor(Theme.textPrimary)
+                                        Text(item.path)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundColor(Theme.textMuted)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundColor(Theme.textMuted)
+                                }
+                            }
+                            .listRowBackground(Theme.background)
+                        }
+                    }
+                    .scrollContentBackground(.hidden)
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle("选择工作目录")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("取消") { directoryPickerPresented = false }
+                }
+            }
+        }
+    }
+
+    private func openDirectoryPicker() {
+        directoryPickerPath = trimmedDirectory.isEmpty ? (defaultCwd.isEmpty ? "/" : defaultCwd) : trimmedDirectory
+        directoryPickerPresented = true
+        browseDirectory(directoryPickerPath)
+    }
+
+    private func browseDirectory(_ path: String) {
+        directoryPickerPath = normalizeDirectoryPath(path)
+        directoryLoading = true
+        directoryError = nil
+        Task {
+            do {
+                let result = try await api.listDirectory(directoryPickerPath)
+                guard !Task.isCancelled else { return }
+                directoryListing = result
+            } catch {
+                guard !Task.isCancelled else { return }
+                directoryError = error.localizedDescription
+            }
+            directoryLoading = false
+        }
+    }
+
+    private func parentDirectory(_ path: String) -> String {
+        let normalized = normalizeDirectoryPath(path)
+        guard normalized != "/" else { return "/" }
+        guard let slash = normalized.lastIndex(of: "/") else { return "/" }
+        let parent = String(normalized[..<slash])
+        return parent.isEmpty ? "/" : parent
+    }
+
+    private func normalizeDirectoryPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "/" }
+        if trimmed == "/" { return "/" }
+        var normalized = trimmed
+        while normalized.count > 1, normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        return normalized
     }
 
     private var cliCard: some View {
@@ -337,9 +483,9 @@ struct WorkspaceNewTaskSheet: View {
         do {
             store.rememberCreationChoice(provider: target, kind: sessionKind)
             let (workspace, creation) = try await store.createTask(
-                name: trimmedName,
+                name: trimmedName.isEmpty ? "未命名任务" : trimmedName,
                 directory: trimmedDirectory,
-                worktree: trimmedDirectory.isEmpty ? false : (worktreeEnabled ? nil : false),
+                worktree: workspaceId != nil && worktreeEnabled,
                 workspaceId: workspaceId
             )
             dismiss()

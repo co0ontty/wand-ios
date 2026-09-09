@@ -42,6 +42,7 @@ private enum TaskListConfirm: Identifiable {
 struct WorkspaceListView: View {
     @ObservedObject var store: WorkspaceStore
     let api: WandAPI
+    var serverDisplayName: String? = nil
     let selectedTaskId: String?
     var selectedSessionId: String? = nil
     let onOpenTask: (Workspace, WorkspaceTask) -> Void
@@ -168,7 +169,7 @@ struct WorkspaceListView: View {
                     Task {
                         do {
                             let (workspace, creation) = try await store.createTask(
-                                name: "新任务",
+                                name: "",
                                 directory: created.cwd,
                                 worktree: false,
                                 workspaceId: created.id
@@ -444,7 +445,9 @@ struct WorkspaceListView: View {
             if let error = store.taskGroupsError, store.taskGroups.isEmpty {
                 inlineError(error)
             }
-            let visible = store.taskGroups.filter { !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
+            let visible = TaskListPresentation.orderedDirectoryGroups(store.taskGroups)
+            let metrics = TaskListPresentation.metrics(for: visible)
+            homeOverviewCard(metrics: metrics)
             if visible.isEmpty && store.taskGroupsError == nil && !store.taskGroupsLoading {
                 VStack(spacing: 12) {
                     Image(systemName: "arrow.triangle.branch")
@@ -472,8 +475,22 @@ struct WorkspaceListView: View {
                 .padding(.vertical, 28)
                 .listRowSeparator(.hidden)
             }
+            if !visible.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("任务与工作窗口")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                    Text(TaskListPresentation.homeTaskSummaryLabel(metrics))
+                        .font(.system(size: 11))
+                        .foregroundColor(Theme.textMuted)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+                .listRowBackground(Theme.background)
+                .listRowSeparator(.hidden)
+            }
             ForEach(visible) { group in
-                taskGroupSection(group, directoryCount: visible.count)
+                taskGroupSection(group, directoryCount: metrics.directoryCount)
             }
         }
         .listStyle(.plain)
@@ -481,6 +498,76 @@ struct WorkspaceListView: View {
             await store.loadTaskGroups(force: true)
             await store.loadWorkspaceIndex()
         }
+    }
+
+    private func homeOverviewCard(metrics: TaskListPresentation.TaskListMetrics) -> some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 11) {
+                WandBrandMark(size: 36)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text("工作台")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(Theme.textPrimary)
+                        Circle()
+                            .fill(Theme.success)
+                            .frame(width: 7, height: 7)
+                        Text("已连接")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Theme.success)
+                    }
+                    Text(serverDisplayName ?? "当前服务器")
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.textMuted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            Button {
+                newTaskSheetCwd = ""
+                newTaskSheetWorkspaceId = nil
+                newTaskSheetPresented = true
+            } label: {
+                Label("新建任务", systemImage: "plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(WandPrimaryButtonStyle())
+            HStack(spacing: 8) {
+                homeMetric("目录", value: metrics.directoryCount)
+                homeMetric("任务", value: metrics.taskCount)
+                homeMetric("窗口", value: metrics.sessionCount)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Theme.surface.opacity(0.88))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Theme.border.opacity(0.55), lineWidth: 1)
+        )
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .listRowBackground(Theme.background)
+        .listRowSeparator(.hidden)
+    }
+
+    private func homeMetric(_ label: String, value: Int) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(value)")
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .foregroundColor(Theme.textPrimary)
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(Theme.textMuted)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Theme.surface.opacity(0.65)))
     }
 
     @ViewBuilder
@@ -494,7 +581,7 @@ struct WorkspaceListView: View {
             .listRowBackground(Theme.background)
             .listRowSeparator(.hidden)
         if expanded {
-            ForEach(group.tasks) { summary in
+            ForEach(TaskListPresentation.orderedTaskSummaries(group.tasks)) { summary in
                 taskRows(summary, group: group)
             }
             if group.tasks.isEmpty && group.standaloneSessions.isEmpty {
@@ -557,6 +644,11 @@ struct WorkspaceListView: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(Theme.textPrimary)
                             .lineLimit(1)
+                        if TaskListPresentation.hasLiveActivity(group) {
+                            Circle()
+                                .fill(Theme.success)
+                                .frame(width: 7, height: 7)
+                        }
                         if group.isSynthetic {
                             Text("未归档目录")
                                 .font(.system(size: 10, weight: .medium))
@@ -607,7 +699,12 @@ struct WorkspaceListView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("在 \(group.workspaceName) 新建任务")
         }
+        .padding(.horizontal, 8)
         .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.surface.opacity(0.55))
+        )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("目录 \(group.workspaceName)，\(group.tasks.count) 个任务")
     }
@@ -652,9 +749,10 @@ struct WorkspaceListView: View {
         )
         let workspace = workspace(from: group)
         taskSummaryRow(summary, group: group)
-            .opacity(summary.status == "done" ? 0.76 : 1)
+            .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: 2, trailing: 12))
             .listRowBackground(Theme.background)
             .listRowSeparator(.hidden)
+            .opacity(summary.status == "done" ? 0.76 : 1)
 
         if expanded {
             if summary.sessions.isEmpty {

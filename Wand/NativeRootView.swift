@@ -284,6 +284,7 @@ struct NativeRootView: View {
                     WorkspaceListView(
                         store: workspaceStore,
                         api: api,
+                        serverDisplayName: profile.displayName,
                         selectedTaskId: selectedWorkspaceTask?.task.id,
                         selectedSessionId: selectedSessionID,
                         onOpenTask: { workspace, task in

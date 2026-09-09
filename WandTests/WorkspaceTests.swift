@@ -91,6 +91,36 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(sessionTabTitleMaxWidth(selected: false), 112)
     }
 
+    func testTaskListMetricsAndOrderingPrioritizeLiveRecentContent() throws {
+        let idle = try group(id: "idle", cwd: "/repo/idle", taskID: "idle-task", lastOpenedAt: "2026-01-01T00:00:00Z")
+        let recent = try group(id: "recent", cwd: "/repo/recent", taskID: "recent-task", lastOpenedAt: "2026-03-01T00:00:00Z")
+        let live = try group(
+            id: "live",
+            cwd: "/repo/live",
+            taskID: "live-task",
+            lastOpenedAt: "2026-02-01T00:00:00Z",
+            sessionStatus: "running"
+        )
+
+        XCTAssertEqual(
+            TaskListPresentation.orderedDirectoryGroups([idle, recent, live]).map(\.id),
+            ["live", "recent", "idle"]
+        )
+        let metrics = TaskListPresentation.metrics(for: [idle, recent, live])
+        XCTAssertEqual(metrics.directoryCount, 3)
+        XCTAssertEqual(metrics.taskCount, 3)
+        XCTAssertEqual(metrics.sessionCount, 3)
+        XCTAssertEqual(TaskListPresentation.homeTaskSummaryLabel(metrics), "3 个目录 · 3 个任务")
+    }
+
+    func testTaskListMetricsDeduplicateDirectoriesByPath() throws {
+        let first = try group(id: "first", cwd: "/repo", taskID: "task-1", lastOpenedAt: nil)
+        let second = try group(id: "second", cwd: "/repo/", taskID: "task-2", lastOpenedAt: nil)
+        let metrics = TaskListPresentation.metrics(for: [first, second])
+        XCTAssertEqual(metrics.directoryCount, 1)
+        XCTAssertEqual(metrics.taskCount, 2)
+    }
+
     func testTaskSwipeActionsKeepDeleteAndClearOnly() {
         XCTAssertEqual(TaskListPresentation.taskTrailingSwipeActions(sessionCount: 0), [.delete])
         XCTAssertEqual(
@@ -475,6 +505,23 @@ final class WorkspaceTests: XCTestCase {
         return try! decode(
             WorkspaceSessionSummary.self,
             from: "{\"id\":\"\(id)\",\"provider\":\"claude\",\"startedAt\":\(timestamp)}"
+        )
+    }
+
+    private func group(
+        id: String,
+        cwd: String,
+        taskID: String,
+        lastOpenedAt: String?,
+        sessionStatus: String? = nil
+    ) throws -> TaskDirectoryGroup {
+        let session = sessionStatus.map { status in
+            "{\"id\":\"session-\(taskID)\",\"provider\":\"claude\",\"status\":\"\(status)\"}"
+        } ?? "{\"id\":\"session-\(taskID)\",\"provider\":\"claude\"}"
+        let opened = lastOpenedAt.map { "\"\($0)\"" } ?? "null"
+        return try decode(
+            TaskDirectoryGroup.self,
+            from: "{\"workspaceId\":\"\(id)\",\"workspaceName\":\"\(id)\",\"workspaceCwd\":\"\(cwd)\",\"synthetic\":false,\"tasks\":[{\"id\":\"\(taskID)\",\"workspaceId\":\"\(id)\",\"name\":\"Task\",\"worktree\":null,\"layout\":null,\"status\":\"active\",\"createdAt\":\"2026-01-01T00:00:00Z\",\"lastOpenedAt\":\(opened),\"cwd\":\"\(cwd)\",\"isolated\":false,\"worktreeError\":null,\"sessions\":[\(session)],\"totalSessions\":1}],\"standaloneSessions\":[]}"
         )
     }
 
