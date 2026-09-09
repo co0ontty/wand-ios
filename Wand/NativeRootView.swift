@@ -40,6 +40,8 @@ struct NativeRootView: View {
     @State private var systemSocket: WandSocket?
     @State private var lifecycleGeneration = 0
     @State private var authenticationTask: Task<Void, Never>?
+    @State private var authenticationRetryTask: Task<Void, Never>?
+    @State private var authenticationRetryAttempt = 0
     @State private var updateRefreshTask: Task<Void, Never>?
     @State private var updateInstallTask: Task<Void, Never>?
 #if DEBUG
@@ -630,8 +632,14 @@ struct NativeRootView: View {
     private func authenticate() {
         invalidateLifecycle()
         let generation = lifecycleGeneration
-        let endpointAPI = api
+        authenticationRetryAttempt = 0
         phase = .authenticating
+        startAuthenticationAttempt(generation: generation)
+    }
+
+    private func startAuthenticationAttempt(generation: Int) {
+        guard isCurrentLifecycle(generation) else { return }
+        let endpointAPI = api
         guard let token, !token.isEmpty else {
             // 裸地址连接（无 token）：直接试列表，401 时引导重新连接。
             authenticationTask = Task { @MainActor in
@@ -642,7 +650,12 @@ struct NativeRootView: View {
                 } catch {
                     guard !Task.isCancelled, isCurrentLifecycle(generation) else { return }
                     authenticationTask = nil
-                    phase = .failed("无法访问服务器：\(error.localizedDescription)\n如果服务器设有密码，请用「连接码」重新连接。")
+                    if let apiError = error as? WandAPI.APIError,
+                       shouldRetryAuthentication(apiError) {
+                        scheduleAuthenticationRetry(generation: generation)
+                    } else {
+                        phase = .failed("无法访问服务器：\(error.localizedDescription)\n如果服务器设有密码，请用「连接码」重新连接。")
+                    }
                 }
             }
             return
@@ -665,14 +678,61 @@ struct NativeRootView: View {
                 finishAuthentication(generation: generation)
             case .failure(let error):
                 authenticationTask = nil
-                phase = .failed(error.userMessage)
+                if shouldRetryAuthentication(error) {
+                    scheduleAuthenticationRetry(generation: generation)
+                } else {
+                    phase = .failed(error.userMessage)
+                }
             }
+        }
+    }
+
+    private func shouldRetryAuthentication(_ error: WandAuth.Failure) -> Bool {
+        switch error {
+        case .network, .rateLimited:
+            return true
+        case .server(let status):
+            return status >= 500
+        case .invalidURL, .unauthorized, .noCookie:
+            return false
+        }
+    }
+
+    private func shouldRetryAuthentication(_ error: WandAPI.APIError) -> Bool {
+        switch error {
+        case .network:
+            return true
+        case .server(let status, _):
+            return status == 429 || status >= 500
+        case .invalidURL, .unauthorized:
+            return false
+        }
+    }
+
+    private func scheduleAuthenticationRetry(generation: Int) {
+        guard authenticationRetryAttempt < 8 else {
+            phase = .failed("服务器暂时不可用，请稍后重试")
+            return
+        }
+        let delays: [UInt64] = [500, 1_000, 2_000, 4_000, 8_000, 15_000]
+        let delay = delays[min(authenticationRetryAttempt, delays.count - 1)]
+        authenticationRetryAttempt += 1
+        phase = .authenticating
+        authenticationRetryTask?.cancel()
+        authenticationRetryTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+            guard !Task.isCancelled, isCurrentLifecycle(generation) else { return }
+            authenticationRetryTask = nil
+            startAuthenticationAttempt(generation: generation)
         }
     }
 
     private func finishAuthentication(generation: Int) {
         guard isCurrentLifecycle(generation) else { return }
         authenticationTask = nil
+        authenticationRetryTask?.cancel()
+        authenticationRetryTask = nil
+        authenticationRetryAttempt = 0
         phase = .ready
         startSystemSocket(generation: generation)
         refreshServerUpdateInfo(generation: generation)
@@ -773,6 +833,9 @@ struct NativeRootView: View {
         lifecycleGeneration &+= 1
         authenticationTask?.cancel()
         authenticationTask = nil
+        authenticationRetryTask?.cancel()
+        authenticationRetryTask = nil
+        authenticationRetryAttempt = 0
         updateRefreshTask?.cancel()
         updateRefreshTask = nil
         updateInstallTask?.cancel()
