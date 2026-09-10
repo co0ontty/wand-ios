@@ -870,13 +870,8 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// 权限决策。结构化会话没有运行时批准条；PTY 走 approve/deny。
+    /// 权限决策。PTY 与 Claude SDK structured 都走 approve/deny；无 pending 时忽略。
     func resolvePermission(_ resolution: String) {
-        if isStructured {
-            pendingEscalation = nil
-            permissionBlocked = false
-            return
-        }
         if let esc = pendingEscalation {
             pendingEscalation = nil
             permissionBlocked = false
