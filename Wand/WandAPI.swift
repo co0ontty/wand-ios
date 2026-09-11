@@ -825,6 +825,7 @@ final class WandAPI {
         workspaceId: String?
     ) async throws -> WandBoardTask {
         var body: [String: Any] = [
+            // 标题可选：留空由服务端按描述自动生成。
             "title": title,
             "description": description,
             "status": status,
@@ -837,6 +838,11 @@ final class WandAPI {
             body["workspaceId"] = NSNull()
         }
         return try await request(WandBoardTask.self, method: "POST", path: "/api/wand-tasks", body: body)
+    }
+
+    /// 单条任务：新建后用来确认后台自动标题是否已生成。
+    func getBoardTask(id: String) async throws -> WandBoardTask {
+        try await request(WandBoardTask.self, method: "GET", path: "/api/wand-tasks/\(percentEncodePathComponent(id))")
     }
 
     func updateBoardTask(id: String, body: [String: Any]) async throws -> WandBoardTask {
@@ -861,6 +867,19 @@ final class WandAPI {
             method: "POST",
             path: "/api/wand-tasks/\(percentEncodePathComponent(id))/dispatch",
             body: ["agent": agent.jsonObject()]
+        )
+    }
+
+    func boardTaskAgentDefaults() async throws -> WandBoardTaskAgent {
+        try await request(WandBoardTaskAgent.self, method: "GET", path: "/api/wand-task-agent-defaults")
+    }
+
+    func saveBoardTaskAgentDefaults(_ agent: WandBoardTaskAgent) async throws -> WandBoardTaskAgent {
+        try await request(
+            WandBoardTaskAgent.self,
+            method: "PUT",
+            path: "/api/wand-task-agent-defaults",
+            body: agent.jsonObject()
         )
     }
 

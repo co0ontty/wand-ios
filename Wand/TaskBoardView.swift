@@ -17,6 +17,7 @@ struct TaskBoardView: View {
     @State private var selected: WandBoardTask?
     @State private var showCreate = false
     @State private var busy = false
+    @State private var lastAgent = WandBoardTaskAgent.default
 
     var body: some View {
         NavigationStack {
@@ -26,9 +27,12 @@ struct TaskBoardView: View {
                         task: selected,
                         workspaces: workspaces,
                         catalog: catalog,
+                        lastAgent: lastAgent,
                         busy: busy,
                         onPatch: { body in await mutate { _ = try await api.updateBoardTask(id: selected.id, body: body) } },
+                        onRemember: rememberAgent,
                         onDispatch: { agent in
+                            rememberAgent(agent)
                             await mutate {
                                 _ = try await api.updateBoardTask(id: selected.id, body: ["agent": agent.jsonObject()])
                                 let result = try await api.dispatchBoardTask(id: selected.id, agent: agent)
@@ -92,6 +96,11 @@ struct TaskBoardView: View {
                     )
                     showCreate = false
                     selected = created
+                    // 标题留空时服务端后台生成：选中卡片的标题晚一点才变成真标题。
+                    if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       created.titleSource == "auto" {
+                        Task { await awaitGeneratedTitle(taskId: created.id, placeholder: created.title) }
+                    }
                 }
             }
         }
@@ -100,6 +109,7 @@ struct TaskBoardView: View {
             await refresh(showProgress: true)
             workspaces = (try? await api.listWorkspaces()) ?? []
             catalog = try? await api.models()
+            lastAgent = (try? await api.boardTaskAgentDefaults()) ?? .default
         }
         .alert("任务操作失败", isPresented: Binding(
             get: { errorMessage != nil },
@@ -163,6 +173,11 @@ struct TaskBoardView: View {
         if let onDismiss { onDismiss() } else { dismiss() }
     }
 
+    private func rememberAgent(_ agent: WandBoardTaskAgent) {
+        lastAgent = agent
+        Task { _ = try? await api.saveBoardTaskAgentDefaults(agent) }
+    }
+
     private func refresh(showProgress: Bool) async {
         if showProgress { loading = true }
         do {
@@ -172,6 +187,23 @@ struct TaskBoardView: View {
             errorMessage = error.localizedDescription
         }
         loading = false
+    }
+
+    /**
+     * 标题留空时标题由服务端后台生成。创建响应里只有描述首行占位，
+     * 这里短轮询几次，拿到真标题就刷新列表和详情；一直没变就保留占位。
+     */
+    private func awaitGeneratedTitle(taskId: String, placeholder: String) async {
+        for delayMs in [1_200, 2_000, 3_000, 5_000, 8_000] {
+            try? await Task.sleep(for: .milliseconds(delayMs))
+            guard let task = try? await api.getBoardTask(id: taskId) else { continue }
+            guard !task.title.isEmpty, task.title != placeholder else { continue }
+            await refresh(showProgress: false)
+            if let id = selected?.id {
+                selected = tasks.first(where: { $0.id == id }) ?? selected
+            }
+            return
+        }
     }
 
     private func mutate(_ work: () async throws -> Void) async {
@@ -220,8 +252,10 @@ private struct TaskBoardDetailView: View {
     let task: WandBoardTask
     let workspaces: [Workspace]
     let catalog: ModelsResponse?
+    let lastAgent: WandBoardTaskAgent
     let busy: Bool
     let onPatch: ([String: Any]) async -> Void
+    let onRemember: (WandBoardTaskAgent) -> Void
     let onDispatch: (WandBoardTaskAgent) async -> Void
     let onDelete: () async -> Void
     let onOpenSession: (String) -> Void
@@ -235,8 +269,10 @@ private struct TaskBoardDetailView: View {
         task: WandBoardTask,
         workspaces: [Workspace],
         catalog: ModelsResponse?,
+        lastAgent: WandBoardTaskAgent,
         busy: Bool,
         onPatch: @escaping ([String: Any]) async -> Void,
+        onRemember: @escaping (WandBoardTaskAgent) -> Void,
         onDispatch: @escaping (WandBoardTaskAgent) async -> Void,
         onDelete: @escaping () async -> Void,
         onOpenSession: @escaping (String) -> Void,
@@ -245,15 +281,17 @@ private struct TaskBoardDetailView: View {
         self.task = task
         self.workspaces = workspaces
         self.catalog = catalog
+        self.lastAgent = lastAgent
         self.busy = busy
         self.onPatch = onPatch
+        self.onRemember = onRemember
         self.onDispatch = onDispatch
         self.onDelete = onDelete
         self.onOpenSession = onOpenSession
         self.onClose = onClose
         _title = State(initialValue: task.title)
         _description = State(initialValue: task.description)
-        _agent = State(initialValue: task.agent ?? .default)
+        _agent = State(initialValue: task.agent ?? lastAgent)
     }
 
     var body: some View {
@@ -297,23 +335,39 @@ private struct TaskBoardDetailView: View {
                 }
             }
             Section("指派 Agent") {
-                Picker("CLI 工具", selection: $agent.provider) {
+                Picker("CLI 工具", selection: Binding(
+                    get: { agent.provider },
+                    set: { provider in
+                        agent.provider = provider
+                        let options = wandBoardModelOptions(from: catalog, provider: provider)
+                        if !options.contains(where: { $0.id == agent.model }) {
+                            agent.model = options.first?.id ?? "default"
+                        }
+                        onRemember(agent)
+                    }
+                )) {
                     ForEach(wandBoardProviders, id: \.self) { provider in
                         Text(wandBoardProviderLabel(provider)).tag(provider)
                     }
                 }
-                .onChange(of: agent.provider) { _, provider in
-                    let options = wandBoardModelOptions(from: catalog, provider: provider)
-                    if !options.contains(where: { $0.id == agent.model }) {
-                        agent.model = options.first?.id ?? "default"
+                Picker("模型", selection: Binding(
+                    get: { agent.model },
+                    set: { model in
+                        agent.model = model
+                        onRemember(agent)
                     }
-                }
-                Picker("模型", selection: $agent.model) {
+                )) {
                     ForEach(wandBoardModelOptions(from: catalog, provider: agent.provider), id: \.id) { option in
                         Text(option.label).tag(option.id)
                     }
                 }
-                Picker("思考深度", selection: $agent.thinkingEffort) {
+                Picker("思考深度", selection: Binding(
+                    get: { agent.thinkingEffort },
+                    set: { effort in
+                        agent.thinkingEffort = effort
+                        onRemember(agent)
+                    }
+                )) {
                     ForEach(wandBoardEfforts, id: \.self) { effort in
                         Text(wandBoardEffortLabel(effort)).tag(effort)
                     }
@@ -348,7 +402,7 @@ private struct TaskBoardDetailView: View {
         .onChange(of: task.id) { _, _ in
             title = task.title
             description = task.description
-            agent = task.agent ?? .default
+            agent = task.agent ?? lastAgent
         }
     }
 }
@@ -368,7 +422,8 @@ private struct TaskBoardCreateView: View {
     var body: some View {
         NavigationStack {
             Form {
-                TextField("任务标题", text: $title)
+                // 标题可选：留空由服务端按描述自动生成。
+                TextField("任务标题（可选）", text: $title, prompt: Text("不填写则按描述自动生成"))
                 TextField("描述", text: $description, axis: .vertical)
                     .lineLimit(3...8)
                 Picker("项目", selection: $workspaceId) {
@@ -408,7 +463,8 @@ private struct TaskBoardCreateView: View {
                             )
                         }
                     }
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        && description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }

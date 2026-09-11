@@ -71,7 +71,7 @@ struct WandBoardDispatchResult: Decodable {
 
 struct WandBoardTask: Decodable, Identifiable, Equatable {
     private enum CodingKeys: String, CodingKey {
-        case id, workspaceId, identifier, title, description, status, priority, labels, dueDate
+        case id, workspaceId, identifier, title, titleSource, description, status, priority, labels, dueDate
         case sortOrder, agent, createdAt, updatedAt, sessionIds, sessions, workspace
     }
 
@@ -79,6 +79,8 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
     let workspaceId: String?
     let identifier: String
     let title: String
+    /// "auto" = 标题由服务端按描述自动生成；老服务端不返回时按用户手写处理。
+    let titleSource: String
     let description: String
     let status: String
     let priority: String
@@ -98,6 +100,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         workspaceId = try? container.decodeIfPresent(String.self, forKey: .workspaceId)
         identifier = (try? container.decode(String.self, forKey: .identifier)) ?? ""
         title = (try? container.decode(String.self, forKey: .title)) ?? "任务"
+        titleSource = (try? container.decode(String.self, forKey: .titleSource)) ?? "user"
         description = (try? container.decode(String.self, forKey: .description)) ?? ""
         status = (try? container.decode(String.self, forKey: .status)) ?? "todo"
         priority = (try? container.decode(String.self, forKey: .priority)) ?? "none"
