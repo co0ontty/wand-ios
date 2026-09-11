@@ -37,6 +37,18 @@ enum WandAuth {
             case .noCookie: return "服务器未返回 session cookie"
             }
         }
+
+        /// Wi-Fi/蜂窝切换、服务刚醒、429/5xx 都还能自动再试；地址错或 token 失效必须用户介入。
+        var isRetryable: Bool {
+            switch self {
+            case .network, .rateLimited, .noCookie:
+                return true
+            case .server(let status):
+                return status == 429 || status >= 500
+            case .invalidURL, .unauthorized:
+                return false
+            }
+        }
     }
 
     final class ConnectionAttempt {

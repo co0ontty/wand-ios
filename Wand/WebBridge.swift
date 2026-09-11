@@ -268,6 +268,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         请确认 wand 服务正在运行，并检查地址是否正确。
         """
         model.phase = .failed(title: "无法加载 wand 服务器", message: message, canRetry: true)
+        model.scheduleAutomaticReconnect()
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -289,6 +290,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         hasLoadedOnce = true
+        model.cancelAutomaticReconnect()
         model.phase = .ready
         // WebContent 进程重建会换一个新的 WKContentView，键盘顶栏会复活，
         // 每次导航完成后重申一次（幂等）。

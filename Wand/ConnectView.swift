@@ -15,6 +15,9 @@ struct ConnectView: View {
     @State private var connectingProfileID: String?
     @State private var connectionGeneration = 0
     @State private var connectionAttempt: WandAuth.ConnectionAttempt?
+    @State private var autoConnectRetryTask: Task<Void, Never>?
+    @State private var autoConnectAttempt = 0
+    @State private var autoConnectingProfileID: String?
     @State private var showScanner = false
     @State private var showLocalNetworkHint = false
     @State private var pendingRemoval: ServerProfile?
@@ -423,6 +426,7 @@ struct ConnectView: View {
     private func connect() {
         let raw = trimmedInput
         guard !raw.isEmpty, !isConnecting else { return }
+        cancelAutoConnectRetry()
         connectionAttempt?.cancel()
         connectionGeneration &+= 1
         let generation = connectionGeneration
@@ -431,17 +435,28 @@ struct ConnectView: View {
         error = nil
         showLocalNetworkHint = false
         inputFocused = false
+        startManualConnectAttempt(raw: raw, generation: generation, attempt: 1)
+    }
 
+    private func startManualConnectAttempt(raw: String, generation: Int, attempt: Int) {
+        guard generation == connectionGeneration else { return }
+        isConnecting = true
         connectionAttempt = WandAuth.resolve(rawInput: raw) { result in
             DispatchQueue.main.async {
                 guard generation == connectionGeneration else { return }
                 connectionAttempt = nil
-                isConnecting = false
                 switch result {
                 case .success(let target):
+                    isConnecting = false
                     store.connect(serverURL: target.url, token: target.token)
                     onDismiss?()
                 case .failure(let err):
+                    if err.isRetryable, attempt < 8 {
+                        error = "暂时无法连接，正在自动重试（第 \(attempt) 次）…"
+                        scheduleManualConnectRetry(raw: raw, generation: generation, attempt: attempt)
+                        return
+                    }
+                    isConnecting = false
                     error = err.userMessage
                     if case .network = err {
                         let host = WandAuth.decodeConnectCode(raw)?.url.host
@@ -453,15 +468,38 @@ struct ConnectView: View {
         }
     }
 
+    private func scheduleManualConnectRetry(raw: String, generation: Int, attempt: Int) {
+        cancelAutoConnectRetry()
+        let delays: [UInt64] = [1_000, 2_000, 4_000, 8_000, 10_000]
+        let delay = delays[min(attempt - 1, delays.count - 1)]
+        autoConnectRetryTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+            guard !Task.isCancelled, generation == connectionGeneration else { return }
+            startManualConnectAttempt(raw: raw, generation: generation, attempt: attempt + 1)
+        }
+    }
+
     private func connect(to profile: ServerProfile) {
         guard !isConnecting else { return }
+        cancelAutoConnectRetry()
         connectionAttempt?.cancel()
         connectionGeneration &+= 1
         let generation = connectionGeneration
         isConnecting = true
         connectingProfileID = profile.id
+        autoConnectingProfileID = profile.id
+        autoConnectAttempt = 0
         error = nil
         showLocalNetworkHint = false
+        startSavedProfileConnectAttempt(profile: profile, generation: generation)
+    }
+
+    private func startSavedProfileConnectAttempt(profile: ServerProfile, generation: Int) {
+        guard generation == connectionGeneration else { return }
+        autoConnectAttempt += 1
+        let attempt = autoConnectAttempt
+        isConnecting = true
+        connectingProfileID = profile.id
         let expectedConnectionIdentity = profile.connectionIdentity
         let targetEndpointSession = SelfSignedSession.forEndpoint(profile.baseURL)
 
@@ -469,10 +507,12 @@ struct ConnectView: View {
             DispatchQueue.main.async {
                 guard generation == connectionGeneration else { return }
                 connectionAttempt = nil
-                isConnecting = false
-                connectingProfileID = nil
                 switch result {
                 case .success:
+                    cancelAutoConnectRetry()
+                    isConnecting = false
+                    connectingProfileID = nil
+                    autoConnectingProfileID = nil
                     guard let current = store.profile(id: profile.id),
                           current.connectionIdentity == expectedConnectionIdentity,
                           store.activateProfile(id: profile.id) else {
@@ -481,6 +521,14 @@ struct ConnectView: View {
                     }
                     onDismiss?()
                 case .failure(let failure):
+                    if failure.isRetryable, attempt < 8 {
+                        error = "暂时无法连接，正在自动重试（第 \(attempt) 次）…"
+                        scheduleSavedProfileRetry(profile: profile, generation: generation)
+                        return
+                    }
+                    isConnecting = false
+                    connectingProfileID = nil
+                    autoConnectingProfileID = nil
                     error = failure.userMessage
                     if case .network = failure {
                         showLocalNetworkHint = LocalNetworkPermission.isLikelyLanHost(profile.baseURL.host)
@@ -505,17 +553,36 @@ struct ConnectView: View {
         }
     }
 
+    private func scheduleSavedProfileRetry(profile: ServerProfile, generation: Int) {
+        cancelAutoConnectRetry()
+        let delays: [UInt64] = [1_000, 2_000, 4_000, 8_000, 10_000]
+        let delay = delays[min(max(autoConnectAttempt - 1, 0), delays.count - 1)]
+        autoConnectRetryTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+            guard !Task.isCancelled, generation == connectionGeneration else { return }
+            startSavedProfileConnectAttempt(profile: profile, generation: generation)
+        }
+    }
+
     private func cancelAndDismiss() {
         invalidateConnectionAttempt()
         onDismiss?()
     }
 
+    private func cancelAutoConnectRetry() {
+        autoConnectRetryTask?.cancel()
+        autoConnectRetryTask = nil
+    }
+
     private func invalidateConnectionAttempt() {
         connectionGeneration &+= 1
+        cancelAutoConnectRetry()
         connectionAttempt?.cancel()
         connectionAttempt = nil
         isConnecting = false
         connectingProfileID = nil
+        autoConnectingProfileID = nil
+        autoConnectAttempt = 0
     }
 }
 

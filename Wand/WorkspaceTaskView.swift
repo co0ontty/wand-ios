@@ -6,10 +6,21 @@ func workspaceTaskNavigationChrome(taskName: String, workspaceName: String) -> (
     if task.isEmpty {
         return (workspace.isEmpty ? "任务" : workspace, nil)
     }
-    if workspace.isEmpty || workspace.compare(task, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame {
+    if workspace.isEmpty || isGenericWorkspaceName(workspace)
+        || workspace.compare(task, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame {
         return (task, nil)
     }
     return (task, workspace)
+}
+
+func isGenericWorkspaceName(_ name: String) -> Bool {
+    ["全局", "全局任务"].contains(name.trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+func emptyTaskWorkspaceCaption(_ name: String) -> String? {
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !isGenericWorkspaceName(trimmed) else { return nil }
+    return trimmed.uppercased()
 }
 
 /// 任务 Tab 条的铬色：结构化对话跟随亮暗主题；PTY 终端页固定深色铬，
@@ -201,10 +212,12 @@ struct WorkspaceTaskView: View {
         ScrollView {
             VStack(spacing: 0) {
                 Spacer(minLength: 54)
-                Text(workspace.name.uppercased())
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(Theme.brand)
-                    .padding(.bottom, 18)
+                if let caption = emptyTaskWorkspaceCaption(workspace.name) {
+                    Text(caption)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Theme.brand)
+                        .padding(.bottom, 18)
+                }
 
                 Image(systemName: "terminal")
                     .font(.system(size: 30, weight: .medium))

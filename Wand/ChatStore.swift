@@ -559,6 +559,28 @@ final class ChatStore: ObservableObject {
         try await sendPtyInput(text, view: "terminal")
     }
 
+    func sendPtyPasteSequence(_ sequence: String) async throws {
+        guard !sequence.isEmpty else { return }
+        try await enqueuePtyInput { [self] in
+            try await ensurePtyRunningForInput()
+            try await api.sendPtyInputChunk(
+                id: sessionId,
+                input: sequence,
+                view: "terminal",
+                shortcutKey: "paste"
+            )
+        }
+    }
+
+    func pasteUploadedPathsIntoPty(_ files: [UploadedFile]) async throws {
+        let bracketed = shouldBracketPtyPaste(provider: snapshot?.provider)
+        for file in files {
+            let path = file.savedPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { continue }
+            try await sendPtyPasteSequence(buildTerminalPathPasteSequence(path, bracketed: bracketed))
+        }
+    }
+
     func sendPtyShortcut(_ input: String, shortcutKey: String) async throws {
         guard !input.isEmpty else { return }
         try await enqueuePtyInput { [self] in

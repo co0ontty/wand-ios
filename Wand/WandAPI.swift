@@ -807,6 +807,63 @@ final class WandAPI {
         )
     }
 
+    // MARK: - 任务管理
+
+    func listBoardTasks(workspaceId: String? = nil) async throws -> [WandBoardTask] {
+        var queryItems: [URLQueryItem]?
+        if let workspaceId, !workspaceId.isEmpty {
+            queryItems = [URLQueryItem(name: "workspaceId", value: workspaceId)]
+        }
+        return try await request([WandBoardTask].self, method: "GET", path: "/api/wand-tasks", queryItems: queryItems)
+    }
+
+    func createBoardTask(
+        title: String,
+        description: String,
+        status: String,
+        priority: String,
+        workspaceId: String?
+    ) async throws -> WandBoardTask {
+        var body: [String: Any] = [
+            "title": title,
+            "description": description,
+            "status": status,
+            "priority": priority,
+            "labels": [String](),
+        ]
+        if let workspaceId, !workspaceId.isEmpty {
+            body["workspaceId"] = workspaceId
+        } else {
+            body["workspaceId"] = NSNull()
+        }
+        return try await request(WandBoardTask.self, method: "POST", path: "/api/wand-tasks", body: body)
+    }
+
+    func updateBoardTask(id: String, body: [String: Any]) async throws -> WandBoardTask {
+        try await request(
+            WandBoardTask.self,
+            method: "PATCH",
+            path: "/api/wand-tasks/\(percentEncodePathComponent(id))",
+            body: body
+        )
+    }
+
+    func deleteBoardTask(id: String) async throws {
+        _ = try await requestData(
+            method: "DELETE",
+            path: "/api/wand-tasks/\(percentEncodePathComponent(id))"
+        )
+    }
+
+    func dispatchBoardTask(id: String, agent: WandBoardTaskAgent) async throws -> WandBoardDispatchResult {
+        try await request(
+            WandBoardDispatchResult.self,
+            method: "POST",
+            path: "/api/wand-tasks/\(percentEncodePathComponent(id))/dispatch",
+            body: ["agent": agent.jsonObject()]
+        )
+    }
+
     // MARK: - 目录与配置
 
     func listDirectory(_ query: String) async throws -> DirectoryListing {

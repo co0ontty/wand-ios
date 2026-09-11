@@ -28,6 +28,7 @@ struct WorkspaceNewTaskSheet: View {
     @State private var directoryListing: DirectoryListing?
     @State private var directoryLoading = false
     @State private var directoryError: String?
+    @State private var selectedWorkspaceId: String?
     @FocusState private var cwdFocused: Bool
 
     init(
@@ -43,6 +44,7 @@ struct WorkspaceNewTaskSheet: View {
         self.workspaceId = workspaceId
         self.onCreated = onCreated
         _cwd = State(initialValue: initialCwd.trimmingCharacters(in: .whitespacesAndNewlines))
+        _selectedWorkspaceId = State(initialValue: workspaceId)
     }
 
     var body: some View {
@@ -51,10 +53,12 @@ struct WorkspaceNewTaskSheet: View {
                 WandAmbientBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        Text("先选工作目录，再决定是否归入已有项目。任务名称由系统自动生成。")
+                        Text("先选工作目录，再决定是否归入已有项目。任务名称可留空，由系统自动生成。")
                             .font(.footnote)
                             .foregroundColor(Theme.textSecondary)
+                        nameCard
                         directoryCard
+                        projectCard
                         if !trimmedDirectory.isEmpty {
                             worktreeCard
                         }
@@ -138,6 +142,31 @@ struct WorkspaceNewTaskSheet: View {
         !creating && !trimmedDirectory.isEmpty && trimmedName.count <= 80
     }
 
+    private var matchingProjects: [TaskDirectoryGroup] {
+        let cwd = normalizeDirectoryPath(trimmedDirectory)
+        guard cwd != "/" else { return [] }
+        return store.taskGroups.filter { group in
+            group.isBindableProject && normalizeDirectoryPath(group.workspaceCwd) == cwd
+        }
+    }
+
+    private var selectedProject: TaskDirectoryGroup? {
+        matchingProjects.first(where: { $0.workspaceId == selectedWorkspaceId })
+    }
+
+    private func updateTaskCwd(_ value: String) {
+        if cwd != value { cwd = value }
+        reconcileSelectedWorkspace()
+    }
+
+    private func reconcileSelectedWorkspace() {
+        if let selectedWorkspaceId,
+           matchingProjects.contains(where: { $0.workspaceId == selectedWorkspaceId }) == false {
+            self.selectedWorkspaceId = nil
+        }
+        errorMessage = nil
+    }
+
     private func loadSuggestions() async {
         let query = trimmedDirectory
         do {
@@ -168,6 +197,15 @@ struct WorkspaceNewTaskSheet: View {
         )
     }
 
+    private var nameCard: some View {
+        fieldCard(title: "任务名称（可选）") {
+            TextField("留空则自动命名", text: $name)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(size: 15))
+        }
+    }
+
     private var directoryCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             fieldCard(title: "工作目录（服务器上的路径）") {
@@ -177,6 +215,9 @@ struct WorkspaceNewTaskSheet: View {
                         .autocorrectionDisabled()
                         .font(.system(size: 15, design: .monospaced))
                         .focused($cwdFocused)
+                        .onChange(of: cwd) { _, _ in
+                            reconcileSelectedWorkspace()
+                        }
                     Button {
                         openDirectoryPicker()
                     } label: {
@@ -194,7 +235,7 @@ struct WorkspaceNewTaskSheet: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(suggestions) { suggestion in
                         Button {
-                            cwd = suggestion.path
+                            updateTaskCwd(suggestion.path)
                             showingSuggestions = false
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
@@ -223,9 +264,9 @@ struct WorkspaceNewTaskSheet: View {
                     HStack(spacing: 8) {
                         ForEach(recentPaths) { recent in
                             Button {
-                                cwd = recent.path
+                                updateTaskCwd(recent.path)
                             } label: {
-                                Text(recent.path)
+                                Text(recent.name.isEmpty ? recent.path : recent.name)
                                     .font(.system(size: 11, design: .monospaced))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
@@ -268,7 +309,7 @@ struct WorkspaceNewTaskSheet: View {
                 } else {
                     List {
                         Button {
-                            cwd = directoryPickerPath
+                            updateTaskCwd(directoryPickerPath)
                             directoryPickerPresented = false
                         } label: {
                             Label("选择此目录", systemImage: "checkmark.circle")
@@ -424,6 +465,85 @@ struct WorkspaceNewTaskSheet: View {
         )
     }
 
+    private var projectCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("项目归属（可选）")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Theme.textSecondary)
+            if matchingProjects.isEmpty {
+                Text(trimmedDirectory.isEmpty
+                    ? "必须选择目录才能创建任务"
+                    : "此目录没有已绑定项目，将创建独立任务。")
+                    .font(.footnote)
+                    .foregroundColor(trimmedDirectory.isEmpty ? Theme.danger : Theme.textMuted)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        projectChoiceCard(
+                            title: "独立任务",
+                            subtitle: "按目录归类",
+                            selected: selectedWorkspaceId == nil,
+                            systemImage: "folder"
+                        ) {
+                            selectedWorkspaceId = nil
+                        }
+                        ForEach(matchingProjects) { project in
+                            projectChoiceCard(
+                                title: project.workspaceName,
+                                subtitle: "已有项目",
+                                selected: selectedProject?.workspaceId == project.workspaceId,
+                                systemImage: "folder.fill"
+                            ) {
+                                selectedWorkspaceId = project.workspaceId
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.surface)
+        )
+    }
+
+    private func projectChoiceCard(
+        title: String,
+        subtitle: String,
+        selected: Bool,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(selected ? Theme.brand : Theme.textMuted)
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textMuted)
+                    .lineLimit(1)
+            }
+            .frame(minWidth: 108, alignment: .leading)
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(selected ? Theme.brand.opacity(0.12) : Theme.surface.opacity(0.6))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(selected ? Theme.brand.opacity(0.7) : Theme.border.opacity(0.5), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(creating)
+    }
+
     private var worktreeCard: some View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: "arrow.triangle.branch")
@@ -485,8 +605,8 @@ struct WorkspaceNewTaskSheet: View {
             let (workspace, creation) = try await store.createTask(
                 name: trimmedName.isEmpty ? "未命名任务" : trimmedName,
                 directory: trimmedDirectory,
-                worktree: workspaceId != nil && worktreeEnabled,
-                workspaceId: workspaceId
+                worktree: worktreeEnabled,
+                workspaceId: selectedWorkspaceId
             )
             dismiss()
             onCreated(workspace, creation)

@@ -31,10 +31,38 @@ final class WebViewModel: ObservableObject {
     var requestClose: (() -> Void)?
     /// WebBridge attach 时回填，供"重试"调用 reload()。
     weak var webView: WKWebView?
+    private var reconnectAttempt = 0
+    private var reconnectTask: Task<Void, Never>?
+    private static let reconnectDelaysMs: [UInt64] = [500, 1_000, 2_000, 4_000, 8_000, 15_000]
 
     func retry() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempt = 0
         phase = .loading
         webView?.reload()
+    }
+
+    func scheduleAutomaticReconnect() {
+        guard reconnectAttempt < 8 else { return }
+        reconnectTask?.cancel()
+        let attempt = reconnectAttempt
+        reconnectAttempt += 1
+        let delay = Self.reconnectDelaysMs[min(attempt, Self.reconnectDelaysMs.count - 1)]
+        reconnectTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+            guard !Task.isCancelled, let self else { return }
+            if case .failed = self.phase {
+                self.phase = .loading
+                self.webView?.reload()
+            }
+        }
+    }
+
+    func cancelAutomaticReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempt = 0
     }
 
     func adjustEmbeddedTerminalScale(delta: Double) {
@@ -186,6 +214,7 @@ struct WebContainerView: View {
             escapeButton
         }
         .onAppear { model.requestClose = onRequestClose }
+        .onDisappear { model.cancelAutomaticReconnect() }
     }
 
     @ViewBuilder private var webContent: some View {

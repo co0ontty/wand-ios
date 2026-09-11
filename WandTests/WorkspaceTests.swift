@@ -12,6 +12,11 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "  ", workspaceName: "wand").title, "wand")
         XCTAssertNil(workspaceTaskNavigationChrome(taskName: "  ", workspaceName: "wand").subtitle)
         XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "", workspaceName: "").title, "任务")
+        XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "修顶栏", workspaceName: "全局").title, "修顶栏")
+        XCTAssertNil(workspaceTaskNavigationChrome(taskName: "修顶栏", workspaceName: "全局").subtitle)
+        XCTAssertNil(emptyTaskWorkspaceCaption(""))
+        XCTAssertNil(emptyTaskWorkspaceCaption("全局"))
+        XCTAssertEqual(emptyTaskWorkspaceCaption("wand"), "WAND")
     }
 
     func testTaskListPresentationShortensPathsAndAvoidsSharedDirectoryLabel() {
@@ -35,6 +40,34 @@ final class WorkspaceTests: XCTestCase {
             ),
             "Pi 1"
         )
+    }
+
+    func testManagedDeletionCascadesTaskSessions() throws {
+        let group = try decode(
+            TaskDirectoryGroup.self,
+            from: """
+            {"workspaceId":"workspace-1","workspaceName":"Wand","workspaceCwd":"/work","synthetic":false,"tasks":[{"id":"task-1","workspaceId":"workspace-1","name":"修复侧栏","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/work","isolated":false,"worktreeError":null,"sessions":[{"id":"session-1"},{"id":"session-2"}],"totalSessions":2}],"standaloneSessions":[{"id":"loose-1"}]}
+            """
+        )
+        let resolved = TaskListPresentation.resolveManagedDeletion(
+            .init(taskIds: ["task-1"], sessionIds: ["session-1", "loose-1"]),
+            groups: [group]
+        )
+        XCTAssertEqual(resolved.taskIds, ["task-1"])
+        XCTAssertEqual(resolved.sessionIds, ["loose-1"])
+        XCTAssertEqual(TaskListPresentation.describeManagedDeletion(resolved), "1 个任务和 1 个终端")
+    }
+
+    func testTaskDirectoryGroupTreatsGlobalWorkspaceAsUnbindable() throws {
+        let global = try decode(
+            TaskDirectoryGroup.self,
+            from: """
+            {"workspaceId":"wand-global","workspaceName":"全局","workspaceCwd":"/scratch","global":true,"synthetic":false,"tasks":[],"standaloneSessions":[]}
+            """
+        )
+        XCTAssertTrue(global.isGlobal)
+        XCTAssertFalse(global.isBindableProject)
+        XCTAssertFalse(global.isSynthetic)
     }
 
     func testHorizontalSwipeSelectsAdjacentTaskSession() {
@@ -91,26 +124,51 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(sessionTabTitleMaxWidth(selected: false), 112)
     }
 
-    func testTaskListMetricsAndOrderingPrioritizeLiveRecentContent() throws {
-        let idle = try group(id: "idle", cwd: "/repo/idle", taskID: "idle-task", lastOpenedAt: "2026-01-01T00:00:00Z")
-        let recent = try group(id: "recent", cwd: "/repo/recent", taskID: "recent-task", lastOpenedAt: "2026-03-01T00:00:00Z")
-        let live = try group(
-            id: "live",
-            cwd: "/repo/live",
-            taskID: "live-task",
-            lastOpenedAt: "2026-02-01T00:00:00Z",
+    func testTaskListKeepsCreatedOrderWithNewItemsFirst() throws {
+        let older = try group(
+            id: "older",
+            cwd: "/repo/older",
+            taskID: "older-task",
+            createdAt: "2026-01-01T00:00:00Z",
+            lastOpenedAt: "2026-06-01T00:00:00Z"
+        )
+        let newer = try group(
+            id: "newer",
+            cwd: "/repo/newer",
+            taskID: "newer-task",
+            createdAt: "2026-05-01T00:00:00Z",
+            lastOpenedAt: "2026-02-01T00:00:00Z"
+        )
+        let running = try group(
+            id: "running",
+            cwd: "/repo/running",
+            taskID: "running-task",
+            createdAt: "2026-03-01T00:00:00Z",
+            lastOpenedAt: "2026-04-01T00:00:00Z",
             sessionStatus: "running"
         )
 
         XCTAssertEqual(
-            TaskListPresentation.orderedDirectoryGroups([idle, recent, live]).map(\.id),
-            ["live", "recent", "idle"]
+            TaskListPresentation.orderedDirectoryGroups([older, newer, running]).map(\.id),
+            ["newer", "running", "older"]
         )
-        let metrics = TaskListPresentation.metrics(for: [idle, recent, live])
+        XCTAssertEqual(
+            TaskListPresentation.orderedTaskSummaries(older.tasks + newer.tasks).map(\.id),
+            ["newer-task", "older-task"]
+        )
+        let metrics = TaskListPresentation.metrics(for: [older, newer, running])
         XCTAssertEqual(metrics.directoryCount, 3)
         XCTAssertEqual(metrics.taskCount, 3)
         XCTAssertEqual(metrics.sessionCount, 3)
         XCTAssertEqual(TaskListPresentation.homeTaskSummaryLabel(metrics), "3 个目录 · 3 个任务")
+    }
+
+    func testTaskListExpansionStorageRoundTripsCollapsedIds() {
+        let defaults = UserDefaults(suiteName: "wand.taskList.expansion.test")!
+        defaults.removePersistentDomain(forName: "wand.taskList.expansion.test")
+        TaskListExpansionStorage.setCollapsedIds(["folder-b", "folder-a"], kind: "groups", defaults: defaults)
+        XCTAssertEqual(TaskListExpansionStorage.collapsedIds(kind: "groups", defaults: defaults), ["folder-a", "folder-b"])
+        defaults.removePersistentDomain(forName: "wand.taskList.expansion.test")
     }
 
     func testTaskListMetricsDeduplicateDirectoriesByPath() throws {
@@ -448,6 +506,27 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(store.visibleSnapshot?.id, "already-open")
     }
 
+    func testTaskGroupsPageDecodesArrayAndRevisionEnvelope() throws {
+        let arrayJSON = "[{\"workspaceId\":\"ws\",\"workspaceName\":\"Wand\",\"workspaceCwd\":\"/repo\",\"synthetic\":false,\"tasks\":[],\"standaloneSessions\":[]}]"
+        let arrayPage = try TaskGroupsPage.decode(from: Data(arrayJSON.utf8))
+        XCTAssertEqual(arrayPage.groups.count, 1)
+        XCTAssertFalse(arrayPage.unchanged)
+        XCTAssertNil(arrayPage.revision)
+
+        let unchanged = try TaskGroupsPage.decode(from: Data("{\"unchanged\":true,\"revision\":\"rev-2\",\"groups\":[]}".utf8))
+        XCTAssertTrue(unchanged.unchanged)
+        XCTAssertEqual(unchanged.revision, "rev-2")
+        XCTAssertTrue(unchanged.groups.isEmpty)
+    }
+
+    func testTaskWorkspaceBindingPrefersTaskIdOverSyntheticGroup() throws {
+        let summary = try decode(
+            WorkspaceTaskSummary.self,
+            from: "{\"id\":\"task-1\",\"workspaceId\":\"real-ws\",\"name\":\"Task\",\"worktree\":null,\"layout\":null,\"status\":\"active\",\"createdAt\":\"2026-01-01T00:00:00Z\",\"lastOpenedAt\":null,\"cwd\":\"/repo/task\",\"isolated\":false,\"worktreeError\":null,\"sessions\":[]}"
+        )
+        XCTAssertEqual(summary.asTask().workspaceId, "real-ws")
+    }
+
     func testDuplicateOpenTaskStillShowsAutoCreatedStructuredWindow() async throws {
         let service = MockWorkspaceService()
         let workspace = try workspace(id: "workspace-dup")
@@ -512,16 +591,17 @@ final class WorkspaceTests: XCTestCase {
         id: String,
         cwd: String,
         taskID: String,
+        createdAt: String = "2026-01-01T00:00:00Z",
         lastOpenedAt: String?,
         sessionStatus: String? = nil
     ) throws -> TaskDirectoryGroup {
         let session = sessionStatus.map { status in
-            "{\"id\":\"session-\(taskID)\",\"provider\":\"claude\",\"status\":\"\(status)\"}"
+            "{\"id\":\"session-\(taskID)\",\"provider\":\"claude\",\"sessionKind\":\"structured\",\"status\":\"\(status)\",\"inFlight\":true}"
         } ?? "{\"id\":\"session-\(taskID)\",\"provider\":\"claude\"}"
         let opened = lastOpenedAt.map { "\"\($0)\"" } ?? "null"
         return try decode(
             TaskDirectoryGroup.self,
-            from: "{\"workspaceId\":\"\(id)\",\"workspaceName\":\"\(id)\",\"workspaceCwd\":\"\(cwd)\",\"synthetic\":false,\"tasks\":[{\"id\":\"\(taskID)\",\"workspaceId\":\"\(id)\",\"name\":\"Task\",\"worktree\":null,\"layout\":null,\"status\":\"active\",\"createdAt\":\"2026-01-01T00:00:00Z\",\"lastOpenedAt\":\(opened),\"cwd\":\"\(cwd)\",\"isolated\":false,\"worktreeError\":null,\"sessions\":[\(session)],\"totalSessions\":1}],\"standaloneSessions\":[]}"
+            from: "{\"workspaceId\":\"\(id)\",\"workspaceName\":\"\(id)\",\"workspaceCwd\":\"\(cwd)\",\"createdAt\":\"\(createdAt)\",\"synthetic\":false,\"tasks\":[{\"id\":\"\(taskID)\",\"workspaceId\":\"\(id)\",\"name\":\"Task\",\"worktree\":null,\"layout\":null,\"status\":\"active\",\"createdAt\":\"\(createdAt)\",\"lastOpenedAt\":\(opened),\"cwd\":\"\(cwd)\",\"isolated\":false,\"worktreeError\":null,\"sessions\":[\(session)],\"totalSessions\":1}],\"standaloneSessions\":[]}"
         )
     }
 
@@ -685,6 +765,10 @@ private final class MockWorkspaceService: WorkspaceServing {
 
     func listTaskGroups() async throws -> [TaskDirectoryGroup] {
         []
+    }
+
+    func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage {
+        TaskGroupsPage(groups: [], revision: revision, unchanged: revision != nil)
     }
 
     func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int {

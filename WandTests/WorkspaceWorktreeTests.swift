@@ -264,7 +264,7 @@ final class WorkspaceWorktreeTests: XCTestCase {
             baseRef: nil,
             worktree: true
         )
-        XCTAssertNil(enabledTask.body["worktree"])
+        XCTAssertEqual(enabledTask.body["worktree"], .bool(true))
 
         // 显式 false 必须传 worktree:false，跳过隔离。
         let sharedTask = createWorkspaceTaskRequest(
@@ -286,6 +286,9 @@ final class WorkspaceWorktreeTests: XCTestCase {
         let mounted = createStandaloneTaskRequest(name: "挂目录", cwd: "/tmp/work", worktree: true)
         XCTAssertEqual(mounted.body["cwd"], .string("/tmp/work"))
         XCTAssertEqual(mounted.body["worktree"], .bool(true))
+
+        let isolatedStandalone = createStandaloneTaskRequest(name: "独立隔离", cwd: "/repo", worktree: true)
+        XCTAssertEqual(isolatedStandalone.body["worktree"], .bool(true))
     }
 
     func testTaskDirectoryGroupsDecodeAggregateShape() throws {
@@ -740,6 +743,11 @@ private final class MockWorktreeMergeService: WorkspaceServing {
             return await withCheckedContinuation { taskGroupsContinuation = $0 }
         }
         return taskGroups
+    }
+
+    func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage {
+        let groups = try await listTaskGroups()
+        return TaskGroupsPage(groups: groups, revision: revision, unchanged: false)
     }
 
     func resolveTaskGroups(with groups: [TaskDirectoryGroup]) {

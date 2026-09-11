@@ -31,6 +31,7 @@ struct NativeRootView: View {
     @State private var showWebFallback = false
     @State private var showSettings = false
     @State private var showMissions = false
+    @State private var showTaskBoard = false
     @State private var serverUpdate: ServerUpdateInfo?
     @State private var dismissedUpdateVersion: String?
     @State private var updateBannerMessage: String?
@@ -105,6 +106,13 @@ struct NativeRootView: View {
                 onOpenSession: openSessionFromMissions
             )
         }
+        .fullScreenCover(isPresented: $showTaskBoard) {
+            TaskBoardView(
+                api: api,
+                linkedWorkspaceId: selectedWorkspaceTask?.workspace.id,
+                onOpenSession: openSessionFromMissions
+            )
+        }
         .sheet(isPresented: $showSettings) {
             SettingsView(serverURL: serverURL, token: token) {
                 // sheet 收起动画结束后再呈现 fullScreenCover，避免双 present 冲突。
@@ -137,9 +145,13 @@ struct NativeRootView: View {
             releaseSessionOpenGateAfterTransition(for: sessionID)
         }
         .task {
+            workspaceStore.startTaskGroupsSync()
             if case .idle = workspaceStore.indexState {
                 await workspaceStore.loadWorkspaceIndex()
             }
+        }
+        .onDisappear {
+            workspaceStore.stopTaskGroupsSync()
         }
         .wandKeyboardShortcuts(rootKeyboardShortcuts)
     }
@@ -187,6 +199,7 @@ struct NativeRootView: View {
             ) {
                 showSettings = false
                 showMissions = false
+                showTaskBoard = false
                 showWebFallback = false
                 selectedWorkspaceTask = nil
                 selectedSessionID = nil
@@ -201,14 +214,27 @@ struct NativeRootView: View {
             ) {
                 showSettings = false
                 showWebFallback = false
+                showTaskBoard = false
                 showMissions = true
+            },
+            WandKeyboardShortcutAction(
+                id: "show-task-board",
+                title: "显示任务管理",
+                key: "3",
+                modifiers: .command,
+                isEnabled: !showTaskBoard
+            ) {
+                showSettings = false
+                showWebFallback = false
+                showMissions = false
+                showTaskBoard = true
             },
             WandKeyboardShortcutAction(
                 id: "close-active-surface",
                 title: "关闭当前页",
                 key: "w",
                 modifiers: .command,
-                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showWebFallback || showSettings || showMissions
+                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showWebFallback || showSettings || showMissions || showTaskBoard
             ) {
                 closeActiveSurfaceFromKeyboard()
             },
@@ -218,6 +244,8 @@ struct NativeRootView: View {
     private func closeActiveSurfaceFromKeyboard() {
         if showMissions {
             showMissions = false
+        } else if showTaskBoard {
+            showTaskBoard = false
         } else if showWebFallback {
             showWebFallback = false
         } else if showSettings {
@@ -357,31 +385,38 @@ struct NativeRootView: View {
                 }
                 .toolbar {
                     ToolbarItem(placement: .navigationBarLeading) {
-                        Menu {
-                            Button {
-                                showMissions = true
+                        if selectedWorkspaceTask == nil && selectedSessionID == nil {
+                            Menu {
+                                Button {
+                                    showTaskBoard = true
+                                } label: {
+                                    Label("任务管理", systemImage: "checklist")
+                                }
+                                Button {
+                                    showMissions = true
+                                } label: {
+                                    Label("并行任务", systemImage: "square.stack.3d.up")
+                                }
+                                Button {
+                                    showSettings = true
+                                } label: {
+                                    Label("设置", systemImage: "gearshape")
+                                }
+                                Button {
+                                    showWebFallback = true
+                                } label: {
+                                    Label("打开网页版", systemImage: "safari")
+                                }
+                                Button {
+                                    NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
+                                } label: {
+                                    Label("切换服务器", systemImage: "server.rack")
+                                }
                             } label: {
-                                Label("并行任务", systemImage: "square.stack.3d.up")
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.system(size: 18))
+                                    .foregroundColor(Theme.textSecondary)
                             }
-                            Button {
-                                showSettings = true
-                            } label: {
-                                Label("设置", systemImage: "gearshape")
-                            }
-                            Button {
-                                showWebFallback = true
-                            } label: {
-                                Label("打开网页版", systemImage: "safari")
-                            }
-                            Button {
-                                NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
-                            } label: {
-                                Label("切换服务器", systemImage: "server.rack")
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .font(.system(size: 18))
-                                .foregroundColor(Theme.textSecondary)
                         }
                     }
                 }
@@ -516,7 +551,7 @@ struct NativeRootView: View {
         guard phase == .ready,
               let pending = quickActions.pending,
               pending.belongs(to: serverID) else { return }
-        let hasPresentedSurface = showWebFallback || showSettings || showMissions
+        let hasPresentedSurface = showWebFallback || showSettings || showMissions || showTaskBoard
 
         switch pending {
         case .openWeb:
@@ -539,6 +574,7 @@ struct NativeRootView: View {
             quickActions.consume(where: { $0 == pending }) != nil else { return }
             showSettings = false
             showMissions = false
+            showTaskBoard = false
             showWebFallback = false
             openSessionFromMissions(id)
         }
@@ -547,6 +583,7 @@ struct NativeRootView: View {
     private func showTaskRoot() {
         showSettings = false
         showMissions = false
+        showTaskBoard = false
         showWebFallback = false
         selectedWorkspaceTask = nil
         selectedSessionID = nil
@@ -569,6 +606,7 @@ struct NativeRootView: View {
     private func openSessionFromMissions(_ sessionID: String) {
         selectedWorkspaceTask = nil
         showMissions = false
+        showTaskBoard = false
         openingSessionID = sessionID
         selectedSessionID = sessionID
         selectedSnapshot = nil

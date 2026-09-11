@@ -113,9 +113,9 @@ func createWorkspaceTaskRequest(
     if let cwd, !cwd.isEmpty {
         body["cwd"] = .string(cwd)
     }
-    // 仅在显式关掉时传 worktree:false；缺省交由服务端默认（git 仓库自动隔离）。
-    if worktree == false {
-        body["worktree"] = .bool(false)
+    // 显式 true/false 都传给服务端：true 失败不再静默降级，false 跳过隔离。
+    if let worktree {
+        body["worktree"] = .bool(worktree)
     }
     return WorkspaceTaskWindowRequest(
         path: "/api/workspaces/\(workspaceId)/tasks",
@@ -326,7 +326,16 @@ extension WandAPI {
     /// 跨目录任务聚合列表（GET /api/tasks）：目录组一级容器，
     /// 未绑定任务的会话归入 standaloneSessions。
     func listTaskGroups() async throws -> [TaskDirectoryGroup] {
-        try await request([TaskDirectoryGroup].self, method: "GET", path: "/api/tasks")
+        try await listTaskGroupsPage(revision: nil).groups
+    }
+
+    func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage {
+        var path = "/api/tasks"
+        if let revision, !revision.isEmpty {
+            path += "?revision=\(percentEncodePathComponent(revision))"
+        }
+        let data = try await requestData(method: "GET", path: path)
+        return try TaskGroupsPage.decode(from: data)
     }
 
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview {

@@ -148,6 +148,9 @@ private struct PtySessionView: View {
         }
         .onAppear {
             attachments.setToastHandler { store.toast = $0 }
+            attachments.setPtyPasteHandler { files in
+                try await store.pasteUploadedPathsIntoPty(files)
+            }
             store.start()
             refreshGitStatus()
             allowWebView = false
@@ -563,6 +566,9 @@ private struct PtySessionView: View {
                 placeholder: ptyComposerPlaceholder,
                 isFocused: inputFocused,
                 disableAutocorrect: true,
+                onPasteImages: { items in
+                    attachments.handlePastedImageData(items)
+                },
                 onFocusChange: { focused in
                     inputFocused = focused
                     if focused {

@@ -39,6 +39,7 @@ protocol WorkspaceServing: AnyObject {
         worktree: Bool?
     ) async throws -> WorkspaceTaskCreation
     func listTaskGroups() async throws -> [TaskDirectoryGroup]
+    func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage
     func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview
     func startWorktreeMergeAgent(
@@ -101,6 +102,8 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var taskGroups: [TaskDirectoryGroup] = []
     @Published private(set) var taskGroupsError: String?
     @Published private(set) var taskGroupsLoading = false
+    private var taskGroupsRevision: String?
+    private var taskGroupsSyncTask: Task<Void, Never>?
 
     @Published private(set) var currentWorkspace: Workspace?
     @Published private(set) var currentTask: WorkspaceTask?
@@ -143,6 +146,24 @@ final class WorkspaceStore: ObservableObject {
     private func invalidateTaskGroupsLoad() {
         taskGroupsGeneration &+= 1
         taskGroupsLoading = false
+        taskGroupsRevision = nil
+    }
+
+    func startTaskGroupsSync() {
+        if taskGroupsSyncTask != nil { return }
+        taskGroupsSyncTask = Task { [weak self] in
+            await self?.loadTaskGroups()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                guard !Task.isCancelled else { return }
+                await self?.loadTaskGroups(force: true)
+            }
+        }
+    }
+
+    func stopTaskGroupsSync() {
+        taskGroupsSyncTask?.cancel()
+        taskGroupsSyncTask = nil
     }
 
     func tasks(for workspaceId: String) -> [WorkspaceTask] {
@@ -250,7 +271,9 @@ final class WorkspaceStore: ObservableObject {
                 workspaceId: group.workspaceId,
                 workspaceName: updated.name,
                 workspaceCwd: updated.cwd,
+                createdAt: group.createdAt,
                 synthetic: group.synthetic,
+                global: group.global,
                 tasks: group.tasks,
                 standaloneSessions: group.standaloneSessions
             )
@@ -327,18 +350,24 @@ final class WorkspaceStore: ObservableObject {
     }
 
     /// 跨目录任务聚合：任务视图数据源；失败不阻塞项目树。
+    /// force 用于下拉刷新和 10s 轮询；首次加载仍可跳过已有缓存。
     func loadTaskGroups(force: Bool = false) async {
         if !force && !taskGroups.isEmpty { return }
         taskGroupsGeneration &+= 1
         let generation = taskGroupsGeneration
-        taskGroupsLoading = true
+        if taskGroups.isEmpty { taskGroupsLoading = true }
         defer {
             if generation == taskGroupsGeneration { taskGroupsLoading = false }
         }
         do {
-            let groups = try await api.listTaskGroups()
+            let page = try await api.listTaskGroupsPage(revision: taskGroupsRevision)
             guard generation == taskGroupsGeneration, !Task.isCancelled else { return }
-            taskGroups = groups
+            if page.unchanged {
+                taskGroupsError = nil
+                return
+            }
+            taskGroups = page.groups
+            taskGroupsRevision = page.revision
             taskGroupsError = nil
         } catch {
             guard generation == taskGroupsGeneration, !Task.isCancelled else { return }
@@ -413,31 +442,54 @@ final class WorkspaceStore: ObservableObject {
             sessions: []
         )
         invalidateTaskGroupsLoad()
-        if let groupIndex = taskGroups.firstIndex(where: { $0.workspaceId == workspace.id }) {
-            let group = taskGroups[groupIndex]
+        upsertCreatedTaskSummary(summary, workspace: workspace)
+        await loadTaskGroups(force: true)
+        return (workspace, creation)
+    }
+
+
+    private func upsertCreatedTaskSummary(_ summary: WorkspaceTaskSummary, workspace: Workspace) {
+        let normalizedCwd = normalizeWorkspaceDirectory(summary.cwd.isEmpty ? workspace.cwd : summary.cwd)
+        let matchingIndex = taskGroups.firstIndex { group in
+            if group.isGlobal { return false }
+            if group.workspaceId == workspace.id, group.isBindableProject { return true }
+            return normalizeWorkspaceDirectory(group.workspaceCwd) == normalizedCwd
+        }
+        if let matchingIndex {
+            let group = taskGroups[matchingIndex]
             let tasks = group.tasks.contains(where: { $0.id == summary.id })
                 ? group.tasks
                 : group.tasks + [summary]
-            taskGroups[groupIndex] = TaskDirectoryGroup(
+            taskGroups[matchingIndex] = TaskDirectoryGroup(
                 workspaceId: group.workspaceId,
                 workspaceName: group.workspaceName,
                 workspaceCwd: group.workspaceCwd,
+                createdAt: group.createdAt,
                 synthetic: group.synthetic,
+                global: group.global,
                 tasks: tasks,
                 standaloneSessions: group.standaloneSessions
             )
-        } else {
-            taskGroups.append(TaskDirectoryGroup(
-                workspaceId: workspace.id,
-                workspaceName: workspace.name,
-                workspaceCwd: workspace.cwd,
-                synthetic: false,
-                tasks: [summary],
-                standaloneSessions: []
-            ))
+            return
         }
-        await loadTaskGroups(force: true)
-        return (workspace, creation)
+        let synthetic = workspace.name.isEmpty || groupLooksGlobal(workspace)
+        let displayName = synthetic
+            ? (normalizedCwd.split(separator: "/").map(String.init).last ?? normalizedCwd)
+            : workspace.name
+        taskGroups.append(TaskDirectoryGroup(
+            workspaceId: synthetic ? "cwd:\(normalizedCwd)" : workspace.id,
+            workspaceName: displayName,
+            workspaceCwd: normalizedCwd.isEmpty ? workspace.cwd : normalizedCwd,
+            createdAt: workspace.createdAt,
+            synthetic: synthetic,
+            global: false,
+            tasks: [summary],
+            standaloneSessions: []
+        ))
+    }
+
+    private func groupLooksGlobal(_ workspace: Workspace) -> Bool {
+        workspace.name == "全局" || workspace.name == "全局任务" || workspace.id == "wand-global"
     }
 
     /// Worktree 合并：用审查结果生成任务书并启动只绑定项目的托管 Agent 会话。
@@ -500,7 +552,9 @@ final class WorkspaceStore: ObservableObject {
                 workspaceId: group.workspaceId,
                 workspaceName: group.workspaceName,
                 workspaceCwd: group.workspaceCwd,
+                createdAt: group.createdAt,
                 synthetic: group.synthetic,
+                global: group.global,
                 tasks: tasks,
                 standaloneSessions: group.standaloneSessions
             )
@@ -520,7 +574,9 @@ final class WorkspaceStore: ObservableObject {
                 workspaceId: group.workspaceId,
                 workspaceName: group.workspaceName,
                 workspaceCwd: group.workspaceCwd,
+                createdAt: group.createdAt,
                 synthetic: group.synthetic,
+                global: group.global,
                 tasks: group.tasks.filter { $0.id != taskId },
                 standaloneSessions: group.standaloneSessions
             )
@@ -745,6 +801,7 @@ final class WorkspaceStore: ObservableObject {
             sessionError = nil
             pickerPresented = false
             creating = false
+            Task { await self.loadTaskGroups(force: true) }
         } catch {
             guard isCurrentTask(task.id, generation: generation), !Task.isCancelled else {
                 creating = false

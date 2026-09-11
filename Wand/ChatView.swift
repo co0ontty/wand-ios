@@ -91,10 +91,6 @@ struct ChatView: View {
     @State private var expandedHistoryBoundaryAbsolute: Int?
     /// 用户手动收起的助手回复，使用绝对 turn 下标避免历史 prepend 后串状态。
     @State private var collapsedAssistantTurns: Set<Int> = []
-    /// 用户手动展开的历史回复；其他历史回复默认逐条收起。
-    @State private var expandedHistoricalAssistantTurns: Set<Int> = []
-    /// 连续工具 / 思考 / 终端活动的详情 sheet。
-    @State private var activitySheet: ActivitySheetItem?
     /// 每次贴底请求递增；较旧的下一帧任务看到代次变化后自行退出，避免连续事件抢滚动。
     @State private var scrollRequestGeneration = 0
     /// 顶部分页哨兵是否在视口内。只有用户主动向历史方向拖动后才允许触发，避免页面
@@ -193,30 +189,6 @@ struct ChatView: View {
             )
                 .presentationDetents([.height(620), .large])
                 .presentationDragIndicator(.visible)
-        }
-        .sheet(item: $activitySheet) { sheet in
-            ActivityDetailSheet(
-                group: sheet.group,
-                baseURL: api.baseURL,
-                isLastTurn: sheet.turnIndex == store.messages.count - 1,
-                isResponding: store.isResponding,
-                askSelections: store.askUserSelections,
-                onAskToggle: { toolUseId, qIdx, optIdx, multi in
-                    store.toggleAskOption(
-                        toolUseId: toolUseId, questionIndex: qIdx,
-                        optionIndex: optIdx, multiSelect: multi
-                    )
-                },
-                onAskSubmit: { toolUseId, answerText in
-                    activitySheet = nil
-                    expandedHistoryBoundaryAbsolute = nil
-                    scrollMode = .stickToBottom
-                    store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
-                }
-            )
-            .presentationDetents([.large])
-            .presentationDragIndicator(.hidden)
-            .interactiveDismissDisabled()
         }
         .fileImporter(
             isPresented: $attachments.showFileImporter,
@@ -379,7 +351,6 @@ struct ChatView: View {
             && !attachments.showFileImporter
             && !attachments.showPhotoPicker
             && !showStopConfirm
-            && activitySheet == nil
             && modelPicker == nil
             && composerChoice == nil
     }
@@ -589,26 +560,15 @@ struct ChatView: View {
                 localIndex: turnIndex,
                 loadedOffset: store.loadedOffset
             )
-            let historical = turnIndex < lastUserTurnIndex
-            let collapsed = historical
-                ? !expandedHistoricalAssistantTurns.contains(absoluteTurn)
-                : false
+            let collapsed = collapsedAssistantTurns.contains(absoluteTurn)
             AssistantReplyDisclosure(
                 preview: preview,
                 collapsed: collapsed,
                 onToggle: {
                     if collapsed {
-                        if historical {
-                            expandedHistoricalAssistantTurns.insert(absoluteTurn)
-                        } else {
-                            collapsedAssistantTurns.remove(absoluteTurn)
-                        }
+                        collapsedAssistantTurns.remove(absoluteTurn)
                     } else {
-                        if historical {
-                            expandedHistoricalAssistantTurns.remove(absoluteTurn)
-                        } else {
-                            collapsedAssistantTurns.insert(absoluteTurn)
-                        }
+                        collapsedAssistantTurns.insert(absoluteTurn)
                     }
                 }
             )
@@ -661,35 +621,25 @@ struct ChatView: View {
                     && tools.contains { $0.result == nil },
                 expandAll: lastTurnIndex == store.messages.count - 1
             )
-        case .activityGroup(let turnIndex, let group, let id):
-            if store.cardDefaults.toolGroup {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(identifiedDisplayItems(group.items)) { identified in
-                        AssistantItemView(
-                            item: identified.item,
-                            baseURL: store.api.baseURL,
-                            isLastTurn: turnIndex == store.messages.count - 1,
-                            isResponding: store.isResponding,
-                            askSelections: store.askUserSelections,
-                            onAskToggle: { toolUseId, qIdx, optIdx, multi in
-                                store.toggleAskOption(
-                                    toolUseId: toolUseId, questionIndex: qIdx,
-                                    optionIndex: optIdx, multiSelect: multi
-                                )
-                            },
-                            onAskSubmit: { toolUseId, answerText in
-                                expandedHistoryBoundaryAbsolute = nil
-                                scrollMode = .stickToBottom
-                                store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
-                            }
-                        )
-                    }
+        case .activityGroup(let turnIndex, let group, _):
+            ActivityFoldCard(
+                group: group,
+                baseURL: store.api.baseURL,
+                isLastTurn: turnIndex == store.messages.count - 1,
+                isResponding: store.isResponding,
+                askSelections: store.askUserSelections,
+                onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                    store.toggleAskOption(
+                        toolUseId: toolUseId, questionIndex: qIdx,
+                        optionIndex: optIdx, multiSelect: multi
+                    )
+                },
+                onAskSubmit: { toolUseId, answerText in
+                    expandedHistoryBoundaryAbsolute = nil
+                    scrollMode = .stickToBottom
+                    store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
-            } else {
-                ActivitySummaryRow(group: group) {
-                    activitySheet = ActivitySheetItem(id: id, turnIndex: turnIndex, group: group)
-                }
-            }
+            )
         case .usageSummary(_, let usage, let isLive):
             UsageSummaryRow(usage: usage, isLive: isLive)
         case .historySummary(let stats, let boundary):
@@ -770,9 +720,6 @@ struct ChatView: View {
                 return true
             }
             let absoluteTurn = absoluteTurnIndex(localIndex: turnIndex, loadedOffset: store.loadedOffset)
-            if turnIndex < lastUserTurnIndex {
-                return expandedHistoricalAssistantTurns.contains(absoluteTurn)
-            }
             return !collapsedAssistantTurns.contains(absoluteTurn)
         }
     }
@@ -1512,6 +1459,9 @@ struct ChatView: View {
             text: $draft,
             placeholder: composerPlaceholder,
             isFocused: inputFocused,
+            onPasteImages: { items in
+                attachments.handlePastedImageData(items)
+            },
             onFocusChange: { inputFocused = $0 },
             onCompositionChange: { composerIsComposing = $0 },
             onSubmit: sendDraft,
@@ -1877,15 +1827,11 @@ private func displayItemIdentity(_ item: DisplayItem) -> String {
 }
 
 private struct ActivityGroup {
-    let summary: String
+    let latest: String
+    let meta: String
+    let count: Int
     let items: [DisplayItem]
     let running: Bool
-}
-
-private struct ActivitySheetItem: Identifiable {
-    let id: String
-    let turnIndex: Int
-    let group: ActivityGroup
 }
 
 /// 被折叠历史区间的统计：轮次 / 工具调用 / 子代理 / 失败。
@@ -2036,20 +1982,21 @@ private func collapseActivityItems(
         guard !pending.isEmpty else { return }
         let turnIndex = pending.last?.turnIndex ?? -1
         let displayItems = pending.map(\.item)
-        let running = displayItems.contains {
-            isActivityItemRunning($0, turnIndex: turnIndex, latestTurnIndex: latestTurnIndex, isResponding: isResponding)
+        let summary = summarizeActivityItems(displayItems)
+        if summary.count > 0 {
+            out.append(.activityGroup(
+                turnIndex: turnIndex,
+                group: ActivityGroup(
+                    latest: summary.latest,
+                    meta: summary.meta,
+                    count: summary.count,
+                    items: displayItems,
+                    running: false
+                ),
+                id: "activity-\(turnIndex)-\(groupOrdinal)"
+            ))
+            groupOrdinal += 1
         }
-        let group = ActivityGroup(
-            summary: activitySummary(displayItems, running: running),
-            items: displayItems,
-            running: running
-        )
-        out.append(.activityGroup(
-            turnIndex: turnIndex,
-            group: group,
-            id: "activity-\(turnIndex)-\(groupOrdinal)"
-        ))
-        groupOrdinal += 1
         pending.removeAll(keepingCapacity: true)
     }
 
@@ -2073,10 +2020,29 @@ private func collapseActivityItems(
         }
     }
     flushPending()
+    if isResponding,
+       case .activityGroup(let turnIndex, let group, let id) = out.last,
+       turnIndex == latestTurnIndex,
+       isActivityGroupOpen(group) {
+        out[out.count - 1] = .activityGroup(
+            turnIndex: turnIndex,
+            group: ActivityGroup(
+                latest: group.latest,
+                meta: group.meta,
+                count: group.count,
+                items: group.items,
+                running: true
+            ),
+            id: id
+        )
+    }
     return out
 }
 
 private func shouldSkipActivityItem(_ item: DisplayItem) -> Bool {
+    if case .plain(.thinking(let text, _)) = item {
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
     guard case .tool(let id, let name, _, let input, let subagent, _) = item else { return false }
     return subagent?.taskId == id
         && (name == "Task" || name == "Agent" || input["subagent_type"]?.stringValue?.isEmpty == false)
@@ -2085,35 +2051,149 @@ private func shouldSkipActivityItem(_ item: DisplayItem) -> Bool {
 private func isCollapsibleActivityItem(_ item: DisplayItem) -> Bool {
     switch item {
     case .plain(let block):
-        if case .text = block { return false }
-        if case .thinking = block { return false }
-        if case .unknown = block { return false }
-        return true
+        switch block {
+        case .text, .unknown, .toolUse: return false
+        case .thinking, .toolResult: return true
+        }
     case .explorationGroup:
         return true
     case .tool(_, let name, _, let input, _, _):
         if name == "AskUserQuestion" { return false }
-        if name == "Read", isReadImageTool(name: name, input: input) { return false }
+        if isReadImageTool(name: name, input: input) { return false }
         return true
     }
 }
 
-private func isActivityItemRunning(
-    _ item: DisplayItem,
-    turnIndex: Int,
-    latestTurnIndex: Int,
-    isResponding: Bool
-) -> Bool {
-    guard isResponding, turnIndex == latestTurnIndex else { return false }
-    switch item {
+private func isActivityGroupOpen(_ group: ActivityGroup) -> Bool {
+    guard let last = group.items.last else { return false }
+    switch last {
+    case .plain(.thinking):
+        return true
     case .tool(_, _, _, _, _, let result):
         return result == nil
     case .explorationGroup(let tools):
-        return tools.contains { $0.result == nil }
-    case .plain(let block):
-        if case .thinking = block { return true }
+        return tools.last?.result == nil
+    default:
         return false
     }
+}
+
+private struct ActivityRunSummary {
+    let latest: String
+    let meta: String
+    let count: Int
+}
+
+private let activityKindMeta: [(String, String)] = [
+    ("read", "浏览"),
+    ("command", "命令"),
+    ("search", "搜索"),
+    ("edit", "编辑"),
+    ("web", "网页"),
+    ("other", "调用"),
+    ("thinking", "思考"),
+]
+
+private func summarizeActivityItems(_ items: [DisplayItem]) -> ActivityRunSummary {
+    var counts: [String: Int] = [:]
+    var latest = ""
+    var count = 0
+
+    func addTool(name: String, input: [String: JSONValue]) {
+        let kind = activityKindOf(name)
+        counts[kind, default: 0] += 1
+        let label = activityToolLabel(name: name, input: input)
+        if !label.isEmpty { latest = label }
+        count += 1
+    }
+
+    for item in items {
+        switch item {
+        case .plain(.thinking(let thinking, _)):
+            let trimmed = thinking.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            counts["thinking", default: 0] += 1
+            latest = activityThinkingLabel(thinking)
+            count += 1
+        case .tool(_, let name, _, let input, _, _):
+            addTool(name: name, input: input)
+        case .explorationGroup(let tools):
+            for tool in tools { addTool(name: tool.name, input: tool.input) }
+        default:
+            break
+        }
+    }
+    let meta = activityKindMeta.compactMap { kind, label in
+        guard let value = counts[kind], value > 0 else { return nil }
+        return "\(label) \(value)"
+    }.joined(separator: " · ")
+    return ActivityRunSummary(
+        latest: latest.isEmpty ? "处理中" : latest,
+        meta: meta,
+        count: count
+    )
+}
+
+private func compactInline(_ value: String) -> String {
+    value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func truncateInline(_ value: String, max: Int) -> String {
+    let text = compactInline(value)
+    if text.isEmpty { return "" }
+    return text.count > max ? String(text.prefix(max - 1)) + "…" : text
+}
+
+private func tailInline(_ value: String, max: Int) -> String {
+    let text = compactInline(value)
+    if text.isEmpty { return "" }
+    return text.count > max ? "…" + String(text.suffix(max - 1)) : text
+}
+
+private func fileNameOf(_ path: String) -> String {
+    if let idx = path.lastIndex(of: "/") {
+        return String(path[path.index(after: idx)...])
+    }
+    return path
+}
+
+private func activityThinkingLabel(_ thinking: String) -> String {
+    let text = tailInline(thinking, max: 240)
+    return text.isEmpty ? "深度思考" : text
+}
+
+private func activityToolLabel(name: String, input: [String: JSONValue]) -> String {
+    let command = input["command"]?.stringValue ?? input["cmd"]?.stringValue ?? ""
+    let path = input["file_path"]?.stringValue ?? input["path"]?.stringValue ?? ""
+    let query = input["pattern"]?.stringValue ?? input["query"]?.stringValue ?? ""
+    let url = input["url"]?.stringValue ?? ""
+    switch name {
+    case "Bash":
+        return command.isEmpty ? "运行命令" : "运行 \(truncateInline(command, max: 240))"
+    case "Read":
+        return path.isEmpty ? "读取文件" : "读取 \(truncateInline(path, max: 240))"
+    case "Grep", "Glob", "WebSearch":
+        return query.isEmpty ? "搜索" : "搜索 \(truncateInline(query, max: 240))"
+    case "WebFetch":
+        return url.isEmpty ? "抓取网页" : "抓取 \(truncateInline(url, max: 240))"
+    case "Edit", "MultiEdit":
+        return "修改 \(path.isEmpty ? "文件" : truncateInline(path, max: 240))"
+    case "Write":
+        return "写入 \(path.isEmpty ? "文件" : truncateInline(path, max: 240))"
+    default:
+        return toolLabel(name)
+    }
+}
+
+private func activityKindOf(_ name: String) -> String {
+    let lower = name.lowercased()
+    if ["read", "inspect", "view", "open", "list", "load"].contains(where: { lower.contains($0) }) { return "read" }
+    if ["bash", "exec", "command", "shell", "stdin", "terminal"].contains(where: { lower.contains($0) }) { return "command" }
+    if ["grep", "glob", "search", "find", "query", "lookup"].contains(where: { lower.contains($0) }) { return "search" }
+    if ["edit", "write", "patch", "replace", "notebook"].contains(where: { lower.contains($0) }) { return "edit" }
+    if ["web", "fetch", "http", "url", "browser"].contains(where: { lower.contains($0) }) { return "web" }
+    return "other"
 }
 
 private func activityTools(_ items: [DisplayItem]) -> [ExplorationToolItem] {
@@ -2695,41 +2775,18 @@ private func formatUsd(_ value: Double) -> String {
     return String(format: "$%.4f", value)
 }
 
-private struct ActivitySummaryRow: View {
-    let group: ActivityGroup
-    let onOpen: () -> Void
+private struct ActivityFoldCompactKey: EnvironmentKey {
+    static let defaultValue = false
+}
 
-    private var tint: Color {
-        group.running ? Theme.brand : Theme.textSecondary
-    }
-
-    var body: some View {
-        Button(action: onOpen) {
-            HStack(spacing: 8) {
-                Image(systemName: activityIconName(group.items))
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(tint)
-                    .frame(width: 20)
-                Text(group.summary)
-                    .font(.system(size: 14))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary.opacity(0.8))
-            }
-            .padding(.horizontal, 2)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+private extension EnvironmentValues {
+    var activityFoldCompact: Bool {
+        get { self[ActivityFoldCompactKey.self] }
+        set { self[ActivityFoldCompactKey.self] = newValue }
     }
 }
 
-private struct ActivityDetailSheet: View {
-    @Environment(\.dismiss) private var dismiss
+private struct ActivityFoldCard: View {
     let group: ActivityGroup
     var baseURL: URL? = nil
     var isLastTurn = false
@@ -2738,50 +2795,86 @@ private struct ActivityDetailSheet: View {
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
     var onAskSubmit: (String, String) -> Void = { _, _ in }
 
+    @State private var expanded = false
+    private let tailAnchorID = "activity-fold-tail"
+    private var refreshToken: String { "\(group.count):\(group.latest)" }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    Text("执行详情")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                    Spacer(minLength: 0)
-                    Text(group.summary)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(Capsule().fill(Theme.background.opacity(0.7)))
-                        .frame(maxWidth: 220, alignment: .trailing)
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(Theme.textSecondary)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                expanded.toggle()
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        if !group.meta.isEmpty {
+                            Text(group.meta)
+                                .font(.system(size: 10))
+                                .foregroundColor(Theme.textMuted.opacity(0.85))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            Spacer(minLength: 0)
+                        }
+                        Text("\(group.count)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(Theme.brand)
+                            .padding(.horizontal, 5)
+                            .frame(minWidth: 18, minHeight: 18)
+                            .background(Capsule().fill(Theme.brand.opacity(0.12)))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(Theme.textMuted)
+                            .rotationEffect(.degrees(expanded ? 180 : 0))
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("关闭执行详情")
+                    if group.running {
+                        Text(group.latest)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(Theme.textMuted)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
-                ForEach(identifiedDisplayItems(group.items)) { identified in
-                    AssistantItemView(
-                        item: identified.item,
-                        baseURL: baseURL,
-                        isLastTurn: isLastTurn,
-                        isResponding: isResponding,
-                        askSelections: askSelections,
-                        onAskToggle: onAskToggle,
-                        onAskSubmit: onAskSubmit
-                    )
+                .padding(.horizontal, 2)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(expanded ? "收起活动" : "展开活动")
+
+            if expanded {
+                Divider().overlay(Theme.border.opacity(0.6))
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(identifiedDisplayItems(group.items)) { identified in
+                                AssistantItemView(
+                                    item: identified.item,
+                                    baseURL: baseURL,
+                                    isLastTurn: isLastTurn,
+                                    isResponding: isResponding,
+                                    askSelections: askSelections,
+                                    onAskToggle: onAskToggle,
+                                    onAskSubmit: onAskSubmit
+                                )
+                            }
+                            Color.clear.frame(height: 1).id(tailAnchorID)
+                        }
+                        .padding(.horizontal, 2)
+                        .padding(.vertical, 6)
+                    }
+                    .frame(height: 220)
+                    .environment(\.activityFoldCompact, true)
+                    .onAppear {
+                        proxy.scrollTo(tailAnchorID, anchor: .bottom)
+                    }
+                    .onChange(of: refreshToken) { _, _ in
+                        proxy.scrollTo(tailAnchorID, anchor: .bottom)
+                    }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 18)
-            .padding(.bottom, 26)
         }
-        .background { WandAmbientBackground() }
     }
 }
 
@@ -3174,6 +3267,7 @@ private struct AssistantItemView: View {
                 questions: questions,
                 result: result,
                 selection: askSelections[id] ?? AskUserSelectionState(),
+                expandAll: isLastTurn,
                 onToggle: { qIdx, optIdx, multi in onAskToggle(id, qIdx, optIdx, multi) },
                 onSubmit: { answerText in onAskSubmit(id, answerText) }
             )
@@ -3213,6 +3307,7 @@ private struct AssistantItemView: View {
 
 private struct BlockView: View {
     @Environment(\.cardExpandDefaults) private var cardDefaults
+    @Environment(\.activityFoldCompact) private var compact
 
     let block: ContentBlock
     var showSubagentTags = true
@@ -3235,9 +3330,9 @@ private struct BlockView: View {
                     initiallyExpanded: cardDefaults.thinking
                 ) {
                     Text(thinking)
-                        .font(.system(size: 13))
+                        .font(.system(size: compact ? 11 : 13))
                         .italic()
-                        .foregroundColor(Theme.textSecondary)
+                        .foregroundColor(compact ? Theme.textMuted : Theme.textSecondary)
                         .textSelection(.enabled)
                 }
             }
@@ -3326,6 +3421,7 @@ private struct MarkdownText: View {
 
     @Environment(\.chatAPI) private var api
     @Environment(\.serverFileLinkController) private var serverFileLinks
+    @Environment(\.activityFoldCompact) private var compact
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -3361,9 +3457,9 @@ private struct MarkdownText: View {
     @ViewBuilder private func blockView(_ block: Block) -> some View {
         switch block {
         case .paragraph(let content):
-            inlineText(content, size: 16)
+            inlineText(content, size: compact ? 12 : 16, color: compact ? Theme.textMuted : Theme.textPrimary)
         case .heading(let level, let content):
-            inlineText(content, size: headingSize(level), weight: .semibold)
+            inlineText(content, size: headingSize(level) - (compact ? 3 : 0), weight: .semibold, color: compact ? Theme.textMuted : Theme.textPrimary)
                 .padding(.top, level <= 2 ? 3 : 1)
         case .listItem(let marker, let content, let indent, let checked):
             HStack(alignment: .top, spacing: 7) {
@@ -3371,7 +3467,7 @@ private struct MarkdownText: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(checked == true ? Theme.success : Theme.brand)
                     .padding(.top, 2)
-                inlineText(content, size: 16)
+                inlineText(content, size: compact ? 12 : 16, color: compact ? Theme.textMuted : Theme.textPrimary)
             }
             .padding(.leading, CGFloat(indent * 14))
         case .quote(let content):
@@ -3379,7 +3475,7 @@ private struct MarkdownText: View {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(Theme.brand)
                     .frame(width: 3)
-                inlineText(content, size: 15, color: Theme.textSecondary)
+                inlineText(content, size: compact ? 12 : 15, color: compact ? Theme.textMuted : Theme.textSecondary)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -4424,6 +4520,7 @@ private struct AskUserQuestionCard: View {
     let questions: [AskUserQuestion]
     let result: ToolResultInfo?
     let selection: AskUserSelectionState
+    var expandAll = false
     let onToggle: (Int, Int, Bool) -> Void
     let onSubmit: (String) -> Void
 
@@ -4467,10 +4564,15 @@ private struct AskUserQuestionCard: View {
                 .stroke(isAnswered ? chatSuccess.opacity(0.55) : Theme.brand.opacity(0.35), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .onAppear { expanded = !isAnswered }
+        .onAppear { expanded = expandAll || !isAnswered }
         .onChange(of: isAnswered) { _, answered in
-            // 回答送达后自动折叠（对齐 Web 已答默认折叠）。
-            if answered { withAnimation(.easeInOut(duration: 0.15)) { expanded = false } }
+            // 回答送达后自动折叠（对齐 Web 已答默认折叠）；最新一轮保持完整内容。
+            if answered && !expandAll {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded = false }
+            }
+        }
+        .onChange(of: expandAll) { _, shouldExpand in
+            if shouldExpand { expanded = true }
         }
     }
 

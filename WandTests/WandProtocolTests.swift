@@ -672,6 +672,18 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(ignored.messageTotal, 4)
     }
 
+    func testTerminalPasteSequenceUsesBracketedPasteDelimiters() {
+        XCTAssertEqual(buildTerminalPasteSequence("hello"), "\u{001b}[200~hello\u{001b}[201~")
+        XCTAssertEqual(buildTerminalPasteSequence("a\nb", bracketed: false), "a\rb")
+        XCTAssertEqual(quoteTerminalPath("/tmp/ok.png"), "/tmp/ok.png")
+        XCTAssertEqual(quoteTerminalPath("/tmp/my file.png"), "'/tmp/my file.png'")
+        XCTAssertTrue(shouldBracketPtyPaste(provider: "codex"))
+        XCTAssertFalse(shouldBracketPtyPaste(provider: "claude"))
+        XCTAssertTrue(isClipboardImageMimeType("image/png"))
+        XCTAssertEqual(clipboardImageExtension(type: "image/jpeg"), ".jpg")
+        XCTAssertTrue(clipboardImageFileName(originalName: "blob", mimeType: "image/png").hasSuffix(".png"))
+    }
+
     func testPtyInputSubmissionKeepsTextAndEnterAsSeparateRequests() {
         XCTAssertEqual(
             ptyInputSubmission(text: "git status", view: "terminal"),

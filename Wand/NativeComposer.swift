@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 enum ComposerMetrics {
     static let actionVisualSize: CGFloat = 34
@@ -111,6 +112,7 @@ final class ComposerAttachmentController: ObservableObject {
     private let sessionId: String
     private let api: WandAPI
     private var showToast: (String) -> Void = { _ in }
+    private var pasteIntoPty: (([UploadedFile]) async throws -> Void)?
 
     init(sessionId: String, api: WandAPI) {
         self.sessionId = sessionId
@@ -119,6 +121,10 @@ final class ComposerAttachmentController: ObservableObject {
 
     func setToastHandler(_ handler: @escaping (String) -> Void) {
         showToast = handler
+    }
+
+    func setPtyPasteHandler(_ handler: (([UploadedFile]) async throws -> Void)?) {
+        pasteIntoPty = handler
     }
 
     func remove(_ file: UploadedFile) {
@@ -133,15 +139,34 @@ final class ComposerAttachmentController: ObservableObject {
         handleSelection(result, cleanupAfterUpload: true)
     }
 
+    func handlePastedImageData(_ items: [(data: Data, name: String?, mimeType: String?)]) {
+        guard !items.isEmpty else { return }
+        var urls: [URL] = []
+        do {
+            for (index, item) in items.enumerated() {
+                urls.append(try writeClipboardImageToTemporaryFile(
+                    data: item.data,
+                    originalName: item.name,
+                    mimeType: item.mimeType,
+                    index: index
+                ))
+            }
+        } catch {
+            showToast(error.localizedDescription)
+            return
+        }
+        upload(urls, cleanupAfterUpload: true, preferPtyPaste: true)
+    }
+
     private func handleSelection(_ result: Result<[URL], Error>, cleanupAfterUpload: Bool) {
         guard case .success(let urls) = result, !urls.isEmpty else {
             if case .failure(let error) = result { showToast(error.localizedDescription) }
             return
         }
-        upload(urls, cleanupAfterUpload: cleanupAfterUpload)
+        upload(urls, cleanupAfterUpload: cleanupAfterUpload, preferPtyPaste: pasteIntoPty != nil)
     }
 
-    private func upload(_ urls: [URL], cleanupAfterUpload: Bool) {
+    private func upload(_ urls: [URL], cleanupAfterUpload: Bool, preferPtyPaste: Bool) {
         isUploading = true
         Task {
             defer {
@@ -154,8 +179,18 @@ final class ComposerAttachmentController: ObservableObject {
             }
             do {
                 let uploaded = try await api.uploadAttachments(id: sessionId, urls: urls)
-                attachments = Array((attachments + uploaded).suffix(5))
-                showToast("已上传 \(uploaded.count) 个附件")
+                if preferPtyPaste, let pasteIntoPty {
+                    let imageCount = uploaded.filter { isClipboardImageMimeType($0.mimeType) }.count
+                    showToast(imageCount == uploaded.count ? "正在粘贴图片…" : "正在上传附件…")
+                    try await pasteIntoPty(uploaded)
+                    let countLabel = imageCount == uploaded.count
+                        ? "\(uploaded.count) 张图片"
+                        : "\(uploaded.count) 个附件"
+                    showToast("已将 \(countLabel)粘贴到 CLI 输入区。")
+                } else {
+                    attachments = Array((attachments + uploaded).suffix(5))
+                    showToast("已上传 \(uploaded.count) 个附件")
+                }
             } catch {
                 showToast(error.localizedDescription)
             }
@@ -269,6 +304,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
     let placeholder: String
     let isFocused: Bool
     var disableAutocorrect: Bool = false
+    var onPasteImages: (([(data: Data, name: String?, mimeType: String?)]) -> Void)? = nil
     let onFocusChange: (Bool) -> Void
     let onCompositionChange: (Bool) -> Void
     let onSubmit: () -> Void
@@ -285,6 +321,9 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         textView.placeholder = placeholder
         textView.onMarkedTextChange = { active in
             context.coordinator.publishComposition(active)
+        }
+        textView.onPasteImages = { items in
+            context.coordinator.parent.onPasteImages?(items)
         }
         textView.backgroundColor = .clear
         textView.textColor = UIColor.label
@@ -319,6 +358,9 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         textView.placeholder = placeholder
         textView.onMarkedTextChange = { active in
             context.coordinator.publishComposition(active)
+        }
+        textView.onPasteImages = { items in
+            context.coordinator.parent.onPasteImages?(items)
         }
         textView.tintColor = UIColor(Theme.brand)
 
@@ -464,6 +506,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
 
 final class ComposerUITextView: UITextView {
     var onMarkedTextChange: ((Bool) -> Void)?
+    var onPasteImages: (([(data: Data, name: String?, mimeType: String?)]) -> Void)?
     private let placeholderLabel = UILabel()
 
     override var canBecomeFirstResponder: Bool { true }
@@ -508,5 +551,42 @@ final class ComposerUITextView: UITextView {
 
     func refreshPlaceholder() {
         placeholderLabel.isHidden = !text.isEmpty || markedTextRange != nil
+    }
+
+    override func paste(_ sender: Any?) {
+        if consumePastedImages() { return }
+        super.paste(sender)
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)), clipboardContainsImage() {
+            return true
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    private func clipboardContainsImage() -> Bool {
+        let pasteboard = UIPasteboard.general
+        if pasteboard.hasImages { return true }
+        return pasteboard.itemProviders.contains { provider in
+            provider.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+        }
+    }
+
+    private func consumePastedImages() -> Bool {
+        guard let onPasteImages else { return false }
+        let pasteboard = UIPasteboard.general
+        var items: [(data: Data, name: String?, mimeType: String?)] = []
+        if let images = pasteboard.images, !images.isEmpty {
+            for (index, image) in images.enumerated() {
+                guard let data = image.pngData() else { continue }
+                items.append((data, "clipboard-image-\(index + 1).png", "image/png"))
+            }
+        } else if let image = pasteboard.image, let data = image.pngData() {
+            items.append((data, "clipboard-image.png", "image/png"))
+        }
+        guard !items.isEmpty else { return false }
+        onPasteImages(items)
+        return true
     }
 }

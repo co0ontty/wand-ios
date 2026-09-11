@@ -456,13 +456,62 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
     let workspaceId: String
     let workspaceName: String
     let workspaceCwd: String
+    let createdAt: String?
     let synthetic: Bool?
+    let global: Bool?
     let tasks: [WorkspaceTaskSummary]
     let standaloneSessions: [WorkspaceSessionSummary]
 
     var id: String { workspaceId }
     var isSynthetic: Bool { synthetic ?? false }
+    var isGlobal: Bool { global ?? false }
+    /// 可归属的真实项目：排除合成目录组和隐藏的全局空间。
+    var isBindableProject: Bool { !isSynthetic && !isGlobal }
 }
+
+enum TaskListExpansionStorage {
+    static func collapsedIds(kind: String, defaults: UserDefaults = .standard) -> Set<String> {
+        Set(defaults.stringArray(forKey: key(kind)) ?? [])
+    }
+
+    static func setCollapsedIds(_ ids: Set<String>, kind: String, defaults: UserDefaults = .standard) {
+        defaults.set(Array(ids).sorted(), forKey: key(kind))
+    }
+
+    private static func key(_ kind: String) -> String {
+        "wand.taskList.collapsed.\(kind)"
+    }
+}
+
+
+struct TaskGroupsPage: Equatable {
+    let groups: [TaskDirectoryGroup]
+    let revision: String?
+    let unchanged: Bool
+
+    static func decode(from data: Data) throws -> TaskGroupsPage {
+        let object = try JSONSerialization.jsonObject(with: data)
+        if let array = object as? [Any] {
+            let encoded = try JSONSerialization.data(withJSONObject: array)
+            let groups = try JSONDecoder().decode([TaskDirectoryGroup].self, from: encoded)
+            return TaskGroupsPage(groups: groups, revision: nil, unchanged: false)
+        }
+        guard let dict = object as? [String: Any] else {
+            throw NSError(domain: "Wand", code: 1, userInfo: [NSLocalizedDescriptionKey: "任务列表响应无效"])
+        }
+        let unchanged = dict["unchanged"] as? Bool ?? false
+        let revision = dict["revision"] as? String
+        let groups: [TaskDirectoryGroup]
+        if let raw = dict["groups"] {
+            let encoded = try JSONSerialization.data(withJSONObject: raw)
+            groups = try JSONDecoder().decode([TaskDirectoryGroup].self, from: encoded)
+        } else {
+            groups = []
+        }
+        return TaskGroupsPage(groups: groups, revision: revision, unchanged: unchanged)
+    }
+}
+
 
 struct SessionBatchDeleteResponse: Decodable {
     let deleted: Int?
@@ -506,6 +555,44 @@ enum TaskListPresentation {
         !showsTaskSessionDisclosure(sessionCount: sessionCount) || !userCollapsed
     }
 
+    struct ManageSelection: Equatable {
+        var taskIds: Set<String> = []
+        var sessionIds: Set<String> = []
+        var count: Int { taskIds.count + sessionIds.count }
+        var isEmpty: Bool { count == 0 }
+    }
+
+    static func collectManagedIds(_ groups: [TaskDirectoryGroup]) -> ManageSelection {
+        var taskIds = Set<String>()
+        var sessionIds = Set<String>()
+        for group in groups {
+            for task in group.tasks {
+                taskIds.insert(task.id)
+                task.sessions.forEach { sessionIds.insert($0.id) }
+            }
+            group.standaloneSessions.forEach { sessionIds.insert($0.id) }
+        }
+        return ManageSelection(taskIds: taskIds, sessionIds: sessionIds)
+    }
+
+    static func resolveManagedDeletion(
+        _ selection: ManageSelection,
+        groups: [TaskDirectoryGroup]
+    ) -> ManageSelection {
+        let owned = Set(groups.flatMap(\.tasks).filter { selection.taskIds.contains($0.id) }.flatMap { $0.sessions.map(\.id) })
+        return ManageSelection(
+            taskIds: selection.taskIds,
+            sessionIds: selection.sessionIds.filter { !owned.contains($0) }
+        )
+    }
+
+    static func describeManagedDeletion(_ selection: ManageSelection) -> String {
+        var parts: [String] = []
+        if !selection.taskIds.isEmpty { parts.append("\(selection.taskIds.count) 个任务") }
+        if !selection.sessionIds.isEmpty { parts.append("\(selection.sessionIds.count) 个终端") }
+        return parts.isEmpty ? "所选内容" : parts.joined(separator: "和 ")
+    }
+
     struct TaskListMetrics: Equatable {
         let directoryCount: Int
         let taskCount: Int
@@ -545,12 +632,9 @@ enum TaskListPresentation {
             .filter { !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
             .enumerated()
             .sorted { lhs, rhs in
-                let leftActive = hasLiveActivity(lhs.element)
-                let rightActive = hasLiveActivity(rhs.element)
-                if leftActive != rightActive { return leftActive }
-                let leftRecent = lhs.element.tasks.compactMap(\.lastOpenedAt).max()
-                let rightRecent = rhs.element.tasks.compactMap(\.lastOpenedAt).max()
-                if leftRecent != rightRecent { return compareTimestamps(rightRecent, leftRecent) }
+                let leftCreated = directoryCreatedAt(lhs.element)
+                let rightCreated = directoryCreatedAt(rhs.element)
+                if leftCreated != rightCreated { return compareTimestamps(leftCreated, rightCreated) }
                 return lhs.offset < rhs.offset
             }
             .map(\.element)
@@ -560,18 +644,19 @@ enum TaskListPresentation {
         tasks
             .enumerated()
             .sorted { lhs, rhs in
-                let leftLive = lhs.element.sessions.contains(where: hasLiveActivity)
-                let rightLive = rhs.element.sessions.contains(where: hasLiveActivity)
-                if leftLive != rightLive { return leftLive }
-                let leftActive = lhs.element.status == "active"
-                let rightActive = rhs.element.status == "active"
-                if leftActive != rightActive { return leftActive }
-                if lhs.element.lastOpenedAt != rhs.element.lastOpenedAt {
-                    return compareTimestamps(rhs.element.lastOpenedAt, lhs.element.lastOpenedAt)
+                if lhs.element.createdAt != rhs.element.createdAt {
+                    return compareTimestamps(lhs.element.createdAt, rhs.element.createdAt)
                 }
                 return lhs.offset < rhs.offset
             }
             .map(\.element)
+    }
+
+    static func directoryCreatedAt(_ group: TaskDirectoryGroup) -> String? {
+        if let createdAt = group.createdAt, !createdAt.isEmpty { return createdAt }
+        let taskTimes = group.tasks.map(\.createdAt).filter { !$0.isEmpty }
+        let sessionTimes = group.standaloneSessions.compactMap(\.startedAt).filter { !$0.isEmpty }
+        return (taskTimes + sessionTimes).min()
     }
 
     static func hasLiveActivity(_ group: TaskDirectoryGroup) -> Bool {

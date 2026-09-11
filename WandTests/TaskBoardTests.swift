@@ -1,0 +1,61 @@
+import Foundation
+import XCTest
+@testable import Wand
+
+final class TaskBoardTests: XCTestCase {
+    func testBoardTaskDecoderReadsWorkspaceAgentAndSessions() throws {
+        let json = """
+        {
+          "id": "task-1",
+          "workspaceId": "ws-1",
+          "identifier": "TASK-1",
+          "title": "修顶栏",
+          "description": "对齐 iOS",
+          "status": "doing",
+          "priority": "high",
+          "labels": ["ui"],
+          "sortOrder": 2,
+          "agent": { "provider": "codex", "model": "default", "thinkingEffort": "deep" },
+          "sessionIds": ["sess-1"],
+          "sessions": [{
+            "id": "sess-1",
+            "provider": "codex",
+            "sessionKind": "structured",
+            "title": "修顶栏",
+            "status": "running",
+            "cwd": "/repo",
+            "model": "gpt-5",
+            "thinkingEffort": "deep"
+          }],
+          "workspace": { "id": "ws-1", "name": "wand", "cwd": "/repo" }
+        }
+        """.data(using: .utf8)!
+        let task = try JSONDecoder().decode(WandBoardTask.self, from: json)
+        XCTAssertEqual(task.id, "task-1")
+        XCTAssertEqual(task.workspaceId, "ws-1")
+        XCTAssertEqual(task.status, "doing")
+        XCTAssertEqual(task.agent?.provider, "codex")
+        XCTAssertEqual(task.workspace?.name, "wand")
+        XCTAssertEqual(task.sessions.first?.id, "sess-1")
+        XCTAssertTrue(task.sessions.first?.isStructured == true)
+    }
+
+    func testBoardTaskDecoderAllowsUnassignedProjectAndAgent() throws {
+        let json = #"{"id":"task-2","title":"草稿"}"#.data(using: .utf8)!
+        let task = try JSONDecoder().decode(WandBoardTask.self, from: json)
+        XCTAssertNil(task.workspaceId)
+        XCTAssertNil(task.agent)
+        XCTAssertEqual(task.status, "todo")
+        XCTAssertEqual(task.priority, "none")
+        XCTAssertTrue(task.sessions.isEmpty)
+    }
+
+    func testBoardLabelsCoverColumns() {
+        XCTAssertEqual(WandBoardStatus.todo.label, "待办")
+        XCTAssertEqual(WandBoardStatus.doing.label, "进行中")
+        XCTAssertEqual(WandBoardStatus.done.label, "已完成")
+        XCTAssertEqual(WandBoardPriority.urgent.label, "紧急")
+        XCTAssertEqual(wandBoardProviderLabel("pi"), "Pi")
+        XCTAssertEqual(wandBoardEffortLabel("deep"), "深入")
+    }
+}

@@ -28,6 +28,7 @@ private enum TaskListConfirm: Identifiable {
     case clearSessions(WorkspaceTaskSummary)
     case deleteSession(WorkspaceSessionSummary)
     case deleteWorkspace(Workspace)
+    case deleteManaged(TaskListPresentation.ManageSelection)
 
     var id: String {
         switch self {
@@ -35,6 +36,7 @@ private enum TaskListConfirm: Identifiable {
         case .clearSessions(let task): return "clear-\(task.id)"
         case .deleteSession(let session): return "delete-session-\(session.id)"
         case .deleteWorkspace(let workspace): return "delete-workspace-\(workspace.id)"
+        case .deleteManaged: return "delete-managed"
         }
     }
 }
@@ -67,9 +69,12 @@ struct WorkspaceListView: View {
     @State private var newTaskSheetPresented = false
     @State private var newTaskSheetCwd = ""
     @State private var newTaskSheetWorkspaceId: String?
-    @State private var collapsedTaskGroups = Set<String>()
-    @State private var collapsedTaskIds = Set<String>()
-    @State private var collapsedLooseGroups = Set<String>()
+    @State private var collapsedTaskGroups = TaskListExpansionStorage.collapsedIds(kind: "groups")
+    @State private var collapsedTaskIds = TaskListExpansionStorage.collapsedIds(kind: "tasks")
+    @State private var collapsedLooseGroups = TaskListExpansionStorage.collapsedIds(kind: "loose")
+    @State private var isSelecting = false
+    @State private var selectedTaskIds = Set<String>()
+    @State private var selectedSessionIds = Set<String>()
 
     @State private var renameWorkspaceTarget: Workspace?
     @State private var renameWorkspaceDraft = ""
@@ -86,27 +91,62 @@ struct WorkspaceListView: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        newTaskSheetCwd = ""
-                        newTaskSheetWorkspaceId = nil
-                        newTaskSheetPresented = true
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 20))
-                            .foregroundColor(Theme.brand)
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if isSelecting {
+                        Button("完成") {
+                            isSelecting = false
+                            selectedTaskIds.removeAll()
+                            selectedSessionIds.removeAll()
+                        }
                     }
-                    .accessibilityLabel("新建任务")
+                }
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    if isSelecting {
+                        Button("删除", role: .destructive) {
+                            let selection = TaskListPresentation.ManageSelection(
+                                taskIds: selectedTaskIds,
+                                sessionIds: selectedSessionIds
+                            )
+                            let resolved = TaskListPresentation.resolveManagedDeletion(
+                                selection,
+                                groups: store.taskGroups
+                            )
+                            if !resolved.isEmpty {
+                                presentConfirm(.deleteManaged(resolved))
+                            }
+                        }
+                        .disabled(selectedTaskIds.isEmpty && selectedSessionIds.isEmpty)
+                    } else {
+                        Button {
+                            isSelecting = true
+                            selectedTaskIds.removeAll()
+                            selectedSessionIds.removeAll()
+                        } label: {
+                            Image(systemName: "checkmark.circle")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(Theme.brand)
+                        }
+                        .accessibilityLabel("多选任务和终端")
+                        Button {
+                            newTaskSheetCwd = ""
+                            newTaskSheetWorkspaceId = nil
+                            newTaskSheetPresented = true
+                        } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 20))
+                                .foregroundColor(Theme.brand)
+                        }
+                        .accessibilityLabel("新建任务")
+                    }
                 }
             }
             .overlay(alignment: .top) { toastView }
             .animation(.easeInOut(duration: 0.25), value: toastMessage)
             .task {
-                async let taskGroupsLoad: Void = store.loadTaskGroups()
+                store.startTaskGroupsSync()
                 if case .idle = store.indexState {
                     await store.loadWorkspaceIndex()
                 }
-                await taskGroupsLoad
             }
             .onChange(of: store.workspaces.map(\.id)) { _, ids in
                 if expandedWorkspaceIds.isEmpty {
@@ -120,6 +160,15 @@ struct WorkspaceListView: View {
             }
             .onChange(of: selectedTaskId) { _, taskId in
                 if let taskId { collapsedTaskIds.remove(taskId) }
+            }
+            .onChange(of: collapsedTaskGroups) { _, ids in
+                TaskListExpansionStorage.setCollapsedIds(ids, kind: "groups")
+            }
+            .onChange(of: collapsedTaskIds) { _, ids in
+                TaskListExpansionStorage.setCollapsedIds(ids, kind: "tasks")
+            }
+            .onChange(of: collapsedLooseGroups) { _, ids in
+                TaskListExpansionStorage.setCollapsedIds(ids, kind: "loose")
             }
             .onChange(of: requestNewTask.wrappedValue) { _, requested in
                 guard requested else { return }
@@ -300,6 +349,7 @@ struct WorkspaceListView: View {
         case .clearSessions: return "清空全部终端？"
         case .deleteSession: return "删除终端？"
         case .deleteWorkspace: return "删除项目？"
+        case .deleteManaged: return "删除所选内容？"
         case .none: return ""
         }
     }
@@ -322,6 +372,8 @@ struct WorkspaceListView: View {
             return "终端「\(sessionDeleteLabel(session))」会结束并被删除，此操作无法撤销。"
         case .deleteWorkspace(let workspace):
             return "项目「\(workspace.name)」及其任务、会话与独立 worktree 将被删除，此操作无法撤销。"
+        case .deleteManaged(let selection):
+            return "将删除\(TaskListPresentation.describeManagedDeletion(selection))，此操作无法撤销。"
         case .none:
             return ""
         }
@@ -687,7 +739,7 @@ struct WorkspaceListView: View {
             .fixedSize(horizontal: true, vertical: true)
             Button {
                 newTaskSheetCwd = group.workspaceCwd
-                newTaskSheetWorkspaceId = group.synthetic == true ? nil : group.workspaceId
+                newTaskSheetWorkspaceId = group.isBindableProject ? group.workspaceId : nil
                 newTaskSheetPresented = true
             } label: {
                 Image(systemName: "plus")
@@ -697,6 +749,8 @@ struct WorkspaceListView: View {
                     .background(Circle().fill(Theme.brand.opacity(0.10)))
             }
             .buttonStyle(.plain)
+            .disabled(isSelecting)
+            .opacity(isSelecting ? 0.35 : 1)
             .accessibilityLabel("在 \(group.workspaceName) 新建任务")
         }
         .padding(.horizontal, 8)
@@ -747,7 +801,7 @@ struct WorkspaceListView: View {
             userCollapsed: collapsedTaskIds.contains(summary.id),
             sessionCount: summary.listedSessionCount
         )
-        let workspace = workspace(from: group)
+        let workspace = workspace(for: summary, group: group)
         taskSummaryRow(summary, group: group)
             .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: 2, trailing: 12))
             .listRowBackground(Theme.background)
@@ -790,11 +844,16 @@ struct WorkspaceListView: View {
             userCollapsed: collapsedTaskIds.contains(summary.id),
             sessionCount: summary.listedSessionCount
         )
-        let workspace = workspace(from: group)
+        let workspace = workspace(for: summary, group: group)
         let task = summary.asTask()
         return HStack(spacing: 8) {
             HStack(spacing: 8) {
-                if summary.isIsolated || summary.status == "done" {
+                if isSelecting {
+                    Image(systemName: selectedTaskIds.contains(summary.id) ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(selectedTaskIds.contains(summary.id) ? Theme.brand : Theme.textMuted)
+                        .frame(width: 22, height: 22)
+                } else if summary.isIsolated || summary.status == "done" {
                     Image(systemName: summary.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(summary.status == "done" ? Theme.success : Theme.textMuted)
@@ -806,7 +865,7 @@ struct WorkspaceListView: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 4)
-                if selected {
+                if selected && !isSelecting {
                     Image(systemName: "checkmark")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(Theme.brand)
@@ -814,6 +873,14 @@ struct WorkspaceListView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture {
+                if isSelecting {
+                    if selectedTaskIds.contains(summary.id) {
+                        selectedTaskIds.remove(summary.id)
+                    } else {
+                        selectedTaskIds.insert(summary.id)
+                    }
+                    return
+                }
                 collapsedTaskIds.remove(summary.id)
                 onOpenTask(workspace, task)
             }
@@ -836,6 +903,7 @@ struct WorkspaceListView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .disabled(isSelecting)
                 .accessibilityLabel(expanded ? "收起终端" : "展开终端")
             }
 
@@ -849,6 +917,8 @@ struct WorkspaceListView: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.plain)
+            .disabled(isSelecting)
+            .opacity(isSelecting ? 0.35 : 1)
             .accessibilityLabel("在任务 \(summary.name) 中新建终端")
         }
         .padding(.vertical, 4)
@@ -929,6 +999,12 @@ struct WorkspaceListView: View {
             parentNames: [workspace.name, summary.name]
         )
         return HStack(spacing: 10) {
+            if isSelecting {
+                Image(systemName: selectedSessionIds.contains(session.id) ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(selectedSessionIds.contains(session.id) ? Theme.brand : Theme.textMuted)
+                    .frame(width: 22, height: 22)
+            }
             BrandLogo(provider: session.provider ?? "terminal", color: selected ? Theme.brand : Theme.textSecondary)
                 .frame(width: 14, height: 14)
                 .frame(width: 22, height: 22)
@@ -954,6 +1030,14 @@ struct WorkspaceListView: View {
         )
         .contentShape(Rectangle())
         .onTapGesture {
+            if isSelecting {
+                if selectedSessionIds.contains(session.id) {
+                    selectedSessionIds.remove(session.id)
+                } else {
+                    selectedSessionIds.insert(session.id)
+                }
+                return
+            }
             onOpenTaskSession?(workspace, summary.asTask(), session)
         }
         .accessibilityElement(children: .combine)
@@ -1009,6 +1093,20 @@ struct WorkspaceListView: View {
                 try await store.deleteWorkspace(workspaceId: workspace.id)
                 onWorkspaceDeleted?(workspace.id)
                 showToast("已删除项目「\(workspace.name)」")
+            case .deleteManaged(let selection):
+                for taskId in selection.taskIds {
+                    if let task = store.taskGroups.flatMap(\.tasks).first(where: { $0.id == taskId }) {
+                        try await store.deleteWorkspaceTask(workspaceId: task.workspaceId, taskId: task.id)
+                        onTaskDeleted?(task.id)
+                    }
+                }
+                if !selection.sessionIds.isEmpty {
+                    try await store.deleteSessions(Array(selection.sessionIds))
+                }
+                isSelecting = false
+                selectedTaskIds.removeAll()
+                selectedSessionIds.removeAll()
+                showToast("已删除\(TaskListPresentation.describeManagedDeletion(selection))")
             }
             self.pendingConfirm = nil
         } catch {
@@ -1019,8 +1117,27 @@ struct WorkspaceListView: View {
 
     /// 聚合接口为列表体积省略了项目级配置；优先复用索引中的完整实体，
     /// 否则才用组字段构造兼容旧服务端的最小值。
+    /// 合成目录组的 group.workspaceId 不是真实项目 ID，打开任务必须用 task.workspaceId。
     private func workspace(from group: TaskDirectoryGroup) -> Workspace {
         workspaceForTaskGroup(group, workspaces: store.workspaces)
+    }
+
+    private func workspace(for summary: WorkspaceTaskSummary, group: TaskDirectoryGroup) -> Workspace {
+        if let workspace = store.workspaces.first(where: { $0.id == summary.workspaceId }) {
+            return workspace
+        }
+        if !group.isSynthetic, summary.workspaceId == group.workspaceId {
+            return workspace(from: group)
+        }
+        return Workspace(
+            id: summary.workspaceId,
+            name: group.workspaceName,
+            cwd: summary.cwd.isEmpty ? group.workspaceCwd : summary.cwd,
+            defaultProvider: nil,
+            layout: nil,
+            createdAt: "",
+            lastOpenedAt: nil
+        )
     }
 
     private func workspaceSection(_ workspace: Workspace) -> some View {
@@ -1186,6 +1303,12 @@ struct WorkspaceListView: View {
         workspace: Workspace
     ) -> some View {
         HStack(spacing: 10) {
+            if isSelecting {
+                Image(systemName: selectedSessionIds.contains(session.id) ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(selectedSessionIds.contains(session.id) ? Theme.brand : Theme.textMuted)
+                    .frame(width: 22, height: 22)
+            }
             ZStack {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(Theme.surface)
@@ -1224,6 +1347,14 @@ struct WorkspaceListView: View {
         .padding(.vertical, 5)
         .contentShape(Rectangle())
         .onTapGesture {
+            if isSelecting {
+                if selectedSessionIds.contains(session.id) {
+                    selectedSessionIds.remove(session.id)
+                } else {
+                    selectedSessionIds.insert(session.id)
+                }
+                return
+            }
             onOpenSession?(workspace, session)
         }
         .accessibilityElement(children: .combine)
