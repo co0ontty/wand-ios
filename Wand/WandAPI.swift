@@ -822,7 +822,8 @@ final class WandAPI {
         description: String,
         status: String,
         priority: String,
-        workspaceId: String?
+        workspaceId: String?,
+        agent: WandBoardTaskAgent? = nil
     ) async throws -> WandBoardTask {
         var body: [String: Any] = [
             // 标题可选：留空由服务端按描述自动生成。
@@ -836,6 +837,9 @@ final class WandAPI {
             body["workspaceId"] = workspaceId
         } else {
             body["workspaceId"] = NSNull()
+        }
+        if let agent {
+            body["agent"] = agent.jsonObject()
         }
         return try await request(WandBoardTask.self, method: "POST", path: "/api/wand-tasks", body: body)
     }

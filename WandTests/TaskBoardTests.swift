@@ -66,4 +66,33 @@ final class TaskBoardTests: XCTestCase {
         XCTAssertEqual(wandBoardProviderLabel("pi"), "Pi")
         XCTAssertEqual(wandBoardEffortLabel("deep"), "深入")
     }
+
+
+    func testSessionsGroupByTheAgentsThatRan() {
+        let json = """
+        {
+          "id": "task-9",
+          "title": "多 Agent",
+          "agent": { "provider": "claude", "model": "opus", "thinkingEffort": "deep" },
+          "sessions": [
+            { "id": "s1", "provider": "claude", "title": "修登录", "status": "running", "model": "opus", "thinkingEffort": "deep" },
+            { "id": "s2", "provider": "claude", "title": "补测试", "status": "exited", "model": "sonnet", "thinkingEffort": "off" },
+            { "id": "s3", "provider": "codex", "title": "实现 API", "status": "idle", "model": "gpt-5", "thinkingEffort": "standard" }
+          ]
+        }
+        """.data(using: .utf8)!
+        let task = try! JSONDecoder().decode(WandBoardTask.self, from: json)
+        let groups = wandBoardSessionGroups(sessions: task.sessions, assigned: task.agent)
+        XCTAssertEqual(groups.map(\.provider), ["claude", "codex"])
+        XCTAssertEqual(groups[0].sessions.map(\.id), ["s1", "s2"])
+        XCTAssertEqual(groups[1].sessions.map(\.id), ["s3"])
+        let pending = wandBoardSessionGroups(
+            sessions: [],
+            assigned: WandBoardTaskAgent(provider: "pi", model: "default", thinkingEffort: "off")
+        )
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?.provider, "pi")
+        XCTAssertTrue(pending.first?.sessions.isEmpty == true)
+    }
+
 }

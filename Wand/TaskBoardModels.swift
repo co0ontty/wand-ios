@@ -181,3 +181,47 @@ func wandBoardModelOptions(from catalog: ModelsResponse?, provider: String) -> [
     let defaultLabel = fallback.isEmpty ? "跟随服务端默认" : "跟随服务端默认（\(fallback)）"
     return [(id: "default", label: defaultLabel)] + mapped
 }
+
+struct WandBoardAgentGroup: Identifiable, Equatable {
+    var id: String { provider }
+    let provider: String
+    let agent: WandBoardTaskAgent?
+    let sessions: [WandBoardTaskSession]
+}
+
+func wandBoardSessionGroups(
+    sessions: [WandBoardTaskSession],
+    assigned: WandBoardTaskAgent?
+) -> [WandBoardAgentGroup] {
+    var providers: [String] = []
+    var agents: [String: WandBoardTaskAgent] = [:]
+    var grouped: [String: [WandBoardTaskSession]] = [:]
+    func ensure(_ provider: String, _ agent: WandBoardTaskAgent?) {
+        let key = provider.isEmpty ? "session" : provider
+        if !providers.contains(key) {
+            providers.append(key)
+            grouped[key] = []
+        }
+        if agents[key] == nil, let agent {
+            agents[key] = agent
+        }
+    }
+    if let assigned, wandBoardProviders.contains(assigned.provider) {
+        ensure(assigned.provider, assigned)
+    }
+    for session in sessions {
+        let agent = wandBoardProviders.contains(session.provider)
+            ? WandBoardTaskAgent(
+                provider: session.provider,
+                model: session.model.isEmpty ? "default" : session.model,
+                thinkingEffort: session.thinkingEffort.isEmpty ? "off" : session.thinkingEffort
+            )
+            : nil
+        let key = (agent?.provider ?? session.provider)
+        ensure(key, agent)
+        grouped[key, default: []].append(session)
+    }
+    return providers.map { key in
+        WandBoardAgentGroup(provider: key, agent: agents[key], sessions: grouped[key] ?? [])
+    }
+}

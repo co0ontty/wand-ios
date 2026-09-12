@@ -84,19 +84,26 @@ struct TaskBoardView: View {
         .sheet(isPresented: $showCreate) {
             TaskBoardCreateView(
                 workspaces: workspaces,
+                catalog: catalog,
+                lastAgent: lastAgent,
                 defaultWorkspaceId: filterWorkspaceId
-            ) { title, description, status, priority, workspaceId in
+            ) { title, description, status, priority, workspaceId, agent in
                 await mutate {
                     let created = try await api.createBoardTask(
                         title: title,
                         description: description,
                         status: status,
                         priority: priority,
-                        workspaceId: workspaceId
+                        workspaceId: workspaceId,
+                        agent: agent
                     )
+                    rememberAgent(agent)
                     showCreate = false
                     selected = created
-                    // 标题留空时服务端后台生成：选中卡片的标题晚一点才变成真标题。
+                    if !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        _ = try? await api.dispatchBoardTask(id: created.id, agent: agent)
+                        await refresh(showProgress: false)
+                    }
                     if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                        created.titleSource == "auto" {
                         Task { await awaitGeneratedTitle(taskId: created.id, placeholder: created.title) }
@@ -334,7 +341,7 @@ private struct TaskBoardDetailView: View {
                     }
                 }
             }
-            Section("指派 Agent") {
+            Section(task.sessions.isEmpty ? "指派 Agent" : "再指派一个 Agent") {
                 Picker("CLI 工具", selection: Binding(
                     get: { agent.provider },
                     set: { provider in
@@ -377,16 +384,38 @@ private struct TaskBoardDetailView: View {
                 }
                 .disabled(busy)
             }
-            if !task.sessions.isEmpty {
-                Section("已绑定会话") {
-                    ForEach(task.sessions) { session in
-                        Button {
-                            onOpenSession(session.id)
-                        } label: {
-                            HStack {
-                                BrandLogo(provider: session.provider, color: Theme.textPrimary)
-                                    .frame(width: 14, height: 14)
-                                Text("\(wandBoardProviderLabel(session.provider))\(session.model.isEmpty ? "" : " · \(session.model)")")
+            Section("已指派的 Agent") {
+                let groups = wandBoardSessionGroups(sessions: task.sessions, assigned: task.agent)
+                if groups.isEmpty {
+                    Text("还没有指派 Agent。描述会作为第一次派发的任务内容。")
+                        .foregroundColor(Theme.textMuted)
+                } else {
+                    ForEach(groups) { group in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(wandBoardProviderLabel(group.provider))
+                                .font(.subheadline.weight(.semibold))
+                            if group.sessions.isEmpty {
+                                Text("已指派，等待派发")
+                                    .font(.caption)
+                                    .foregroundColor(Theme.textMuted)
+                            } else {
+                                ForEach(group.sessions) { session in
+                                    Button {
+                                        onOpenSession(session.id)
+                                    } label: {
+                                        HStack {
+                                            BrandLogo(provider: session.provider, color: Theme.textPrimary)
+                                                .frame(width: 14, height: 14)
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(session.title.isEmpty ? wandBoardProviderLabel(session.provider) : session.title)
+                                                Text([session.model, session.status].filter { !$0.isEmpty }.joined(separator: " · "))
+                                                    .font(.caption)
+                                                    .foregroundColor(Theme.textMuted)
+                                            }
+                                            Spacer()
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -409,8 +438,10 @@ private struct TaskBoardDetailView: View {
 
 private struct TaskBoardCreateView: View {
     let workspaces: [Workspace]
+    let catalog: ModelsResponse?
+    let lastAgent: WandBoardTaskAgent
     let defaultWorkspaceId: String
-    let onCreate: (String, String, String, String, String?) async -> Void
+    let onCreate: (String, String, String, String, String?, WandBoardTaskAgent) async -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
@@ -418,18 +449,63 @@ private struct TaskBoardCreateView: View {
     @State private var status = "todo"
     @State private var priority = "none"
     @State private var workspaceId = ""
+    @State private var agent: WandBoardTaskAgent
+
+    init(
+        workspaces: [Workspace],
+        catalog: ModelsResponse?,
+        lastAgent: WandBoardTaskAgent,
+        defaultWorkspaceId: String,
+        onCreate: @escaping (String, String, String, String, String?, WandBoardTaskAgent) async -> Void
+    ) {
+        self.workspaces = workspaces
+        self.catalog = catalog
+        self.lastAgent = lastAgent
+        self.defaultWorkspaceId = defaultWorkspaceId
+        self.onCreate = onCreate
+        _agent = State(initialValue: lastAgent)
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                // 标题可选：留空由服务端按描述自动生成。
                 TextField("任务标题（可选）", text: $title, prompt: Text("不填写则按描述自动生成"))
-                TextField("描述", text: $description, axis: .vertical)
+                TextField("描述（作为第一次指派）", text: $description, axis: .vertical)
                     .lineLimit(3...8)
-                Picker("项目", selection: $workspaceId) {
-                    Text("不指定项目（使用全局目录）").tag("")
+                Picker("目录", selection: $workspaceId) {
+                    Text("不指定目录（使用全局目录）").tag("")
                     ForEach(workspaces) { workspace in
                         Text(workspace.name).tag(workspace.id)
+                    }
+                }
+                Picker("第一次指派", selection: Binding(
+                    get: { agent.provider },
+                    set: { provider in
+                        agent.provider = provider
+                        let options = wandBoardModelOptions(from: catalog, provider: provider)
+                        if !options.contains(where: { $0.id == agent.model }) {
+                            agent.model = options.first?.id ?? "default"
+                        }
+                    }
+                )) {
+                    ForEach(wandBoardProviders, id: \.self) { provider in
+                        Text(wandBoardProviderLabel(provider)).tag(provider)
+                    }
+                }
+                Picker("模型", selection: Binding(
+                    get: { agent.model },
+                    set: { agent.model = $0 }
+                )) {
+                    ForEach(wandBoardModelOptions(from: catalog, provider: agent.provider), id: \.id) { option in
+                        Text(option.label).tag(option.id)
+                    }
+                }
+                Picker("思考深度", selection: Binding(
+                    get: { agent.thinkingEffort },
+                    set: { agent.thinkingEffort = $0 }
+                )) {
+                    ForEach(wandBoardEfforts, id: \.self) { effort in
+                        Text(wandBoardEffortLabel(effort)).tag(effort)
                     }
                 }
                 Picker("状态", selection: $status) {
@@ -452,14 +528,15 @@ private struct TaskBoardCreateView: View {
                     Button("取消") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("创建") {
+                    Button(description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "创建" : "创建并指派") {
                         Task {
                             await onCreate(
                                 title.trimmingCharacters(in: .whitespacesAndNewlines),
                                 description,
                                 status,
                                 priority,
-                                workspaceId.isEmpty ? nil : workspaceId
+                                workspaceId.isEmpty ? nil : workspaceId,
+                                agent
                             )
                         }
                     }

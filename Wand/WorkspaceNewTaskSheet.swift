@@ -53,12 +53,11 @@ struct WorkspaceNewTaskSheet: View {
                 WandAmbientBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        Text("先选工作目录，再决定是否归入已有项目。任务名称可留空，由系统自动生成。")
+                        Text("先选工作目录。任务名称可留空，由系统自动生成。")
                             .font(.footnote)
                             .foregroundColor(Theme.textSecondary)
                         nameCard
                         directoryCard
-                        projectCard
                         if !trimmedDirectory.isEmpty {
                             worktreeCard
                         }
