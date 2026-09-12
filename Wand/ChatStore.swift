@@ -8,6 +8,16 @@ struct AskUserSelectionState {
     var submitted = false
 }
 
+enum ChatRealtimeStartKind: Equatable {
+    case skip, firstConnect, reconnect
+}
+
+/// 详情页实时连接：页面仍可见时跳过；关过 socket 的同一 store 必须重连而不是被 started 挡住。
+func chatRealtimeStartKind(active: Bool, started: Bool) -> ChatRealtimeStartKind {
+    if active { return .skip }
+    return started ? .reconnect : .firstConnect
+}
+
 /// 单个会话的状态机：拉取快照、订阅 WebSocket、合并增量推送、发送输入与权限决策。
 /// 合流规则对齐浏览器端 websocket.ts：
 ///   - init / messages 全量 → 直接替换
@@ -110,30 +120,20 @@ final class ChatStore: ObservableObject {
     func start() {
         shutdownTask?.cancel()
         shutdownTask = nil
-        guard !active else {
+        switch chatRealtimeStartKind(active: active, started: started) {
+        case .skip:
             wlog("session", "start() 跳过 session=\(sessionId)（页面已激活）")
             return
-        }
-        active = true
-
-        // 首次 REST 加载还没结束时也要立刻恢复实时连接。旧逻辑在这里直接 return，
-        // 而上一次 shutdown 已关 socket，快速返回再打开会一直等 REST + 模型 + 配置
-        // 三段请求收尾，看起来像页面卡死。
-        guard !initialLoadInProgress else {
-            wlog("session", "start() session=\(sessionId)（首次加载未完，立即恢复实时连接）")
-            connectSocket()
-            return
-        }
-
-        // destination 被 NavigationStack 复用时，重新打开已经关闭的 socket，并重新读取
-        // 服务端当前缓存的模型目录。目录刷新由服务端负责，客户端只消费最新快照。
-        guard !started else {
+        case .reconnect:
+            active = true
             wlog("session", "start() session=\(sessionId)（恢复缓存详情连接）")
             connectSocket()
             if snapshot != nil {
                 Task { [weak self] in await self?.loadModels() }
             }
             return
+        case .firstConnect:
+            active = true
         }
         started = true
         initialLoadInProgress = true

@@ -61,6 +61,12 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertTrue(matchesModelKeyword("  ", id: "anything", label: "label"))
     }
 
+    func testChatRealtimeStartReopensSocketAfterShutdown() {
+        XCTAssertEqual(chatRealtimeStartKind(active: false, started: false), .firstConnect)
+        XCTAssertEqual(chatRealtimeStartKind(active: true, started: true), .skip)
+        XCTAssertEqual(chatRealtimeStartKind(active: false, started: true), .reconnect)
+    }
+
     func testSessionOpenGateRejectsDuplicateAndConcurrentNavigation() {
         XCTAssertTrue(shouldBeginSessionOpen(
             requestedID: "a", currentSelection: nil, openingSessionID: nil

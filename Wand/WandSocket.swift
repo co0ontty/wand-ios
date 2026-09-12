@@ -57,7 +57,8 @@ final class WandSocket {
         guard !closed, !endpointSession.isRetired else { return }
         wlog("ws", "回前台强制重建 socket session=\(subscribedSessionId ?? "nil")")
         connectionReported = false
-        onConnectionChange?(false)
+        // 主动重建不先发 disconnected：回前台不应闪红条，只有新连接失败才走 scheduleReconnect。
+        generation += 1
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         reconnectDelay = 1
