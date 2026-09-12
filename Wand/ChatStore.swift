@@ -24,7 +24,7 @@ final class ChatStore: ObservableObject {
     @Published var legacyPermissionPrompt: PermissionRequestInfo?
     @Published var permissionBlocked = false
     @Published var currentTaskTitle: String?
-    @Published var connected = false
+    @Published var connected = true
     @Published var loading = true
     @Published var loadError: String?
     @Published var toast: String?
@@ -67,6 +67,9 @@ final class ChatStore: ObservableObject {
     private var started = false
     private var active = false
     private var initialLoadInProgress = false
+    /// NavigationStack / 任务窗口会在布局时误触发 onDisappear+onAppear。立刻关 socket
+    /// 会把「未连上」画成红条，而且下一次 onAppear 若被跳过就只能退出再进才能恢复。
+    private var shutdownTask: Task<Void, Never>?
     /// 每个 WS 状态事件都会前进；初始 REST 只能在此版本未变化时整体落地，
     /// 避免晚到的旧快照覆盖 init/output/status 已经发布的新状态。
     private var realtimeRevision = 0
@@ -105,6 +108,8 @@ final class ChatStore: ObservableObject {
     // MARK: - 生命周期
 
     func start() {
+        shutdownTask?.cancel()
+        shutdownTask = nil
         guard !active else {
             wlog("session", "start() 跳过 session=\(sessionId)（页面已激活）")
             return
@@ -189,10 +194,14 @@ final class ChatStore: ObservableObject {
 
     func shutdown() {
         guard active else { return }
-        active = false
-        connected = false
-        wlog("session", "shutdown() session=\(sessionId)（视图销毁，关闭 socket）")
-        socket.close()
+        shutdownTask?.cancel()
+        shutdownTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard !Task.isCancelled, let self, self.active else { return }
+            self.active = false
+            wlog("session", "shutdown() session=\(self.sessionId)（视图销毁，关闭 socket）")
+            self.socket.close()
+        }
     }
 
     /// 回前台健康检查：先判断再行动，避免无谓重连。

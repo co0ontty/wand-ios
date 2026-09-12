@@ -701,6 +701,42 @@ struct WebViewRepresentable: UIViewRepresentable {
               border-radius:0!important;
               box-shadow:none!important;
             }
+            /* iOS 直通输入：xterm 默认把 .xterm-helper-textarea 放在
+               6x14pt 的隐藏槽位（opacity:0，跟随光标）。WKWebView 拒绝
+               为这种不可见/过小的目标弹出软键盘，于是「点终端直接打字」
+               永远无法唤起输入法。这里把它放大成覆盖终端可视区的透明输入
+               层：字还打在 xterm 里，但键盘可以正常弹出。 */
+            .is-wand-terminal-passthrough .terminal-scroll-wrap{position:relative;}
+            /* .xterm-helpers 默认是 0x0，子层的 width:100% 会算成 0，
+               所以要先把它撑满终端可视区。*/
+            .is-wand-terminal-passthrough .xterm-helpers{
+              position:absolute!important;
+              left:0!important;
+              top:0!important;
+              width:100%!important;
+              height:100%!important;
+              z-index:6!important;
+            }
+            .is-wand-terminal-passthrough .xterm-helper-textarea{
+              /* opacity 用 0.01 而不是 0：iOS WebKit 对完全 opacity:0 的
+                 元素可能拒绝唤起键盘，保留极低不透明度最稳。*/
+              opacity:0.01!important;
+              left:0!important;
+              top:0!important;
+              width:100%!important;
+              height:100%!important;
+              z-index:6!important;
+              /* 必须 ≥16px，否则 iOS 会因为字号过小而自动缩放/不弹键盘。*/
+              font-size:16px!important;
+              line-height:1!important;
+              color:transparent!important;
+              background:transparent!important;
+              caret-color:transparent!important;
+              resize:none!important;
+              /* 不拦截触摸：终端滚动/选中仍由 .xterm-screen 处理，
+                 我们只在点击时显式 focus() 这个输入层。*/
+              pointer-events:none!important;
+            }
           `;
           document.head.appendChild(style);
         }

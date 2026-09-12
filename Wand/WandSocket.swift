@@ -198,7 +198,14 @@ final class WandSocket {
               let task,
               let data = try? JSONSerialization.data(withJSONObject: payload),
               let text = String(data: data, encoding: .utf8) else { return }
-        task.send(.string(text)) { _ in }
+        task.send(.string(text)) { [weak self] error in
+            guard let error else { return }
+            DispatchQueue.main.async {
+                guard let self, !self.closed else { return }
+                wlog("ws", "send 失败 \(error.localizedDescription)")
+                self.scheduleReconnect()
+            }
+        }
     }
 
     // MARK: - 重连与看门狗

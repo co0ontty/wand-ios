@@ -2774,30 +2774,42 @@ private func formatUsd(_ value: Double) -> String {
     return String(format: "$%.4f", value)
 }
 
-private struct ActivityFoldPulseDots: View {
+private struct ActivityTextShimmer: View {
+    let text: String
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var lifted = false
 
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(Theme.brand)
-                    .frame(width: 4, height: 4)
-                    .offset(y: reduceMotion ? 0 : (lifted ? -2.5 : 0))
-                    .opacity(reduceMotion ? 0.55 : (lifted ? 1 : 0.28))
-                    .animation(
-                        reduceMotion
-                            ? nil
-                            : .easeInOut(duration: 0.42)
-                                .repeatForever(autoreverses: true)
-                                .delay(Double(index) * 0.12),
-                        value: lifted
-                    )
+        let base = Text(text)
+            .font(.system(size: 11, design: .monospaced))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        if reduceMotion {
+            base.foregroundColor(Theme.textSecondary)
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { timeline in
+                let t = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2) / 2
+                base
+                    .foregroundColor(Theme.textMuted)
+                    .overlay {
+                        base
+                            .foregroundColor(Theme.brand)
+                            .mask {
+                                GeometryReader { geo in
+                                    let width = max(geo.size.width, 1)
+                                    let band = max(width * 0.28, 28)
+                                    let x = CGFloat(t) * (width + band) - band
+                                    LinearGradient(
+                                        colors: [.clear, .white, .clear],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                    .frame(width: band)
+                                    .offset(x: x)
+                                }
+                            }
+                    }
             }
         }
-        .accessibilityHidden(true)
-        .onAppear { lifted = true }
     }
 }
 
@@ -2854,15 +2866,7 @@ private struct ActivityFoldCard: View {
                             .rotationEffect(.degrees(expanded ? 180 : 0))
                     }
                     if group.running {
-                        HStack(spacing: 8) {
-                            Text(group.latest)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(Theme.textSecondary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            ActivityFoldPulseDots()
-                        }
+                        ActivityTextShimmer(text: group.latest)
                     }
                 }
                 .padding(.horizontal, 2)
