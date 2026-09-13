@@ -2063,20 +2063,6 @@ private func isCollapsibleActivityItem(_ item: DisplayItem) -> Bool {
     }
 }
 
-private func isActivityGroupOpen(_ group: ActivityGroup) -> Bool {
-    guard let last = group.items.last else { return false }
-    switch last {
-    case .plain(.thinking):
-        return true
-    case .tool(_, _, _, _, _, let result):
-        return result == nil
-    case .explorationGroup(let tools):
-        return tools.last?.result == nil
-    default:
-        return false
-    }
-}
-
 private struct ActivityRunSummary {
     let latest: String
     let meta: String
