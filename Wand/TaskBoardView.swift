@@ -18,6 +18,7 @@ struct TaskBoardView: View {
     @State private var showCreate = false
     @State private var busy = false
     @State private var lastAgent = WandBoardTaskAgent.default
+    @State private var archiveExpanded = false
 
     var body: some View {
         NavigationStack {
@@ -155,8 +156,15 @@ struct TaskBoardView: View {
                         if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
                         return lhs.updatedAt > rhs.updatedAt
                     }
+                let archived = status == .done
+                    ? visibleTasks.filter { $0.status == "archived" }
+                        .sorted { lhs, rhs in
+                            if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
+                            return lhs.updatedAt > rhs.updatedAt
+                        }
+                    : []
                 Section("\(status.label)  \(items.count)") {
-                    if items.isEmpty {
+                    if items.isEmpty && archived.isEmpty {
                         Text(status.empty).foregroundStyle(Theme.textMuted)
                     } else {
                         ForEach(items) { task in
@@ -166,6 +174,24 @@ struct TaskBoardView: View {
                                 TaskBoardRow(task: task)
                             }
                             .buttonStyle(.plain)
+                        }
+                        if !archived.isEmpty {
+                            DisclosureGroup(isExpanded: Binding(
+                                get: { archiveExpanded || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+                                set: { archiveExpanded = $0 }
+                            )) {
+                                ForEach(archived) { task in
+                                    Button {
+                                        selected = task
+                                    } label: {
+                                        TaskBoardRow(task: task)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            } label: {
+                                Label("归档任务  \(archived.count)", systemImage: "folder")
+                                    .foregroundStyle(Theme.textMuted)
+                            }
                         }
                     }
                 }
