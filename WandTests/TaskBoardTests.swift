@@ -95,4 +95,53 @@ final class TaskBoardTests: XCTestCase {
         XCTAssertTrue(pending.first?.sessions.isEmpty == true)
     }
 
+    func testSwipeActionsFollowAndroidStatusContract() {
+        XCTAssertEqual(wandBoardSwipeAction(for: "todo"), .start)
+        XCTAssertEqual(wandBoardSwipeAction(for: "doing"), .complete)
+        XCTAssertEqual(wandBoardSwipeAction(for: "done"), .archive)
+        XCTAssertNil(wandBoardSwipeAction(for: "archived"))
+        XCTAssertEqual(wandBoardSwipeTargetStatus(.start), "doing")
+        XCTAssertEqual(wandBoardSwipeTargetStatus(.complete), "done")
+        XCTAssertNil(wandBoardSwipeTargetStatus(.archive))
+        XCTAssertEqual(wandBoardSwipeActionTitle(.start), "开始任务？")
+        XCTAssertEqual(wandBoardToggledStatus("doing"), "done")
+        XCTAssertEqual(wandBoardToggledStatus("done"), "todo")
+    }
+
+    func testProcessingAndAgentRunningLabels() throws {
+        let json = """
+        {
+          "id": "task-run",
+          "title": "",
+          "description": "项目：wand\\n修登录",
+          "status": "doing",
+          "sessions": [{ "id": "s1", "provider": "claude", "status": "running" }]
+        }
+        """.data(using: .utf8)!
+        let task = try JSONDecoder().decode(WandBoardTask.self, from: json)
+        XCTAssertEqual(wandBoardCardTitle(task), "修登录")
+        XCTAssertEqual(wandBoardProcessingLabel(task), "正在处理...")
+        XCTAssertTrue(wandBoardAgentRunning(task))
+        XCTAssertEqual(wandBoardAgentLabels(sessions: task.sessions, assigned: task.agent), "Claude")
+    }
+
+    func testBoardTaskStatsCountRemainingAndPriority() throws {
+        let json = """
+        [
+          {"id":"a","status":"todo","priority":"urgent"},
+          {"id":"b","status":"doing","priority":"none"},
+          {"id":"c","status":"done","priority":"high"},
+          {"id":"d","status":"archived","priority":"low"}
+        ]
+        """.data(using: .utf8)!
+        let tasks = try JSONDecoder().decode([WandBoardTask].self, from: json)
+        let stats = wandBoardTaskStats(tasks)
+        XCTAssertEqual(stats.total, 4)
+        XCTAssertEqual(stats.todo, 1)
+        XCTAssertEqual(stats.doing, 1)
+        XCTAssertEqual(stats.done, 1)
+        XCTAssertEqual(stats.remaining, 2)
+        XCTAssertEqual(stats.high, 2)
+    }
+
 }

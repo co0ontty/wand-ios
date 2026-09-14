@@ -20,6 +20,22 @@ func sessionListQuickActionsEnabled(
     rootIsSessions && !hasPresentedSurface
 }
 
+/// 首页模式：会话树（默认）或任务管理看板。点标题栏即可切换并持久化。
+enum HomeListMode: String, Equatable {
+    case sessions
+    case board
+
+    static let storageKey = "wand.homeListMode"
+
+    var label: String { self == .board ? "任务模式" : "会话模式" }
+
+    var next: HomeListMode { self == .board ? .sessions : .board }
+
+    static func fromStorage(_ value: String?) -> HomeListMode {
+        value == "board" ? .board : .sessions
+    }
+}
+
 /// 原生客户端根视图：先用 appToken 登录拿 session cookie（ephemeral 存储，
 /// 冷启动后为空），然后进入原生会话列表。WebView 仅作为「网页版」兜底入口保留，
 /// 覆盖设置、文件浏览等原生未实现的功能。
@@ -31,7 +47,9 @@ struct NativeRootView: View {
     @State private var showWebFallback = false
     @State private var showSettings = false
     @State private var showMissions = false
-    @State private var showTaskBoard = false
+    @AppStorage(HomeListMode.storageKey) private var homeListModeRaw = HomeListMode.sessions.rawValue
+    @State private var isSelectingHome = false
+    @State private var boardRefreshNonce = 0
     @State private var serverUpdate: ServerUpdateInfo?
     @State private var dismissedUpdateVersion: String?
     @State private var updateBannerMessage: String?
@@ -83,6 +101,12 @@ struct NativeRootView: View {
         WandAPI(baseURL: serverURL, token: token)
     }
 
+    private var homeListMode: HomeListMode {
+        HomeListMode.fromStorage(homeListModeRaw)
+    }
+
+    private var showingBoard: Bool { homeListMode == .board }
+
     var body: some View {
         AdaptiveNavigationContainer(
             selection: navigationSelection,
@@ -103,13 +127,6 @@ struct NativeRootView: View {
                 linkedTaskId: selectedWorkspaceTask?.task.id,
                 linkedTaskName: selectedWorkspaceTask?.task.name,
                 linkedTaskCwd: workspaceStore.taskState.detail?.cwd ?? selectedWorkspaceTask?.workspace.cwd,
-                onOpenSession: openSessionFromMissions
-            )
-        }
-        .fullScreenCover(isPresented: $showTaskBoard) {
-            TaskBoardView(
-                api: api,
-                linkedWorkspaceId: selectedWorkspaceTask?.workspace.id,
                 onOpenSession: openSessionFromMissions
             )
         }
@@ -195,12 +212,12 @@ struct NativeRootView: View {
                 title: "显示任务列表",
                 key: "1",
                 modifiers: .command,
-                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showWebFallback
+                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showWebFallback || showingBoard
             ) {
                 showSettings = false
                 showMissions = false
-                showTaskBoard = false
                 showWebFallback = false
+                setHomeListMode(.sessions)
                 selectedWorkspaceTask = nil
                 selectedSessionID = nil
                 selectedSnapshot = nil
@@ -214,7 +231,6 @@ struct NativeRootView: View {
             ) {
                 showSettings = false
                 showWebFallback = false
-                showTaskBoard = false
                 showMissions = true
             },
             WandKeyboardShortcutAction(
@@ -222,30 +238,33 @@ struct NativeRootView: View {
                 title: "显示任务管理",
                 key: "3",
                 modifiers: .command,
-                isEnabled: !showTaskBoard
+                isEnabled: !showingBoard
             ) {
                 showSettings = false
                 showWebFallback = false
                 showMissions = false
-                showTaskBoard = true
+                setHomeListMode(.board)
             },
             WandKeyboardShortcutAction(
                 id: "close-active-surface",
                 title: "关闭当前页",
                 key: "w",
                 modifiers: .command,
-                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showWebFallback || showSettings || showMissions || showTaskBoard
+                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showWebFallback || showSettings || showMissions
             ) {
                 closeActiveSurfaceFromKeyboard()
             },
         ]
     }
 
+    private func setHomeListMode(_ mode: HomeListMode) {
+        homeListModeRaw = mode.rawValue
+        isSelectingHome = false
+    }
+
     private func closeActiveSurfaceFromKeyboard() {
         if showMissions {
             showMissions = false
-        } else if showTaskBoard {
-            showTaskBoard = false
         } else if showWebFallback {
             showWebFallback = false
         } else if showSettings {
@@ -309,117 +328,123 @@ struct NativeRootView: View {
                         updateBanner
                             .padding(.horizontal, 16)
                             .padding(.top, 8)
-                            .padding(.bottom, 6)
+                            .padding(.bottom, 4)
                     }
-                    WorkspaceListView(
-                        store: workspaceStore,
-                        api: api,
+                    HomeOverviewBar(
                         serverDisplayName: profile.displayName,
-                        selectedTaskId: selectedWorkspaceTask?.task.id,
-                        selectedSessionId: selectedSessionID,
-                        onOpenTask: { workspace, task in
-                            selectedSessionID = nil
-                            selectedSnapshot = nil
-                            openingSessionID = nil
-                            selectedWorkspaceTask = WorkspaceTaskSelection(
-                                workspace: workspace,
-                                task: task
-                            )
+                        mode: homeListMode,
+                        showNewTask: !showingBoard,
+                        canSelect: !showingBoard && !workspaceStore.taskGroups.isEmpty,
+                        onToggleMode: {
+                            setHomeListMode(homeListMode.next)
                         },
-                        onTaskRenamed: { updated in
-                            if var selection = selectedWorkspaceTask, selection.task.id == updated.id {
-                                selection = WorkspaceTaskSelection(workspace: selection.workspace, task: updated)
-                                selectedWorkspaceTask = selection
+                        onNewTask: { presentNewTask = true },
+                        onRefresh: {
+                            if showingBoard {
+                                boardRefreshNonce += 1
+                            } else {
+                                Task {
+                                    await workspaceStore.loadTaskGroups(force: true)
+                                    await workspaceStore.loadWorkspaceIndex()
+                                }
                             }
                         },
-                        onTaskDeleted: { taskId in
-                            if selectedWorkspaceTask?.task.id == taskId {
-                                selectedWorkspaceTask = nil
-                            }
+                        onStartSelection: {
+                            isSelectingHome = true
                         },
-                        onOpenSession: { _, session in
-                            openWorkspaceStandaloneSession(session.id)
-                        },
-                        onOpenTaskSession: { workspace, task, session in
-                            selectedWorkspaceTask = WorkspaceTaskSelection(
-                                workspace: workspace,
-                                task: task
-                            )
-                            Task {
-                                await workspaceStore.openTask(
-                                    workspace: workspace,
-                                    task: task,
-                                    preferredSessionId: session.id
-                                )
-                            }
-                        },
-                        onRequestNewSession: { workspace, task in
-                            selectedWorkspaceTask = WorkspaceTaskSelection(
-                                workspace: workspace,
-                                task: task
-                            )
-                            Task {
-                                await workspaceStore.openTaskAndPresentPicker(
+                        onOpenMissions: { showMissions = true },
+                        onOpenSettings: { showSettings = true },
+                        onOpenWeb: { showWebFallback = true },
+                        onSwitchServer: {
+                            NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
+                        }
+                    )
+                    if showingBoard {
+                        TaskBoardView(
+                            api: api,
+                            onOpenSession: openSessionFromMissions,
+                            embedded: true,
+                            refreshNonce: boardRefreshNonce
+                        )
+                    } else {
+                        WorkspaceListView(
+                            store: workspaceStore,
+                            api: api,
+                            serverDisplayName: profile.displayName,
+                            selectedTaskId: selectedWorkspaceTask?.task.id,
+                            selectedSessionId: selectedSessionID,
+                            hidesHomeChrome: true,
+                            isSelecting: $isSelectingHome,
+                            onOpenTask: { workspace, task in
+                                selectedSessionID = nil
+                                selectedSnapshot = nil
+                                openingSessionID = nil
+                                selectedWorkspaceTask = WorkspaceTaskSelection(
                                     workspace: workspace,
                                     task: task
                                 )
-                            }
-                        },
-                        onOpenParallel: { workspace, task in
-                            selectedWorkspaceTask = WorkspaceTaskSelection(
-                                workspace: workspace,
-                                task: task
-                            )
-                            showMissions = true
-                        },
-                        onMergeAgentStarted: { _, started in
-                            presentMergeAgentSession(started)
-                        },
-                        onWorkspaceDeleted: { workspaceId in
-                            if selectedWorkspaceTask?.workspace.id == workspaceId {
-                                selectedWorkspaceTask = nil
-                            }
-                        },
-                        requestNewTask: $presentNewTask
-                    )
-                }
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        if selectedWorkspaceTask == nil && selectedSessionID == nil {
-                            Menu {
-                                Button {
-                                    showTaskBoard = true
-                                } label: {
-                                    Label("任务管理", systemImage: "checklist")
+                            },
+                            onTaskRenamed: { updated in
+                                if var selection = selectedWorkspaceTask, selection.task.id == updated.id {
+                                    selection = WorkspaceTaskSelection(workspace: selection.workspace, task: updated)
+                                    selectedWorkspaceTask = selection
                                 }
-                                Button {
-                                    showMissions = true
-                                } label: {
-                                    Label("并行任务", systemImage: "square.stack.3d.up")
+                            },
+                            onTaskDeleted: { taskId in
+                                if selectedWorkspaceTask?.task.id == taskId {
+                                    selectedWorkspaceTask = nil
                                 }
-                                Button {
-                                    showSettings = true
-                                } label: {
-                                    Label("设置", systemImage: "gearshape")
+                            },
+                            onOpenSession: { _, session in
+                                openWorkspaceStandaloneSession(session.id)
+                            },
+                            onOpenTaskSession: { workspace, task, session in
+                                selectedWorkspaceTask = WorkspaceTaskSelection(
+                                    workspace: workspace,
+                                    task: task
+                                )
+                                Task {
+                                    await workspaceStore.openTask(
+                                        workspace: workspace,
+                                        task: task,
+                                        preferredSessionId: session.id
+                                    )
                                 }
-                                Button {
-                                    showWebFallback = true
-                                } label: {
-                                    Label("打开网页版", systemImage: "safari")
+                            },
+                            onRequestNewSession: { workspace, task in
+                                selectedWorkspaceTask = WorkspaceTaskSelection(
+                                    workspace: workspace,
+                                    task: task
+                                )
+                                Task {
+                                    await workspaceStore.openTaskAndPresentPicker(
+                                        workspace: workspace,
+                                        task: task
+                                    )
                                 }
-                                Button {
-                                    NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
-                                } label: {
-                                    Label("切换服务器", systemImage: "server.rack")
+                            },
+                            onOpenParallel: { workspace, task in
+                                selectedWorkspaceTask = WorkspaceTaskSelection(
+                                    workspace: workspace,
+                                    task: task
+                                )
+                                showMissions = true
+                            },
+                            onMergeAgentStarted: { _, started in
+                                presentMergeAgentSession(started)
+                            },
+                            onWorkspaceDeleted: { workspaceId in
+                                if selectedWorkspaceTask?.workspace.id == workspaceId {
+                                    selectedWorkspaceTask = nil
                                 }
-                            } label: {
-                                Image(systemName: "ellipsis.circle")
-                                    .font(.system(size: 18))
-                                    .foregroundColor(Theme.textSecondary)
-                            }
-                        }
+                            },
+                            requestNewTask: $presentNewTask
+                        )
                     }
                 }
+                .navigationTitle("")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar(.hidden, for: .navigationBar)
             }
         }
     }
@@ -551,7 +576,7 @@ struct NativeRootView: View {
         guard phase == .ready,
               let pending = quickActions.pending,
               pending.belongs(to: serverID) else { return }
-        let hasPresentedSurface = showWebFallback || showSettings || showMissions || showTaskBoard
+        let hasPresentedSurface = showWebFallback || showSettings || showMissions
 
         switch pending {
         case .openWeb:
@@ -574,7 +599,6 @@ struct NativeRootView: View {
             quickActions.consume(where: { $0 == pending }) != nil else { return }
             showSettings = false
             showMissions = false
-            showTaskBoard = false
             showWebFallback = false
             openSessionFromMissions(id)
         }
@@ -583,8 +607,8 @@ struct NativeRootView: View {
     private func showTaskRoot() {
         showSettings = false
         showMissions = false
-        showTaskBoard = false
         showWebFallback = false
+        setHomeListMode(.sessions)
         selectedWorkspaceTask = nil
         selectedSessionID = nil
         selectedSnapshot = nil
@@ -606,7 +630,6 @@ struct NativeRootView: View {
     private func openSessionFromMissions(_ sessionID: String) {
         selectedWorkspaceTask = nil
         showMissions = false
-        showTaskBoard = false
         openingSessionID = sessionID
         selectedSessionID = sessionID
         selectedSnapshot = nil
@@ -881,6 +904,89 @@ struct NativeRootView: View {
         installingUpdate = false
         systemSocket?.close()
         systemSocket = nil
+    }
+}
+
+/// 对齐 Android HomeOverviewCard：服务器名 + 会话/任务模式芯片 + 新建 + 溢出菜单。
+private struct HomeOverviewBar: View {
+    let serverDisplayName: String
+    let mode: HomeListMode
+    let showNewTask: Bool
+    let canSelect: Bool
+    let onToggleMode: () -> Void
+    let onNewTask: () -> Void
+    let onRefresh: () -> Void
+    let onStartSelection: () -> Void
+    let onOpenMissions: () -> Void
+    let onOpenSettings: () -> Void
+    let onOpenWeb: () -> Void
+    let onSwitchServer: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(serverDisplayName.isEmpty ? "当前服务器" : serverDisplayName)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+                .lineLimit(1)
+            Button(action: onToggleMode) {
+                HStack(spacing: 2) {
+                    Text(mode.label)
+                        .font(.system(size: 13, weight: .semibold))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .foregroundColor(Theme.brand)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("当前\(mode.label)，点按切换到\(mode.next.label)")
+            Spacer(minLength: 8)
+            if showNewTask {
+                Button(action: onNewTask) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Theme.brand))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("新建终端或任务")
+            }
+            Menu {
+                if canSelect {
+                    Button(action: onStartSelection) {
+                        Label("选择多项", systemImage: "checkmark.circle")
+                    }
+                }
+                Button(action: onRefresh) {
+                    Label(mode == .board ? "刷新任务" : "刷新会话", systemImage: "arrow.clockwise")
+                }
+                Button(action: onOpenMissions) {
+                    Label("并行任务", systemImage: "square.stack.3d.up")
+                }
+                Button(action: onOpenSettings) {
+                    Label("设置", systemImage: "gearshape")
+                }
+                Button(action: onOpenWeb) {
+                    Label("打开网页版", systemImage: "safari")
+                }
+                Button(action: onSwitchServer) {
+                    Label("切换服务器", systemImage: "server.rack")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("更多选项")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 4)
     }
 }
 

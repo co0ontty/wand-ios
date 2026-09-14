@@ -5,6 +5,8 @@ struct TaskBoardView: View {
     var linkedWorkspaceId: String? = nil
     let onOpenSession: (String) -> Void
     var onDismiss: (() -> Void)? = nil
+    var embedded: Bool = false
+    var refreshNonce: Int = 0
 
     @Environment(\.dismiss) private var dismiss
     @State private var tasks: [WandBoardTask] = []
@@ -19,66 +21,36 @@ struct TaskBoardView: View {
     @State private var busy = false
     @State private var lastAgent = WandBoardTaskAgent.default
     @State private var archiveExpanded = false
+    @State private var statusFilter = ""
+    @State private var pendingSwipe: (task: WandBoardTask, action: WandBoardSwipeAction)?
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if let selected {
-                    TaskBoardDetailView(
-                        task: selected,
-                        workspaces: workspaces,
-                        catalog: catalog,
-                        lastAgent: lastAgent,
-                        busy: busy,
-                        onPatch: { body in await mutate { _ = try await api.updateBoardTask(id: selected.id, body: body) } },
-                        onRemember: rememberAgent,
-                        onDispatch: { agent in
-                            rememberAgent(agent)
-                            await mutate {
-                                _ = try await api.updateBoardTask(id: selected.id, body: ["agent": agent.jsonObject()])
-                                let result = try await api.dispatchBoardTask(id: selected.id, agent: agent)
-                                if !result.sessionId.isEmpty { onOpenSession(result.sessionId) }
+        Group {
+            if embedded {
+                boardSurface
+            } else {
+                NavigationStack {
+                    boardSurface
+                        .navigationTitle(selected == nil ? "任务管理" : selected?.title ?? "任务")
+                        #if os(iOS)
+                        .navigationBarTitleDisplayMode(.inline)
+                        #endif
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button(selected == nil ? "关闭" : "返回") {
+                                    if selected != nil { selected = nil } else { close() }
+                                }
                             }
-                        },
-                        onDelete: {
-                            await mutate {
-                                try await api.deleteBoardTask(id: selected.id)
-                                self.selected = nil
+                            if selected == nil {
+                                ToolbarItem(placement: .primaryAction) {
+                                    Button {
+                                        Task { await refresh(showProgress: false) }
+                                    } label: {
+                                        Image(systemName: "arrow.clockwise")
+                                    }
+                                }
                             }
-                        },
-                        onOpenSession: onOpenSession,
-                        onClose: { self.selected = nil }
-                    )
-                } else if loading && tasks.isEmpty {
-                    ProgressView().tint(Theme.brand)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    listContent
-                }
-            }
-            .background { WandAmbientBackground() }
-            .navigationTitle(selected == nil ? "任务管理" : selected?.title ?? "任务")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(selected == nil ? "关闭" : "返回") {
-                        if selected != nil { selected = nil } else { close() }
-                    }
-                }
-                if selected == nil {
-                    ToolbarItemGroup(placement: .primaryAction) {
-                        Button {
-                            Task { await refresh(showProgress: false) }
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
                         }
-                        Button { showCreate = true } label: {
-                            Image(systemName: "plus.circle.fill")
-                        }
-                        .accessibilityLabel("新建任务")
-                    }
                 }
             }
         }
@@ -102,7 +74,7 @@ struct TaskBoardView: View {
                     showCreate = false
                     selected = created
                     if !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        _ = try? await api.dispatchBoardTask(id: created.id, agent: agent)
+                        _ = try? await api.dispatchBoardTask(id: created.id, agent: agent, prompt: description)
                         await refresh(showProgress: false)
                     }
                     if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -118,6 +90,9 @@ struct TaskBoardView: View {
             workspaces = (try? await api.listWorkspaces()) ?? []
             catalog = try? await api.models()
             lastAgent = (try? await api.boardTaskAgentDefaults()) ?? .default
+        }
+        .onChange(of: refreshNonce) { _, _ in
+            Task { await refresh(showProgress: false) }
         }
         .alert("任务操作失败", isPresented: Binding(
             get: { errorMessage != nil },
@@ -139,67 +114,334 @@ struct TaskBoardView: View {
         }
     }
 
+    private var boardStats: WandBoardTaskStats { wandBoardTaskStats(visibleTasks) }
+
+    private var projectName: String {
+        workspaces.first(where: { $0.id == filterWorkspaceId })?.name ?? "全部任务"
+    }
+
+    @ViewBuilder
+    private var boardSurface: some View {
+        Group {
+            if let selected {
+                VStack(spacing: 0) {
+                    if embedded {
+                        boardDetailChrome(title: selected.title.isEmpty ? "任务详情" : selected.title)
+                    }
+                    TaskBoardDetailView(
+                        task: selected,
+                        workspaces: workspaces,
+                        catalog: catalog,
+                        lastAgent: lastAgent,
+                        busy: busy,
+                        onPatch: { body in await mutate { _ = try await api.updateBoardTask(id: selected.id, body: body) } },
+                        onRemember: rememberAgent,
+                        onDispatch: { agent, prompt in
+                            rememberAgent(agent)
+                            await mutate {
+                                _ = try await api.updateBoardTask(id: selected.id, body: ["agent": agent.jsonObject()])
+                                let result = try await api.dispatchBoardTask(id: selected.id, agent: agent, prompt: prompt)
+                                if !result.sessionId.isEmpty { onOpenSession(result.sessionId) }
+                            }
+                        },
+                        onDelete: {
+                            await mutate {
+                                try await api.deleteBoardTask(id: selected.id)
+                                self.selected = nil
+                            }
+                        },
+                        onOpenSession: onOpenSession,
+                        onClose: { self.selected = nil }
+                    )
+                }
+            } else if loading && tasks.isEmpty {
+                ProgressView().tint(Theme.brand)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                listContent
+            }
+        }
+        .background { WandAmbientBackground() }
+    }
+
+    private func boardDetailChrome(title: String) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                selected = nil
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("返回")
+                        .font(.system(size: 15, weight: .medium))
+                }
+                .foregroundColor(Theme.brand)
+            }
+            .buttonStyle(.plain)
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
     private var listContent: some View {
-        List {
-            Section {
-                TextField("搜索任务", text: $query)
-                Picker("项目", selection: $filterWorkspaceId) {
-                    Text("所有项目").tag("")
-                    ForEach(workspaces) { workspace in
-                        Text(workspace.name).tag(workspace.id)
+        ZStack(alignment: .bottomTrailing) {
+            List {
+                Section {
+                    TaskBoardHero(
+                        projectName: projectName,
+                        stats: boardStats,
+                        query: $query
+                    )
+                    .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 4, trailing: 14))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+
+                    boardFilters
+                        .listRowInsets(EdgeInsets(top: 4, leading: 14, bottom: 8, trailing: 14))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                }
+
+                if visibleTasks.isEmpty {
+                    Section {
+                        boardEmptyState
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    }
+                } else if statusFilter.isEmpty {
+                    ForEach(WandBoardStatus.allCases) { status in
+                        let items = sortedTasks(visibleTasks.filter { $0.status == status.rawValue })
+                        let archived = status == .done
+                            ? sortedTasks(visibleTasks.filter { $0.status == "archived" })
+                            : []
+                        if !items.isEmpty || !archived.isEmpty {
+                            Section {
+                                boardSectionHeader(status: status.rawValue, count: items.count)
+                                    .listRowInsets(EdgeInsets(top: 10, leading: 18, bottom: 2, trailing: 14))
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(Color.clear)
+                                ForEach(items) { task in
+                                    boardRow(task)
+                                }
+                                if !archived.isEmpty {
+                                    boardArchiveHeader(count: archived.count)
+                                        .listRowInsets(EdgeInsets(top: 8, leading: 18, bottom: 2, trailing: 14))
+                                        .listRowSeparator(.hidden)
+                                        .listRowBackground(Color.clear)
+                                    if archiveOpen {
+                                        ForEach(archived) { task in
+                                            boardRow(task)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Section {
+                        ForEach(sortedTasks(visibleTasks.filter { $0.status == statusFilter })) { task in
+                            boardRow(task)
+                        }
                     }
                 }
             }
-            ForEach(WandBoardStatus.allCases) { status in
-                let items = visibleTasks.filter { $0.status == status.rawValue }
-                    .sorted { lhs, rhs in
-                        if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
-                        return lhs.updatedAt > rhs.updatedAt
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .contentMargins(.bottom, 88, for: .scrollContent)
+
+            Button {
+                showCreate = true
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 56, height: 56)
+                    .background(Circle().fill(Theme.success))
+                    .shadow(color: Theme.success.opacity(0.28), radius: 8, y: 3)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 18)
+            .padding(.bottom, 18)
+            .accessibilityLabel("新建任务")
+        }
+        .confirmationDialog(
+            pendingSwipe.map { wandBoardSwipeActionTitle($0.action) } ?? "确认",
+            isPresented: Binding(
+                get: { pendingSwipe != nil },
+                set: { if !$0 { pendingSwipe = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pending = pendingSwipe {
+                Button(
+                    wandBoardSwipeActionLabel(pending.action),
+                    role: pending.action == .archive ? .destructive : nil
+                ) {
+                    Task { await applySwipe(pending.task, pending.action) }
+                    pendingSwipe = nil
+                }
+                Button("取消", role: .cancel) { pendingSwipe = nil }
+            }
+        } message: {
+            if let pending = pendingSwipe {
+                Text("「\(wandBoardCardTitle(pending.task))」\n\(wandBoardSwipeConfirmMessage(pending.action))")
+            }
+        }
+    }
+
+    private var archiveOpen: Bool {
+        archiveExpanded || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || statusFilter == "archived"
+    }
+
+    private var boardFilters: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Menu {
+                Button("所有项目") { filterWorkspaceId = "" }
+                ForEach(workspaces) { workspace in
+                    Button(workspace.name) { filterWorkspaceId = workspace.id }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(workspaces.first(where: { $0.id == filterWorkspaceId })?.name ?? "所有项目")
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundColor(Theme.textSecondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Capsule().fill(Theme.surface.opacity(0.92)))
+                .overlay(Capsule().stroke(Theme.border.opacity(0.7), lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+
+            HStack(spacing: 6) {
+                ForEach(
+                    [("", "全部"), ("todo", "待办"), ("doing", "进行中"), ("done", "已完成"), ("archived", "归档")],
+                    id: \.0
+                ) { value, label in
+                    let active = statusFilter == value
+                    Button {
+                        statusFilter = value
+                    } label: {
+                        Text(label)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(active ? Theme.success : Theme.textSecondary)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule().fill(active ? Theme.successSoft : Theme.surface.opacity(0.88))
+                            )
+                            .overlay(
+                                Capsule().stroke(active ? Theme.success.opacity(0.35) : Theme.border.opacity(0.55), lineWidth: 0.5)
+                            )
                     }
-                let archived = status == .done
-                    ? visibleTasks.filter { $0.status == "archived" }
-                        .sorted { lhs, rhs in
-                            if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
-                            return lhs.updatedAt > rhs.updatedAt
-                        }
-                    : []
-                Section("\(status.label)  \(items.count)") {
-                    if items.isEmpty && archived.isEmpty {
-                        Text(status.empty).foregroundStyle(Theme.textMuted)
-                    } else {
-                        ForEach(items) { task in
-                            Button {
-                                selected = task
-                            } label: {
-                                TaskBoardRow(task: task)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        if !archived.isEmpty {
-                            DisclosureGroup(isExpanded: Binding(
-                                get: { archiveExpanded || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
-                                set: { archiveExpanded = $0 }
-                            )) {
-                                ForEach(archived) { task in
-                                    Button {
-                                        selected = task
-                                    } label: {
-                                        TaskBoardRow(task: task)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            } label: {
-                                Label("归档任务  \(archived.count)", systemImage: "folder")
-                                    .foregroundStyle(Theme.textMuted)
-                            }
-                        }
-                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
-        #if os(iOS)
-        .listStyle(.insetGrouped)
-        #endif
+    }
+
+    private var boardEmptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "checklist")
+                .font(.system(size: 28, weight: .medium))
+                .foregroundColor(Theme.success)
+            Text(query.isEmpty && statusFilter.isEmpty ? "工作台还是空的" : "没有匹配的任务")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(Theme.textPrimary)
+            Text(query.isEmpty && statusFilter.isEmpty ? "点右下角 +，把事情做完。" : "换个筛选条件，或新建一条任务。")
+                .font(.system(size: 13))
+                .foregroundColor(Theme.textMuted)
+            Button("新建任务", action: { showCreate = true })
+                .buttonStyle(WandPrimaryButtonStyle())
+                .frame(maxWidth: 180)
+                .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 36)
+    }
+
+    private func boardSectionHeader(status: String, count: Int) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(wandBoardStatusColor(status))
+                .frame(width: 8, height: 8)
+            Text(WandBoardStatus(rawValue: status)?.label ?? status)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(wandBoardStatusColor(status))
+            Text("\(count)")
+                .font(.system(size: 11))
+                .foregroundColor(Theme.textMuted)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func boardArchiveHeader(count: Int) -> some View {
+        Button {
+            archiveExpanded.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("归档任务")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("\(count)")
+                    .font(.system(size: 11))
+                Spacer(minLength: 0)
+            }
+            .foregroundColor(Theme.textMuted)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func boardRow(_ task: WandBoardTask) -> some View {
+        TaskBoardRow(
+            task: task,
+            showWorkspace: filterWorkspaceId.isEmpty,
+            onOpen: { selected = task },
+            onToggleComplete: {
+                Task { await mutate { _ = try await api.updateBoardTask(id: task.id, body: ["status": wandBoardToggledStatus(task.status)]) } }
+            },
+            onOpenSession: onOpenSession
+        )
+        .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            if let action = wandBoardSwipeAction(for: task.status) {
+                Button {
+                    pendingSwipe = (task, action)
+                } label: {
+                    Label(wandBoardSwipeActionLabel(action), systemImage: wandBoardSwipeSystemImage(action))
+                }
+                .tint(action == .archive ? Theme.danger : (action == .complete ? Theme.info : Theme.success))
+            }
+        }
+    }
+
+    /// 顺序以 GET /api/wand-tasks 返回为准，客户端不再本地排序。
+    private func sortedTasks(_ tasks: [WandBoardTask]) -> [WandBoardTask] {
+        tasks
+    }
+
+    private func applySwipe(_ task: WandBoardTask, _ action: WandBoardSwipeAction) async {
+        await mutate {
+            if let status = wandBoardSwipeTargetStatus(action) {
+                _ = try await api.updateBoardTask(id: task.id, body: ["status": status])
+            } else {
+                try await api.deleteBoardTask(id: task.id)
+            }
+        }
     }
 
     private func close() {
@@ -254,31 +496,338 @@ struct TaskBoardView: View {
     }
 }
 
-private struct TaskBoardRow: View {
-    let task: WandBoardTask
+private func wandBoardStatusColor(_ status: String) -> Color {
+    switch status {
+    case "todo": return Theme.thinking
+    case "doing": return Theme.success
+    case "done": return Theme.info
+    default: return Theme.textMuted
+    }
+}
+
+private func wandBoardPriorityColor(_ priority: String) -> Color {
+    switch priority {
+    case "urgent": return Theme.danger
+    case "high": return Theme.warning
+    case "medium": return Theme.permission
+    default: return Theme.textMuted
+    }
+}
+
+private struct TaskBoardHero: View {
+    let projectName: String
+    let stats: WandBoardTaskStats
+    @Binding var query: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(task.identifier.isEmpty ? String(task.id.prefix(8)) : task.identifier)
-                .font(.caption2)
-                .foregroundStyle(Theme.textMuted)
-            Text(task.title)
-                .font(.headline)
-                .foregroundStyle(Theme.textPrimary)
-                .lineLimit(2)
-            HStack(spacing: 8) {
-                Text(task.workspace?.name ?? "未指定项目")
-                if task.priority != "none" {
-                    Text(WandBoardPriority(rawValue: task.priority)?.label ?? task.priority)
-                        .foregroundStyle(Theme.warning)
-                }
-                Text(task.agent.map { wandBoardProviderLabel($0.provider) } ?? "未指派")
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Text(projectName)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(Theme.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                boardSearchCapsule
             }
-            .font(.caption)
-            .foregroundStyle(Theme.textMuted)
+            HStack(alignment: .bottom, spacing: 10) {
+                Text("\(stats.remaining)")
+                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                    .foregroundColor(Theme.success)
+                    .monospacedDigit()
+                Text("未完成")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(Theme.textMuted)
+                    .padding(.bottom, 6)
+            }
+            .padding(.top, 4)
+            HStack(spacing: 8) {
+                metricTile("待办", value: stats.todo, color: wandBoardStatusColor("todo"))
+                metricTile("进行中", value: stats.doing, color: wandBoardStatusColor("doing"))
+                metricTile("已完成", value: stats.done, color: wandBoardStatusColor("done"))
+            }
+            .padding(.top, 12)
         }
-        .padding(.vertical, 4)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Theme.successSoft)
+        )
     }
+
+    private var boardSearchCapsule: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(Theme.textMuted)
+            TextField("搜索", text: $query)
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textPrimary)
+                .textInputAutocapitalization(.never)
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(Theme.textMuted)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(width: 148, height: 30)
+        .background(Capsule().fill(Theme.surface.opacity(0.88)))
+        .overlay(Capsule().stroke(Theme.border.opacity(0.72), lineWidth: 0.5))
+    }
+
+    private func metricTile(_ label: String, value: Int, color: Color) -> some View {
+        let ratio = stats.total > 0 ? CGFloat(value) / CGFloat(stats.total) : 0
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(Theme.textMuted)
+            Text("\(value)")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundColor(color)
+                .padding(.bottom, 8)
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(color.opacity(0.16))
+                    Capsule()
+                        .fill(color)
+                        .frame(width: max(4, proxy.size.width * ratio))
+                }
+            }
+            .frame(height: 4)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.surface.opacity(0.82))
+        )
+    }
+}
+
+private struct TaskBoardRow: View {
+    let task: WandBoardTask
+    var showWorkspace = true
+    var onOpen: () -> Void = {}
+    var onToggleComplete: () -> Void = {}
+    var onOpenSession: (String) -> Void = { _ in }
+
+    private var done: Bool { task.status == "done" || task.status == "archived" }
+    private var agentRunning: Bool { wandBoardAgentRunning(task) }
+    private var hasChips: Bool {
+        (showWorkspace && !(task.workspace?.name ?? "").isEmpty)
+            || (task.priority != "none" && !task.priority.isEmpty)
+            || wandBoardAgentLabels(sessions: task.sessions, assigned: task.agent) != nil
+            || task.labels.contains(where: { !$0.isEmpty })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 8) {
+                Button(action: onToggleComplete) {
+                    BoardStatusCheck(status: task.status)
+                }
+                .buttonStyle(.plain)
+                Text(wandBoardCardTitle(task))
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(done ? Theme.textMuted : Theme.textPrimary)
+                    .strikethrough(done)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onOpen)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                if hasChips {
+                    FlowLayout(spacing: 6) {
+                        if showWorkspace, let name = task.workspace?.name, !name.isEmpty {
+                            boardChip(name, icon: "folder")
+                        }
+                        if task.priority != "none", !task.priority.isEmpty {
+                            boardChip(
+                                WandBoardPriority(rawValue: task.priority)?.label ?? task.priority,
+                                color: wandBoardPriorityColor(task.priority)
+                            )
+                        }
+                        if let agent = wandBoardAgentLabels(sessions: task.sessions, assigned: task.agent) {
+                            boardChip(agent, color: agentRunning ? Theme.textPrimary : Theme.textSecondary) {
+                                if agentRunning { BoardAgentDots() }
+                            }
+                        }
+                        ForEach(task.labels.filter { !$0.isEmpty }.prefix(3), id: \.self) { label in
+                            boardChip(label)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                if let processing = wandBoardProcessingLabel(task) {
+                    HStack(spacing: 6) {
+                        Circle().fill(Theme.success).frame(width: 7, height: 7)
+                        Text(processing)
+                            .font(.system(size: 11))
+                            .foregroundColor(Theme.success)
+                    }
+                    .padding(.top, 8)
+                }
+                if !task.sessions.isEmpty {
+                    FlowLayout(spacing: 6) {
+                        ForEach(task.sessions) { session in
+                            Button {
+                                onOpenSession(session.id)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    BrandLogo(
+                                        provider: session.provider.isEmpty ? "terminal" : session.provider,
+                                        color: Theme.textPrimary
+                                    )
+                                    .frame(width: 12, height: 12)
+                                    Text(wandBoardProviderLabel(session.provider))
+                                        .font(.system(size: 11))
+                                        .foregroundColor(Theme.textSecondary)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(Theme.surfaceSoft.opacity(0.8)))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onOpen)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Theme.surface.opacity(0.94))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Theme.border.opacity(0.55), lineWidth: 1)
+        )
+    }
+
+    private func boardChip(
+        _ label: String,
+        icon: String? = nil,
+        color: Color = Theme.textSecondary,
+        @ViewBuilder trailing: () -> some View = { EmptyView() }
+    ) -> some View {
+        HStack(spacing: 4) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            Text(label)
+                .font(.system(size: 11))
+                .lineLimit(1)
+            trailing()
+        }
+        .foregroundColor(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .overlay(Capsule().stroke(Theme.border, lineWidth: 0.5))
+    }
+}
+
+/// 轻量换行布局，任务卡上的项目 / 优先级 / Agent 胶囊按内容折行。
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        layout(proposal: proposal, subviews: subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = layout(proposal: proposal, subviews: subviews)
+        for (index, subview) in subviews.enumerated() {
+            subview.place(at: CGPoint(x: bounds.minX + result.origins[index].x, y: bounds.minY + result.origins[index].y), proposal: .unspecified)
+        }
+    }
+
+    private func layout(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, origins: [CGPoint]) {
+        let maxWidth = proposal.width ?? .infinity
+        var origins: [CGPoint] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var width: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maxWidth {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            origins.append(CGPoint(x: x, y: y))
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+            width = max(width, x - spacing)
+        }
+        return (CGSize(width: width, height: y + rowHeight), origins)
+    }
+}
+
+private struct BoardStatusCheck: View {
+    let status: String
+    private var done: Bool { status == "done" || status == "archived" }
+    private var doing: Bool { status == "doing" }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Theme.success.opacity(done ? 1 : 0.55), lineWidth: 1.5)
+            if done {
+                Circle().fill(Theme.success)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+            } else if doing {
+                Circle()
+                    .fill(Theme.success)
+                    .frame(width: 7, height: 7)
+            }
+        }
+        .frame(width: 18, height: 18)
+        .accessibilityLabel(done ? "标为未完成" : "标为已完成")
+    }
+}
+
+private struct BoardAgentDots: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.05, paused: reduceMotion)) { context in
+            let now = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 2) {
+                ForEach(0..<3, id: \.self) { index in
+                    let raised = reduceMotion ? 0 : boardAgentDotLift(index: index, now: now)
+                    Circle()
+                        .fill(Theme.success.opacity(reduceMotion ? 1 : 0.35 + 0.65 * raised))
+                        .frame(width: 3, height: 3)
+                        .offset(y: -3 * raised)
+                }
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private func boardAgentDotLift(index: Int, now: TimeInterval) -> CGFloat {
+    let cycle = 1.2
+    let t = (now - Double(index) * 0.15).truncatingRemainder(dividingBy: cycle)
+    let local = t < 0 ? t + cycle : t
+    if local < 0.12 { return CGFloat(local / 0.12) }
+    if local < 0.24 { return CGFloat(1 - (local - 0.12) / 0.12) }
+    return 0
 }
 
 private struct TaskBoardDetailView: View {
@@ -289,7 +838,7 @@ private struct TaskBoardDetailView: View {
     let busy: Bool
     let onPatch: ([String: Any]) async -> Void
     let onRemember: (WandBoardTaskAgent) -> Void
-    let onDispatch: (WandBoardTaskAgent) async -> Void
+    let onDispatch: (WandBoardTaskAgent, String) async -> Void
     let onDelete: () async -> Void
     let onOpenSession: (String) -> Void
     let onClose: () -> Void
@@ -297,6 +846,7 @@ private struct TaskBoardDetailView: View {
     @State private var title: String
     @State private var description: String
     @State private var agent: WandBoardTaskAgent
+    @State private var composePrompt = ""
 
     init(
         task: WandBoardTask,
@@ -306,7 +856,7 @@ private struct TaskBoardDetailView: View {
         busy: Bool,
         onPatch: @escaping ([String: Any]) async -> Void,
         onRemember: @escaping (WandBoardTaskAgent) -> Void,
-        onDispatch: @escaping (WandBoardTaskAgent) async -> Void,
+        onDispatch: @escaping (WandBoardTaskAgent, String) async -> Void,
         onDelete: @escaping () async -> Void,
         onOpenSession: @escaping (String) -> Void,
         onClose: @escaping () -> Void
@@ -368,6 +918,8 @@ private struct TaskBoardDetailView: View {
                 }
             }
             Section(task.sessions.isEmpty ? "指派 Agent" : "再指派一个 Agent") {
+                TextField("提示词", text: $composePrompt, prompt: Text("输入这次派给 Agent 的提示词…"), axis: .vertical)
+                    .lineLimit(3...8)
                 Picker("CLI 工具", selection: Binding(
                     get: { agent.provider },
                     set: { provider in
@@ -406,9 +958,9 @@ private struct TaskBoardDetailView: View {
                     }
                 }
                 Button(task.sessions.isEmpty ? "派发 Agent" : "再派发一次") {
-                    Task { await onDispatch(agent) }
+                    Task { await onDispatch(agent, composePrompt.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 }
-                .disabled(busy)
+                .disabled(busy || composePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             Section("已指派的 Agent") {
                 let groups = wandBoardSessionGroups(sessions: task.sessions, assigned: task.agent)

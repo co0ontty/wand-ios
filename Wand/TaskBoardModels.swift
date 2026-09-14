@@ -71,7 +71,9 @@ struct WandBoardDispatchResult: Decodable {
 
 struct WandBoardTask: Decodable, Identifiable, Equatable {
     private enum CodingKeys: String, CodingKey {
-        case id, workspaceId, identifier, title, titleSource, description, status, priority, labels, dueDate
+        case id, workspaceId, identifier, title, titleSource
+        case taskDescription = "description"
+        case status, priority, labels, dueDate
         case sortOrder, agent, createdAt, updatedAt, sessionIds, sessions, workspace
     }
 
@@ -101,7 +103,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         identifier = (try? container.decode(String.self, forKey: .identifier)) ?? ""
         title = (try? container.decode(String.self, forKey: .title)) ?? "任务"
         titleSource = (try? container.decode(String.self, forKey: .titleSource)) ?? "user"
-        description = (try? container.decode(String.self, forKey: .description)) ?? ""
+        description = (try? container.decode(String.self, forKey: .taskDescription)) ?? ""
         status = (try? container.decode(String.self, forKey: .status)) ?? "todo"
         priority = (try? container.decode(String.self, forKey: .priority)) ?? "none"
         labels = (try? container.decode([String].self, forKey: .labels)) ?? []
@@ -224,4 +226,138 @@ func wandBoardSessionGroups(
     return providers.map { key in
         WandBoardAgentGroup(provider: key, agent: agents[key], sessions: grouped[key] ?? [])
     }
+}
+
+let wandUnnamedTaskName = "未命名任务"
+
+enum WandBoardSwipeAction: String, Identifiable {
+    case start, complete, archive
+    var id: String { rawValue }
+}
+
+func wandBoardSwipeAction(for status: String) -> WandBoardSwipeAction? {
+    switch status {
+    case "todo": return .start
+    case "doing": return .complete
+    case "done": return .archive
+    default: return nil
+    }
+}
+
+func wandBoardSwipeActionLabel(_ action: WandBoardSwipeAction) -> String {
+    switch action {
+    case .start: return "开始"
+    case .complete: return "完成"
+    case .archive: return "归档"
+    }
+}
+
+func wandBoardSwipeActionTitle(_ action: WandBoardSwipeAction) -> String {
+    switch action {
+    case .start: return "开始任务？"
+    case .complete: return "确认完成？"
+    case .archive: return "归档任务？"
+    }
+}
+
+func wandBoardSwipeConfirmMessage(_ action: WandBoardSwipeAction) -> String {
+    switch action {
+    case .start: return "任务将标记为进行中。"
+    case .complete: return "任务将标记为已完成。"
+    case .archive: return "任务将移入归档，之后仍可在「归档」中找回。"
+    }
+}
+
+func wandBoardSwipeTargetStatus(_ action: WandBoardSwipeAction) -> String? {
+    switch action {
+    case .start: return "doing"
+    case .complete: return "done"
+    case .archive: return nil
+    }
+}
+
+func wandBoardSwipeSystemImage(_ action: WandBoardSwipeAction) -> String {
+    switch action {
+    case .start: return "play.fill"
+    case .complete: return "checkmark"
+    case .archive: return "archivebox"
+    }
+}
+
+func wandBoardToggledStatus(_ status: String) -> String {
+    (status == "done" || status == "archived") ? "todo" : "done"
+}
+
+func wandBoardSessionRunning(_ status: String) -> Bool { status == "running" }
+
+func wandBoardSessionFinished(_ status: String) -> Bool {
+    status == "exited" || status == "idle"
+}
+
+func wandBoardCardTitle(_ task: WandBoardTask) -> String {
+    let title = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !title.isEmpty { return title }
+    let fromDescription = task.description.split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .first { !$0.isEmpty && !wandBoardIsSyncedWorkspaceLine($0) }
+    return fromDescription ?? wandUnnamedTaskName
+}
+
+func wandBoardAgentLabels(sessions: [WandBoardTaskSession], assigned: WandBoardTaskAgent?) -> String? {
+    let labels = wandBoardSessionGroups(sessions: sessions, assigned: assigned)
+        .map { wandBoardProviderLabel($0.provider) }
+    return labels.isEmpty ? nil : labels.joined(separator: " · ")
+}
+
+func wandBoardProcessingLabel(_ task: WandBoardTask) -> String? {
+    guard task.status == "doing" else { return nil }
+    let running = task.sessions.contains { wandBoardSessionRunning($0.status) }
+    let finished = !task.sessions.isEmpty && task.sessions.allSatisfy { wandBoardSessionFinished($0.status) }
+    if running { return "正在处理..." }
+    if finished { return "等待验收" }
+    if !task.sessions.isEmpty { return "暂停处理" }
+    return "等待派发"
+}
+
+func wandBoardAgentRunning(_ task: WandBoardTask) -> Bool {
+    task.sessions.contains { wandBoardSessionRunning($0.status) }
+}
+
+struct WandBoardTaskStats: Equatable {
+    var total: Int
+    var todo: Int
+    var doing: Int
+    var done: Int
+    var remaining: Int
+    var high: Int
+}
+
+func wandBoardTaskStats(_ tasks: [WandBoardTask]) -> WandBoardTaskStats {
+    var todo = 0
+    var doing = 0
+    var done = 0
+    var high = 0
+    for task in tasks {
+        switch task.status {
+        case "todo": todo += 1
+        case "doing": doing += 1
+        case "done": done += 1
+        default: break
+        }
+        if task.priority == "high" || task.priority == "urgent" {
+            high += 1
+        }
+    }
+    return WandBoardTaskStats(
+        total: tasks.count,
+        todo: todo,
+        doing: doing,
+        done: done,
+        remaining: todo + doing,
+        high: high
+    )
+}
+
+private func wandBoardIsSyncedWorkspaceLine(_ line: String) -> Bool {
+    line.hasPrefix("项目：") || line.hasPrefix("目录：") || line.hasPrefix("分支：")
 }

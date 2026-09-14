@@ -830,6 +830,19 @@ final class AlignmentParityTests: XCTestCase {
         }
     }
 
+    func testHomeListModePersistsBoardAsTaskMode() {
+        XCTAssertEqual(HomeListMode.fromStorage(nil), .sessions)
+        XCTAssertEqual(HomeListMode.fromStorage("sessions"), .sessions)
+        XCTAssertEqual(HomeListMode.fromStorage("tasks"), .sessions)
+        XCTAssertEqual(HomeListMode.fromStorage("board"), .board)
+        XCTAssertEqual(HomeListMode.sessions.label, "会话模式")
+        XCTAssertEqual(HomeListMode.board.label, "任务模式")
+        XCTAssertEqual(HomeListMode.sessions.next, .board)
+        XCTAssertEqual(HomeListMode.board.next, .sessions)
+        XCTAssertEqual(HomeListMode.board.rawValue, "board")
+        XCTAssertEqual(HomeListMode.storageKey, "wand.homeListMode")
+    }
+
     func testSessionActivityPiAndServerIDRoundTripAndLegacyDecode() throws {
         let entry = SessionActivityAttributes.SessionEntry(
             id: "pi-session",

@@ -636,19 +636,31 @@ struct ConversationTurn: Decodable {
     let role: String
     let content: [ContentBlock]
     let usage: TurnUsage?
+    let createdAt: String?
+    let completedAt: String?
 
-    private enum CodingKeys: String, CodingKey { case role, content, usage }
+    private enum CodingKeys: String, CodingKey { case role, content, usage, createdAt, completedAt }
 
-    init(role: String, content: [ContentBlock], usage: TurnUsage? = nil) {
+    init(
+        role: String,
+        content: [ContentBlock],
+        usage: TurnUsage? = nil,
+        createdAt: String? = nil,
+        completedAt: String? = nil
+    ) {
         self.role = role
         self.content = content
         self.usage = usage
+        self.createdAt = createdAt
+        self.completedAt = completedAt
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         role = (try? c.decode(String.self, forKey: .role)) ?? "assistant"
         usage = try? c.decode(TurnUsage.self, forKey: .usage)
+        createdAt = try? c.decodeIfPresent(String.self, forKey: .createdAt)
+        completedAt = try? c.decodeIfPresent(String.self, forKey: .completedAt)
         // 逐块容错：单个块解析失败不拖垮整条消息。
         var blocks: [ContentBlock] = []
         if var arr = try? c.nestedUnkeyedContainer(forKey: .content) {

@@ -321,6 +321,45 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(SessionTimeFormatting.sortTimestamp(timestamp: nil, mtimeMs: nil), 0)
     }
 
+    func testChatClockUsesTimeOnlyOnTheSameDay() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = SessionTimeFormatting.date(from: "2026-09-13T15:00:00Z")!
+        XCTAssertEqual(
+            SessionTimeFormatting.chatClock(iso: "2026-09-13T11:41:20Z", now: now, calendar: calendar),
+            "11:41:20"
+        )
+        XCTAssertEqual(
+            SessionTimeFormatting.chatClock(iso: "2026-09-12T11:41:20Z", now: now, calendar: calendar),
+            "9/12 11:41:20"
+        )
+        let turn = ConversationTurn(
+            role: "assistant",
+            content: [],
+            createdAt: "2026-09-13T11:00:00Z",
+            completedAt: "2026-09-13T11:41:20Z"
+        )
+        XCTAssertEqual(
+            SessionTimeFormatting.conversationTurnClock(turn, now: now),
+            SessionTimeFormatting.chatClock(iso: "2026-09-13T11:41:20Z", now: now)
+        )
+    }
+
+    func testEnrichConversationTimesStampsAssistantCompletion() {
+        let previous = [
+            ConversationTurn(role: "user", content: [.text(text: "hi", subagent: nil)], createdAt: "2026-09-13T11:00:00Z"),
+            ConversationTurn(role: "assistant", content: [.text(text: "ok", subagent: nil)], createdAt: "2026-09-13T11:00:01Z"),
+        ]
+        let enriched = enrichConversationTimes(
+            previous: previous,
+            incoming: previous,
+            wasResponding: true,
+            nowResponding: false,
+            now: "2026-09-13T11:41:20Z"
+        )
+        XCTAssertEqual(enriched.last?.completedAt, "2026-09-13T11:41:20Z")
+    }
+
     func testVoiceTranscriptAppendsNormalizedText() {
         XCTAssertEqual(appendingVoiceTranscript("  新内容\n", to: "已有内容  "), "已有内容 新内容")
         XCTAssertEqual(appendingVoiceTranscript("  \n", to: "已有内容"), "已有内容")

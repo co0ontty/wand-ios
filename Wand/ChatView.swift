@@ -107,6 +107,8 @@ struct ChatView: View {
     @State private var modelPicker: ModelPickerPresentation?
     @State private var composerChoice: ComposerChoicePresentation?
     @State private var visibleTurnIndex = 0
+    @State private var holdCompletedClock = ""
+    @State private var sawResponding = false
 
     init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true) {
         self.sessionId = sessionId
@@ -132,6 +134,7 @@ struct ChatView: View {
                         SubagentActivityShelf(
                             activities: subagentActivities,
                             isResponding: store.isResponding,
+                            completedClock: completedClock,
                             baseURL: store.api.baseURL,
                             askSelections: store.askUserSelections,
                             onAskToggle: { toolUseId, qIdx, optIdx, multi in
@@ -509,6 +512,15 @@ struct ChatView: View {
                     }
                 }
                 .onChange(of: store.isResponding) {
+                    if store.isResponding {
+                        sawResponding = true
+                    } else if sawResponding {
+                        let fromTurn = store.messages.last(where: { $0.role == "assistant" })
+                            .map { SessionTimeFormatting.conversationTurnClock($0) } ?? ""
+                        holdCompletedClock = fromTurn.isEmpty
+                            ? SessionTimeFormatting.chatClock(iso: SessionTimeFormatting.nowISO())
+                            : fromTurn
+                    }
                     scrollToActiveTarget(proxy)
                 }
                 .onChange(of: store.loading) { _, loading in
@@ -561,17 +573,25 @@ struct ChatView: View {
                 loadedOffset: store.loadedOffset
             )
             let collapsed = collapsedAssistantTurns.contains(absoluteTurn)
-            AssistantReplyDisclosure(
-                preview: preview,
-                collapsed: collapsed,
-                onToggle: {
-                    if collapsed {
-                        collapsedAssistantTurns.remove(absoluteTurn)
-                    } else {
-                        collapsedAssistantTurns.insert(absoluteTurn)
-                    }
+            VStack(alignment: .leading, spacing: 4) {
+                if store.messages.indices.contains(turnIndex) {
+                    ChatMessageTime(
+                        clock: SessionTimeFormatting.conversationTurnClock(store.messages[turnIndex]),
+                        alignEnd: false
+                    )
                 }
-            )
+                AssistantReplyDisclosure(
+                    preview: preview,
+                    collapsed: collapsed,
+                    onToggle: {
+                        if collapsed {
+                            collapsedAssistantTurns.remove(absoluteTurn)
+                        } else {
+                            collapsedAssistantTurns.insert(absoluteTurn)
+                        }
+                    }
+                )
+            }
         case .turn(let index, let turn):
             let turnView = TurnView(
                 turn: turn,
@@ -696,8 +716,15 @@ struct ChatView: View {
         collectSubagentActivities(messages: store.messages, isResponding: store.isResponding)
     }
 
+    private var completedClock: String {
+        if store.isResponding { return "" }
+        if !holdCompletedClock.isEmpty { return holdCompletedClock }
+        return store.messages.last(where: { $0.role == "assistant" })
+            .map { SessionTimeFormatting.conversationTurnClock($0) } ?? ""
+    }
+
     private var shouldShowSubagentShelf: Bool {
-        store.isStructured && (store.isResponding || !subagentActivities.isEmpty)
+        store.isStructured && (store.isResponding || !subagentActivities.isEmpty || !completedClock.isEmpty)
     }
 
     private var groupedMessageItems: [MessageDisplayItem] {
@@ -2540,6 +2567,10 @@ private struct TurnView: View {
         let canCompact = compactUser && shouldCompactUserBody(parsed.body)
         let collapsed = canCompact && !userExpanded
         return VStack(alignment: .trailing, spacing: 6) {
+            ChatMessageTime(
+                clock: SessionTimeFormatting.conversationTurnClock(turn),
+                alignEnd: true
+            )
             if !parsed.attachmentPaths.isEmpty {
                 attachmentsView(parsed.attachmentPaths)
             }
@@ -2916,9 +2947,26 @@ private func activityIconName(_ items: [DisplayItem]) -> String {
     return "wrench.and.screwdriver"
 }
 
+private struct ChatMessageTime: View {
+    let clock: String
+    var alignEnd = false
+
+    var body: some View {
+        if !clock.isEmpty {
+            Text(clock)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundColor(Theme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: alignEnd ? .trailing : .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+        }
+    }
+}
+
 private struct SubagentActivityShelf: View {
     let activities: [SubagentActivity]
     let isResponding: Bool
+    var completedClock: String = ""
     var baseURL: URL? = nil
     var askSelections: [String: AskUserSelectionState] = [:]
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
@@ -2938,8 +2986,13 @@ private struct SubagentActivityShelf: View {
     }
 
     private var summary: String {
-        if activities.isEmpty { return isResponding ? "正在协调子任务" : "暂无子任务" }
-        if runningCount > 0 { return "\(runningCount) 个正在运行" }
+        if isResponding {
+            if activities.isEmpty { return "正在协调子任务" }
+            if runningCount > 0 { return "\(runningCount) 个正在运行" }
+            return "\(activities.count) 个子任务已完成"
+        }
+        if !completedClock.isEmpty { return "完成 \(completedClock)" }
+        if activities.isEmpty { return "暂无子任务" }
         return "\(activities.count) 个子任务已完成"
     }
 

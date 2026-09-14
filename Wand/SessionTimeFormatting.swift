@@ -29,6 +29,28 @@ enum SessionTimeFormatting {
         return relativeFormatter.localizedString(for: timestamp, relativeTo: referenceDate)
     }
 
+    /// 聊天消息时间：当天只显示时分秒，跨天才带月/日。对齐 Android formatChatClock。
+    static func chatClock(iso: String?, now: Date = Date(), calendar: Calendar = .current) -> String {
+        guard let date = date(from: iso) else { return "" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "HH:mm:ss"
+        let clock = formatter.string(from: date)
+        if calendar.isDate(date, inSameDayAs: now) { return clock }
+        let month = calendar.component(.month, from: date)
+        let day = calendar.component(.day, from: date)
+        return "\(month)/\(day) \(clock)"
+    }
+
+    static func conversationTurnClock(_ turn: ConversationTurn, now: Date = Date()) -> String {
+        chatClock(iso: turn.completedAt ?? turn.createdAt, now: now)
+    }
+
+    static func nowISO(_ date: Date = Date()) -> String {
+        fractionalFormatter.string(from: date)
+    }
+
     static func duration(startedAt: String?, endedAt: String?, now: Date = Date()) -> String {
         guard let started = date(from: startedAt) else { return "" }
         let ended = date(from: endedAt) ?? now

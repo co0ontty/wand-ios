@@ -231,18 +231,29 @@ final class ChatStore: ObservableObject {
     ///     前缀拼回去，再接上快照尾部。
     private func applyWindowedMessages(
         _ incoming: [ConversationTurn]?, offset: Int?, total: Int?,
-        leadingOffset: Int? = nil, leadingTotal: Int? = nil
+        leadingOffset: Int? = nil, leadingTotal: Int? = nil,
+        nowResponding: Bool? = nil
     ) {
-        applyMessageWindow(
-            mergingWindowedMessages(
-                current: messageWindow,
-                incoming: incoming,
-                offset: offset,
-                total: total,
-                leadingOffset: leadingOffset,
-                leadingTotal: leadingTotal
-            )
+        let previous = messages
+        let wasResponding = isResponding
+        let responding = nowResponding ?? isResponding
+        var window = mergingWindowedMessages(
+            current: messageWindow,
+            incoming: incoming,
+            offset: offset,
+            total: total,
+            leadingOffset: leadingOffset,
+            leadingTotal: leadingTotal,
+            wasResponding: wasResponding,
+            nowResponding: responding
         )
+        window.messages = enrichConversationTimes(
+            previous: previous,
+            incoming: window.messages,
+            wasResponding: wasResponding,
+            nowResponding: responding
+        )
+        applyMessageWindow(window)
     }
 
     private var messageWindow: SessionMessageWindow {
@@ -266,8 +277,14 @@ final class ChatStore: ObservableObject {
     private func apply(snapshot snap: SessionSnapshot) {
         let previousError = snapshot?.structuredState?.lastError
         self.snapshot = snap
-        applyWindowedMessages(snap.messages, offset: snap.messageOffset, total: snap.messageTotal,
-                              leadingOffset: snap.leadingBlockOffset, leadingTotal: snap.leadingBlockTotal)
+        applyWindowedMessages(
+            snap.messages,
+            offset: snap.messageOffset,
+            total: snap.messageTotal,
+            leadingOffset: snap.leadingBlockOffset,
+            leadingTotal: snap.leadingBlockTotal,
+            nowResponding: snap.isResponding
+        )
         status = snap.status ?? status
         isResponding = snap.isResponding
         queuedMessages = snap.queuedMessages ?? []
@@ -406,8 +423,14 @@ final class ChatStore: ObservableObject {
         let incremental = data.incremental ?? false
         if let msgs = data.messages {
             // 全量赢（窗口合并：空不覆盖非空、保留已加载的更早前缀）。
-            applyWindowedMessages(msgs, offset: data.messageOffset, total: data.messageTotal,
-                                  leadingOffset: data.leadingBlockOffset, leadingTotal: data.leadingBlockTotal)
+            applyWindowedMessages(
+                msgs,
+                offset: data.messageOffset,
+                total: data.messageTotal,
+                leadingOffset: data.leadingBlockOffset,
+                leadingTotal: data.leadingBlockTotal,
+                nowResponding: data.isResponding ?? isResponding
+            )
         } else if incremental, let incoming = data.lastMessage {
             applyMessageWindow(
                 applyingIncrementalMessage(
@@ -498,7 +521,11 @@ final class ChatStore: ObservableObject {
                 queuedMessages.append(trimmed)
                 toast = "已加入排队，等当前回复完成会自动发送。"
             } else {
-                messages.append(ConversationTurn(role: "user", content: [.text(text: trimmed, subagent: nil)]))
+                messages.append(ConversationTurn(
+                    role: "user",
+                    content: [.text(text: trimmed, subagent: nil)],
+                    createdAt: SessionTimeFormatting.nowISO()
+                ))
                 isResponding = true
             }
             publishPresence()
@@ -1066,7 +1093,13 @@ final class ChatStore: ObservableObject {
                 // 仅当起点没被其它更新改动、且 messages[0] 仍是同一条 turn 时才 prepend，避免错位。
                 if loadedOffset == turnIndex, leadingBlockOffset == currentBlockOffset,
                    let head = messages.first, head.role == leadingRole, !page.blocks.isEmpty {
-                    messages[0] = ConversationTurn(role: head.role, content: page.blocks + head.content)
+                    messages[0] = ConversationTurn(
+                        role: head.role,
+                        content: page.blocks + head.content,
+                        usage: head.usage,
+                        createdAt: head.createdAt,
+                        completedAt: head.completedAt
+                    )
                     leadingBlockOffset = page.blockOffset
                     leadingBlockTotal = max(leadingBlockTotal, page.blockTotal)
                 }

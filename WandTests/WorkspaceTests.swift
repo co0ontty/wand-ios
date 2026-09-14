@@ -150,11 +150,11 @@ final class WorkspaceTests: XCTestCase {
 
         XCTAssertEqual(
             TaskListPresentation.orderedDirectoryGroups([older, newer, running]).map(\.id),
-            ["newer", "running", "older"]
+            ["older", "newer", "running"]
         )
         XCTAssertEqual(
             TaskListPresentation.orderedTaskSummaries(older.tasks + newer.tasks).map(\.id),
-            ["newer-task", "older-task"]
+            ["older-task", "newer-task"]
         )
         let metrics = TaskListPresentation.metrics(for: [older, newer, running])
         XCTAssertEqual(metrics.directoryCount, 3)

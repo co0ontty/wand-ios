@@ -47,6 +47,8 @@ struct WorkspaceListView: View {
     var serverDisplayName: String? = nil
     let selectedTaskId: String?
     var selectedSessionId: String? = nil
+    var hidesHomeChrome: Bool = false
+    @Binding var isSelecting: Bool
     let onOpenTask: (Workspace, WorkspaceTask) -> Void
     var onTaskRenamed: ((WorkspaceTask) -> Void)? = nil
     var onTaskDeleted: ((String) -> Void)? = nil
@@ -72,7 +74,6 @@ struct WorkspaceListView: View {
     @State private var collapsedTaskGroups = TaskListExpansionStorage.collapsedIds(kind: "groups")
     @State private var collapsedTaskIds = TaskListExpansionStorage.collapsedIds(kind: "tasks")
     @State private var collapsedLooseGroups = TaskListExpansionStorage.collapsedIds(kind: "loose")
-    @State private var isSelecting = false
     @State private var selectedTaskIds = Set<String>()
     @State private var selectedSessionIds = Set<String>()
 
@@ -90,53 +91,46 @@ struct WorkspaceListView: View {
             .background(WandAmbientBackground())
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(hidesHomeChrome ? .hidden : .automatic, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    if isSelecting {
-                        Button("完成") {
-                            isSelecting = false
-                            selectedTaskIds.removeAll()
-                            selectedSessionIds.removeAll()
-                        }
-                    }
-                }
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    if isSelecting {
-                        Button("删除", role: .destructive) {
-                            let selection = TaskListPresentation.ManageSelection(
-                                taskIds: selectedTaskIds,
-                                sessionIds: selectedSessionIds
-                            )
-                            let resolved = TaskListPresentation.resolveManagedDeletion(
-                                selection,
-                                groups: store.taskGroups
-                            )
-                            if !resolved.isEmpty {
-                                presentConfirm(.deleteManaged(resolved))
+                if !hidesHomeChrome {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        if isSelecting {
+                            Button("完成") {
+                                isSelecting = false
+                                selectedTaskIds.removeAll()
+                                selectedSessionIds.removeAll()
                             }
                         }
-                        .disabled(selectedTaskIds.isEmpty && selectedSessionIds.isEmpty)
-                    } else {
-                        Button {
-                            isSelecting = true
-                            selectedTaskIds.removeAll()
-                            selectedSessionIds.removeAll()
-                        } label: {
-                            Image(systemName: "checkmark.circle")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(Theme.brand)
+                    }
+                    ToolbarItemGroup(placement: .navigationBarTrailing) {
+                        if isSelecting {
+                            Button("删除", role: .destructive) {
+                                requestDeleteManagedSelection()
+                            }
+                            .disabled(selectedTaskIds.isEmpty && selectedSessionIds.isEmpty)
+                        } else {
+                            Button {
+                                isSelecting = true
+                                selectedTaskIds.removeAll()
+                                selectedSessionIds.removeAll()
+                            } label: {
+                                Image(systemName: "checkmark.circle")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(Theme.brand)
+                            }
+                            .accessibilityLabel("多选任务和终端")
+                            Button {
+                                newTaskSheetCwd = ""
+                                newTaskSheetWorkspaceId = nil
+                                newTaskSheetPresented = true
+                            } label: {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 20))
+                                    .foregroundColor(Theme.brand)
+                            }
+                            .accessibilityLabel("新建任务")
                         }
-                        .accessibilityLabel("多选任务和终端")
-                        Button {
-                            newTaskSheetCwd = ""
-                            newTaskSheetWorkspaceId = nil
-                            newTaskSheetPresented = true
-                        } label: {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 20))
-                                .foregroundColor(Theme.brand)
-                        }
-                        .accessibilityLabel("新建任务")
                     }
                 }
             }
@@ -176,6 +170,12 @@ struct WorkspaceListView: View {
                 newTaskSheetWorkspaceId = nil
                 newTaskSheetPresented = true
                 requestNewTask.wrappedValue = false
+            }
+            .onChange(of: isSelecting) { _, selecting in
+                if !selecting {
+                    selectedTaskIds.removeAll()
+                    selectedSessionIds.removeAll()
+                }
             }
             .alert("重命名任务", isPresented: renameTaskPresented) {
                 renameTaskAlertContent
@@ -499,7 +499,9 @@ struct WorkspaceListView: View {
             }
             let visible = TaskListPresentation.orderedDirectoryGroups(store.taskGroups)
             let metrics = TaskListPresentation.metrics(for: visible)
-            homeOverviewCard(metrics: metrics)
+            if hidesHomeChrome && isSelecting {
+                homeManageBar(visible: visible)
+            }
             if visible.isEmpty && store.taskGroupsError == nil && !store.taskGroupsLoading {
                 VStack(spacing: 12) {
                     Image(systemName: "arrow.triangle.branch")
@@ -527,20 +529,6 @@ struct WorkspaceListView: View {
                 .padding(.vertical, 28)
                 .listRowSeparator(.hidden)
             }
-            if !visible.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("任务与工作窗口")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                    Text(TaskListPresentation.homeTaskSummaryLabel(metrics))
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textMuted)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 6)
-                .listRowBackground(Theme.background)
-                .listRowSeparator(.hidden)
-            }
             ForEach(visible) { group in
                 taskGroupSection(group, directoryCount: metrics.directoryCount)
             }
@@ -552,74 +540,59 @@ struct WorkspaceListView: View {
         }
     }
 
-    private func homeOverviewCard(metrics: TaskListPresentation.TaskListMetrics) -> some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack(spacing: 11) {
-                WandBrandMark(size: 36)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text("工作台")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundColor(Theme.textPrimary)
-                        Circle()
-                            .fill(Theme.success)
-                            .frame(width: 7, height: 7)
-                        Text("已连接")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(Theme.success)
-                    }
-                    Text(serverDisplayName ?? "当前服务器")
-                        .font(.system(size: 12))
-                        .foregroundColor(Theme.textMuted)
-                        .lineLimit(1)
+    private func homeManageBar(visible: [TaskDirectoryGroup]) -> some View {
+        let all = TaskListPresentation.collectManagedIds(visible)
+        let selectedCount = selectedTaskIds.count + selectedSessionIds.count
+        let allOn = selectedCount > 0
+            && selectedTaskIds.count == all.taskIds.count
+            && selectedSessionIds.count == all.sessionIds.count
+        return HStack(spacing: 10) {
+            Button(allOn ? "取消全选" : "全选") {
+                if allOn {
+                    selectedTaskIds.removeAll()
+                    selectedSessionIds.removeAll()
+                } else {
+                    selectedTaskIds = all.taskIds
+                    selectedSessionIds = all.sessionIds
                 }
-                Spacer(minLength: 0)
             }
-            Button {
-                newTaskSheetCwd = ""
-                newTaskSheetWorkspaceId = nil
-                newTaskSheetPresented = true
-            } label: {
-                Label("新建任务", systemImage: "plus")
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(maxWidth: .infinity)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundColor(Theme.brand)
+            Text(selectedCount == 0 ? "选择任务或终端" : "已选 \(selectedCount)")
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textMuted)
+            Spacer(minLength: 8)
+            Button("删除", role: .destructive) {
+                requestDeleteManagedSelection()
             }
-            .buttonStyle(WandPrimaryButtonStyle())
-            HStack(spacing: 8) {
-                homeMetric("目录", value: metrics.directoryCount)
-                homeMetric("任务", value: metrics.taskCount)
-                homeMetric("窗口", value: metrics.sessionCount)
+            .font(.system(size: 13, weight: .semibold))
+            .disabled(selectedCount == 0)
+            Button("完成") {
+                isSelecting = false
+                selectedTaskIds.removeAll()
+                selectedSessionIds.removeAll()
             }
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundColor(Theme.textPrimary)
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Theme.surface.opacity(0.88))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Theme.border.opacity(0.55), lineWidth: 1)
-        )
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 4)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 6)
         .listRowBackground(Theme.background)
         .listRowSeparator(.hidden)
     }
 
-    private func homeMetric(_ label: String, value: Int) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("\(value)")
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
-                .foregroundColor(Theme.textPrimary)
-            Text(label)
-                .font(.system(size: 11))
-                .foregroundColor(Theme.textMuted)
+    private func requestDeleteManagedSelection() {
+        let selection = TaskListPresentation.ManageSelection(
+            taskIds: selectedTaskIds,
+            sessionIds: selectedSessionIds
+        )
+        let resolved = TaskListPresentation.resolveManagedDeletion(
+            selection,
+            groups: store.taskGroups
+        )
+        if !resolved.isEmpty {
+            presentConfirm(.deleteManaged(resolved))
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Theme.surface.opacity(0.65)))
     }
 
     @ViewBuilder
@@ -679,40 +652,24 @@ struct WorkspaceListView: View {
     }
 
     private func taskGroupHeader(_ group: TaskDirectoryGroup, expanded: Bool, collapsible: Bool) -> some View {
-        let sessionTotal = group.tasks.reduce(0) { $0 + $1.listedSessionCount } + group.standaloneSessions.count
-        return HStack(alignment: .center, spacing: 10) {
-            HStack(alignment: .center, spacing: 10) {
-                Image(systemName: group.isSynthetic ? "folder.badge.questionmark" : "folder.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(Theme.brand)
-                    .frame(width: 32, height: 32)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Theme.brand.opacity(0.10))
-                    )
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(group.workspaceName)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(Theme.textPrimary)
-                            .lineLimit(1)
-                        if TaskListPresentation.hasLiveActivity(group) {
-                            Circle()
-                                .fill(Theme.success)
-                                .frame(width: 7, height: 7)
-                        }
-                        if group.isSynthetic {
-                            Text("未归档目录")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(Theme.textMuted)
-                        }
-                    }
-                    if let caption = TaskListPresentation.directoryPathCaption(name: group.workspaceName, cwd: group.workspaceCwd) {
-                        Text(caption)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(Theme.textMuted)
-                            .lineLimit(1)
-                    }
+        HStack(alignment: .center, spacing: 9) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(Theme.brand)
+                .frame(width: 30, height: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Theme.brandSoft)
+                )
+            HStack(spacing: 7) {
+                Text(group.workspaceName.isEmpty ? "任务目录" : group.workspaceName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                if TaskListPresentation.hasLiveActivity(group) {
+                    Circle()
+                        .fill(Theme.success)
+                        .frame(width: 7, height: 7)
                 }
             }
             .contentShape(Rectangle())
@@ -730,13 +687,9 @@ struct WorkspaceListView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(expanded ? "收起目录" : "展开目录")
             }
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("\(group.tasks.count) 任务")
-                Text("\(sessionTotal) 会话")
+            if group.tasks.contains(where: { $0.worktree != nil }) {
+                worktreeBadge(workspace(from: group))
             }
-            .font(.system(size: 10))
-            .foregroundColor(Theme.textMuted)
-            .fixedSize(horizontal: true, vertical: true)
             Button {
                 newTaskSheetCwd = group.workspaceCwd
                 newTaskSheetWorkspaceId = group.isBindableProject ? group.workspaceId : nil
@@ -746,19 +699,15 @@ struct WorkspaceListView: View {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundColor(Theme.brand)
                     .frame(width: 26, height: 26)
-                    .background(Circle().fill(Theme.brand.opacity(0.10)))
+                    .background(Circle().fill(Theme.brandSoft))
             }
             .buttonStyle(.plain)
             .disabled(isSelecting)
             .opacity(isSelecting ? 0.35 : 1)
             .accessibilityLabel("在 \(group.workspaceName) 新建任务")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Theme.surface.opacity(0.55))
-        )
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("目录 \(group.workspaceName)，\(group.tasks.count) 个任务")
     }
@@ -853,23 +802,18 @@ struct WorkspaceListView: View {
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundColor(selectedTaskIds.contains(summary.id) ? Theme.brand : Theme.textMuted)
                         .frame(width: 22, height: 22)
-                } else if summary.isIsolated || summary.status == "done" {
-                    Image(systemName: summary.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
+                } else if summary.isIsolated {
+                    Image(systemName: "arrow.triangle.branch")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(summary.status == "done" ? Theme.success : Theme.textMuted)
-                        .frame(width: 18, height: 18)
+                        .foregroundColor(Theme.success)
+                        .frame(width: 14, height: 18)
                 }
                 Text(summary.name)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 15, weight: selected || isSelecting && selectedTaskIds.contains(summary.id) ? .semibold : .medium))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 4)
-                if selected && !isSelecting {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(Theme.brand)
-                }
             }
             .contentShape(Rectangle())
             .onTapGesture {
@@ -885,10 +829,12 @@ struct WorkspaceListView: View {
                 onOpenTask(workspace, task)
             }
 
-            Text(summary.status == "done" ? "已完成" : "进行中")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(summary.status == "done" ? Theme.textMuted : Theme.success)
-                .padding(.trailing, 4)
+            if summary.status == "done" {
+                Text("已完成")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.textMuted)
+                    .padding(.trailing, 4)
+            }
 
             if canCollapseSessions {
                 Button {
@@ -922,6 +868,11 @@ struct WorkspaceListView: View {
             .accessibilityLabel("在任务 \(summary.name) 中新建终端")
         }
         .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill((isSelecting ? selectedTaskIds.contains(summary.id) : selected) ? Theme.brandSoft : Color.clear)
+        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("任务 \(summary.name)")
         .accessibilityAddTraits(.isButton)

@@ -100,6 +100,9 @@ enum Theme {
     static let textSecondary = dynamic(light: rgb(0.384, 0.353, 0.325), dark: rgb(0.780, 0.745, 0.706)) // #625A53 / #C7BEB4
     static let textMuted = dynamic(light: rgb(0.545, 0.510, 0.475), dark: rgb(0.584, 0.545, 0.506)) // #8B8279 / #958B81
     static let success = dynamic(light: rgb(0.310, 0.478, 0.345), dark: rgb(0.545, 0.729, 0.580)) // #4F7A58 / #8BBA94
+    static let brandSoft = brand.opacity(0.14)
+    static let successSoft = success.opacity(0.14)
+    static let surfaceSoft = dynamic(light: rgb(0.914, 0.867, 0.749), dark: rgb(0.165, 0.149, 0.129)) // #E9DDBF / #2A2621
     static let warning = dynamic(light: rgb(0.663, 0.416, 0.184), dark: rgb(0.851, 0.631, 0.361)) // #A96A2F / #D9A15C
     static let danger = dynamic(light: rgb(0.698, 0.310, 0.271), dark: rgb(0.878, 0.486, 0.447)) // #B24F45 / #E07C72
     static let permission = dynamic(light: rgb(0.761, 0.541, 0.125), dark: rgb(0.902, 0.718, 0.353)) // #C28A20 / #E6B75A

@@ -628,35 +628,11 @@ enum TaskListPresentation {
     }
 
     static func orderedDirectoryGroups(_ groups: [TaskDirectoryGroup]) -> [TaskDirectoryGroup] {
-        groups
-            .filter { !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
-            .enumerated()
-            .sorted { lhs, rhs in
-                let leftCreated = directoryCreatedAt(lhs.element)
-                let rightCreated = directoryCreatedAt(rhs.element)
-                if leftCreated != rightCreated { return compareTimestamps(leftCreated, rightCreated) }
-                return lhs.offset < rhs.offset
-            }
-            .map(\.element)
+        groups.filter { !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
     }
 
     static func orderedTaskSummaries(_ tasks: [WorkspaceTaskSummary]) -> [WorkspaceTaskSummary] {
         tasks
-            .enumerated()
-            .sorted { lhs, rhs in
-                if lhs.element.createdAt != rhs.element.createdAt {
-                    return compareTimestamps(lhs.element.createdAt, rhs.element.createdAt)
-                }
-                return lhs.offset < rhs.offset
-            }
-            .map(\.element)
-    }
-
-    static func directoryCreatedAt(_ group: TaskDirectoryGroup) -> String? {
-        if let createdAt = group.createdAt, !createdAt.isEmpty { return createdAt }
-        let taskTimes = group.tasks.map(\.createdAt).filter { !$0.isEmpty }
-        let sessionTimes = group.standaloneSessions.compactMap(\.startedAt).filter { !$0.isEmpty }
-        return (taskTimes + sessionTimes).min()
     }
 
     static func hasLiveActivity(_ group: TaskDirectoryGroup) -> Bool {
@@ -666,15 +642,6 @@ enum TaskListPresentation {
 
     static func hasLiveActivity(_ session: WorkspaceSessionSummary) -> Bool {
         session.inFlight == true || ["running", "thinking", "permission", "waiting-input", "reconnecting"].contains(session.activityStatus)
-    }
-
-    private static func compareTimestamps(_ lhs: String?, _ rhs: String?) -> Bool {
-        switch (lhs?.isEmpty == false, rhs?.isEmpty == false) {
-        case (false, false): return false
-        case (false, true): return false
-        case (true, false): return true
-        case (true, true): return lhs! > rhs!
-        }
     }
 
     /// 任务行左滑只保留破坏性操作。新建终端已经在行尾「＋」，再塞进滑动区会挤成一排点不到。

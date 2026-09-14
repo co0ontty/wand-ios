@@ -865,12 +865,20 @@ final class WandAPI {
         )
     }
 
-    func dispatchBoardTask(id: String, agent: WandBoardTaskAgent) async throws -> WandBoardDispatchResult {
-        try await request(
+    func dispatchBoardTask(
+        id: String,
+        agent: WandBoardTaskAgent,
+        prompt: String? = nil
+    ) async throws -> WandBoardDispatchResult {
+        var body: [String: Any] = ["agent": agent.jsonObject()]
+        if let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            body["prompt"] = prompt
+        }
+        return try await request(
             WandBoardDispatchResult.self,
             method: "POST",
             path: "/api/wand-tasks/\(percentEncodePathComponent(id))/dispatch",
-            body: ["agent": agent.jsonObject()]
+            body: body
         )
     }
 

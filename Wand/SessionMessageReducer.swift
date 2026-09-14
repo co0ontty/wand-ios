@@ -44,11 +44,15 @@ private func mergeOverlappingTurns(
     local: ConversationTurn,
     incoming: ConversationTurn
 ) -> ConversationTurn {
-    guard shouldKeepLocalTurn(local, over: incoming) else { return incoming }
+    guard shouldKeepLocalTurn(local, over: incoming) else {
+        return mergeConversationTurnTimes(previous: local, incoming: incoming)
+    }
     return ConversationTurn(
         role: local.role,
         content: local.content,
-        usage: incoming.usage ?? local.usage
+        usage: incoming.usage ?? local.usage,
+        createdAt: incoming.createdAt ?? local.createdAt,
+        completedAt: incoming.completedAt ?? local.completedAt
     )
 }
 
@@ -103,11 +107,83 @@ private func mergeLeadingAssistantTurn(
         turn: ConversationTurn(
             role: local.role,
             content: blocks,
-            usage: incoming.usage ?? local.usage
+            usage: incoming.usage ?? local.usage,
+            createdAt: incoming.createdAt ?? local.createdAt,
+            completedAt: incoming.completedAt ?? local.completedAt
         ),
         blockOffset: mergedStart,
         blockTotal: max(localTotal, incomingTotal, mergedEnd)
     )
+}
+
+func mergeConversationTurnTimes(
+    previous: ConversationTurn?,
+    incoming: ConversationTurn
+) -> ConversationTurn {
+    let createdAt = incoming.createdAt ?? previous?.createdAt
+    let completedAt = incoming.completedAt ?? previous?.completedAt
+    if createdAt == incoming.createdAt && completedAt == incoming.completedAt { return incoming }
+    return ConversationTurn(
+        role: incoming.role,
+        content: incoming.content,
+        usage: incoming.usage,
+        createdAt: createdAt,
+        completedAt: completedAt
+    )
+}
+
+func stampLiveTurnTime(_ turn: ConversationTurn, now: String = SessionTimeFormatting.nowISO()) -> ConversationTurn {
+    if let createdAt = turn.createdAt, !createdAt.isEmpty { return turn }
+    return ConversationTurn(
+        role: turn.role,
+        content: turn.content,
+        usage: turn.usage,
+        createdAt: now,
+        completedAt: turn.completedAt
+    )
+}
+
+func enrichConversationTimes(
+    previous: [ConversationTurn],
+    incoming: [ConversationTurn],
+    wasResponding: Bool,
+    nowResponding: Bool,
+    now: String = SessionTimeFormatting.nowISO()
+) -> [ConversationTurn] {
+    guard !incoming.isEmpty else { return incoming }
+    let lastIncoming = incoming.last!
+    let lastPrevious = previous.last
+    let appendedUser = lastIncoming.role == "user" && !previous.isEmpty && (
+        incoming.count > previous.count || lastPrevious?.role != "user"
+    )
+    var changed = false
+    let out = incoming.enumerated().map { index, turn in
+        let prev = previous.indices.contains(index) ? previous[index] : nil
+        var createdAt = (turn.createdAt?.isEmpty == false ? turn.createdAt : nil) ?? prev?.createdAt
+        var completedAt = (turn.completedAt?.isEmpty == false ? turn.completedAt : nil) ?? prev?.completedAt
+        let isLast = index == incoming.count - 1
+        if (createdAt == nil || createdAt?.isEmpty == true) && isLast {
+            if nowResponding || (turn.role == "user" && appendedUser) {
+                createdAt = now
+            }
+        }
+        if isLast && turn.role == "assistant" && wasResponding && !nowResponding {
+            if completedAt == nil || completedAt?.isEmpty == true { completedAt = now }
+            if createdAt == nil || createdAt?.isEmpty == true { createdAt = now }
+        }
+        if createdAt == turn.createdAt && completedAt == turn.completedAt {
+            return turn
+        }
+        changed = true
+        return ConversationTurn(
+            role: turn.role,
+            content: turn.content,
+            usage: turn.usage,
+            createdAt: createdAt,
+            completedAt: completedAt
+        )
+    }
+    return changed ? out : incoming
 }
 
 func mergingWindowedMessages(
@@ -116,7 +192,9 @@ func mergingWindowedMessages(
     offset: Int?,
     total: Int?,
     leadingOffset: Int? = nil,
-    leadingTotal: Int? = nil
+    leadingTotal: Int? = nil,
+    wasResponding: Bool = false,
+    nowResponding: Bool = false
 ) -> SessionMessageWindow {
     guard let incoming else { return current }
 
@@ -231,18 +309,19 @@ func applyingIncrementalMessage(
     to current: SessionMessageWindow
 ) -> SessionMessageWindow {
     var result = current
-    if let last = result.messages.last, last.role == incoming.role {
-        let keepLocal = shouldKeepLocalTurn(last, over: incoming)
+    let stamped = stampLiveTurnTime(incoming)
+    if let last = result.messages.last, last.role == stamped.role {
+        let keepLocal = shouldKeepLocalTurn(last, over: stamped)
         result.messages[result.messages.count - 1] = mergeOverlappingTurns(
             local: last,
-            incoming: incoming
+            incoming: stamped
         )
         if result.messages.count == 1, !keepLocal {
             result.leadingBlockOffset = 0
-            result.leadingBlockTotal = incoming.content.count
+            result.leadingBlockTotal = stamped.content.count
         }
     } else if result.loadedOffset + result.messages.count < expectedCount || expectedCount == 0 {
-        result.messages.append(incoming)
+        result.messages.append(stamped)
     }
     result.messageTotal = max(
         result.messageTotal,
