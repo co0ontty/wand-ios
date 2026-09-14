@@ -204,6 +204,32 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    /// 首屏快照加载失败后的显式重试；不重建 socket，也不清掉已收到的实时增量。
+    func retryInitialLoad() {
+        guard !initialLoadInProgress else { return }
+        loadError = nil
+        if messages.isEmpty { loading = true }
+        initialLoadInProgress = true
+        let revision = realtimeRevision
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let snap = try await api.getSession(id: sessionId)
+                guard realtimeRevision == revision, !Task.isCancelled else { return }
+                apply(snapshot: snap)
+                loadError = nil
+                await loadModels()
+                await loadCardDefaults()
+            } catch {
+                if snapshot == nil, realtimeRevision == revision, !Task.isCancelled {
+                    loadError = error.localizedDescription
+                }
+            }
+            loading = false
+            initialLoadInProgress = false
+        }
+    }
+
     /// 回前台健康检查：先判断再行动，避免无谓重连。
     /// connect() 每次会 generation += 1 新建 task，幂等但有握手成本，所以用 connected 守卫；
     /// 无论是否重连都拉一份最新快照（requestResync 未订阅时自身 no-op），消除后台期间可能的过期状态。
@@ -499,7 +525,11 @@ final class ChatStore: ObservableObject {
 
     /// 发送一条消息。PTY 会话走 chat 视图语义：文本和 Enter 分两次发，
     /// 对齐 Web 端 getTerminalSubmitChunks，避免回车被并入粘贴内容。
-    func send(text: String, forcePtyChat: Bool = false) {
+    func send(
+        text: String,
+        forcePtyChat: Bool = false,
+        onFailure: (() -> Void)? = nil
+    ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let structured = forcePtyChat ? false : isStructured
@@ -561,6 +591,7 @@ final class ChatStore: ObservableObject {
                 } else if structured {
                     socket.requestResync()
                 }
+                onFailure?()
             }
             if queueing { queueMutationPending = false }
         }

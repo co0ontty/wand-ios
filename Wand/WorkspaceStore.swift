@@ -184,17 +184,40 @@ final class WorkspaceStore: ObservableObject {
 
             workspaces = projects
             if let defaultProvider { serverDefaultProvider = defaultProvider }
+            // 项目数可能很多；任务列表没有相互依赖，并行拉取后按原顺序合并，
+            // 避免首页在慢网络/多项目时被串行请求放大成显著的白屏等待。
+            let taskResults: [String: Result<[WorkspaceTask], Error>] = await withTaskGroup(
+                of: (String, Result<[WorkspaceTask], Error>).self
+            ) { group in
+                for workspace in projects {
+                    group.addTask {
+                        do {
+                            return (workspace.id, .success(try await self.api.listWorkspaceTasks(
+                                workspaceId: workspace.id
+                            )))
+                        } catch {
+                            return (workspace.id, .failure(error))
+                        }
+                    }
+                }
+                var results: [String: Result<[WorkspaceTask], Error>] = [:]
+                for await result in group { results[result.0] = result.1 }
+                return results
+            }
+            guard generation == indexGeneration, !Task.isCancelled else { return }
+
             var loadedTasks: [String: [WorkspaceTask]] = [:]
             var errors: [String: String] = [:]
             for workspace in projects {
-                guard generation == indexGeneration, !Task.isCancelled else { return }
-                do {
-                    loadedTasks[workspace.id] = try await api.listWorkspaceTasks(
-                        workspaceId: workspace.id
-                    )
-                } catch {
+                switch taskResults[workspace.id] {
+                case .success(let tasks):
+                    loadedTasks[workspace.id] = tasks
+                case .failure(let error):
                     loadedTasks[workspace.id] = tasksByWorkspace[workspace.id] ?? []
                     errors[workspace.id] = error.localizedDescription
+                case .none:
+                    loadedTasks[workspace.id] = tasksByWorkspace[workspace.id] ?? []
+                    errors[workspace.id] = "任务列表未返回"
                 }
             }
             guard generation == indexGeneration, !Task.isCancelled else { return }

@@ -386,7 +386,8 @@ struct ConnectView: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(Theme.textSecondary)
-                        .padding(8)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .disabled(isConnecting)
                 .accessibilityLabel("移除服务器 \(profile.displayName)")

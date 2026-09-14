@@ -363,10 +363,13 @@ struct ChatView: View {
             ProgressView().tint(Theme.brand)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let error = store.loadError {
-            VStack(spacing: 12) {
+            VStack(spacing: 14) {
                 Text("加载失败").font(.headline).foregroundColor(Theme.textPrimary)
                 Text(error).font(.footnote).foregroundColor(Theme.textSecondary)
                     .multilineTextAlignment(.center)
+                Button("重试") { store.retryInitialLoad() }
+                    .buttonStyle(WandSecondaryButtonStyle())
+                    .accessibilityLabel("重新加载会话")
             }
             .padding(32)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1521,10 +1524,18 @@ struct ChatView: View {
     private func sendDraft() {
         guard canSend else { return }
         let text = buildAttachmentPrompt(attachments.attachments, body: draft)
+        let savedDraft = draft
+        let savedAttachments = attachments.attachments
         draft = ""
         attachments.attachments.removeAll()
         scrollMode = .stickToBottom
-        store.send(text: text)
+        store.send(text: text) {
+            // 发送失败时把草稿还回来，避免网络抖动直接吞掉用户输入。
+            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                draft = savedDraft
+            }
+            attachments.attachments = savedAttachments
+        }
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让输入框丢焦点。
         // 发送后主动保持焦点，方便连续输入。
         inputFocused = true

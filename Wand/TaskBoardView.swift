@@ -59,7 +59,8 @@ struct TaskBoardView: View {
                 workspaces: workspaces,
                 catalog: catalog,
                 lastAgent: lastAgent,
-                defaultWorkspaceId: filterWorkspaceId
+                defaultWorkspaceId: filterWorkspaceId,
+                busy: busy
             ) { title, description, status, priority, workspaceId, agent in
                 await mutate {
                     let created = try await api.createBoardTask(
@@ -1019,6 +1020,7 @@ private struct TaskBoardCreateView: View {
     let catalog: ModelsResponse?
     let lastAgent: WandBoardTaskAgent
     let defaultWorkspaceId: String
+    var busy = false
     let onCreate: (String, String, String, String, String?, WandBoardTaskAgent) async -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -1034,12 +1036,14 @@ private struct TaskBoardCreateView: View {
         catalog: ModelsResponse?,
         lastAgent: WandBoardTaskAgent,
         defaultWorkspaceId: String,
+        busy: Bool = false,
         onCreate: @escaping (String, String, String, String, String?, WandBoardTaskAgent) async -> Void
     ) {
         self.workspaces = workspaces
         self.catalog = catalog
         self.lastAgent = lastAgent
         self.defaultWorkspaceId = defaultWorkspaceId
+        self.busy = busy
         self.onCreate = onCreate
         _agent = State(initialValue: lastAgent)
     }
@@ -1106,7 +1110,7 @@ private struct TaskBoardCreateView: View {
                     Button("取消") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "创建" : "创建并指派") {
+                    Button(busy ? "创建中…" : (description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "创建" : "创建并指派")) {
                         Task {
                             await onCreate(
                                 title.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1118,8 +1122,8 @@ private struct TaskBoardCreateView: View {
                             )
                         }
                     }
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        && description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(busy || (title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        && description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
                 }
             }
         }

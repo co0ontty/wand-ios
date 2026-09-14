@@ -102,7 +102,7 @@ if ! XCODE_VERSION_OUTPUT="$(xcodebuild -version 2>&1)"; then
   fi
 fi
 
-XCODE_MAJOR=$(printf '%s\n' "$XCODE_VERSION_OUTPUT" | awk 'NR==1 { gsub("\\..*$", "", $2); print $2 }')
+XCODE_MAJOR=$(printf '%s\n' "$XCODE_VERSION_OUTPUT" | awk '$1 == "Xcode" { gsub("\\..*$", "", $2); print $2; exit }')
 if (( XCODE_MAJOR < 26 )); then
   echo "⚠️  当前 Xcode 主版本 $XCODE_MAJOR < 26：产物不会启用 iOS 26 Liquid Glass 外观" >&2
 fi
