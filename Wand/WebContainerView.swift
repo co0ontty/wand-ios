@@ -706,7 +706,16 @@ struct WebViewRepresentable: UIViewRepresentable {
                为这种不可见/过小的目标弹出软键盘，于是「点终端直接打字」
                永远无法唤起输入法。这里把它放大成覆盖终端可视区的透明输入
                层：字还打在 xterm 里，但键盘可以正常弹出。 */
-            .is-wand-terminal-passthrough .terminal-scroll-wrap{position:relative;}
+            /* 注意：.terminal-container.active 是 row 方向的 flex 容器，wrap 从
+               absolute 改成 relative 后会退化成「按内容宽度收缩」的 flex item
+               （flex-grow: 0）：宽度由 xterm 自己的网格宽度反向决定，而 FitAddon
+               又按这个宽度反算列数，自反馈会让终端每 fit 一次就更窄一点（表现为
+               右侧铺不满、并逐渐缩小）。必须显式钉死占满容器宽度。 */
+            .is-wand-terminal-passthrough .terminal-scroll-wrap{
+              position:relative;
+              width:100%!important;
+              min-width:0!important;
+            }
             /* .xterm-helpers 默认是 0x0，子层的 width:100% 会算成 0，
                所以要先把它撑满终端可视区。*/
             .is-wand-terminal-passthrough .xterm-helpers{
