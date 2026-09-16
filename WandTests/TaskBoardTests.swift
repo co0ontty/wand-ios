@@ -35,6 +35,8 @@ final class TaskBoardTests: XCTestCase {
         XCTAssertEqual(task.workspaceId, "ws-1")
         XCTAssertEqual(task.status, "doing")
         XCTAssertEqual(task.agent?.provider, "codex")
+        // 服务端未返回 mode：按 provider 支持范围夹取（codex 只有 full-access）。
+        XCTAssertEqual(task.agent?.mode, "full-access")
         XCTAssertEqual(task.workspace?.name, "wand")
         XCTAssertEqual(task.sessions.first?.id, "sess-1")
         XCTAssertTrue(task.sessions.first?.isStructured == true)
@@ -56,6 +58,18 @@ final class TaskBoardTests: XCTestCase {
         let json = #"{"id":"task-3","title":"根据描述生成的标题","titleSource":"auto"}"#.data(using: .utf8)!
         let task = try JSONDecoder().decode(WandBoardTask.self, from: json)
         XCTAssertEqual(task.titleSource, "auto")
+    }
+
+    func testAgentModeDefaultsAndClamps() {
+        XCTAssertEqual(wandBoardNormalizedMode(provider: "codex", mode: "managed"), "full-access")
+        XCTAssertEqual(wandBoardNormalizedMode(provider: "claude", mode: "bogus"), "default")
+        XCTAssertEqual(wandBoardSupportedModes("codex"), ["full-access"])
+        XCTAssertEqual(wandBoardModeLabel("managed"), "托管")
+        XCTAssertEqual(wandBoardModeLabel("full-access"), "全权限")
+        XCTAssertEqual(wandBoardModeLabel("default"), "标准")
+        let agent = WandBoardTaskAgent(provider: "claude", model: "default", thinkingEffort: "off", mode: "managed")
+        XCTAssertEqual(agent.jsonObject()["mode"] as? String, "managed")
+        XCTAssertEqual(agent.mode, "managed")
     }
 
     func testBoardLabelsCoverColumns() {

@@ -4,11 +4,35 @@ struct WandBoardTaskAgent: Codable, Equatable {
     var provider: String
     var model: String
     var thinkingEffort: String
+    /// 派发时的执行模式：托管 / 全权限 / 标准。
+    var mode: String
+
+    enum CodingKeys: String, CodingKey {
+        case provider, model, thinkingEffort, mode
+    }
+
+    init(provider: String, model: String, thinkingEffort: String, mode: String = "default") {
+        self.provider = provider
+        self.model = model
+        self.thinkingEffort = thinkingEffort
+        self.mode = wandBoardNormalizedMode(provider: provider, mode: mode)
+    }
 
     static let `default` = WandBoardTaskAgent(provider: "claude", model: "default", thinkingEffort: "off")
 
+    /// mode 是后加字段：老服务端不返回时按 provider 支持范围读默认值，不整条配置解码失败。
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            provider: (try? container.decode(String.self, forKey: .provider)) ?? "claude",
+            model: (try? container.decode(String.self, forKey: .model)) ?? "default",
+            thinkingEffort: (try? container.decode(String.self, forKey: .thinkingEffort)) ?? "off",
+            mode: (try? container.decode(String.self, forKey: .mode)) ?? "default"
+        )
+    }
+
     func jsonObject() -> [String: Any] {
-        ["provider": provider, "model": model, "thinkingEffort": thinkingEffort]
+        ["provider": provider, "model": model, "thinkingEffort": thinkingEffort, "mode": mode]
     }
 }
 
@@ -153,6 +177,36 @@ enum WandBoardPriority: String, CaseIterable, Identifiable {
 
 let wandBoardProviders = ["claude", "codex", "opencode", "grok", "qoder", "pi"]
 let wandBoardEfforts = ["off", "standard", "deep", "max"]
+/// 任务派发允许的执行模式；顺序即下拉顺序。
+let wandBoardModes = ["managed", "full-access", "default"]
+
+/// Codex 只有 full-access 一个有效值，其余 provider 支持三种。
+func wandBoardSupportedModes(_ provider: String) -> [String] {
+    provider == "codex" ? ["full-access"] : wandBoardModes
+}
+
+/// 把任意（含旧数据 / 其它客户端缺省的）模式夹到该 provider 真正支持的值。
+func wandBoardNormalizedMode(provider: String, mode: String) -> String {
+    let supported = wandBoardSupportedModes(provider)
+    let trimmed = mode.trimmingCharacters(in: .whitespacesAndNewlines)
+    if supported.contains(trimmed) { return trimmed }
+    return supported.contains("default") ? "default" : (supported.first ?? "default")
+}
+
+func wandBoardModeLabel(_ mode: String) -> String {
+    switch mode {
+    case "managed": return "托管"
+    case "full-access": return "全权限"
+    default: return "标准"
+    }
+}
+
+/// 已指派 Agent 的分组标题：provider · 模型 · 运行模式。
+func wandBoardAgentTitle(_ provider: String, _ agent: WandBoardTaskAgent?) -> String {
+    guard let agent else { return wandBoardProviderLabel(provider) }
+    let model = agent.model == "default" ? "默认模型" : agent.model
+    return "\(wandBoardProviderLabel(provider)) · \(model) · \(wandBoardModeLabel(agent.mode))"
+}
 
 func wandBoardProviderLabel(_ provider: String) -> String {
     switch provider {

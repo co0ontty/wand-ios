@@ -18,6 +18,8 @@ struct TaskBoardView: View {
     @State private var filterWorkspaceId = ""
     @State private var selected: WandBoardTask?
     @State private var showCreate = false
+    // 从哪一列点开的「新建」决定初始状态：待办 = 只创建，进行中 = 创建并指派。
+    @State private var createStatus = "todo"
     @State private var busy = false
     @State private var lastAgent = WandBoardTaskAgent.default
     @State private var archiveExpanded = false
@@ -60,6 +62,7 @@ struct TaskBoardView: View {
                 catalog: catalog,
                 lastAgent: lastAgent,
                 defaultWorkspaceId: filterWorkspaceId,
+                initialStatus: createStatus,
                 busy: busy
             ) { title, description, status, priority, workspaceId, agent in
                 await mutate {
@@ -74,7 +77,9 @@ struct TaskBoardView: View {
                     rememberAgent(agent)
                     showCreate = false
                     selected = created
-                    if !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // 只有「进行中」列的新建才顺带第一次指派；「待办」列只创建任务。
+                    if wandBoardCreateDispatches(status: status),
+                       !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         _ = try? await api.dispatchBoardTask(id: created.id, agent: agent, prompt: description)
                         await refresh(showProgress: false)
                     }
@@ -256,7 +261,7 @@ struct TaskBoardView: View {
             .contentMargins(.bottom, 88, for: .scrollContent)
 
             Button {
-                showCreate = true
+                openCreate("todo")
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 22, weight: .semibold))
@@ -362,13 +367,18 @@ struct TaskBoardView: View {
             Text(query.isEmpty && statusFilter.isEmpty ? "点右下角 +，把事情做完。" : "换个筛选条件，或新建一条任务。")
                 .font(.system(size: 13))
                 .foregroundColor(Theme.textMuted)
-            Button("新建任务", action: { showCreate = true })
+            Button("新建任务", action: { openCreate("todo") })
                 .buttonStyle(WandPrimaryButtonStyle())
                 .frame(maxWidth: 180)
                 .padding(.top, 4)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 36)
+    }
+
+    private func openCreate(_ status: String) {
+        createStatus = status
+        showCreate = true
     }
 
     private func boardSectionHeader(status: String, count: Int) -> some View {
@@ -383,6 +393,17 @@ struct TaskBoardView: View {
                 .font(.system(size: 11))
                 .foregroundColor(Theme.textMuted)
             Spacer(minLength: 0)
+            Button {
+                openCreate(status)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Theme.textSecondary)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Theme.surface.opacity(0.9)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("在\(WandBoardStatus(rawValue: status)?.label ?? status)中新建任务")
         }
     }
 
@@ -925,6 +946,7 @@ private struct TaskBoardDetailView: View {
                     get: { agent.provider },
                     set: { provider in
                         agent.provider = provider
+                        agent.mode = wandBoardNormalizedMode(provider: provider, mode: agent.mode)
                         let options = wandBoardModelOptions(from: catalog, provider: provider)
                         if !options.contains(where: { $0.id == agent.model }) {
                             agent.model = options.first?.id ?? "default"
@@ -958,6 +980,17 @@ private struct TaskBoardDetailView: View {
                         Text(wandBoardEffortLabel(effort)).tag(effort)
                     }
                 }
+                Picker("运行模式", selection: Binding(
+                    get: { agent.mode },
+                    set: { mode in
+                        agent.mode = mode
+                        onRemember(agent)
+                    }
+                )) {
+                    ForEach(wandBoardSupportedModes(agent.provider), id: \.self) { mode in
+                        Text(wandBoardModeLabel(mode)).tag(mode)
+                    }
+                }
                 Button(task.sessions.isEmpty ? "派发 Agent" : "再派发一次") {
                     Task { await onDispatch(agent, composePrompt.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 }
@@ -971,7 +1004,7 @@ private struct TaskBoardDetailView: View {
                 } else {
                     ForEach(groups) { group in
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(wandBoardProviderLabel(group.provider))
+                            Text(wandBoardAgentTitle(group.provider, group.agent))
                                 .font(.subheadline.weight(.semibold))
                             if group.sessions.isEmpty {
                                 Text("已指派，等待派发")
@@ -1026,7 +1059,7 @@ private struct TaskBoardCreateView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var description = ""
-    @State private var status = "todo"
+    @State private var status: String
     @State private var priority = "none"
     @State private var workspaceId = ""
     @State private var agent: WandBoardTaskAgent
@@ -1036,6 +1069,7 @@ private struct TaskBoardCreateView: View {
         catalog: ModelsResponse?,
         lastAgent: WandBoardTaskAgent,
         defaultWorkspaceId: String,
+        initialStatus: String = "todo",
         busy: Bool = false,
         onCreate: @escaping (String, String, String, String, String?, WandBoardTaskAgent) async -> Void
     ) {
@@ -1045,14 +1079,18 @@ private struct TaskBoardCreateView: View {
         self.defaultWorkspaceId = defaultWorkspaceId
         self.busy = busy
         self.onCreate = onCreate
+        _status = State(initialValue: initialStatus)
         _agent = State(initialValue: lastAgent)
     }
+
+    /// 「进行中」列的新建代表已经决定要跑，所以创建后立刻派 Agent；其他列只落库。
+    private var dispatches: Bool { wandBoardCreateDispatches(status: status) }
 
     var body: some View {
         NavigationStack {
             Form {
                 TextField("任务标题（可选）", text: $title, prompt: Text("不填写则按描述自动生成"))
-                TextField("描述（作为第一次指派）", text: $description, axis: .vertical)
+                TextField(dispatches ? "描述（作为第一次指派）" : "描述（只创建任务）", text: $description, axis: .vertical)
                     .lineLimit(3...8)
                 Picker("目录", selection: $workspaceId) {
                     Text("不指定目录（使用全局目录）").tag("")
@@ -1060,34 +1098,46 @@ private struct TaskBoardCreateView: View {
                         Text(workspace.name).tag(workspace.id)
                     }
                 }
-                Picker("第一次指派", selection: Binding(
-                    get: { agent.provider },
-                    set: { provider in
-                        agent.provider = provider
-                        let options = wandBoardModelOptions(from: catalog, provider: provider)
-                        if !options.contains(where: { $0.id == agent.model }) {
-                            agent.model = options.first?.id ?? "default"
+                if dispatches {
+                    Picker("第一次指派", selection: Binding(
+                        get: { agent.provider },
+                        set: { provider in
+                            agent.provider = provider
+                            agent.mode = wandBoardNormalizedMode(provider: provider, mode: agent.mode)
+                            let options = wandBoardModelOptions(from: catalog, provider: provider)
+                            if !options.contains(where: { $0.id == agent.model }) {
+                                agent.model = options.first?.id ?? "default"
+                            }
+                        }
+                    )) {
+                        ForEach(wandBoardProviders, id: \.self) { provider in
+                            Text(wandBoardProviderLabel(provider)).tag(provider)
                         }
                     }
-                )) {
-                    ForEach(wandBoardProviders, id: \.self) { provider in
-                        Text(wandBoardProviderLabel(provider)).tag(provider)
+                    Picker("模型", selection: Binding(
+                        get: { agent.model },
+                        set: { agent.model = $0 }
+                    )) {
+                        ForEach(wandBoardModelOptions(from: catalog, provider: agent.provider), id: \.id) { option in
+                            Text(option.label).tag(option.id)
+                        }
+                    }
+                    Picker("思考深度", selection: Binding(
+                        get: { agent.thinkingEffort },
+                        set: { agent.thinkingEffort = $0 }
+                    )) {
+                        ForEach(wandBoardEfforts, id: \.self) { effort in
+                            Text(wandBoardEffortLabel(effort)).tag(effort)
+                        }
                     }
                 }
-                Picker("模型", selection: Binding(
-                    get: { agent.model },
-                    set: { agent.model = $0 }
+                // 运行模式始终可选：只创建的任务也会把模式写进服务端全局默认。
+                Picker("运行模式", selection: Binding(
+                    get: { agent.mode },
+                    set: { agent.mode = $0 }
                 )) {
-                    ForEach(wandBoardModelOptions(from: catalog, provider: agent.provider), id: \.id) { option in
-                        Text(option.label).tag(option.id)
-                    }
-                }
-                Picker("思考深度", selection: Binding(
-                    get: { agent.thinkingEffort },
-                    set: { agent.thinkingEffort = $0 }
-                )) {
-                    ForEach(wandBoardEfforts, id: \.self) { effort in
-                        Text(wandBoardEffortLabel(effort)).tag(effort)
+                    ForEach(wandBoardSupportedModes(agent.provider), id: \.self) { mode in
+                        Text(wandBoardModeLabel(mode)).tag(mode)
                     }
                 }
                 Picker("状态", selection: $status) {
@@ -1110,7 +1160,9 @@ private struct TaskBoardCreateView: View {
                     Button("取消") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(busy ? "创建中…" : (description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "创建" : "创建并指派")) {
+                    Button(busy
+                        ? "创建中…"
+                        : (dispatches && !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "创建并指派" : "创建任务")) {
                         Task {
                             await onCreate(
                                 title.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1130,3 +1182,9 @@ private struct TaskBoardCreateView: View {
         .onAppear { workspaceId = defaultWorkspaceId }
     }
 }
+
+/**
+ * 新建任务是否顺带完成第一次指派。
+ * 「待办」列只创建任务；「进行中」列代表已经决定要跑，所以创建后立刻派给所选 Agent。
+ */
+func wandBoardCreateDispatches(status: String) -> Bool { status == "doing" }
