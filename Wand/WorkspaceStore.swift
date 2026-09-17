@@ -826,7 +826,9 @@ final class WorkspaceStore: ObservableObject {
         provider: WorkspaceSessionTarget? = nil,
         kind: WorkspaceSessionKind? = nil
     ) {
-        if let provider, provider != .shell { selectedTarget = provider }
+        // 本地选择必须无条件跟着走：只把「不覆盖服务端默认 CLI」的限制放在下面写偏好那一步，
+        // 否则「空白终端」在目标选择器里永远选不中（对齐 Android 的 newTaskTarget = option）。
+        if let provider { selectedTarget = provider }
         if let kind { selectedKind = kind }
         Task {
             guard let api = api as? WandAPI else { return }

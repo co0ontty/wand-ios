@@ -136,7 +136,11 @@ struct WorkspaceListView: View {
                     confirmError = nil
                 }
                 Button(confirmBusy ? "处理中…" : confirmActionTitle, role: confirmIsDestructive ? .destructive : nil) {
-                    Task { await performPendingConfirm() }
+                    // SwiftUI 在按钮动作返回后就把 isPresented 置 false，confirmPresented 的 setter
+                    // 随即清空 pendingConfirm；异步工作要等下一轮才跑，再去读 pendingConfirm 只会拿到
+                    // nil（旧的 performPendingConfirm 因此整个确认流程静默失败）。这里先捕获动作本体。
+                    guard let confirm = pendingConfirm else { return }
+                    Task { await performConfirm(confirm) }
                 }
                 .disabled(confirmBusy)
             } message: {
@@ -1161,12 +1165,12 @@ struct WorkspaceListView: View {
         )
     }
 
-    private func performPendingConfirm() async {
-        guard let pendingConfirm, !confirmBusy else { return }
+    private func performConfirm(_ confirm: TaskListConfirm) async {
+        guard !confirmBusy else { return }
         confirmBusy = true
         confirmError = nil
         do {
-            switch pendingConfirm {
+            switch confirm {
             case .archiveTask(let task):
                 try await store.archiveWorkspaceTask(taskId: task.id, workspaceId: task.workspaceId)
                 onTaskArchived?(task.id)
@@ -1197,8 +1201,10 @@ struct WorkspaceListView: View {
                 endManagedSelection()
                 showToast("已\(TaskListPresentation.describeManagedResult(selection))")
             }
-            self.pendingConfirm = nil
+            pendingConfirm = nil
         } catch {
+            // 失败时把弹窗留在屏幕上（重新置为待确认），让 confirmMessage 展示错误。
+            pendingConfirm = confirm
             confirmError = error.localizedDescription
         }
         confirmBusy = false

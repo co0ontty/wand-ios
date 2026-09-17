@@ -712,6 +712,45 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(detail.sessions.map(\.id), ["created"])
     }
 
+    func testTargetPickerSelectsShellAndCreatesPtyWindow() async throws {
+        // 「空白终端」曾是死按钮：rememberCreationChoice 为不覆盖服务端默认 CLI 而跳过 shell，
+        // 连带本地 selectedTarget 也不更新，目标选择器里点它没有任何反应。
+        let service = MockWorkspaceService()
+        let workspace = try workspace(id: "workspace-shell")
+        let task = try task(id: "task-shell", workspaceId: workspace.id)
+        service.taskDetails[task.id] = try taskDetail(
+            id: task.id,
+            workspaceId: workspace.id,
+            sessions: []
+        )
+        service.createdSnapshot = try decode(
+            SessionSnapshot.self,
+            from: #"{"id":"shell-window","sessionKind":"pty","provider":"","cwd":"/task/worktree","workspaceId":"workspace-shell","workspaceTaskId":"task-shell"}"#
+        )
+        let store = WorkspaceStore(api: service, serverID: "server-shell")
+        await store.openTask(workspace: workspace, task: task)
+        store.presentTargetPicker()
+
+        store.rememberCreationChoice(provider: .shell, kind: .structured)
+        XCTAssertEqual(store.selectedTarget, .shell)
+        XCTAssertEqual(store.selectedKind, .structured)
+
+        await store.createSelectedWindow(expectedTaskId: task.id)
+
+        XCTAssertEqual(service.createRequests.first?.target, .shell)
+        XCTAssertEqual(service.createRequests.first?.kind, .pty)
+        XCTAssertEqual(store.visibleSessionID, "shell-window")
+    }
+
+    func testRememberCreationChoiceKeepsNonShellProvider() async throws {
+        let service = MockWorkspaceService()
+        let store = WorkspaceStore(api: service, serverID: "server-choice")
+
+        store.rememberCreationChoice(provider: .grok, kind: .pty)
+        XCTAssertEqual(store.selectedTarget, .grok)
+        XCTAssertEqual(store.selectedKind, .pty)
+    }
+
     func testCreateFirstTaskWindowSendsPromptAndActivatesSessionOnOpen() async throws {
         let service = MockWorkspaceService()
         let workspace = try workspace(id: "workspace-first")
