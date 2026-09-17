@@ -42,20 +42,59 @@ final class WorkspaceTests: XCTestCase {
         )
     }
 
-    func testManagedDeletionCascadesTaskSessions() throws {
+    func testManagedSelectionArchivesTasksAndDeletesSelectedSessions() throws {
         let group = try decode(
             TaskDirectoryGroup.self,
             from: """
             {"workspaceId":"workspace-1","workspaceName":"Wand","workspaceCwd":"/work","synthetic":false,"tasks":[{"id":"task-1","workspaceId":"workspace-1","name":"修复侧栏","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/work","isolated":false,"worktreeError":null,"sessions":[{"id":"session-1"},{"id":"session-2"}],"totalSessions":2}],"standaloneSessions":[{"id":"loose-1"}]}
             """
         )
-        let resolved = TaskListPresentation.resolveManagedDeletion(
-            .init(taskIds: ["task-1"], sessionIds: ["session-1", "loose-1"]),
-            groups: [group]
+        let selection = TaskListPresentation.ManageSelection(
+            taskIds: ["task-1", "gone-task"],
+            sessionIds: ["session-1", "loose-1", "gone-session"]
         )
-        XCTAssertEqual(resolved.taskIds, ["task-1"])
-        XCTAssertEqual(resolved.sessionIds, ["loose-1"])
-        XCTAssertEqual(TaskListPresentation.describeManagedDeletion(resolved), "1 个任务和 1 个终端")
+        // 选中项已不可见（另一端删掉了）要剪掉，否则会把不存在的 ID 交给服务端。
+        let pruned = TaskListPresentation.pruneManagedSelection(selection, groups: [group])
+        XCTAssertEqual(pruned.taskIds, ["task-1"])
+        XCTAssertEqual(pruned.sessionIds, ["session-1", "loose-1"])
+        // 任务内的会话被选上也算破坏性操作——归档任务不会连带停掉它的终端。
+        XCTAssertTrue(TaskListPresentation.managedSelectionIsDestructive(pruned))
+        XCTAssertFalse(
+            TaskListPresentation.managedSelectionIsDestructive(
+                TaskListPresentation.ManageSelection(taskIds: ["task-1"], sessionIds: [])
+            )
+        )
+        XCTAssertEqual(TaskListPresentation.describeManagedAction(pruned), "归档任务并删除终端")
+        XCTAssertEqual(
+            TaskListPresentation.describeManagedAction(
+                TaskListPresentation.ManageSelection(taskIds: ["task-1"], sessionIds: [])
+            ),
+            "归档任务"
+        )
+        XCTAssertEqual(
+            TaskListPresentation.describeManagedAction(
+                TaskListPresentation.ManageSelection(taskIds: [], sessionIds: ["s"])
+            ),
+            "删除终端"
+        )
+        XCTAssertEqual(
+            TaskListPresentation.describeManagedResult(
+                TaskListPresentation.ManageSelection(taskIds: ["a", "b"], sessionIds: ["s"])
+            ),
+            "归档 2 个任务、删除 1 个终端"
+        )
+        XCTAssertEqual(
+            TaskListPresentation.describeManagedResult(
+                TaskListPresentation.ManageSelection(taskIds: [], sessionIds: ["s"])
+            ),
+            "删除 1 个终端"
+        )
+        XCTAssertEqual(
+            TaskListPresentation.describeManagedResult(
+                TaskListPresentation.ManageSelection(taskIds: ["a"], sessionIds: [])
+            ),
+            "归档 1 个任务"
+        )
     }
 
     func testTaskDirectoryGroupTreatsGlobalWorkspaceAsUnbindable() throws {
@@ -179,6 +218,248 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(metrics.taskCount, 2)
     }
 
+    // ── 任务层级对齐（Android a1c7cb3 / 6886012 / 1b37959 / 99ccef9 + 服务端 249c98c）──
+
+    func testDirectoryGroupsHideDoneTasksRenameGlobalAndKeepItLast() throws {
+        let project = try decode(
+            TaskDirectoryGroup.self,
+            from: """
+            {"workspaceId":"ws-1","workspaceName":"Wand","workspaceCwd":"/repo","synthetic":false,"tasks":[{"id":"active-1","workspaceId":"ws-1","name":"在做","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/repo","isolated":false,"worktreeError":null,"sessions":[],"totalSessions":0},{"id":"done-1","workspaceId":"ws-1","name":"已归档","worktree":null,"layout":null,"status":"done","createdAt":"","lastOpenedAt":null,"cwd":"/repo","isolated":false,"worktreeError":null,"sessions":[],"totalSessions":0}],"standaloneSessions":[]}
+            """
+        )
+        let global = try decode(
+            TaskDirectoryGroup.self,
+            from: """
+            {"workspaceId":"wand-global","workspaceName":"全局","workspaceCwd":"/scratch","global":true,"synthetic":false,"tasks":[{"id":"loose-task","workspaceId":"wand-global","name":"无归属","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/scratch","isolated":false,"worktreeError":null,"sessions":[],"totalSessions":0}],"standaloneSessions":[{"id":"loose-session"}]}
+            """
+        )
+        let emptyGlobal = try decode(
+            TaskDirectoryGroup.self,
+            from: """
+            {"workspaceId":"wand-global","workspaceName":"全局","workspaceCwd":"/scratch","global":true,"synthetic":false,"tasks":[],"standaloneSessions":[]}
+            """
+        )
+
+        let ordered = TaskListPresentation.orderedDirectoryGroups([global, project, emptyGlobal])
+
+        XCTAssertEqual(ordered.map(\.workspaceId), ["ws-1", "wand-global"])
+        // 侧栏不展示已完成任务（归档任务只在看板里看）。
+        XCTAssertEqual(ordered[0].tasks.map(\.id), ["active-1"])
+        // 全局空间在侧栏叫“未归属工作区”，且永远排最后。
+        XCTAssertEqual(ordered[1].workspaceName, TaskListPresentation.unassignedWorkspaceName)
+        XCTAssertEqual(ordered[1].standaloneSessions.map(\.id), ["loose-session"])
+    }
+
+    func testGlobalGroupIsRecognisedByFlagOrLegacyId() throws {
+        let flagged = try decode(
+            TaskDirectoryGroup.self,
+            from: #"{"workspaceId":"wp-1","workspaceName":"全局","workspaceCwd":"/s","global":true,"synthetic":false,"tasks":[],"standaloneSessions":[]}"#
+        )
+        let legacy = try decode(
+            TaskDirectoryGroup.self,
+            from: #"{"workspaceId":"wand-global","workspaceName":"全局","workspaceCwd":"/s","synthetic":false,"tasks":[],"standaloneSessions":[]}"#
+        )
+        let real = try decode(
+            TaskDirectoryGroup.self,
+            from: #"{"workspaceId":"ws-1","workspaceName":"Wand","workspaceCwd":"/repo","synthetic":false,"tasks":[],"standaloneSessions":[]}"#
+        )
+
+        XCTAssertTrue(flagged.isGlobal)
+        XCTAssertFalse(flagged.isBindableProject)
+        // 老服务端不给 global 字段，只给 wand-global 这个 ID。
+        XCTAssertTrue(legacy.isGlobal)
+        XCTAssertFalse(legacy.isBindableProject)
+        XCTAssertFalse(real.isGlobal)
+        XCTAssertTrue(real.isBindableProject)
+    }
+
+    func testSessionMoveTargetsDedupeFilterAndKeepCurrentLast() throws {
+        let project = try decode(
+            TaskDirectoryGroup.self,
+            from: """
+            {"workspaceId":"ws-1","workspaceName":"Wand","workspaceCwd":"/repo","synthetic":false,"tasks":[{"id":"task-current","workspaceId":"ws-1","name":"当前任务","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/repo","isolated":false,"worktreeError":null,"sessions":[{"id":"s-1"}],"totalSessions":1},{"id":"task-other","workspaceId":"ws-1","name":"目标任务","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/repo","isolated":false,"worktreeError":null,"sessions":[],"totalSessions":0}],"standaloneSessions":[]}
+            """
+        )
+        let global = try decode(
+            TaskDirectoryGroup.self,
+            from: """
+            {"workspaceId":"wand-global","workspaceName":"全局","workspaceCwd":"/scratch","global":true,"synthetic":false,"tasks":[{"id":"task-loose","workspaceId":"wand-global","name":"无归属任务","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/scratch","isolated":false,"worktreeError":null,"sessions":[],"totalSessions":0}],"standaloneSessions":[]}
+            """
+        )
+        // 同一任务出现在两个目录组里（合成组 + 真实项目组）只能列一次。
+        let targets = SessionMovePresentation.targets(
+            groups: [project, project, global],
+            sessionId: "s-1"
+        )
+        XCTAssertEqual(targets.map(\.id), ["task-current", "task-other", "task-loose"])
+        XCTAssertTrue(targets.first(where: { $0.id == "task-current" })?.current == true)
+        XCTAssertEqual(
+            targets.first(where: { $0.id == "task-loose" })?.workspace,
+            TaskListPresentation.unassignedWorkspaceName
+        )
+        // 可选目标在上，源任务（禁用）在下。
+        XCTAssertEqual(
+            SessionMovePresentation.ordered(targets).map(\.id),
+            ["task-other", "task-loose", "task-current"]
+        )
+        // 搜索命中的工作区名与任务名都能过滤，未归属用重命名后的名字。
+        XCTAssertEqual(
+            SessionMovePresentation.targets(groups: [project, global], sessionId: "s-1", query: "未归属")
+                .map(\.id),
+            ["task-loose"]
+        )
+        XCTAssertEqual(
+            SessionMovePresentation.targets(groups: [project, global], sessionId: "s-1", query: "目标")
+                .map(\.id),
+            ["task-other"]
+        )
+        XCTAssertTrue(
+            SessionMovePresentation.targets(groups: [project, global], sessionId: "s-1", query: "没有这个")
+                .isEmpty
+        )
+    }
+
+    func testSessionMoveSubtitleDisambiguatesDuplicateNames() throws {
+        let group = try decode(
+            TaskDirectoryGroup.self,
+            from: """
+            {"workspaceId":"ws-1","workspaceName":"Wand","workspaceCwd":"/repo","synthetic":false,"tasks":[{"id":"task-a","workspaceId":"ws-1","name":"修复登录","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/repo","isolated":false,"worktreeError":null,"sessions":[],"totalSessions":0},{"id":"task-b","workspaceId":"ws-1","name":"修复登录","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/repo","isolated":false,"worktreeError":null,"sessions":[],"totalSessions":0},{"id":"task-c","workspaceId":"ws-1","name":"别的事","worktree":null,"layout":null,"status":"active","createdAt":"","lastOpenedAt":null,"cwd":"/repo","isolated":false,"worktreeError":null,"sessions":[],"totalSessions":0}],"standaloneSessions":[]}
+            """
+        )
+        let targets = SessionMovePresentation.targets(groups: [group], sessionId: "s-1")
+        let ambiguous = SessionMovePresentation.ambiguousKeys(targets)
+
+        XCTAssertEqual(ambiguous.count, 1)
+        XCTAssertEqual(
+            targets.filter { ambiguous.contains($0.key) }.map(\.id),
+            ["task-a", "task-b"]
+        )
+        XCTAssertEqual(
+            targets.first(where: { $0.id == "task-a" })?.subtitle(ambiguous: true),
+            "Wand · task-a"
+        )
+        XCTAssertEqual(targets.first(where: { $0.id == "task-c" })?.subtitle(ambiguous: false), "Wand")
+        XCTAssertEqual(targets.first(where: { $0.id == "task-c" })?.subtitle(ambiguous: true), "Wand · task-c")
+    }
+
+    func testTaskHierarchyMutationFilterIgnoresReadsAndLayoutWrites() {
+        XCTAssertFalse(changesTaskHierarchy(method: "GET", path: "/api/tasks"))
+        // 布局自动保存不能反过来触发重拉，否则会自激。
+        XCTAssertFalse(changesTaskHierarchy(method: "PUT", path: "/api/workspace-tasks/task-1/layout"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/workspace-tasks/task-1/sessions"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/workspace-tasks/task-1/archive"))
+        XCTAssertTrue(changesTaskHierarchy(method: "PATCH", path: "/api/workspace-tasks/task-1"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/tasks"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/workspaces/ws-1/tasks"))
+        XCTAssertTrue(changesTaskHierarchy(method: "DELETE", path: "/api/workspaces/ws-1"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/wand-tasks/task-1"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/commands"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/structured-sessions"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/batch-delete"))
+        // 查询串不能影响判定。
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/tasks?revision=1"))
+        XCTAssertFalse(changesTaskHierarchy(method: "POST", path: "/api/unknown"))
+    }
+
+    func testTaskCreationRequestsCarryOptionalDescription() {
+        let project = createWorkspaceTaskRequest(
+            workspaceId: "ws-1",
+            name: "未命名任务",
+            baseRef: nil,
+            worktree: false,
+            cwd: "/repo",
+            description: "把侧栏重构一遍"
+        )
+        XCTAssertEqual(project.path, "/api/workspaces/ws-1/tasks")
+        XCTAssertEqual(project.body["description"], .string("把侧栏重构一遍"))
+        XCTAssertEqual(project.body["worktree"], .bool(false))
+        XCTAssertEqual(project.body["cwd"], .string("/repo"))
+
+        let standalone = createStandaloneTaskRequest(
+            name: "未命名任务",
+            cwd: "/scratch",
+            worktree: false,
+            description: "写个脚本"
+        )
+        XCTAssertEqual(standalone.path, "/api/tasks")
+        XCTAssertEqual(standalone.body["description"], .string("写个脚本"))
+        XCTAssertEqual(standalone.body["worktree"], .bool(false))
+
+        // 空/全空白描述不占位，避免服务端拿空字符串去总结标题。
+        XCTAssertNil(createStandaloneTaskRequest(name: "任务", description: "   ").body["description"])
+        XCTAssertNil(createStandaloneTaskRequest(name: "任务").body["description"])
+    }
+
+    func testTaskWindowRequestSendsPromptOnlyForStructuredSessions() {
+        let binding = WorkspaceBinding(
+            workspaceId: "ws-1",
+            workspaceTaskId: "task-1",
+            cwd: "/repo"
+        )
+        let structured = workspaceTaskWindowRequest(
+            target: .claude,
+            binding: binding,
+            kind: .structured,
+            prompt: " 修好登录 "
+        )
+        XCTAssertEqual(structured.path, "/api/structured-sessions")
+        XCTAssertEqual(structured.body["prompt"], .string("修好登录"))
+        XCTAssertNil(structured.body["initialInput"])
+        XCTAssertEqual(structured.body["workspaceTaskId"], .string("task-1"))
+
+        let pty = workspaceTaskWindowRequest(
+            target: .claude,
+            binding: binding,
+            kind: .pty,
+            prompt: "修好登录"
+        )
+        XCTAssertEqual(pty.path, "/api/commands")
+        XCTAssertEqual(pty.body["initialInput"], .string("修好登录"))
+        XCTAssertNil(pty.body["prompt"])
+
+        let shell = workspaceTaskWindowRequest(
+            target: .shell,
+            binding: binding,
+            kind: .pty,
+            prompt: "修好登录"
+        )
+        XCTAssertEqual(shell.body["shell"], .bool(true))
+        XCTAssertNil(shell.body["initialInput"])
+    }
+
+    func testMoveAndArchiveStoreMutationsHitServerAndDropLocalState() async throws {
+        let service = MockWorkspaceService()
+        let source = try workspace(id: "ws-source")
+        let target = try workspace(id: "ws-target")
+        let sourceTask = try task(id: "task-source", workspaceId: source.id)
+        let targetTask = try task(id: "task-target", workspaceId: target.id)
+        service.taskDetails[sourceTask.id] = try taskDetail(
+            id: sourceTask.id,
+            workspaceId: source.id,
+            sessions: [summary(id: "s-1", startedAt: "2026-08-09T00:00:01Z")]
+        )
+        service.taskDetails[targetTask.id] = try taskDetail(
+            id: targetTask.id,
+            workspaceId: target.id,
+            sessions: []
+        )
+        let store = WorkspaceStore(api: service, serverID: "server-move")
+
+        try await store.moveSession(sessionId: "s-1", toTaskId: targetTask.id)
+
+        XCTAssertEqual(service.moveRequests.map(\.sessionId), ["s-1"])
+        XCTAssertEqual(service.moveRequests.map(\.taskId), [targetTask.id])
+
+        // 打开目标任务再归档：当前任务与可见会话都要跟着清掉。
+        await store.openTask(workspace: target, task: targetTask)
+        try await store.archiveWorkspaceTask(taskId: targetTask.id, workspaceId: target.id)
+
+        XCTAssertEqual(service.archiveRequests, [targetTask.id])
+        XCTAssertNil(store.currentTask)
+        XCTAssertNil(store.currentWorkspace)
+        XCTAssertNil(store.visibleSessionID)
+    }
+
     func testTaskSwipeActionsKeepDeleteAndClearOnly() {
         XCTAssertEqual(TaskListPresentation.taskTrailingSwipeActions(sessionCount: 0), [.delete])
         XCTAssertEqual(
@@ -188,10 +469,12 @@ final class WorkspaceTests: XCTestCase {
     }
 
     func testTaskTreeHidesNeedlessCaretsAndKeepsTerminalsOpen() {
-        XCTAssertFalse(TaskListPresentation.showsDirectoryDisclosure(directoryCount: 1))
+        // 目录折叠按钮不再随目录数量消失（对齐 Android 的 TaskDirectoryHeader）。
+        XCTAssertTrue(TaskListPresentation.showsDirectoryDisclosure(directoryCount: 1))
         XCTAssertTrue(TaskListPresentation.showsDirectoryDisclosure(directoryCount: 2))
-        XCTAssertTrue(TaskListPresentation.isDirectoryExpanded(userCollapsed: true, directoryCount: 1))
+        XCTAssertFalse(TaskListPresentation.isDirectoryExpanded(userCollapsed: true, directoryCount: 1))
         XCTAssertFalse(TaskListPresentation.isDirectoryExpanded(userCollapsed: true, directoryCount: 2))
+        XCTAssertTrue(TaskListPresentation.isDirectoryExpanded(userCollapsed: false, directoryCount: 1))
         XCTAssertFalse(TaskListPresentation.showsTaskSessionDisclosure(sessionCount: 0))
         XCTAssertTrue(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: true, sessionCount: 0))
         XCTAssertFalse(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: true, sessionCount: 2))
@@ -446,10 +729,10 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(detail.sessions.map(\.id), ["created"])
     }
 
-    func testNewTaskAutoCreatesStructuredWindowAfterOpen() async throws {
+    func testCreateFirstTaskWindowSendsPromptAndActivatesSessionOnOpen() async throws {
         let service = MockWorkspaceService()
-        let workspace = try workspace(id: "workspace-auto")
-        let task = try task(id: "task-auto", workspaceId: workspace.id)
+        let workspace = try workspace(id: "workspace-first")
+        let task = try task(id: "task-first", workspaceId: workspace.id)
         service.taskDetails[task.id] = try taskDetail(
             id: task.id,
             workspaceId: workspace.id,
@@ -457,29 +740,38 @@ final class WorkspaceTests: XCTestCase {
         )
         service.createdSnapshot = try decode(
             SessionSnapshot.self,
-            from: #"{"id":"structured-window","sessionKind":"structured","provider":"codex","cwd":"/task/worktree","workspaceId":"workspace-auto","workspaceTaskId":"task-auto"}"#
+            from: #"{"id":"first-window","sessionKind":"structured","provider":"codex","cwd":"/task/worktree","workspaceId":"workspace-first","workspaceTaskId":"task-first"}"#
         )
-        let store = WorkspaceStore(api: service, serverID: "server-auto")
-        store.selectedTarget = .codex
-        store.selectedKind = .structured
-        store.scheduleAutoCreateWindow(taskId: task.id)
+        let store = WorkspaceStore(api: service, serverID: "server-first")
 
-        await store.openTask(workspace: workspace, task: task)
+        let created = try await store.createFirstTaskWindow(
+            taskId: task.id,
+            target: .codex,
+            kind: .structured,
+            prompt: "把侧栏重构一遍"
+        )
 
+        XCTAssertEqual(created.id, "first-window")
         XCTAssertEqual(service.createRequests.count, 1)
         XCTAssertEqual(service.createRequests.first?.target, .codex)
-        XCTAssertEqual(service.createRequests.first?.kind, .structured)
-        XCTAssertEqual(store.visibleSessionID, "structured-window")
-        XCTAssertEqual(store.visibleSnapshot?.id, "structured-window")
-        XCTAssertEqual(store.visibleSnapshot?.sessionKind, "structured")
-        XCTAssertTrue(store.visibleSnapshot?.isStructured == true)
-        guard case .ready(let detail) = store.taskState else {
-            return XCTFail("Auto-created structured window must enter the ready state")
-        }
-        XCTAssertEqual(detail.sessions.map(\.id), ["structured-window"])
+        XCTAssertEqual(service.createRequests.first?.binding.workspaceTaskId, task.id)
+        XCTAssertEqual(service.createRequests.first?.binding.cwd, "/task/worktree")
+        XCTAssertEqual(service.createRequests.first?.prompt, "把侧栏重构一遍")
+        // 首个会话必须成为任务里的活动窗口，打开任务时直接落在它身上。
+        let savedLayout = service.taskDetails[task.id]?.layout
+        let activeWindow = savedLayout?.windows.first { $0.id == savedLayout?.activeWindowId }
+        XCTAssertEqual(
+            activeWindow.map { WorkspaceLayoutReconciler.sessionIds(in: $0.layout) } ?? [],
+            ["first-window"]
+        )
+
+        await store.openTask(workspace: workspace, task: task)
+        XCTAssertEqual(store.visibleSessionID, "first-window")
+        XCTAssertEqual(store.visibleSnapshot?.id, "first-window")
+        XCTAssertEqual(service.createRequests.count, 1)
     }
 
-    func testAutoCreateIsSkippedWhenTaskAlreadyHasWindows() async throws {
+    func testOpenTaskNeverCreatesSessionsImplicitly() async throws {
         let service = MockWorkspaceService()
         let workspace = try workspace(id: "workspace-existing")
         let task = try task(id: "task-existing", workspaceId: workspace.id)
@@ -492,18 +784,48 @@ final class WorkspaceTests: XCTestCase {
             SessionSnapshot.self,
             from: #"{"id":"already-open","sessionKind":"structured","provider":"claude"}"#
         )
-        service.createdSnapshot = try decode(
-            SessionSnapshot.self,
-            from: #"{"id":"should-not-create","sessionKind":"structured","provider":"claude"}"#
-        )
         let store = WorkspaceStore(api: service, serverID: "server-existing")
-        store.scheduleAutoCreateWindow(taskId: task.id)
 
         await store.openTask(workspace: workspace, task: task)
 
+        // 新建任务才会启动首个会话；打开已有任务不该再凭空造一个终端。
         XCTAssertTrue(service.createRequests.isEmpty)
         XCTAssertEqual(store.visibleSessionID, "already-open")
         XCTAssertEqual(store.visibleSnapshot?.id, "already-open")
+    }
+
+    func testScheduledSessionSelectionAppliesOnNextOpenOfThatTaskOnly() async throws {
+        let service = MockWorkspaceService()
+        let workspace = try workspace(id: "workspace-schedule")
+        let task = try task(id: "task-schedule", workspaceId: workspace.id)
+        service.taskDetails[task.id] = try taskDetail(
+            id: task.id,
+            workspaceId: workspace.id,
+            sessions: [
+                summary(id: "window-a", startedAt: "2026-08-09T00:00:01Z"),
+                summary(id: "window-b", startedAt: "2026-08-09T00:00:02Z"),
+            ]
+        )
+        service.sessions["window-a"] = try decode(
+            SessionSnapshot.self,
+            from: #"{"id":"window-a","sessionKind":"structured","provider":"claude"}"#
+        )
+        service.sessions["window-b"] = try decode(
+            SessionSnapshot.self,
+            from: #"{"id":"window-b","sessionKind":"structured","provider":"claude"}"#
+        )
+        let store = WorkspaceStore(api: service, serverID: "server-schedule")
+        store.scheduleAutoSelectSession(taskId: "another-task", sessionId: "window-b")
+
+        // 给别的任务排的选择不能影响这次打开。
+        await store.openTask(workspace: workspace, task: task)
+        XCTAssertEqual(store.visibleSessionID, "window-a")
+
+        store.scheduleAutoSelectSession(taskId: task.id, sessionId: "window-b")
+        await store.openTask(workspace: workspace, task: task)
+        XCTAssertEqual(store.visibleSessionID, "window-b")
+        XCTAssertEqual(store.visibleSnapshot?.id, "window-b")
+        XCTAssertTrue(service.createRequests.isEmpty)
     }
 
     func testTaskGroupsPageDecodesArrayAndRevisionEnvelope() throws {
@@ -527,26 +849,25 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(summary.asTask().workspaceId, "real-ws")
     }
 
-    func testDuplicateOpenTaskStillShowsAutoCreatedStructuredWindow() async throws {
+    func testReopeningTaskKeepsTheLastActiveWindowWithoutCreatingSessions() async throws {
         let service = MockWorkspaceService()
         let workspace = try workspace(id: "workspace-dup")
         let task = try task(id: "task-dup", workspaceId: workspace.id)
         service.taskDetails[task.id] = try taskDetail(
             id: task.id,
             workspaceId: workspace.id,
-            sessions: []
+            sessions: [summary(id: "dup-window", startedAt: "2026-08-09T00:00:01Z")]
         )
-        service.createdSnapshot = try decode(
+        service.sessions["dup-window"] = try decode(
             SessionSnapshot.self,
-            from: #"{"id":"dup-window","sessionKind":"structured","provider":"claude","cwd":"/task/worktree","workspaceId":"workspace-dup","workspaceTaskId":"task-dup"}"#
+            from: #"{"id":"dup-window","sessionKind":"structured","provider":"claude"}"#
         )
         let store = WorkspaceStore(api: service, serverID: "server-dup")
-        store.scheduleAutoCreateWindow(taskId: task.id)
 
         await store.openTask(workspace: workspace, task: task)
         await store.openTask(workspace: workspace, task: task)
 
-        XCTAssertEqual(service.createRequests.count, 1)
+        XCTAssertTrue(service.createRequests.isEmpty)
         XCTAssertEqual(store.visibleSessionID, "dup-window")
         XCTAssertEqual(store.visibleSnapshot?.sessionKind, "structured")
         XCTAssertTrue(store.visibleSnapshot?.isStructured == true)
@@ -616,6 +937,12 @@ private final class MockWorkspaceService: WorkspaceServing {
         let target: WorkspaceSessionTarget
         let binding: WorkspaceBinding
         let kind: WorkspaceSessionKind
+        let prompt: String?
+    }
+
+    struct MoveRequest {
+        let taskId: String
+        let sessionId: String
     }
 
     enum MockError: LocalizedError {
@@ -641,6 +968,8 @@ private final class MockWorkspaceService: WorkspaceServing {
     var taskRequestIds: [String] = []
     var sessions: [String: SessionSnapshot] = [:]
     var createRequests: [CreateRequest] = []
+    var moveRequests: [MoveRequest] = []
+    var archiveRequests: [String] = []
     var createdSnapshot: SessionSnapshot?
     var saveError: Error?
 
@@ -702,9 +1031,12 @@ private final class MockWorkspaceService: WorkspaceServing {
     func createWorkspaceTaskWindow(
         target: WorkspaceSessionTarget,
         binding: WorkspaceBinding,
-        kind: WorkspaceSessionKind
+        kind: WorkspaceSessionKind,
+        prompt: String?
     ) async throws -> SessionSnapshot {
-        createRequests.append(CreateRequest(target: target, binding: binding, kind: kind))
+        createRequests.append(
+            CreateRequest(target: target, binding: binding, kind: kind, prompt: prompt)
+        )
         guard let createdSnapshot else { throw MockError.createUnavailable }
         sessions[createdSnapshot.id] = createdSnapshot
         if let detail = taskDetails[binding.workspaceTaskId] {
@@ -716,6 +1048,47 @@ private final class MockWorkspaceService: WorkspaceServing {
             )
         }
         return createdSnapshot
+    }
+
+    func archiveWorkspaceTask(taskId: String) async throws -> WorkspaceTask {
+        archiveRequests.append(taskId)
+        guard let detail = taskDetails[taskId] else { throw MockError.missingTask }
+        for (workspaceId, list) in tasks {
+            if let index = list.firstIndex(where: { $0.id == taskId }) {
+                tasks[workspaceId]?.remove(at: index)
+                break
+            }
+        }
+        taskDetails.removeValue(forKey: taskId)
+        return WorkspaceTask(
+            id: detail.id,
+            workspaceId: detail.workspaceId,
+            name: detail.name,
+            worktree: detail.worktree,
+            layout: detail.layout,
+            status: "done",
+            createdAt: detail.createdAt,
+            lastOpenedAt: detail.lastOpenedAt
+        )
+    }
+
+    func moveWorkspaceSession(taskId: String, sessionId: String) async throws {
+        moveRequests.append(MoveRequest(taskId: taskId, sessionId: sessionId))
+        guard let target = taskDetails[taskId] else { throw MockError.missingTask }
+        var moved: WorkspaceSessionSummary?
+        for (id, detail) in taskDetails where id != taskId {
+            guard let summary = detail.sessions.first(where: { $0.id == sessionId }) else { continue }
+            moved = summary
+            taskDetails[id] = detail.replacing(
+                layout: detail.layout,
+                sessions: detail.sessions.filter { $0.id != sessionId }
+            )
+            break
+        }
+        guard let moved else { throw MockError.missingSession }
+        var sessions = target.sessions.filter { $0.id != sessionId }
+        sessions.append(moved)
+        taskDetails[taskId] = target.replacing(layout: target.layout, sessions: sessions)
     }
 
     func getSession(id: String, blockBudget: Int) async throws -> SessionSnapshot {
@@ -750,7 +1123,8 @@ private final class MockWorkspaceService: WorkspaceServing {
         name: String,
         baseRef: String?,
         worktree: Bool?,
-        cwd: String?
+        cwd: String?,
+        description: String?
     ) async throws -> WorkspaceTaskCreation {
         throw MockError.createUnavailable
     }
@@ -758,7 +1132,8 @@ private final class MockWorkspaceService: WorkspaceServing {
     func createStandaloneTask(
         name: String,
         cwd: String?,
-        worktree: Bool?
+        worktree: Bool?,
+        description: String?
     ) async throws -> WorkspaceTaskCreation {
         throw MockError.createUnavailable
     }

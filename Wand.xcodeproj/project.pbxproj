@@ -69,6 +69,7 @@
 		E7000000000000000000AC10 /* WorkspaceWorktreeReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */; };
 		E9000000000000000000AC12 /* WorkspaceCreateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9000000000000000000BC12 /* WorkspaceCreateView.swift */; };
 		E9000000000000000000AC13 /* WorkspaceNewTaskSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9000000000000000000BC13 /* WorkspaceNewTaskSheet.swift */; };
+		E9000000000000000000AC14 /* SessionMoveSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9000000000000000000BC14 /* SessionMoveSheet.swift */; };
 		E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC08 /* WorkspaceTests.swift */; };
 		E8000000000000000000AC01 /* WorkspaceWorktreeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */; };
 /* End PBXBuildFile section */
@@ -170,6 +171,7 @@
 		E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWorktreeReviewView.swift; sourceTree = "<group>"; };
 		E9000000000000000000BC12 /* WorkspaceCreateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCreateView.swift; sourceTree = "<group>"; };
 		E9000000000000000000BC13 /* WorkspaceNewTaskSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNewTaskSheet.swift; sourceTree = "<group>"; };
+		E9000000000000000000BC14 /* SessionMoveSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMoveSheet.swift; sourceTree = "<group>"; };
 		E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWorktreeTests.swift; sourceTree = "<group>"; };
 		C3000000000000000000F101 /* WandTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WandTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -267,6 +269,7 @@
 				E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */,
 				E9000000000000000000BC12 /* WorkspaceCreateView.swift */,
 				E9000000000000000000BC13 /* WorkspaceNewTaskSheet.swift */,
+				E9000000000000000000BC14 /* SessionMoveSheet.swift */,
 				A100000000000000000000D1 /* Assets.xcassets */,
 				A100000000000000000000E1 /* Info.plist */,
 			);
@@ -509,6 +512,7 @@
 				E7000000000000000000AC10 /* WorkspaceWorktreeReviewView.swift in Sources */,
 				E9000000000000000000AC12 /* WorkspaceCreateView.swift in Sources */,
 				E9000000000000000000AC13 /* WorkspaceNewTaskSheet.swift in Sources */,
+				E9000000000000000000AC14 /* SessionMoveSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

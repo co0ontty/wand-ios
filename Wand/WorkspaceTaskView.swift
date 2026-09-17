@@ -100,6 +100,7 @@ struct WorkspaceTaskView: View {
     let api: WandAPI
     @ObservedObject var store: WorkspaceStore
     @State private var pendingDeleteSession: WorkspaceSessionSummary?
+    @State private var moveSessionTarget: WorkspaceSessionSummary?
     @State private var deleteSessionBusy = false
     @State private var deleteSessionError: String?
 
@@ -133,6 +134,14 @@ struct WorkspaceTaskView: View {
             WorkspaceTargetPicker(store: store, taskId: task.id)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $moveSessionTarget) { session in
+            SessionMoveSheet(
+                store: store,
+                sessionId: session.id,
+                sessionTitle: sessionLabel(session, index: 0)
+            )
+            .presentationDetents([.medium, .large])
         }
         .task(id: task.id) {
             await store.openTask(workspace: workspace, task: task)
@@ -413,6 +422,11 @@ struct WorkspaceTaskView: View {
                 .stroke(selected ? palette.selectedBorder : palette.chipBorder, lineWidth: 1)
         )
         .contextMenu {
+            Button {
+                moveSessionTarget = session
+            } label: {
+                Label("移动到任务", systemImage: "folder")
+            }
             Button(role: .destructive) {
                 requestDeleteSession(session)
             } label: {

@@ -464,9 +464,28 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
 
     var id: String { workspaceId }
     var isSynthetic: Bool { synthetic ?? false }
-    var isGlobal: Bool { global ?? false }
+    /// 服务端会在 global 组上打标；老服务端只给 `wand-global` 这个 ID，两边都要认。
+    var isGlobal: Bool { (global ?? false) || workspaceId == "wand-global" }
     /// 可归属的真实项目：排除合成目录组和隐藏的全局空间。
     var isBindableProject: Bool { !isSynthetic && !isGlobal }
+
+    /// 仅用于展示层改写（重命名小组 / 剔掉已完成任务），不改动服务端数据。
+    func replacing(
+        workspaceName: String? = nil,
+        tasks: [WorkspaceTaskSummary]? = nil,
+        standaloneSessions: [WorkspaceSessionSummary]? = nil
+    ) -> TaskDirectoryGroup {
+        TaskDirectoryGroup(
+            workspaceId: workspaceId,
+            workspaceName: workspaceName ?? self.workspaceName,
+            workspaceCwd: workspaceCwd,
+            createdAt: createdAt,
+            synthetic: synthetic,
+            global: global,
+            tasks: tasks ?? self.tasks,
+            standaloneSessions: standaloneSessions ?? self.standaloneSessions
+        )
+    }
 }
 
 enum TaskListExpansionStorage {
@@ -540,7 +559,8 @@ enum TaskListPresentation {
     }
 
     static func showsDirectoryDisclosure(directoryCount: Int) -> Bool {
-        directoryCount > 1
+        // 只有一个目录时也保留折叠按钮：这个开关的意义不该随目录数量变化。
+        true
     }
 
     static func showsTaskSessionDisclosure(sessionCount: Int) -> Bool {
@@ -575,22 +595,37 @@ enum TaskListPresentation {
         return ManageSelection(taskIds: taskIds, sessionIds: sessionIds)
     }
 
-    static func resolveManagedDeletion(
+    /// 批量操作里任务是归档（终端继续跑、worktree 保留），只有显式选中的终端才是真删除。
+    /// 这里只把选择夹到当前可见集合，不再把任务名下的终端从删除集合里剔掉。
+    static func pruneManagedSelection(
         _ selection: ManageSelection,
         groups: [TaskDirectoryGroup]
     ) -> ManageSelection {
-        let owned = Set(groups.flatMap(\.tasks).filter { selection.taskIds.contains($0.id) }.flatMap { $0.sessions.map(\.id) })
+        let visible = collectManagedIds(groups)
         return ManageSelection(
-            taskIds: selection.taskIds,
-            sessionIds: selection.sessionIds.filter { !owned.contains($0) }
+            taskIds: selection.taskIds.intersection(visible.taskIds),
+            sessionIds: selection.sessionIds.intersection(visible.sessionIds)
         )
     }
 
-    static func describeManagedDeletion(_ selection: ManageSelection) -> String {
+    static func describeManagedAction(_ selection: ManageSelection) -> String {
+        let hasTasks = !selection.taskIds.isEmpty
+        let hasSessions = !selection.sessionIds.isEmpty
+        if hasTasks && hasSessions { return "归档任务并删除终端" }
+        if hasTasks { return "归档任务" }
+        return "删除终端"
+    }
+
+    static func describeManagedResult(_ selection: ManageSelection) -> String {
         var parts: [String] = []
-        if !selection.taskIds.isEmpty { parts.append("\(selection.taskIds.count) 个任务") }
-        if !selection.sessionIds.isEmpty { parts.append("\(selection.sessionIds.count) 个终端") }
-        return parts.isEmpty ? "所选内容" : parts.joined(separator: "和 ")
+        if !selection.taskIds.isEmpty { parts.append("归档 \(selection.taskIds.count) 个任务") }
+        if !selection.sessionIds.isEmpty { parts.append("删除 \(selection.sessionIds.count) 个终端") }
+        return parts.isEmpty ? "处理所选内容" : parts.joined(separator: "、")
+    }
+
+    /// 只有真的会杀终端时才用破坏性样式；纯归档不该渲染成红色操作。
+    static func managedSelectionIsDestructive(_ selection: ManageSelection) -> Bool {
+        !selection.sessionIds.isEmpty
     }
 
     struct TaskListMetrics: Equatable {
@@ -628,8 +663,20 @@ enum TaskListPresentation {
     }
 
     static func orderedDirectoryGroups(_ groups: [TaskDirectoryGroup]) -> [TaskDirectoryGroup] {
-        groups.filter { !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
+        let visible = groups.map { group in
+            // 仅展示层处理：已完成任务仍保留在看板和会话导航里。
+            group.replacing(
+                workspaceName: group.isGlobal ? unassignedWorkspaceName : group.workspaceName,
+                tasks: group.tasks.filter { $0.status != "done" }
+            )
+        }
+        .filter { !$0.isGlobal || !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
+        // 未归属工作区永远排在最后，并且保持服务端给的其余顺序（不依赖非稳定排序）。
+        return visible.filter { !$0.isGlobal } + visible.filter(\.isGlobal)
     }
+
+    /// 未绑定任务的历史任务统一挂在服务端全局空间下；侧栏要给它一个能读懂的名字。
+    static let unassignedWorkspaceName = "未归属工作区"
 
     static func orderedTaskSummaries(_ tasks: [WorkspaceTaskSummary]) -> [WorkspaceTaskSummary] {
         tasks
@@ -673,6 +720,61 @@ enum TaskListPresentation {
         )
         if !trimmed.isEmpty && !repeats { return trimmed }
         return "\(providerLabel) \(index + 1)"
+    }
+}
+
+/// 会话可移动到的任务（与服务端 GET /api/tasks 同一份数据，不另建目的地列表）。
+struct SessionMoveTarget: Equatable, Identifiable {
+    let id: String
+    let workspace: String
+    let name: String
+    /// 会话当前就属于这个任务：就地禁用，不提供“移到原地”。
+    let current: Bool
+
+    var key: String { "\(workspace)\u{1}\(name)" }
+
+    /// 同名任务出现在不同工作区时补上 ID 前缀，避免两个一模一样的选项。
+    func subtitle(ambiguous: Bool) -> String {
+        ambiguous ? "\(workspace) · \(String(id.prefix(8)))" : workspace
+    }
+}
+
+enum SessionMovePresentation {
+    static func targets(
+        groups: [TaskDirectoryGroup],
+        sessionId: String,
+        query: String = ""
+    ) -> [SessionMoveTarget] {
+        var seen = Set<String>()
+        var targets: [SessionMoveTarget] = []
+        for group in groups {
+            let workspace = group.isGlobal
+                ? TaskListPresentation.unassignedWorkspaceName
+                : group.workspaceName
+            for task in group.tasks where seen.insert(task.id).inserted {
+                targets.append(SessionMoveTarget(
+                    id: task.id,
+                    workspace: workspace,
+                    name: task.name,
+                    current: task.sessions.contains { $0.id == sessionId }
+                ))
+            }
+        }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return targets }
+        return targets.filter { "\($0.workspace) \($0.name)".localizedCaseInsensitiveContains(trimmed) }
+    }
+
+    /// 目标里出现重名（同一工作区 + 同名任务）时需要用 ID 区分。
+    static func ambiguousKeys(_ targets: [SessionMoveTarget]) -> Set<String> {
+        var counts: [String: Int] = [:]
+        for target in targets { counts[target.key, default: 0] += 1 }
+        return Set(counts.filter { $0.value > 1 }.keys)
+    }
+
+    /// 可选目标在上、当前任务（禁用）在下，键盘弹出时也不用越过一行禁用项。
+    static func ordered(_ targets: [SessionMoveTarget]) -> [SessionMoveTarget] {
+        targets.filter { !$0.current } + targets.filter(\.current)
     }
 }
 

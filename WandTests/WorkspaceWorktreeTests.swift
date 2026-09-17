@@ -664,8 +664,17 @@ private final class MockWorktreeMergeService: WorkspaceServing {
     func createWorkspaceTaskWindow(
         target: WorkspaceSessionTarget,
         binding: WorkspaceBinding,
-        kind: WorkspaceSessionKind
+        kind: WorkspaceSessionKind,
+        prompt: String?
     ) async throws -> SessionSnapshot {
+        throw MockError.unavailable
+    }
+
+    func archiveWorkspaceTask(taskId: String) async throws -> WorkspaceTask {
+        throw MockError.unavailable
+    }
+
+    func moveWorkspaceSession(taskId: String, sessionId: String) async throws {
         throw MockError.unavailable
     }
 
@@ -708,7 +717,8 @@ private final class MockWorktreeMergeService: WorkspaceServing {
         name: String,
         baseRef: String?,
         worktree: Bool? = nil,
-        cwd: String? = nil
+        cwd: String? = nil,
+        description: String? = nil
     ) async throws -> WorkspaceTaskCreation {
         createTaskRequests.append(
             CreateTaskRequest(workspaceId: workspaceId, name: name, baseRef: baseRef, worktree: worktree, cwd: cwd)
@@ -722,7 +732,8 @@ private final class MockWorktreeMergeService: WorkspaceServing {
     func createStandaloneTask(
         name: String,
         cwd: String?,
-        worktree: Bool?
+        worktree: Bool?,
+        description: String?
     ) async throws -> WorkspaceTaskCreation {
         standaloneTaskRequests.append(StandaloneTaskRequest(name: name, cwd: cwd, worktree: worktree))
         let directory = cwd?.isEmpty == false ? cwd! : "/scratch"

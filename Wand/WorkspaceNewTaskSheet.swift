@@ -1,20 +1,23 @@
 import SwiftUI
 
-/// 新建任务 sheet（对齐 web 端新建任务对话框）：名称 + 目录 + worktree 隔离开关。
-/// 目录按 find-or-create 归入隐式项目；git 仓库默认生成独立 worktree，
-/// 可通过开关显式关闭（服务端 `worktree: false`）。
+/// 新建任务 sheet（对齐 Android 的 TaskListScreen 新建对话框）：名称 + 工作目录 +
+/// 「创建后」二选一（启动会话 / 仅建分组）+ 首个会话提示词，worktree 隔离收在「高级」里。
+/// 目录按 find-or-create 归入隐式项目；`worktree: false` 时服务端只做界面分组，不建磁盘目录。
 struct WorkspaceNewTaskSheet: View {
     let api: WandAPI
     @ObservedObject var store: WorkspaceStore
     /// 预填目录（从项目组「＋」进入时为项目 cwd；全局入口为空）。
     var initialCwd: String = ""
     var workspaceId: String? = nil
-    let onCreated: (Workspace, WorkspaceTaskCreation) -> Void
+    let onCreated: (WorkspaceNewTaskResult) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var cwd = ""
-    @State private var worktreeEnabled = true
+    @State private var worktreeEnabled = false
+    @State private var showingAdvanced = false
+    @State private var startFirstSession = true
+    @State private var prompt = ""
     @State private var target: WorkspaceSessionTarget = .claude
     @State private var sessionKind: WorkspaceSessionKind = .structured
     @State private var suggestions: [WorkspacePathSuggestion] = []
@@ -36,7 +39,7 @@ struct WorkspaceNewTaskSheet: View {
         store: WorkspaceStore,
         initialCwd: String = "",
         workspaceId: String? = nil,
-        onCreated: @escaping (Workspace, WorkspaceTaskCreation) -> Void
+        onCreated: @escaping (WorkspaceNewTaskResult) -> Void
     ) {
         self.api = api
         self.store = store
@@ -53,15 +56,16 @@ struct WorkspaceNewTaskSheet: View {
                 WandAmbientBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        Text("先选工作目录。任务名称可留空，由系统自动生成。")
+                        Text("任务是工作区内的分组，与任务看板同步，不会创建磁盘子目录。")
                             .font(.footnote)
                             .foregroundColor(Theme.textSecondary)
                         nameCard
                         directoryCard
-                        if !trimmedDirectory.isEmpty {
-                            worktreeCard
+                        createModeCard
+                        if startFirstSession {
+                            cliCard
                         }
-                        cliCard
+                        advancedCard
                         if let errorMessage {
                             errorBanner(errorMessage)
                         }
@@ -77,7 +81,7 @@ struct WorkspaceNewTaskSheet: View {
                         .disabled(creating)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(creating ? "创建中…" : "创建") {
+                    Button(creating ? "创建中…" : (startFirstSession ? "创建并启动会话" : "创建任务")) {
                         Task { await submit() }
                     }
                     .font(.system(size: 15, weight: .semibold))
@@ -93,7 +97,6 @@ struct WorkspaceNewTaskSheet: View {
             }
             .task {
                 if let config = try? await api.serverConfig() {
-                    worktreeEnabled = config.defaultTaskWorktree != false
                     defaultCwd = config.defaultCwd ?? ""
                     if let raw = config.defaultProvider,
                        let provider = WorkspaceSessionTarget(rawValue: raw), provider != .shell {
@@ -137,8 +140,20 @@ struct WorkspaceNewTaskSheet: View {
         cwd.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var trimmedPrompt: String {
+        prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 首个会话的提示词：仅结构化会话能当描述用；PTY 的首行输入不走自动命名。
+    private var taskPrompt: String? {
+        guard startFirstSession, target != .shell else { return nil }
+        return trimmedPrompt.isEmpty ? nil : trimmedPrompt
+    }
+
     private var canSubmit: Bool {
-        !creating && !trimmedDirectory.isEmpty && trimmedName.count <= 80
+        guard !creating, !trimmedDirectory.isEmpty, trimmedName.count <= 80 else { return false }
+        // 名字和提示词至少有一个，否则服务端只能拿到一个没意义的占位标题。
+        return !trimmedName.isEmpty || taskPrompt != nil
     }
 
     private var matchingProjects: [TaskDirectoryGroup] {
@@ -198,7 +213,7 @@ struct WorkspaceNewTaskSheet: View {
 
     private var nameCard: some View {
         fieldCard(title: "任务名称（可选）") {
-            TextField("留空则自动命名", text: $name)
+            TextField("留空按提示词自动命名", text: $name)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.system(size: 15))
@@ -543,43 +558,90 @@ struct WorkspaceNewTaskSheet: View {
         .disabled(creating)
     }
 
-    private var worktreeCard: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(worktreeEnabled ? Theme.brand : Theme.textMuted)
-                .frame(width: 32, height: 32)
-                .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(worktreeEnabled ? Theme.brand.opacity(0.12) : Theme.surface)
-                )
-            VStack(alignment: .leading, spacing: 3) {
-                Text("独立 worktree 隔离")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                Text(worktreeEnabled
-                    ? "为任务创建独立分支与工作树，改动隔离、可审查后合并。"
-                    : "会话直接运行在任务目录；非 git 目录自动用这种模式。")
-                    .font(.footnote)
-                    .foregroundColor(Theme.textMuted)
+    /// 「创建后」二选一：直接启动首个会话，或只建分组（对齐 Android 的 WandChoiceStrip）。
+    private var createModeCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("创建后")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Theme.textSecondary)
+            HStack(spacing: 8) {
+                modeChoice("启动会话", selected: startFirstSession) { startFirstSession = true }
+                modeChoice("仅建分组", selected: !startFirstSession) { startFirstSession = false }
             }
-            Spacer(minLength: 8)
-            Toggle("", isOn: $worktreeEnabled)
-                .labelsHidden()
-                .tint(Theme.brand)
-                .onChange(of: worktreeEnabled) { _, enabled in
-                    Task { try? await api.updateNewSessionDefaults(defaultTaskWorktree: enabled) }
+            if startFirstSession, target != .shell {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("首个会话的提示词（可选）")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                    TextField("希望 CLI 帮你完成什么？", text: $prompt, axis: .vertical)
+                        .lineLimit(2...4)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(size: 15))
+                        .disabled(creating)
+                    Text("任务名称留空时按此提示词自动命名，仍可随时改名。")
+                        .font(.footnote)
+                        .foregroundColor(Theme.textMuted)
                 }
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Theme.surface)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(worktreeEnabled ? Theme.brand.opacity(0.42) : .clear, lineWidth: 1)
-        )
+    }
+
+    private func modeChoice(
+        _ title: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(selected ? Theme.brand.opacity(0.12) : Theme.surface.opacity(0.6))
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(creating)
+    }
+
+    /// worktree 隔离默认关闭（服务端默认也不建目录），需要时才在高级里打开。
+    @ViewBuilder
+    private var advancedCard: some View {
+        Button {
+            showingAdvanced.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: showingAdvanced ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(showingAdvanced ? "收起高级选项" : "高级：独立工作树")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+            }
+            .foregroundColor(Theme.textSecondary)
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+        .disabled(creating)
+        if showingAdvanced {
+            HStack(spacing: 8) {
+                modeChoice("共用工作区", selected: !worktreeEnabled) { worktreeEnabled = false }
+                modeChoice("隔离 worktree", selected: worktreeEnabled) { worktreeEnabled = true }
+            }
+            Text(worktreeEnabled
+                ? "需要 Git 仓库，会创建独立工作树。"
+                : "默认仅做界面分组，不创建目录。")
+                .font(.footnote)
+                .foregroundColor(Theme.textMuted)
+        }
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -602,15 +664,57 @@ struct WorkspaceNewTaskSheet: View {
         do {
             store.rememberCreationChoice(provider: target, kind: sessionKind)
             let (workspace, creation) = try await store.createTask(
-                name: trimmedName.isEmpty ? "未命名任务" : trimmedName,
+                name: trimmedName,
                 directory: trimmedDirectory,
                 worktree: worktreeEnabled,
-                workspaceId: selectedWorkspaceId
+                workspaceId: selectedWorkspaceId,
+                description: taskPrompt
             )
-            dismiss()
-            onCreated(workspace, creation)
+            guard startFirstSession else {
+                dismiss()
+                onCreated(WorkspaceNewTaskResult(
+                    workspace: workspace,
+                    creation: creation,
+                    session: nil,
+                    sessionError: nil
+                ))
+                return
+            }
+            // 会话启动失败时任务已经存在：错误交给调用方提示，任务照常打开。
+            do {
+                let snapshot = try await store.createFirstTaskWindow(
+                    taskId: creation.id,
+                    target: target,
+                    kind: sessionKind,
+                    prompt: taskPrompt
+                )
+                dismiss()
+                onCreated(WorkspaceNewTaskResult(
+                    workspace: workspace,
+                    creation: creation,
+                    session: snapshot,
+                    sessionError: nil
+                ))
+            } catch {
+                dismiss()
+                onCreated(WorkspaceNewTaskResult(
+                    workspace: workspace,
+                    creation: creation,
+                    session: nil,
+                    sessionError: "任务已创建，但启动会话失败：\(error.localizedDescription)"
+                ))
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
+}
+
+struct WorkspaceNewTaskResult {
+    let workspace: Workspace
+    let creation: WorkspaceTaskCreation
+    /// 「启动会话」成功时的首个会话；「仅建分组」与启动失败时为 nil。
+    let session: SessionSnapshot?
+    /// 任务已创建但首个会话没起来时的原因。
+    let sessionError: String?
 }

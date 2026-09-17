@@ -23,7 +23,32 @@ func workspaceForTaskGroup(
     )
 }
 
+/// 任务行对应的真实项目：优先索引里的完整实体。合成目录组的 `workspaceId` 不是真实项目 ID，
+/// 打开任务必须用 `task.workspaceId`（侧栏与看板都走这一个出口）。
+func workspaceForTaskSummary(
+    _ summary: WorkspaceTaskSummary,
+    group: TaskDirectoryGroup,
+    workspaces: [Workspace]
+) -> Workspace {
+    if let workspace = workspaces.first(where: { $0.id == summary.workspaceId }) {
+        return workspace
+    }
+    if !group.isSynthetic, summary.workspaceId == group.workspaceId {
+        return workspaceForTaskGroup(group, workspaces: workspaces)
+    }
+    return Workspace(
+        id: summary.workspaceId,
+        name: group.workspaceName,
+        cwd: summary.cwd.isEmpty ? group.workspaceCwd : summary.cwd,
+        defaultProvider: nil,
+        layout: nil,
+        createdAt: "",
+        lastOpenedAt: nil
+    )
+}
+
 private enum TaskListConfirm: Identifiable {
+    case archiveTask(WorkspaceTask)
     case deleteTask(WorkspaceTask)
     case clearSessions(WorkspaceTaskSummary)
     case deleteSession(WorkspaceSessionSummary)
@@ -32,6 +57,7 @@ private enum TaskListConfirm: Identifiable {
 
     var id: String {
         switch self {
+        case .archiveTask(let task): return "archive-task-\(task.id)"
         case .deleteTask(let task): return "delete-task-\(task.id)"
         case .clearSessions(let task): return "clear-\(task.id)"
         case .deleteSession(let session): return "delete-session-\(session.id)"
@@ -52,6 +78,7 @@ struct WorkspaceListView: View {
     let onOpenTask: (Workspace, WorkspaceTask) -> Void
     var onTaskRenamed: ((WorkspaceTask) -> Void)? = nil
     var onTaskDeleted: ((String) -> Void)? = nil
+    var onTaskArchived: ((String) -> Void)? = nil
     var onOpenSession: ((Workspace, WorkspaceSessionSummary) -> Void)? = nil
     var onOpenTaskSession: ((Workspace, WorkspaceTask, WorkspaceSessionSummary) -> Void)? = nil
     var onRequestNewSession: ((Workspace, WorkspaceTask) -> Void)? = nil
@@ -83,6 +110,7 @@ struct WorkspaceListView: View {
     @State private var renameWorkspaceBusy = false
 
     @State private var reviewTarget: Workspace?
+    @State private var moveSessionTarget: WorkspaceSessionSummary?
     @State private var createWorkspacePresented = false
     @State private var toastMessage: String?
 
@@ -109,7 +137,7 @@ struct WorkspaceListView: View {
                     pendingConfirm = nil
                     confirmError = nil
                 }
-                Button(confirmBusy ? "处理中…" : confirmActionTitle, role: .destructive) {
+                Button(confirmBusy ? "处理中…" : confirmActionTitle, role: confirmIsDestructive ? .destructive : nil) {
                     Task { await performPendingConfirm() }
                 }
                 .disabled(confirmBusy)
@@ -200,14 +228,24 @@ struct WorkspaceListView: View {
     @ViewBuilder
     private var trailingToolbarButtons: some View {
         if isSelecting {
-            Button("删除", role: .destructive) {
-                requestDeleteManagedSelection()
+            Button(TaskListPresentation.describeManagedAction(managedToolbarSelection)) {
+                requestManagedSelection()
             }
-            .disabled(selectedTaskIds.isEmpty && selectedSessionIds.isEmpty)
+            .disabled(managedToolbarSelection.isEmpty)
         } else {
             toolbarSelectionToggle
             toolbarNewTaskButton
         }
+    }
+
+    private var managedToolbarSelection: TaskListPresentation.ManageSelection {
+        TaskListPresentation.pruneManagedSelection(
+            TaskListPresentation.ManageSelection(
+                taskIds: selectedTaskIds,
+                sessionIds: selectedSessionIds
+            ),
+            groups: store.taskGroups
+        )
     }
 
     private var toolbarSelectionToggle: some View {
@@ -234,6 +272,16 @@ struct WorkspaceListView: View {
 
     private var sheetContent: some View {
         alertContent
+            .sheet(item: $moveSessionTarget) { session in
+                SessionMoveSheet(
+                    store: store,
+                    sessionId: session.id,
+                    sessionTitle: sessionMoveTitle(session)
+                ) {
+                    showToast("已移动终端「\(sessionMoveTitle(session))」")
+                }
+                .presentationDetents([.medium, .large])
+            }
             .sheet(item: $reviewTarget) { workspace in
                 WorkspaceWorktreeReviewView(
                     workspace: workspace,
@@ -272,13 +320,18 @@ struct WorkspaceListView: View {
                 }
             }
             .sheet(isPresented: $newTaskSheetPresented) {
-                WorkspaceNewTaskSheet(api: api, store: store, initialCwd: newTaskSheetCwd, workspaceId: newTaskSheetWorkspaceId) { workspace, creation in
-                    if !creation.isIsolated, let worktreeError = creation.worktreeError {
+                WorkspaceNewTaskSheet(api: api, store: store, initialCwd: newTaskSheetCwd, workspaceId: newTaskSheetWorkspaceId) { result in
+                    let creation = result.creation
+                    if let sessionError = result.sessionError {
+                        showToast(sessionError)
+                    } else if !creation.isIsolated, let worktreeError = creation.worktreeError {
                         showToast("已创建任务「\(creation.name)」：\(worktreeError)")
+                    } else if result.session != nil {
+                        showToast("已创建任务「\(creation.name)」并启动会话")
                     } else {
-                        showToast("已创建任务「\(creation.name)」\(creation.isIsolated ? "（独立 worktree）" : "")")
+                        showToast("已创建任务「\(creation.name)」")
                     }
-                    let task = WorkspaceTask(
+                    onOpenTask(result.workspace, WorkspaceTask(
                         id: creation.id,
                         workspaceId: creation.workspaceId,
                         name: creation.name,
@@ -287,9 +340,7 @@ struct WorkspaceListView: View {
                         status: creation.status,
                         createdAt: "",
                         lastOpenedAt: nil
-                    )
-                    store.scheduleAutoCreateWindow(taskId: creation.id)
-                    onOpenTask(workspace, task)
+                    ))
                 }
                 .presentationDetents([.medium, .large])
             }
@@ -377,25 +428,42 @@ struct WorkspaceListView: View {
 
     private var confirmTitle: String {
         switch pendingConfirm {
-        case .deleteTask: return "删除任务？"
+        case .archiveTask: return "归档任务？"
+        case .deleteTask: return "删除任务并清理 Worktree？"
         case .clearSessions: return "清空全部终端？"
         case .deleteSession: return "删除终端？"
         case .deleteWorkspace: return "删除项目？"
-        case .deleteManaged: return "删除所选内容？"
+        case .deleteManaged(let selection):
+            return "\(TaskListPresentation.describeManagedAction(selection))？"
         case .none: return ""
         }
     }
 
     private var confirmActionTitle: String {
         switch pendingConfirm {
+        case .archiveTask: return "确认归档"
         case .clearSessions: return "确认清空"
+        case .deleteManaged(let selection):
+            return "确认\(TaskListPresentation.describeManagedAction(selection))"
         default: return "删除"
+        }
+    }
+
+    /// 纯归档不该渲染成红色破坏性操作（对齐 web 端 managedSelectionIsDestructive）。
+    private var confirmIsDestructive: Bool {
+        switch pendingConfirm {
+        case .archiveTask: return false
+        case .deleteManaged(let selection):
+            return TaskListPresentation.managedSelectionIsDestructive(selection)
+        default: return true
         }
     }
 
     private var confirmMessage: String {
         if let confirmError { return confirmError }
         switch pendingConfirm {
+        case .archiveTask(let task):
+            return "「\(task.name)」会从侧栏隐藏并移入任务看板的归档任务，终端继续运行、Worktree 保留。"
         case .deleteTask(let task):
             return "任务「\(task.name)」及其会话和独立 worktree 将被删除，此操作无法撤销。"
         case .clearSessions(let task):
@@ -405,7 +473,13 @@ struct WorkspaceListView: View {
         case .deleteWorkspace(let workspace):
             return "项目「\(workspace.name)」及其任务、会话与独立 worktree 将被删除，此操作无法撤销。"
         case .deleteManaged(let selection):
-            return "将删除\(TaskListPresentation.describeManagedDeletion(selection))，此操作无法撤销。"
+            if selection.taskIds.isEmpty {
+                return "将结束所选终端，此操作无法撤销。"
+            }
+            if selection.sessionIds.isEmpty {
+                return "所选任务会从侧栏隐藏并移入看板归档，终端与 Worktree 都保留。"
+            }
+            return "所选任务会移入看板归档（终端与 Worktree 保留），同时结束所选终端。"
         case .none:
             return ""
         }
@@ -572,8 +646,12 @@ struct WorkspaceListView: View {
 
     private func homeManageBar(visible: [TaskDirectoryGroup]) -> some View {
         let all = TaskListPresentation.collectManagedIds(visible)
-        let selectedCount = selectedTaskIds.count + selectedSessionIds.count
-        let allOn = selectedCount > 0
+        let selection = TaskListPresentation.ManageSelection(
+            taskIds: selectedTaskIds,
+            sessionIds: selectedSessionIds
+        )
+        let resolved = TaskListPresentation.pruneManagedSelection(selection, groups: store.taskGroups)
+        let allOn = !resolved.isEmpty
             && selectedTaskIds.count == all.taskIds.count
             && selectedSessionIds.count == all.sessionIds.count
         return HStack(spacing: 10) {
@@ -587,15 +665,18 @@ struct WorkspaceListView: View {
             }
             .font(.system(size: 13, weight: .semibold))
             .foregroundColor(Theme.brand)
-            Text(selectedCount == 0 ? "选择任务或终端" : "已选 \(selectedCount)")
+            Text(resolved.isEmpty ? "选择任务或终端" : "已选 \(resolved.count)")
                 .font(.system(size: 12))
                 .foregroundColor(Theme.textMuted)
             Spacer(minLength: 8)
-            Button("删除", role: .destructive) {
-                requestDeleteManagedSelection()
+            Button(TaskListPresentation.describeManagedAction(resolved)) {
+                requestManagedSelection()
             }
             .font(.system(size: 13, weight: .semibold))
-            .disabled(selectedCount == 0)
+            .foregroundColor(TaskListPresentation.managedSelectionIsDestructive(resolved)
+                ? Theme.danger
+                : Theme.brand)
+            .disabled(resolved.isEmpty)
             Button("完成") {
                 endManagedSelection()
             }
@@ -608,12 +689,12 @@ struct WorkspaceListView: View {
         .listRowSeparator(.hidden)
     }
 
-    private func requestDeleteManagedSelection() {
+    private func requestManagedSelection() {
         let selection = TaskListPresentation.ManageSelection(
             taskIds: selectedTaskIds,
             sessionIds: selectedSessionIds
         )
-        let resolved = TaskListPresentation.resolveManagedDeletion(
+        let resolved = TaskListPresentation.pruneManagedSelection(
             selection,
             groups: store.taskGroups
         )
@@ -1001,20 +1082,29 @@ struct WorkspaceListView: View {
                 Label("并行任务", systemImage: "square.stack.3d.up")
             }
         }
-        Button(role: .destructive) {
-            presentConfirm(.deleteTask(task))
+        Button {
+            presentAfterSwipe { pendingConfirm = .archiveTask(task) }
         } label: {
-            Label("删除", systemImage: "trash")
+            Label(summary.isIsolated ? "归档任务（保留 Worktree）" : "归档任务", systemImage: "archivebox")
+        }
+        // 归档是软删除；只有隔离任务才真删并清理 worktree（对齐 web 端）。
+        if summary.isIsolated {
+            Button(role: .destructive) {
+                presentConfirm(.deleteTask(task))
+            } label: {
+                Label("删除任务并清理 Worktree", systemImage: "trash")
+            }
         }
     }
 
     @ViewBuilder
     private func taskSummarySwipeActions(_ summary: WorkspaceTaskSummary, task: WorkspaceTask) -> some View {
-        Button(role: .destructive) {
-            presentConfirm(.deleteTask(task))
+        Button {
+            presentConfirm(.archiveTask(task))
         } label: {
-            Label("删除", systemImage: "trash")
+            Label("归档", systemImage: "archivebox")
         }
+        .tint(Theme.brand)
         if summary.listedSessionCount > 0 {
             Button {
                 presentConfirm(.clearSessions(summary))
@@ -1085,6 +1175,11 @@ struct WorkspaceListView: View {
         .accessibilityLabel("会话 \(label)")
         .accessibilityAddTraits(.isButton)
         .contextMenu {
+            Button {
+                moveSessionTarget = session
+            } label: {
+                Label("移动到任务", systemImage: "folder")
+            }
             Button(role: .destructive) {
                 requestDeleteSession(session)
             } label: {
@@ -1104,6 +1199,17 @@ struct WorkspaceListView: View {
         presentConfirm(.deleteSession(session))
     }
 
+    /// 移动会话行内与 sheet 标题共用同一个名字：优先原生标题，否则用 provider + 序号。
+    private func sessionMoveTitle(_ session: WorkspaceSessionSummary) -> String {
+        TaskListPresentation.listSessionLabel(
+            title: session.title,
+            providerLabel: session.providerLabel,
+            cwd: session.cwd,
+            index: 0,
+            parentNames: []
+        )
+    }
+
     private func sessionDeleteLabel(_ session: WorkspaceSessionSummary) -> String {
         TaskListPresentation.listSessionLabel(
             title: session.title,
@@ -1120,6 +1226,10 @@ struct WorkspaceListView: View {
         confirmError = nil
         do {
             switch pendingConfirm {
+            case .archiveTask(let task):
+                try await store.archiveWorkspaceTask(taskId: task.id, workspaceId: task.workspaceId)
+                onTaskArchived?(task.id)
+                showToast("已归档任务「\(task.name)」，可在任务看板的归档任务中恢复")
             case .deleteTask(let task):
                 try await store.deleteWorkspaceTask(workspaceId: task.workspaceId, taskId: task.id)
                 onTaskDeleted?(task.id)
@@ -1136,16 +1246,15 @@ struct WorkspaceListView: View {
                 showToast("已删除项目「\(workspace.name)」")
             case .deleteManaged(let selection):
                 for taskId in selection.taskIds {
-                    if let task = store.taskGroups.flatMap(\.tasks).first(where: { $0.id == taskId }) {
-                        try await store.deleteWorkspaceTask(workspaceId: task.workspaceId, taskId: task.id)
-                        onTaskDeleted?(task.id)
-                    }
+                    guard let task = store.taskGroups.flatMap(\.tasks).first(where: { $0.id == taskId }) else { continue }
+                    try await store.archiveWorkspaceTask(taskId: task.id, workspaceId: task.workspaceId)
+                    onTaskArchived?(task.id)
                 }
                 if !selection.sessionIds.isEmpty {
                     try await store.deleteSessions(Array(selection.sessionIds))
                 }
                 endManagedSelection()
-                showToast("已删除\(TaskListPresentation.describeManagedDeletion(selection))")
+                showToast("已\(TaskListPresentation.describeManagedResult(selection))")
             }
             self.pendingConfirm = nil
         } catch {
@@ -1162,21 +1271,7 @@ struct WorkspaceListView: View {
     }
 
     private func workspace(for summary: WorkspaceTaskSummary, group: TaskDirectoryGroup) -> Workspace {
-        if let workspace = store.workspaces.first(where: { $0.id == summary.workspaceId }) {
-            return workspace
-        }
-        if !group.isSynthetic, summary.workspaceId == group.workspaceId {
-            return workspace(from: group)
-        }
-        return Workspace(
-            id: summary.workspaceId,
-            name: group.workspaceName,
-            cwd: summary.cwd.isEmpty ? group.workspaceCwd : summary.cwd,
-            defaultProvider: nil,
-            layout: nil,
-            createdAt: "",
-            lastOpenedAt: nil
-        )
+        workspaceForTaskSummary(summary, group: group, workspaces: store.workspaces)
     }
 
     private func workspaceSection(_ workspace: Workspace) -> some View {
@@ -1396,6 +1491,11 @@ struct WorkspaceListView: View {
         .accessibilityLabel("会话 \(session.title ?? session.providerLabel)")
         .accessibilityAddTraits(.isButton)
         .contextMenu {
+            Button {
+                moveSessionTarget = session
+            } label: {
+                Label("移动到任务", systemImage: "folder")
+            }
             Button(role: .destructive) {
                 requestDeleteSession(session)
             } label: {

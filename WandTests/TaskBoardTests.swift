@@ -3,6 +3,35 @@ import XCTest
 @testable import Wand
 
 final class TaskBoardTests: XCTestCase {
+    func testBoardTaskDecodesWorkspaceTaskBindingAndTerminalLabels() throws {
+        // 看板卡片靠 workspaceTaskId 才能带着任务上下文打开会话。
+        let bound = try JSONDecoder().decode(
+            WandBoardTask.self,
+            from: Data(
+                #"{"id":"t-1","title":"修顶栏","status":"doing","workspaceTaskId":"wt-1","sessions":[]}"#.utf8
+            )
+        )
+        XCTAssertEqual(bound.workspaceTaskId, "wt-1")
+
+        // 旧服务端不返回该字段，或者返回空串：都当“未绑定”。
+        let unbound = try JSONDecoder().decode(
+            WandBoardTask.self,
+            from: Data(#"{"id":"t-2","title":"无归属","status":"todo","workspaceTaskId":""}"#.utf8)
+        )
+        XCTAssertNil(unbound.workspaceTaskId)
+        let missing = try JSONDecoder().decode(
+            WandBoardTask.self,
+            from: Data(#"{"id":"t-3","title":"旧数据","status":"todo"}"#.utf8)
+        )
+        XCTAssertNil(missing.workspaceTaskId)
+
+        // 空白终端的 provider 是 shell/session，不能把内部标识当工具名印在卡片上。
+        XCTAssertEqual(wandBoardProviderLabel("shell"), "终端")
+        XCTAssertEqual(wandBoardProviderLabel("session"), "终端")
+        XCTAssertEqual(wandBoardProviderLabel("pi"), "Pi")
+        XCTAssertEqual(wandBoardProviderLabel(""), "Agent")
+    }
+
     func testBoardTaskDecoderReadsWorkspaceAgentAndSessions() throws {
         let json = """
         {

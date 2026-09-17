@@ -99,6 +99,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         case taskDescription = "description"
         case status, priority, labels, dueDate
         case sortOrder, agent, createdAt, updatedAt, sessionIds, sessions, workspace
+        case workspaceTaskId
     }
 
     let id: String
@@ -119,6 +120,8 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
     let sessionIds: [String]
     let sessions: [WandBoardTaskSession]
     let workspace: WandBoardWorkspace?
+    /// 侧栏任务 ID：卡片与会话树共用同一套任务分组，打开会话时要带回真实工作区/任务上下文。
+    let workspaceTaskId: String?
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -139,6 +142,8 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         sessionIds = (try? container.decode([String].self, forKey: .sessionIds)) ?? []
         sessions = (try? container.decode([WandBoardTaskSession].self, forKey: .sessions)) ?? []
         workspace = try? container.decodeIfPresent(WandBoardWorkspace.self, forKey: .workspace)
+        let rawWorkspaceTaskId = (try? container.decodeIfPresent(String.self, forKey: .workspaceTaskId)) ?? nil
+        workspaceTaskId = (rawWorkspaceTaskId?.isEmpty == false) ? rawWorkspaceTaskId : nil
     }
 }
 
@@ -216,6 +221,8 @@ func wandBoardProviderLabel(_ provider: String) -> String {
     case "grok": return "Grok"
     case "qoder": return "Qoder"
     case "pi": return "Pi"
+    // 空白终端与老服务端的会话类型也是卡片上的“provider”，不能原样把 shell 当工具名印出来。
+    case "shell", "session": return "终端"
     default: return provider.isEmpty ? "Agent" : provider
     }
 }

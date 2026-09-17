@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import CryptoKit
 
 private extension Data {
@@ -16,6 +17,9 @@ final class WandAPI {
 
     let baseURL: URL
     let token: String?
+    /// 任务层级（目录组 / 任务 / 会话归属）的写操作完成后发一次：
+    /// 侧栏、任务看板、任务详情用同一份无效化信号对齐（对齐 Android 的 TaskChangeSource）。
+    let taskChanges = PassthroughSubject<Void, Never>()
     /// Captured once so resetting an endpoint retires this client instead of letting a stale
     /// owner recreate a session and authenticate again with an obsolete token.
     let endpointSession: SelfSignedSession
@@ -144,6 +148,9 @@ final class WandAPI {
             }
             wlog("api", "\(http.statusCode) \(method) \(path): \(message)")
             throw APIError.server(status: http.statusCode, message: message)
+        }
+        if changesTaskHierarchy(method: method, path: path) {
+            taskChanges.send()
         }
         return data
     }

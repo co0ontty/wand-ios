@@ -22,27 +22,46 @@ struct WorkspaceTaskWindowRequest: Equatable {
 }
 
 /// Pure request construction keeps provider-to-command mapping and workspace binding testable.
+/// `prompt` 是新建任务时顺手发出的第一条提示词：结构化会话走 `prompt`，PTY 走 `initialInput`。
 func workspaceTaskWindowRequest(
     target: WorkspaceSessionTarget,
     binding: WorkspaceBinding,
-    kind: WorkspaceSessionKind = .structured
+    kind: WorkspaceSessionKind = .structured,
+    prompt: String? = nil
 ) -> WorkspaceTaskWindowRequest {
     var body: [String: WorkspaceRequestValue] = [
         "cwd": .string(binding.cwd),
         "workspaceId": .string(binding.workspaceId),
         "workspaceTaskId": .string(binding.workspaceTaskId),
     ]
+    let initialPrompt = prompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let promptValue = (initialPrompt?.isEmpty == false) ? initialPrompt : nil
     if let provider = target.provider {
         body["provider"] = .string(provider.rawValue)
         if kind == .structured {
+            if let promptValue { body["prompt"] = .string(promptValue) }
             body["runner"] = .string(provider.structuredRunner)
             return WorkspaceTaskWindowRequest(path: "/api/structured-sessions", body: body)
         }
+        if let promptValue { body["initialInput"] = .string(promptValue) }
         body["command"] = .string(provider == .qoder ? "qodercli" : provider.rawValue)
     } else {
         body["shell"] = .bool(true)
     }
     return WorkspaceTaskWindowRequest(path: "/api/commands", body: body)
+}
+
+/// 目录组 / 任务 / 会话归属的写入路径：命中后其他屏要失效重取。
+/// `layout` 是任务内的视图状态，改了它不该触发整棵树的刷新（否则后台刷新会自激）。
+func changesTaskHierarchy(method: String, path: String) -> Bool {
+    if method == "GET" { return false }
+    let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+    if route.hasSuffix("/layout") { return false }
+    if route == "/api/tasks" || route.hasPrefix("/api/workspace-tasks/") { return true }
+    if route == "/api/workspaces" || route.hasPrefix("/api/workspaces/") { return true }
+    if route == "/api/wand-tasks" || route.hasPrefix("/api/wand-tasks/") { return true }
+    if route == "/api/commands" || route == "/api/structured-sessions" { return true }
+    return route == "/api/sessions/batch-delete"
 }
 
 /// Worktree 合并 Agent 的托管会话请求：mode=managed + initialInput 任务书，
@@ -104,7 +123,8 @@ func createWorkspaceTaskRequest(
     name: String,
     baseRef: String?,
     worktree: Bool? = nil,
-    cwd: String? = nil
+    cwd: String? = nil,
+    description: String? = nil
 ) -> WorkspaceTaskWindowRequest {
     var body: [String: WorkspaceRequestValue] = ["name": .string(name)]
     if let baseRef, !baseRef.isEmpty {
@@ -117,6 +137,10 @@ func createWorkspaceTaskRequest(
     if let worktree {
         body["worktree"] = .bool(worktree)
     }
+    // 首个会话的提示词：任务留空名时服务端据此总结标题，不再写“未命名任务”。
+    if let description, !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        body["description"] = .string(description)
+    }
     return WorkspaceTaskWindowRequest(
         path: "/api/workspaces/\(workspaceId)/tasks",
         body: body
@@ -126,7 +150,8 @@ func createWorkspaceTaskRequest(
 func createStandaloneTaskRequest(
     name: String,
     cwd: String? = nil,
-    worktree: Bool? = nil
+    worktree: Bool? = nil,
+    description: String? = nil
 ) -> WorkspaceTaskWindowRequest {
     var body: [String: WorkspaceRequestValue] = ["name": .string(name)]
     if let cwd, !cwd.isEmpty {
@@ -136,6 +161,9 @@ func createStandaloneTaskRequest(
         body["worktree"] = .bool(false)
     } else if worktree == true {
         body["worktree"] = .bool(true)
+    }
+    if let description, !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        body["description"] = .string(description)
     }
     return WorkspaceTaskWindowRequest(path: "/api/tasks", body: body)
 }
@@ -188,6 +216,27 @@ extension WandAPI {
         _ = try await requestData(method: "DELETE", path: "/api/workspace-tasks/\(id)?cascade=1")
     }
 
+    /// 移动会话归属：不动运行目录、不重启 CLI，只改任务归属。
+    func moveWorkspaceSession(taskId: String, sessionId: String) async throws {
+        let id = percentEncodePathComponent(taskId)
+        _ = try await requestData(
+            method: "POST",
+            path: "/api/workspace-tasks/\(id)/sessions",
+            body: ["sessionId": sessionId]
+        )
+    }
+
+    /// 归档任务：软删除。终端继续运行、worktree 保留，只是侧栏不再显示。
+    @discardableResult
+    func archiveWorkspaceTask(taskId: String) async throws -> WorkspaceTask {
+        let id = percentEncodePathComponent(taskId)
+        return try await request(
+            WorkspaceTask.self,
+            method: "POST",
+            path: "/api/workspace-tasks/\(id)/archive"
+        )
+    }
+
     func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int {
         let ids = Array(Set(sessionIds.filter { !$0.isEmpty }))
         guard !ids.isEmpty else { return 0 }
@@ -234,9 +283,15 @@ extension WandAPI {
     func createWorkspaceTaskWindow(
         target: WorkspaceSessionTarget,
         binding: WorkspaceBinding,
-        kind: WorkspaceSessionKind
+        kind: WorkspaceSessionKind,
+        prompt: String? = nil
     ) async throws -> SessionSnapshot {
-        let requestSpec = workspaceTaskWindowRequest(target: target, binding: binding, kind: kind)
+        let requestSpec = workspaceTaskWindowRequest(
+            target: target,
+            binding: binding,
+            kind: kind,
+            prompt: prompt
+        )
         return try await request(
             SessionSnapshot.self,
             method: "POST",
@@ -292,14 +347,16 @@ extension WandAPI {
         name: String,
         baseRef: String? = nil,
         worktree: Bool? = nil,
-        cwd: String? = nil
+        cwd: String? = nil,
+        description: String? = nil
     ) async throws -> WorkspaceTaskCreation {
         let requestSpec = createWorkspaceTaskRequest(
             workspaceId: workspaceId,
             name: name,
             baseRef: baseRef,
             worktree: worktree,
-            cwd: cwd
+            cwd: cwd,
+            description: description
         )
         return try await request(
             WorkspaceTaskCreation.self,
@@ -312,9 +369,15 @@ extension WandAPI {
     func createStandaloneTask(
         name: String,
         cwd: String? = nil,
-        worktree: Bool? = nil
+        worktree: Bool? = nil,
+        description: String? = nil
     ) async throws -> WorkspaceTaskCreation {
-        let requestSpec = createStandaloneTaskRequest(name: name, cwd: cwd, worktree: worktree)
+        let requestSpec = createStandaloneTaskRequest(
+            name: name,
+            cwd: cwd,
+            worktree: worktree,
+            description: description
+        )
         return try await request(
             WorkspaceTaskCreation.self,
             method: "POST",

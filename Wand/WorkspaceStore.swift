@@ -6,6 +6,10 @@ protocol WorkspaceServing: AnyObject {
     func listWorkspaceTasks(workspaceId: String) async throws -> [WorkspaceTask]
     func updateWorkspaceTask(taskId: String, name: String?) async throws -> WorkspaceTask
     func deleteWorkspaceTask(taskId: String) async throws
+    /// 归档（软删除）任务：终端继续跑、worktree 保留，只从侧栏隐藏。
+    func archiveWorkspaceTask(taskId: String) async throws -> WorkspaceTask
+    /// 移动会话归属；会话本身、运行目录与历史都不变。
+    func moveWorkspaceSession(taskId: String, sessionId: String) async throws
     func getWorkspaceTask(taskId: String) async throws -> WorkspaceTaskDetail
     func saveWorkspaceTaskLayout(
         taskId: String,
@@ -14,7 +18,8 @@ protocol WorkspaceServing: AnyObject {
     func createWorkspaceTaskWindow(
         target: WorkspaceSessionTarget,
         binding: WorkspaceBinding,
-        kind: WorkspaceSessionKind
+        kind: WorkspaceSessionKind,
+        prompt: String?
     ) async throws -> SessionSnapshot
     func getSession(id: String, blockBudget: Int) async throws -> SessionSnapshot
     func workspaceDefaultProvider() async throws -> WandProvider
@@ -31,12 +36,14 @@ protocol WorkspaceServing: AnyObject {
         name: String,
         baseRef: String?,
         worktree: Bool?,
-        cwd: String?
+        cwd: String?,
+        description: String?
     ) async throws -> WorkspaceTaskCreation
     func createStandaloneTask(
         name: String,
         cwd: String?,
-        worktree: Bool?
+        worktree: Bool?,
+        description: String?
     ) async throws -> WorkspaceTaskCreation
     func listTaskGroups() async throws -> [TaskDirectoryGroup]
     func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage
@@ -47,6 +54,22 @@ protocol WorkspaceServing: AnyObject {
         provider: WandProvider,
         prompt: String
     ) async throws -> SessionSnapshot
+}
+
+extension WorkspaceServing {
+    /// Swift 协议不支持默认参数，用一个省略 prompt 的重载对齐 Android 端的 `prompt = null`。
+    func createWorkspaceTaskWindow(
+        target: WorkspaceSessionTarget,
+        binding: WorkspaceBinding,
+        kind: WorkspaceSessionKind
+    ) async throws -> SessionSnapshot {
+        try await createWorkspaceTaskWindow(
+            target: target,
+            binding: binding,
+            kind: kind,
+            prompt: nil
+        )
+    }
 }
 
 extension WandAPI: WorkspaceServing {}
@@ -130,12 +153,13 @@ final class WorkspaceStore: ObservableObject {
     private var sessionGeneration = 0
     private var loadingStandaloneSessions = Set<String>()
     private var standaloneSessionGenerations: [String: Int] = [:]
-    private var pendingWindowCreation: PendingWindowCreation?
+    private var pendingSessionSelection: PendingSessionSelection?
+    private var backgroundRefreshInFlight = false
+    private var taskChangeCancellables = Set<AnyCancellable>()
 
-    private struct PendingWindowCreation {
+    private struct PendingSessionSelection {
         let taskId: String
-        let target: WorkspaceSessionTarget
-        let kind: WorkspaceSessionKind
+        let sessionId: String
     }
 
     init(api: WorkspaceServing, serverID: String) {
@@ -151,6 +175,16 @@ final class WorkspaceStore: ObservableObject {
 
     func startTaskGroupsSync() {
         if taskGroupsSyncTask != nil { return }
+        // 同端（网页版 / 另一台手机）改了归属时立即失效重取，不靠下一个 10s 轮询周期。
+        if let live = api as? WandAPI {
+            live.taskChanges
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] in
+                    guard let self else { return }
+                    Task { await self.loadTaskGroups(force: true) }
+                }
+                .store(in: &taskChangeCancellables)
+        }
         taskGroupsSyncTask = Task { [weak self] in
             await self?.loadTaskGroups()
             while !Task.isCancelled {
@@ -164,6 +198,7 @@ final class WorkspaceStore: ObservableObject {
     func stopTaskGroupsSync() {
         taskGroupsSyncTask?.cancel()
         taskGroupsSyncTask = nil
+        taskChangeCancellables.removeAll()
     }
 
     func tasks(for workspaceId: String) -> [WorkspaceTask] {
@@ -336,7 +371,8 @@ final class WorkspaceStore: ObservableObject {
             name: name,
             baseRef: nil,
             worktree: nil,
-            cwd: nil
+            cwd: nil,
+            description: nil
         )
         var refreshed: [WorkspaceTask] = []
         do {
@@ -392,6 +428,7 @@ final class WorkspaceStore: ObservableObject {
             taskGroups = page.groups
             taskGroupsRevision = page.revision
             taskGroupsError = nil
+            await syncCurrentTaskMetadata()
         } catch {
             guard generation == taskGroupsGeneration, !Task.isCancelled else { return }
             // 保留旧数据，仅记错误供 UI 提示；老服务端无该接口时静默降级。
@@ -399,14 +436,22 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// 直接拉一份不经展示层过滤的分组（含已完成任务），供「移动会话」选目的地。
+    /// 不改 taskGroups：侧栏缓存由下一次轮询/显式刷新接管。
+    func freshTaskGroups() async throws -> [TaskDirectoryGroup] {
+        try await api.listTaskGroups()
+    }
+
     /// 任务入口：独立任务走 POST /api/tasks（目录可空，使用全局临时目录）；
-    /// 指定 workspaceId 时在该项目下创建。
+    /// 指定 workspaceId 时在该项目下创建。description 是首个会话的提示词，
+    /// 任务未命名时服务端据此总结标题。
     @discardableResult
     func createTask(
         name: String,
         directory: String,
         worktree: Bool?,
-        workspaceId: String? = nil
+        workspaceId: String? = nil,
+        description: String? = nil
     ) async throws -> (workspace: Workspace, creation: WorkspaceTaskCreation) {
         let normalized = normalizeWorkspaceDirectory(directory)
         let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -420,14 +465,16 @@ final class WorkspaceStore: ObservableObject {
                 name: normalizedName,
                 baseRef: nil,
                 worktree: worktree,
-                cwd: normalized.isEmpty ? nil : normalized
+                cwd: normalized.isEmpty ? nil : normalized,
+                description: description
             )
             workspace = existing
         } else {
             creation = try await api.createStandaloneTask(
                 name: normalizedName,
                 cwd: normalized.isEmpty ? nil : normalized,
-                worktree: normalized.isEmpty ? false : worktree
+                worktree: normalized.isEmpty ? false : worktree,
+                description: description
             )
             workspace = workspaces.first(where: { $0.id == creation.workspaceId })
                 ?? Workspace(
@@ -483,16 +530,7 @@ final class WorkspaceStore: ObservableObject {
             let tasks = group.tasks.contains(where: { $0.id == summary.id })
                 ? group.tasks
                 : group.tasks + [summary]
-            taskGroups[matchingIndex] = TaskDirectoryGroup(
-                workspaceId: group.workspaceId,
-                workspaceName: group.workspaceName,
-                workspaceCwd: group.workspaceCwd,
-                createdAt: group.createdAt,
-                synthetic: group.synthetic,
-                global: group.global,
-                tasks: tasks,
-                standaloneSessions: group.standaloneSessions
-            )
+            taskGroups[matchingIndex] = group.replacing(tasks: tasks)
             return
         }
         let synthetic = workspace.name.isEmpty || groupLooksGlobal(workspace)
@@ -618,6 +656,64 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// 移动会话归属：不动运行目录、不重启 CLI，只改任务归属。
+    func moveSession(sessionId: String, toTaskId: String) async throws {
+        try await api.moveWorkspaceSession(taskId: toTaskId, sessionId: sessionId)
+        invalidateTaskGroupsLoad()
+        await loadTaskGroups(force: true)
+        await refreshCurrentTaskInBackground()
+    }
+
+    /// 归档任务（软删除）：终端继续跑、worktree 保留，只从侧栏隐藏并进入看板归档。
+    func archiveWorkspaceTask(taskId: String, workspaceId: String?) async throws {
+        _ = try await api.archiveWorkspaceTask(taskId: taskId)
+        if let workspaceId, var list = tasksByWorkspace[workspaceId] {
+            list.removeAll { $0.id == taskId }
+            tasksByWorkspace[workspaceId] = list
+        }
+        invalidateTaskGroupsLoad()
+        taskGroups = taskGroups.map { $0.replacing(tasks: $0.tasks.filter { $0.id != taskId }) }
+        if currentTask?.id == taskId {
+            currentTask = nil
+            currentWorkspace = nil
+            taskState = .idle
+            visibleSessionID = nil
+            visibleSnapshot = nil
+        }
+        await loadTaskGroups(force: true)
+    }
+
+    /**
+     服务端失效（同端移动会话、看板改任务）驱动的后台重取：
+     保留当前选中会话，不闪加载态，失败时留着上一份可用快照。
+     */
+    func refreshCurrentTaskInBackground() async {
+        guard let task = currentTask,
+              taskState.detail != nil,
+              !creating,
+              !backgroundRefreshInFlight else { return }
+        if case .loading = taskState { return }
+        backgroundRefreshInFlight = true
+        defer { backgroundRefreshInFlight = false }
+        let generation = taskGeneration
+        guard let detail = try? await api.getWorkspaceTask(taskId: task.id) else { return }
+        guard isCurrentTask(task.id, generation: generation), !Task.isCancelled, !creating else { return }
+        await applyLoadedDetail(detail, preferredSessionId: visibleSessionID, generation: generation)
+    }
+
+    /// 侧栏刚拿到新数据：当前打开的任务名称/会话集合变了就静默对齐
+    /// （同端移动会话、看板改名都不会经过本机的 mutation 路径）。
+    private func syncCurrentTaskMetadata() async {
+        guard let task = currentTask, let detail = taskState.detail, detail.id == task.id else { return }
+        guard let live = taskGroups.lazy.flatMap(\.tasks).first(where: { $0.id == task.id }) else { return }
+        if live.name != task.name || live.status != task.status {
+            currentTask = live.asTask()
+        }
+        if Set(live.sessions.map(\.id)) != Set(detail.sessions.map(\.id)) {
+            await refreshCurrentTaskInBackground()
+        }
+    }
+
     func clearTaskSessions(taskId: String) async throws {
         let detail = try await api.getWorkspaceTask(taskId: taskId)
         let ids = detail.sessions.map(\.id)
@@ -625,14 +721,9 @@ final class WorkspaceStore: ObservableObject {
         try await deleteSessions(ids)
     }
 
-    /// 新建任务后由任务页的 `openTask` 消费：避免列表回调和详情 `.task` 各开一次
-    /// 任务，把刚创建的结构化窗口冲掉。
-    func scheduleAutoCreateWindow(taskId: String) {
-        pendingWindowCreation = PendingWindowCreation(
-            taskId: taskId,
-            target: selectedTarget,
-            kind: selectedKind
-        )
+    /// 新建任务时「启动会话」开出的首个会话，等任务页打开时直接激活它（布局写失败也不丢）。
+    func scheduleAutoSelectSession(taskId: String, sessionId: String) {
+        pendingSessionSelection = PendingSessionSelection(taskId: taskId, sessionId: sessionId)
     }
 
     func openTask(
@@ -640,9 +731,10 @@ final class WorkspaceStore: ObservableObject {
         task: WorkspaceTask,
         preferredSessionId: String? = nil
     ) async {
-        if let pending = pendingWindowCreation, pending.taskId != task.id {
-            pendingWindowCreation = nil
-        }
+        let pendingSelection = pendingSessionSelection?.taskId == task.id
+            ? pendingSessionSelection
+            : nil
+        if pendingSelection == nil { pendingSessionSelection = nil }
         taskGeneration &+= 1
         sessionGeneration &+= 1
         let generation = taskGeneration
@@ -656,18 +748,19 @@ final class WorkspaceStore: ObservableObject {
         layoutWarning = nil
         creationError = nil
         pickerPresented = false
-        if pendingWindowCreation?.taskId != task.id {
-            selectedTarget = WorkspaceSessionTarget(
-                provider: workspace.defaultProvider ?? serverDefaultProvider
-            )
-            selectedKind = .structured
-        }
+        selectedTarget = WorkspaceSessionTarget(
+            provider: workspace.defaultProvider ?? serverDefaultProvider
+        )
+        selectedKind = .structured
 
         do {
             let detail = try await api.getWorkspaceTask(taskId: task.id)
             guard isCurrentTask(task.id, generation: generation), !Task.isCancelled else { return }
-            await applyLoadedDetail(detail, preferredSessionId: preferredSessionId, generation: generation)
-            await consumePendingWindowCreationIfNeeded(generation: generation)
+            let preferred = preferredSessionId ?? pendingSelection?.sessionId
+            await applyLoadedDetail(detail, preferredSessionId: preferred, generation: generation)
+            if preferred == pendingSelection?.sessionId {
+                pendingSessionSelection = nil
+            }
         } catch {
             guard isCurrentTask(task.id, generation: generation), !Task.isCancelled else { return }
             taskState = .failed(error.localizedDescription)
@@ -835,6 +928,44 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// 新建任务后立刻开第一个会话（带首条提示词）；失败不阻塞任务本身已创建的事实。
+    func createFirstTaskWindow(
+        taskId: String,
+        target: WorkspaceSessionTarget,
+        kind: WorkspaceSessionKind,
+        prompt: String?
+    ) async throws -> SessionSnapshot {
+        let detail = try await api.getWorkspaceTask(taskId: taskId)
+        let binding = WorkspaceBinding(
+            workspaceId: detail.workspaceId,
+            workspaceTaskId: detail.id,
+            cwd: detail.cwd
+        )
+        let snapshot = try await api.createWorkspaceTaskWindow(
+            target: target,
+            binding: binding,
+            kind: target == .shell ? .pty : kind,
+            prompt: prompt
+        )
+        // 新会话要成为任务里的活动窗口，否则打开任务看到的还是旧窗口（对齐 Android 的
+        // addSessionWindow(activate: true)）；布局写失败不影响会话已创建的事实。
+        let refreshed = (try? await api.getWorkspaceTask(taskId: taskId)) ?? detail
+        var sessions = WorkspaceLayoutReconciler.orderedSessions(refreshed.sessions)
+        if !sessions.contains(where: { $0.id == snapshot.id }) {
+            sessions.append(WorkspaceSessionSummary(snapshot: snapshot))
+        }
+        let layout = WorkspaceLayoutReconciler.reconcile(
+            persisted: refreshed.layout,
+            sessionIds: sessions.map(\.id),
+            preferredSessionId: snapshot.id
+        )
+        _ = try? await api.saveWorkspaceTaskLayout(taskId: taskId, layout: layout)
+        scheduleAutoSelectSession(taskId: taskId, sessionId: snapshot.id)
+        invalidateTaskGroupsLoad()
+        await loadTaskGroups(force: true)
+        return snapshot
+    }
+
     func clearLayoutWarning() {
         layoutWarning = nil
     }
@@ -880,19 +1011,4 @@ final class WorkspaceStore: ObservableObject {
         taskGeneration == generation && currentTask?.id == taskId
     }
 
-    private func consumePendingWindowCreationIfNeeded(generation: Int) async {
-        guard let pending = pendingWindowCreation,
-              isCurrentTask(pending.taskId, generation: generation) else { return }
-        if case .empty = taskState {
-            selectedTarget = pending.target
-            selectedKind = pending.kind
-            await createSelectedWindow(expectedTaskId: pending.taskId)
-            guard isCurrentTask(pending.taskId, generation: generation) else { return }
-            if visibleSnapshot != nil || creationError != nil {
-                pendingWindowCreation = nil
-            }
-            return
-        }
-        pendingWindowCreation = nil
-    }
 }

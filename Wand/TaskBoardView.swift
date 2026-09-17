@@ -2,8 +2,12 @@ import SwiftUI
 
 struct TaskBoardView: View {
     let api: WandAPI
+    /// 任务看板与会话树共用同一套任务/终端：看板里移动会话要直接改归属。
+    @ObservedObject var workspaceStore: WorkspaceStore
     var linkedWorkspaceId: String? = nil
     let onOpenSession: (String) -> Void
+    /// 会话已绑定任务时优先打开任务上下文（对齐 web / Android 的 openSessionWithOwningTask）。
+    var onOpenBoundSession: ((String, String) -> Void)? = nil
     var onDismiss: (() -> Void)? = nil
     var embedded: Bool = false
     var refreshNonce: Int = 0
@@ -13,7 +17,9 @@ struct TaskBoardView: View {
     @State private var workspaces: [Workspace] = []
     @State private var catalog: ModelsResponse?
     @State private var loading = true
+    @State private var refreshInFlight: Task<Void, Never>?
     @State private var errorMessage: String?
+    @State private var moveSessionTarget: WandBoardTaskSession?
     @State private var query = ""
     @State private var filterWorkspaceId = ""
     @State private var selected: WandBoardTask?
@@ -63,7 +69,8 @@ struct TaskBoardView: View {
                 lastAgent: lastAgent,
                 defaultWorkspaceId: filterWorkspaceId,
                 initialStatus: createStatus,
-                busy: busy
+                busy: busy,
+                error: errorMessage
             ) { title, description, status, priority, workspaceId, agent in
                 await mutate {
                     let created = try await api.createBoardTask(
@@ -80,8 +87,15 @@ struct TaskBoardView: View {
                     // 只有「进行中」列的新建才顺带第一次指派；「待办」列只创建任务。
                     if wandBoardCreateDispatches(status: status),
                        !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        _ = try? await api.dispatchBoardTask(id: created.id, agent: agent, prompt: description)
+                        var dispatchError: String?
+                        do {
+                            _ = try await api.dispatchBoardTask(id: created.id, agent: agent, prompt: description)
+                        } catch {
+                            dispatchError = "任务已创建，但第一次指派失败：\(error.localizedDescription)"
+                        }
                         await refresh(showProgress: false)
+                        // refresh 成功会清掉旧错误，所以错误必须放在刷新之后写回。
+                        if let dispatchError { errorMessage = dispatchError }
                     }
                     if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                        created.titleSource == "auto" {
@@ -90,6 +104,16 @@ struct TaskBoardView: View {
                 }
             }
         }
+        .sheet(item: $moveSessionTarget) { session in
+            SessionMoveSheet(
+                store: workspaceStore,
+                sessionId: session.id,
+                sessionTitle: sessionMoveTitle(session)
+            ) {
+                Task { await refresh(showProgress: false) }
+            }
+            .presentationDetents([.medium, .large])
+        }
         .task {
             if filterWorkspaceId.isEmpty { filterWorkspaceId = linkedWorkspaceId ?? "" }
             await refresh(showProgress: true)
@@ -97,11 +121,23 @@ struct TaskBoardView: View {
             catalog = try? await api.models()
             lastAgent = (try? await api.boardTaskAgentDefaults()) ?? .default
         }
+        .task {
+            // 看板不参与会话树的 10s 轮询：独立周期低调重取，跟上另一端的任务/会话变更。
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard !Task.isCancelled else { return }
+                await refresh(showProgress: false)
+            }
+        }
+        .onReceive(api.taskChanges) { _ in
+            Task { await refresh(showProgress: false) }
+        }
         .onChange(of: refreshNonce) { _, _ in
             Task { await refresh(showProgress: false) }
         }
         .alert("任务操作失败", isPresented: Binding(
-            get: { errorMessage != nil },
+            // 新建弹窗上时用弹窗内联错误，弹窗外再弹 alert 会与 sheet 争同一个呈现通道。
+            get: { errorMessage != nil && !showCreate },
             set: { if !$0 { errorMessage = nil } }
         )) {
             Button("好", role: .cancel) { errorMessage = nil }
@@ -147,7 +183,7 @@ struct TaskBoardView: View {
                             await mutate {
                                 _ = try await api.updateBoardTask(id: selected.id, body: ["agent": agent.jsonObject()])
                                 let result = try await api.dispatchBoardTask(id: selected.id, agent: agent, prompt: prompt)
-                                if !result.sessionId.isEmpty { onOpenSession(result.sessionId) }
+                                if !result.sessionId.isEmpty { openBoardSession(result.sessionId) }
                             }
                         },
                         onDelete: {
@@ -156,8 +192,9 @@ struct TaskBoardView: View {
                                 self.selected = nil
                             }
                         },
-                        onOpenSession: onOpenSession,
-                        onClose: { self.selected = nil }
+                        onOpenSession: openBoardSession,
+                        onClose: { self.selected = nil },
+                        onMoveSession: { session in moveSessionTarget = session }
                     )
                 }
             } else if loading && tasks.isEmpty {
@@ -476,6 +513,18 @@ struct TaskBoardView: View {
     }
 
     private func refresh(showProgress: Bool) async {
+        // 后台轮询不能把已渲染的列表闪回加载态，但显式刷新也不该被吞掉：
+        // 先等上一次跑完再发，避免交错赋值（对齐 Android 的 refreshMutex）。
+        if let inFlight = refreshInFlight {
+            await inFlight.value
+        }
+        let task = Task { await performRefresh(showProgress: showProgress) }
+        refreshInFlight = task
+        await task.value
+        if refreshInFlight == task { refreshInFlight = nil }
+    }
+
+    private func performRefresh(showProgress: Bool) async {
         if showProgress { loading = true }
         do {
             tasks = try await api.listBoardTasks()
@@ -501,6 +550,22 @@ struct TaskBoardView: View {
             }
             return
         }
+    }
+
+    private func sessionMoveTitle(_ session: WandBoardTaskSession) -> String {
+        session.title.isEmpty ? wandBoardProviderLabel(session.provider) : session.title
+    }
+
+    /// 已绑定任务的会话要连着任务上下文打开，否则侧栏/详情标题都会丢掉归属。
+    private func openBoardSession(_ sessionId: String) {
+        let owner = tasks.first { task in task.sessions.contains { $0.id == sessionId } }
+        if let bound = onOpenBoundSession,
+           let workspaceTaskId = owner?.workspaceTaskId,
+           !workspaceTaskId.isEmpty {
+            bound(sessionId, workspaceTaskId)
+            return
+        }
+        onOpenSession(sessionId)
     }
 
     private func mutate(_ work: () async throws -> Void) async {
@@ -863,6 +928,7 @@ private struct TaskBoardDetailView: View {
     let onDispatch: (WandBoardTaskAgent, String) async -> Void
     let onDelete: () async -> Void
     let onOpenSession: (String) -> Void
+    let onMoveSession: (WandBoardTaskSession) -> Void
     let onClose: () -> Void
 
     @State private var title: String
@@ -881,7 +947,8 @@ private struct TaskBoardDetailView: View {
         onDispatch: @escaping (WandBoardTaskAgent, String) async -> Void,
         onDelete: @escaping () async -> Void,
         onOpenSession: @escaping (String) -> Void,
-        onClose: @escaping () -> Void
+        onClose: @escaping () -> Void,
+        onMoveSession: @escaping (WandBoardTaskSession) -> Void = { _ in }
     ) {
         self.task = task
         self.workspaces = workspaces
@@ -894,6 +961,7 @@ private struct TaskBoardDetailView: View {
         self.onDelete = onDelete
         self.onOpenSession = onOpenSession
         self.onClose = onClose
+        self.onMoveSession = onMoveSession
         _title = State(initialValue: task.title)
         _description = State(initialValue: task.description)
         _agent = State(initialValue: task.agent ?? lastAgent)
@@ -927,13 +995,13 @@ private struct TaskBoardDetailView: View {
                         Text(priority.label).tag(priority.rawValue)
                     }
                 }
-                Picker("项目", selection: Binding(
+                Picker("工作区", selection: Binding(
                     get: { task.workspaceId ?? "" },
                     set: { value in
                         Task { await onPatch(["workspaceId": value.isEmpty ? NSNull() : value]) }
                     }
                 )) {
-                    Text("不指定项目（使用全局目录）").tag("")
+                    Text("未归属工作区（使用临时目录）").tag("")
                     ForEach(workspaces) { workspace in
                         Text(workspace.name).tag(workspace.id)
                     }
@@ -996,10 +1064,10 @@ private struct TaskBoardDetailView: View {
                 }
                 .disabled(busy || composePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            Section("已指派的 Agent") {
+            Section("任务内的会话") {
                 let groups = wandBoardSessionGroups(sessions: task.sessions, assigned: task.agent)
                 if groups.isEmpty {
-                    Text("还没有指派 Agent。描述会作为第一次派发的任务内容。")
+                    Text("还没有关联会话。描述会作为第一次派发的任务内容。")
                         .foregroundColor(Theme.textMuted)
                 } else {
                     ForEach(groups) { group in
@@ -1007,25 +1075,37 @@ private struct TaskBoardDetailView: View {
                             Text(wandBoardAgentTitle(group.provider, group.agent))
                                 .font(.subheadline.weight(.semibold))
                             if group.sessions.isEmpty {
-                                Text("已指派，等待派发")
+                                Text("默认执行参数 · 尚无关联会话")
                                     .font(.caption)
                                     .foregroundColor(Theme.textMuted)
                             } else {
                                 ForEach(group.sessions) { session in
-                                    Button {
-                                        onOpenSession(session.id)
-                                    } label: {
-                                        HStack {
-                                            BrandLogo(provider: session.provider, color: Theme.textPrimary)
-                                                .frame(width: 14, height: 14)
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(session.title.isEmpty ? wandBoardProviderLabel(session.provider) : session.title)
-                                                Text([session.model, session.status].filter { !$0.isEmpty }.joined(separator: " · "))
-                                                    .font(.caption)
-                                                    .foregroundColor(Theme.textMuted)
+                                    HStack(spacing: 8) {
+                                        Button {
+                                            onOpenSession(session.id)
+                                        } label: {
+                                            HStack {
+                                                BrandLogo(provider: session.provider, color: Theme.textPrimary)
+                                                    .frame(width: 14, height: 14)
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    Text(session.title.isEmpty ? wandBoardProviderLabel(session.provider) : session.title)
+                                                    Text([session.model, session.status].filter { !$0.isEmpty }.joined(separator: " · "))
+                                                        .font(.caption)
+                                                        .foregroundColor(Theme.textMuted)
+                                                }
+                                                Spacer()
                                             }
-                                            Spacer()
                                         }
+                                        Button {
+                                            onMoveSession(session)
+                                        } label: {
+                                            Image(systemName: "folder")
+                                                .font(.system(size: 14, weight: .medium))
+                                                .foregroundColor(Theme.textSecondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .disabled(busy)
+                                        .accessibilityLabel("移动会话到其他任务")
                                     }
                                 }
                             }
@@ -1054,6 +1134,7 @@ private struct TaskBoardCreateView: View {
     let lastAgent: WandBoardTaskAgent
     let defaultWorkspaceId: String
     var busy = false
+    var error: String?
     let onCreate: (String, String, String, String, String?, WandBoardTaskAgent) async -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -1071,6 +1152,7 @@ private struct TaskBoardCreateView: View {
         defaultWorkspaceId: String,
         initialStatus: String = "todo",
         busy: Bool = false,
+        error: String? = nil,
         onCreate: @escaping (String, String, String, String, String?, WandBoardTaskAgent) async -> Void
     ) {
         self.workspaces = workspaces
@@ -1078,6 +1160,7 @@ private struct TaskBoardCreateView: View {
         self.lastAgent = lastAgent
         self.defaultWorkspaceId = defaultWorkspaceId
         self.busy = busy
+        self.error = error
         self.onCreate = onCreate
         _status = State(initialValue: initialStatus)
         _agent = State(initialValue: lastAgent)
@@ -1089,11 +1172,19 @@ private struct TaskBoardCreateView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Text("与会话树共用同一个任务分组。")
+                    .font(.footnote)
+                    .foregroundColor(Theme.textMuted)
+                if let error, !error.isEmpty {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundColor(Theme.danger)
+                }
                 TextField("任务标题（可选）", text: $title, prompt: Text("不填写则按描述自动生成"))
                 TextField(dispatches ? "描述（作为第一次指派）" : "描述（只创建任务）", text: $description, axis: .vertical)
                     .lineLimit(3...8)
-                Picker("目录", selection: $workspaceId) {
-                    Text("不指定目录（使用全局目录）").tag("")
+                Picker("工作区", selection: $workspaceId) {
+                    Text("未归属工作区（使用临时目录）").tag("")
                     ForEach(workspaces) { workspace in
                         Text(workspace.name).tag(workspace.id)
                     }
@@ -1158,6 +1249,7 @@ private struct TaskBoardCreateView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
+                        .disabled(busy)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(busy

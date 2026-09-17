@@ -140,6 +140,9 @@ struct NativeRootView: View {
             .environmentObject(store)
         }
         .onAppear { authenticate() }
+        .onChange(of: workspaceStore.taskGroups) { _, groups in
+            syncSelectedWorkspaceTaskMetadata(groups)
+        }
         .onDisappear { invalidateLifecycle() }
         // 「打开网页版」快捷操作归本视图消费；登录完成前先挂起，ready 后再接。
         .onReceive(quickActions.$pending) { _ in
@@ -362,7 +365,9 @@ struct NativeRootView: View {
                     if showingBoard {
                         TaskBoardView(
                             api: api,
+                            workspaceStore: workspaceStore,
                             onOpenSession: openSessionFromMissions,
+                            onOpenBoundSession: openBoardBoundSession,
                             embedded: true,
                             refreshNonce: boardRefreshNonce
                         )
@@ -391,6 +396,12 @@ struct NativeRootView: View {
                                 }
                             },
                             onTaskDeleted: { taskId in
+                                if selectedWorkspaceTask?.task.id == taskId {
+                                    selectedWorkspaceTask = nil
+                                }
+                            },
+                            onTaskArchived: { taskId in
+                                // 归档是软删除：侧栏入口消失，详情也跟着收起（对齐 web 的 closeWorkspace）。
                                 if selectedWorkspaceTask?.task.id == taskId {
                                     selectedWorkspaceTask = nil
                                 }
@@ -627,6 +638,22 @@ struct NativeRootView: View {
         }
     }
 
+    /// 看板/侧栏拿到新分组时，把详情的导航元数据对齐：另一端改名、归档、移动会话都不会
+    /// 经过本机的 mutation 回调，只有这里能补上（对齐 Android 的 syncTaskMembership）。
+    private func syncSelectedWorkspaceTaskMetadata(_ groups: [TaskDirectoryGroup]) {
+        guard let selection = selectedWorkspaceTask else { return }
+        for group in groups {
+            guard let summary = group.tasks.first(where: { $0.id == selection.task.id }) else { continue }
+            let workspace = workspaceForTaskSummary(summary, group: group, workspaces: workspaceStore.workspaces)
+            let next = WorkspaceTaskSelection(
+                workspace: workspace,
+                task: summary.asTask()
+            )
+            if next != selection { selectedWorkspaceTask = next }
+            return
+        }
+    }
+
     private func openSessionFromMissions(_ sessionID: String) {
         selectedWorkspaceTask = nil
         showMissions = false
@@ -649,6 +676,36 @@ struct NativeRootView: View {
     }
 
     /// 打开项目直属会话：留在项目分区，替换任务详情为会话详情。
+    /// 看板里的会话若已归属任务，连着任务上下文打开；归属任务以最新分组为准，
+    /// 因为会话可能在另一端刚被移动过（与 Android 的 openSession 一致）。
+    private func openBoardBoundSession(_ sessionId: String, workspaceTaskId: String) {
+        Task {
+            await workspaceStore.loadTaskGroups(force: true)
+            for group in workspaceStore.taskGroups {
+                guard let summary = group.tasks.first(where: { $0.id == workspaceTaskId }) else { continue }
+                let workspace = workspaceForTaskSummary(
+                    summary,
+                    group: group,
+                    workspaces: workspaceStore.workspaces
+                )
+                selectedSessionID = nil
+                selectedSnapshot = nil
+                openingSessionID = nil
+                selectedWorkspaceTask = WorkspaceTaskSelection(
+                    workspace: workspace,
+                    task: summary.asTask()
+                )
+                await workspaceStore.openTask(
+                    workspace: workspace,
+                    task: summary.asTask(),
+                    preferredSessionId: sessionId
+                )
+                return
+            }
+            openWorkspaceStandaloneSession(sessionId)
+        }
+    }
+
     private func openWorkspaceStandaloneSession(_ sessionID: String) {
         guard openingSessionID != sessionID, selectedSessionID != sessionID else { return }
         selectedWorkspaceTask = nil
