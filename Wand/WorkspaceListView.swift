@@ -87,7 +87,6 @@ struct WorkspaceListView: View {
     var onWorkspaceDeleted: ((String) -> Void)? = nil
     var requestNewTask: Binding<Bool> = .constant(false)
 
-    @State private var expandedWorkspaceIds = Set<String>()
     @State private var renameTarget: WorkspaceTask?
     @State private var renameDraft = ""
     @State private var renameError: String?
@@ -111,7 +110,6 @@ struct WorkspaceListView: View {
 
     @State private var reviewTarget: Workspace?
     @State private var moveSessionTarget: WorkspaceSessionSummary?
-    @State private var createWorkspacePresented = false
     @State private var toastMessage: String?
 
     var body: some View {
@@ -153,16 +151,6 @@ struct WorkspaceListView: View {
                 store.startTaskGroupsSync()
                 if case .idle = store.indexState {
                     await store.loadWorkspaceIndex()
-                }
-            }
-            .onChange(of: store.workspaces.map(\.id)) { _, ids in
-                if expandedWorkspaceIds.isEmpty {
-                    expandedWorkspaceIds = Set(ids)
-                }
-            }
-            .onChange(of: expandedWorkspaceIds) { _, expanded in
-                for workspaceId in expanded where store.standaloneSessions[workspaceId] == nil {
-                    Task { await store.loadWorkspaceSessions(workspaceId: workspaceId) }
                 }
             }
             .onChange(of: selectedTaskId) { _, taskId in
@@ -291,33 +279,6 @@ struct WorkspaceListView: View {
                         onMergeAgentStarted?(workspace, started)
                     }
                 )
-            }
-            .sheet(isPresented: $createWorkspacePresented) {
-                WorkspaceCreateView(api: api, store: store) { created in
-                    showToast("已创建项目「\(created.name)」")
-                    Task {
-                        do {
-                            let (workspace, creation) = try await store.createTask(
-                                name: "",
-                                directory: created.cwd,
-                                worktree: false,
-                                workspaceId: created.id
-                            )
-                            onOpenTask(workspace, WorkspaceTask(
-                                id: creation.id,
-                                workspaceId: creation.workspaceId,
-                                name: creation.name,
-                                worktree: creation.worktree,
-                                layout: nil,
-                                status: creation.status,
-                                createdAt: "",
-                                lastOpenedAt: nil
-                            ))
-                        } catch {
-                            showToast(error.localizedDescription)
-                        }
-                    }
-                }
             }
             .sheet(isPresented: $newTaskSheetPresented) {
                 WorkspaceNewTaskSheet(api: api, store: store, initialCwd: newTaskSheetCwd, workspaceId: newTaskSheetWorkspaceId) { result in
@@ -544,48 +505,6 @@ struct WorkspaceListView: View {
         taskGroupsList
     }
 
-    private var emptyProjectsState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "folder.badge.plus")
-                .font(.system(size: 34))
-                .foregroundColor(Theme.brand)
-            Text("还没有项目")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
-            Text("创建项目后可按任务隔离 worktree，多窗口并行推进")
-                .font(.footnote)
-                .foregroundColor(Theme.textSecondary)
-            Button {
-                createWorkspacePresented = true
-            } label: {
-                Text("新建项目")
-                    .frame(maxWidth: 220)
-            }
-            .buttonStyle(WandPrimaryButtonStyle())
-            .padding(.top, 6)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(28)
-    }
-
-    private var projectTreeList: some View {
-        List {
-            if case .failed(let message) = store.indexState {
-                inlineError(message)
-            }
-            ForEach(store.workspaces) { workspace in
-                workspaceSection(workspace)
-            }
-        }
-        .listStyle(.plain)
-        .refreshable {
-            await store.loadWorkspaceIndex()
-            for workspaceId in expandedWorkspaceIds {
-                Task { await store.loadWorkspaceSessions(workspaceId: workspaceId, force: true) }
-            }
-        }
-    }
-
     /// 任务一级视图：GET /api/tasks 聚合，目录组为一级容器，未分组会话不丢失。
     private var taskGroupsList: some View {
         List {
@@ -604,7 +523,6 @@ struct WorkspaceListView: View {
                 inlineError(error)
             }
             let visible = TaskListPresentation.orderedDirectoryGroups(store.taskGroups)
-            let metrics = TaskListPresentation.metrics(for: visible)
             if hidesHomeChrome && isSelecting {
                 homeManageBar(visible: visible)
             }
@@ -634,7 +552,7 @@ struct WorkspaceListView: View {
                 .listRowSeparator(.hidden)
             }
             ForEach(visible) { group in
-                taskGroupSection(group, directoryCount: metrics.directoryCount)
+                taskGroupSection(group)
             }
         }
         .listStyle(.plain)
@@ -725,13 +643,9 @@ struct WorkspaceListView: View {
     }
 
     @ViewBuilder
-    private func taskGroupSection(_ group: TaskDirectoryGroup, directoryCount: Int) -> some View {
-        let expanded = TaskListPresentation.isDirectoryExpanded(
-            userCollapsed: collapsedTaskGroups.contains(group.id),
-            directoryCount: directoryCount
-        )
-        let collapsible = TaskListPresentation.showsDirectoryDisclosure(directoryCount: directoryCount)
-        taskGroupHeader(group, expanded: expanded, collapsible: collapsible)
+    private func taskGroupSection(_ group: TaskDirectoryGroup) -> some View {
+        let expanded = !collapsedTaskGroups.contains(group.id)
+        taskGroupHeader(group, expanded: expanded)
             .listRowBackground(Theme.background)
             .listRowSeparator(.hidden)
         if expanded {
@@ -780,7 +694,7 @@ struct WorkspaceListView: View {
         }
     }
 
-    private func taskGroupHeader(_ group: TaskDirectoryGroup, expanded: Bool, collapsible: Bool) -> some View {
+    private func taskGroupHeader(_ group: TaskDirectoryGroup, expanded: Bool) -> some View {
         HStack(alignment: .center, spacing: 9) {
             Image(systemName: "folder.fill")
                 .font(.system(size: 14, weight: .semibold))
@@ -803,19 +717,16 @@ struct WorkspaceListView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                guard collapsible else { return }
                 toggleCollapsedTaskGroup(group.id)
             }
             Spacer(minLength: 6)
-            if collapsible {
-                Button {
-                    toggleCollapsedTaskGroup(group.id)
-                } label: {
-                    treeDisclosureCaret(expanded: expanded)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(expanded ? "收起目录" : "展开目录")
+            Button {
+                toggleCollapsedTaskGroup(group.id)
+            } label: {
+                treeDisclosureCaret(expanded: expanded)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(expanded ? "收起目录" : "展开目录")
             if group.tasks.contains(where: { $0.worktree != nil }) {
                 worktreeBadge(workspace(from: group))
             }
@@ -1274,131 +1185,6 @@ struct WorkspaceListView: View {
         workspaceForTaskSummary(summary, group: group, workspaces: store.workspaces)
     }
 
-    private func workspaceSection(_ workspace: Workspace) -> some View {
-        DisclosureGroup(
-            isExpanded: Binding(
-                get: { expandedWorkspaceIds.contains(workspace.id) },
-                set: { expanded in
-                    if expanded {
-                        expandedWorkspaceIds.insert(workspace.id)
-                        Task { await store.loadWorkspaceSessions(workspaceId: workspace.id) }
-                    } else {
-                        expandedWorkspaceIds.remove(workspace.id)
-                    }
-                }
-            )
-        ) {
-            if let error = store.taskErrors[workspace.id] {
-                inlineError(error)
-            }
-            if let error = store.standaloneSessionErrors[workspace.id],
-               store.standaloneSessions[workspace.id] == nil {
-                inlineError(error)
-            }
-            let tasks = store.tasks(for: workspace.id)
-            let sessions = store.standaloneSessions[workspace.id] ?? []
-            if sessions.isEmpty && tasks.isEmpty
-                && store.taskErrors[workspace.id] == nil
-                && store.standaloneSessionErrors[workspace.id] == nil {
-                Text("还没有任务。点击「+」创建隔离任务，或在「会话」里新建。")
-                    .font(.footnote)
-                    .foregroundColor(Theme.textMuted)
-                    .padding(.vertical, 10)
-            } else {
-                ForEach(sessions) { session in
-                    standaloneSessionRow(session, workspace: workspace)
-                }
-                ForEach(tasks) { task in
-                    taskRow(task, workspace: workspace)
-                }
-            }
-        } label: {
-            workspaceHeader(workspace)
-        }
-        .listRowBackground(Theme.background)
-        .listRowSeparator(.hidden)
-        .contextMenu {
-            Button {
-                presentNewTaskSheet(cwd: workspace.cwd, workspaceId: workspace.id)
-            } label: {
-                Label("新任务", systemImage: "plus")
-            }
-            Button {
-                reviewTarget = workspace
-            } label: {
-                Label("Worktree 审查", systemImage: "arrow.triangle.branch")
-            }
-            Button {
-                renameWorkspaceDraft = workspace.name
-                renameWorkspaceError = nil
-                renameWorkspaceTarget = workspace
-            } label: {
-                Label("重命名项目", systemImage: "pencil")
-            }
-            Button(role: .destructive) {
-                presentConfirm(.deleteWorkspace(workspace))
-            } label: {
-                Label("删除项目", systemImage: "trash")
-            }
-        }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(role: .destructive) {
-                presentConfirm(.deleteWorkspace(workspace))
-            } label: {
-                Label("删除", systemImage: "trash")
-            }
-        }
-    }
-
-    private func workspaceHeader(_ workspace: Workspace) -> some View {
-        HStack(spacing: 11) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(Theme.brand)
-                .frame(width: 32, height: 32)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Theme.brand.opacity(0.10))
-                )
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(workspace.name)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                    if let provider = workspace.defaultProvider {
-                        Text(provider.title)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(Theme.textSecondary)
-                    }
-                }
-                Text(workspace.cwd)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(Theme.textMuted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: 6)
-            worktreeBadge(workspace)
-            Button {
-                presentNewTaskSheet(cwd: workspace.cwd, workspaceId: workspace.id)
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(Theme.brand)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        Circle().fill(Theme.brand.opacity(0.10))
-                    )
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("在 \(workspace.name) 新建任务")
-        }
-        .padding(.vertical, 5)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("项目 \(workspace.name)，目录 \(workspace.cwd)")
-    }
-
     /// 行尾的 Worktree 徽章按钮：显示数量，为 0 时禁用（对齐 web 端审查入口）。
     private func worktreeBadge(_ workspace: Workspace) -> some View {
         let count = workspace.worktreeCount
@@ -1510,63 +1296,6 @@ struct WorkspaceListView: View {
             }
         }
     }
-
-    private func taskRow(_ task: WorkspaceTask, workspace: Workspace) -> some View {
-        Button {
-            onOpenTask(workspace, task)
-        } label: {
-            HStack(spacing: 10) {
-                if task.status == "done" || task.worktree != nil {
-                    Image(systemName: task.status == "done" ? "checkmark.circle.fill" : "arrow.triangle.branch")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(task.status == "done" ? Theme.success : Theme.textMuted)
-                        .frame(width: 18, height: 18)
-                }
-                Text(task.name)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                Spacer(minLength: 4)
-                if selectedTaskId == task.id {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(Theme.brand)
-                }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(Theme.textMuted)
-            }
-            .padding(.leading, 14)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("任务 \(task.name)")
-        .accessibilityValue(task.status == "done" ? "已完成" : "进行中")
-        .contextMenu {
-            Button {
-                renameDraft = task.name
-                renameError = nil
-                renameTarget = task
-            } label: {
-                Label("重命名", systemImage: "pencil")
-            }
-            Button(role: .destructive) {
-                presentConfirm(.deleteTask(task))
-            } label: {
-                Label("删除", systemImage: "trash")
-            }
-        }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(role: .destructive) {
-                presentConfirm(.deleteTask(task))
-            } label: {
-                Label("删除", systemImage: "trash")
-            }
-        }
-    }
-
 
     private func showToast(_ message: String) {
         toastMessage = message

@@ -67,7 +67,6 @@
 		E7000000000000000000AC07 /* WorkspaceTargetPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC07 /* WorkspaceTargetPicker.swift */; };
 		E7000000000000000000AC09 /* WorkspaceWorktreeModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC09 /* WorkspaceWorktreeModels.swift */; };
 		E7000000000000000000AC10 /* WorkspaceWorktreeReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */; };
-		E9000000000000000000AC12 /* WorkspaceCreateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9000000000000000000BC12 /* WorkspaceCreateView.swift */; };
 		E9000000000000000000AC13 /* WorkspaceNewTaskSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9000000000000000000BC13 /* WorkspaceNewTaskSheet.swift */; };
 		E9000000000000000000AC14 /* SessionMoveSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9000000000000000000BC14 /* SessionMoveSheet.swift */; };
 		E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC08 /* WorkspaceTests.swift */; };
@@ -169,7 +168,6 @@
 		E7000000000000000000BC08 /* WorkspaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTests.swift; sourceTree = "<group>"; };
 		E7000000000000000000BC09 /* WorkspaceWorktreeModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWorktreeModels.swift; sourceTree = "<group>"; };
 		E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWorktreeReviewView.swift; sourceTree = "<group>"; };
-		E9000000000000000000BC12 /* WorkspaceCreateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCreateView.swift; sourceTree = "<group>"; };
 		E9000000000000000000BC13 /* WorkspaceNewTaskSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNewTaskSheet.swift; sourceTree = "<group>"; };
 		E9000000000000000000BC14 /* SessionMoveSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMoveSheet.swift; sourceTree = "<group>"; };
 		E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWorktreeTests.swift; sourceTree = "<group>"; };
@@ -267,7 +265,6 @@
 				E7000000000000000000BC07 /* WorkspaceTargetPicker.swift */,
 				E7000000000000000000BC09 /* WorkspaceWorktreeModels.swift */,
 				E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */,
-				E9000000000000000000BC12 /* WorkspaceCreateView.swift */,
 				E9000000000000000000BC13 /* WorkspaceNewTaskSheet.swift */,
 				E9000000000000000000BC14 /* SessionMoveSheet.swift */,
 				A100000000000000000000D1 /* Assets.xcassets */,
@@ -510,7 +507,6 @@
 				E7000000000000000000AC07 /* WorkspaceTargetPicker.swift in Sources */,
 				E7000000000000000000AC09 /* WorkspaceWorktreeModels.swift in Sources */,
 				E7000000000000000000AC10 /* WorkspaceWorktreeReviewView.swift in Sources */,
-				E9000000000000000000AC12 /* WorkspaceCreateView.swift in Sources */,
 				E9000000000000000000AC13 /* WorkspaceNewTaskSheet.swift in Sources */,
 				E9000000000000000000AC14 /* SessionMoveSheet.swift in Sources */,
 			);

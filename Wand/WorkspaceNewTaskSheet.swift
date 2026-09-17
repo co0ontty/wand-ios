@@ -164,10 +164,6 @@ struct WorkspaceNewTaskSheet: View {
         }
     }
 
-    private var selectedProject: TaskDirectoryGroup? {
-        matchingProjects.first(where: { $0.workspaceId == selectedWorkspaceId })
-    }
-
     private func updateTaskCwd(_ value: String) {
         if cwd != value { cwd = value }
         reconcileSelectedWorkspace()
@@ -477,85 +473,6 @@ struct WorkspaceNewTaskSheet: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Theme.surface)
         )
-    }
-
-    private var projectCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("项目归属（可选）")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(Theme.textSecondary)
-            if matchingProjects.isEmpty {
-                Text(trimmedDirectory.isEmpty
-                    ? "必须选择目录才能创建任务"
-                    : "此目录没有已绑定项目，将创建独立任务。")
-                    .font(.footnote)
-                    .foregroundColor(trimmedDirectory.isEmpty ? Theme.danger : Theme.textMuted)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        projectChoiceCard(
-                            title: "独立任务",
-                            subtitle: "按目录归类",
-                            selected: selectedWorkspaceId == nil,
-                            systemImage: "folder"
-                        ) {
-                            selectedWorkspaceId = nil
-                        }
-                        ForEach(matchingProjects) { project in
-                            projectChoiceCard(
-                                title: project.workspaceName,
-                                subtitle: "已有项目",
-                                selected: selectedProject?.workspaceId == project.workspaceId,
-                                systemImage: "folder.fill"
-                            ) {
-                                selectedWorkspaceId = project.workspaceId
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.surface)
-        )
-    }
-
-    private func projectChoiceCard(
-        title: String,
-        subtitle: String,
-        selected: Bool,
-        systemImage: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 4) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(selected ? Theme.brand : Theme.textMuted)
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
-                    .lineLimit(1)
-                Text(subtitle)
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textMuted)
-                    .lineLimit(1)
-            }
-            .frame(minWidth: 108, alignment: .leading)
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(selected ? Theme.brand.opacity(0.12) : Theme.surface.opacity(0.6))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(selected ? Theme.brand.opacity(0.7) : Theme.border.opacity(0.5), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(creating)
     }
 
     /// 「创建后」二选一：直接启动首个会话，或只建分组（对齐 Android 的 WandChoiceStrip）。

@@ -140,7 +140,6 @@ final class WorkspaceStore: ObservableObject {
     @Published var pickerPresented = false
     @Published var selectedTarget: WorkspaceSessionTarget = .claude
     @Published var selectedKind: WorkspaceSessionKind = .structured
-    @Published private(set) var defaultTaskWorktree = true
     @Published private(set) var creating = false
     @Published private(set) var creationError: String?
 
@@ -806,7 +805,6 @@ final class WorkspaceStore: ObservableObject {
 
     func loadCreationDefaults() async {
         guard let api = api as? WandAPI, let config = try? await api.serverConfig() else { return }
-        defaultTaskWorktree = config.defaultTaskWorktree != false
         selectedKind = config.defaultSessionKind == "pty" ? .pty : .structured
         if let raw = config.defaultProvider,
            let target = WorkspaceSessionTarget(rawValue: raw),
@@ -817,18 +815,15 @@ final class WorkspaceStore: ObservableObject {
 
     func rememberCreationChoice(
         provider: WorkspaceSessionTarget? = nil,
-        kind: WorkspaceSessionKind? = nil,
-        worktree: Bool? = nil
+        kind: WorkspaceSessionKind? = nil
     ) {
         if let provider, provider != .shell { selectedTarget = provider }
         if let kind { selectedKind = kind }
-        if let worktree { defaultTaskWorktree = worktree }
         Task {
             guard let api = api as? WandAPI else { return }
             try? await api.updateCreationDefaults(
                 defaultProvider: provider.flatMap { $0 == .shell ? nil : $0.rawValue },
-                defaultSessionKind: kind?.rawValue,
-                defaultTaskWorktree: worktree
+                defaultSessionKind: kind?.rawValue
             )
         }
     }

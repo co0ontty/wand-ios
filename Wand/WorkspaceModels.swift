@@ -558,17 +558,8 @@ enum TaskListPresentation {
         isolated ? "隔离" : nil
     }
 
-    static func showsDirectoryDisclosure(directoryCount: Int) -> Bool {
-        // 只有一个目录时也保留折叠按钮：这个开关的意义不该随目录数量变化。
-        true
-    }
-
     static func showsTaskSessionDisclosure(sessionCount: Int) -> Bool {
         sessionCount > 0
-    }
-
-    static func isDirectoryExpanded(userCollapsed: Bool, directoryCount: Int) -> Bool {
-        !showsDirectoryDisclosure(directoryCount: directoryCount) || !userCollapsed
     }
 
     static func isTaskSessionsExpanded(userCollapsed: Bool, sessionCount: Int) -> Bool {
@@ -628,40 +619,6 @@ enum TaskListPresentation {
         !selection.sessionIds.isEmpty
     }
 
-    struct TaskListMetrics: Equatable {
-        let directoryCount: Int
-        let taskCount: Int
-        let sessionCount: Int
-    }
-
-    static func metrics(for groups: [TaskDirectoryGroup]) -> TaskListMetrics {
-        let visible = groups.filter { !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
-        var directoryKeys = Set<String>()
-        var taskIDs = Set<String>()
-        for group in visible {
-            let cwd = group.workspaceCwd
-                .replacingOccurrences(of: "\\", with: "/")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            directoryKeys.insert(cwd.isEmpty ? "id:\(group.id)" : "cwd:\(cwd)")
-            group.tasks.forEach { taskIDs.insert($0.id) }
-        }
-        return TaskListMetrics(
-            directoryCount: directoryKeys.count,
-            taskCount: taskIDs.count,
-            sessionCount: visible.reduce(0) { total, group in
-                total + group.standaloneSessions.count
-                    + group.tasks.reduce(0) { $0 + $1.listedSessionCount }
-            }
-        )
-    }
-
-    static func homeTaskSummaryLabel(_ metrics: TaskListMetrics) -> String {
-        if metrics.directoryCount == 0 { return "按工作目录整理你的任务" }
-        if metrics.taskCount == 0 { return "\(metrics.directoryCount) 个目录 · 暂无任务" }
-        return "\(metrics.directoryCount) 个目录 · \(metrics.taskCount) 个任务"
-    }
-
     static func orderedDirectoryGroups(_ groups: [TaskDirectoryGroup]) -> [TaskDirectoryGroup] {
         let visible = groups.map { group in
             // 仅展示层处理：已完成任务仍保留在看板和会话导航里。
@@ -689,20 +646,6 @@ enum TaskListPresentation {
 
     static func hasLiveActivity(_ session: WorkspaceSessionSummary) -> Bool {
         session.inFlight == true || ["running", "thinking", "permission", "waiting-input", "reconnecting"].contains(session.activityStatus)
-    }
-
-    /// 任务行左滑只保留破坏性操作。新建终端已经在行尾「＋」，再塞进滑动区会挤成一排点不到。
-    enum TrailingSwipeAction: String, Equatable, Hashable {
-        case delete
-        case clearSessions
-    }
-
-    static func taskTrailingSwipeActions(sessionCount: Int) -> [TrailingSwipeAction] {
-        var actions: [TrailingSwipeAction] = [.delete]
-        if sessionCount > 0 {
-            actions.append(.clearSessions)
-        }
-        return actions
     }
 
     static func listSessionLabel(

@@ -195,11 +195,6 @@ final class WorkspaceTests: XCTestCase {
             TaskListPresentation.orderedTaskSummaries(older.tasks + newer.tasks).map(\.id),
             ["older-task", "newer-task"]
         )
-        let metrics = TaskListPresentation.metrics(for: [older, newer, running])
-        XCTAssertEqual(metrics.directoryCount, 3)
-        XCTAssertEqual(metrics.taskCount, 3)
-        XCTAssertEqual(metrics.sessionCount, 3)
-        XCTAssertEqual(TaskListPresentation.homeTaskSummaryLabel(metrics), "3 个目录 · 3 个任务")
     }
 
     func testTaskListExpansionStorageRoundTripsCollapsedIds() {
@@ -208,14 +203,6 @@ final class WorkspaceTests: XCTestCase {
         TaskListExpansionStorage.setCollapsedIds(["folder-b", "folder-a"], kind: "groups", defaults: defaults)
         XCTAssertEqual(TaskListExpansionStorage.collapsedIds(kind: "groups", defaults: defaults), ["folder-a", "folder-b"])
         defaults.removePersistentDomain(forName: "wand.taskList.expansion.test")
-    }
-
-    func testTaskListMetricsDeduplicateDirectoriesByPath() throws {
-        let first = try group(id: "first", cwd: "/repo", taskID: "task-1", lastOpenedAt: nil)
-        let second = try group(id: "second", cwd: "/repo/", taskID: "task-2", lastOpenedAt: nil)
-        let metrics = TaskListPresentation.metrics(for: [first, second])
-        XCTAssertEqual(metrics.directoryCount, 1)
-        XCTAssertEqual(metrics.taskCount, 2)
     }
 
     // ── 任务层级对齐（Android a1c7cb3 / 6886012 / 1b37959 / 99ccef9 + 服务端 249c98c）──
@@ -460,21 +447,7 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertNil(store.visibleSessionID)
     }
 
-    func testTaskSwipeActionsKeepDeleteAndClearOnly() {
-        XCTAssertEqual(TaskListPresentation.taskTrailingSwipeActions(sessionCount: 0), [.delete])
-        XCTAssertEqual(
-            TaskListPresentation.taskTrailingSwipeActions(sessionCount: 2),
-            [.delete, .clearSessions]
-        )
-    }
-
     func testTaskTreeHidesNeedlessCaretsAndKeepsTerminalsOpen() {
-        // 目录折叠按钮不再随目录数量消失（对齐 Android 的 TaskDirectoryHeader）。
-        XCTAssertTrue(TaskListPresentation.showsDirectoryDisclosure(directoryCount: 1))
-        XCTAssertTrue(TaskListPresentation.showsDirectoryDisclosure(directoryCount: 2))
-        XCTAssertFalse(TaskListPresentation.isDirectoryExpanded(userCollapsed: true, directoryCount: 1))
-        XCTAssertFalse(TaskListPresentation.isDirectoryExpanded(userCollapsed: true, directoryCount: 2))
-        XCTAssertTrue(TaskListPresentation.isDirectoryExpanded(userCollapsed: false, directoryCount: 1))
         XCTAssertFalse(TaskListPresentation.showsTaskSessionDisclosure(sessionCount: 0))
         XCTAssertTrue(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: true, sessionCount: 0))
         XCTAssertFalse(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: true, sessionCount: 2))
