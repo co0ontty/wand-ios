@@ -111,6 +111,31 @@ final class TaskBoardTests: XCTestCase {
     }
 
 
+    /// 空白终端会话的 provider 是空串：必须落进「终端」(session) 分组，否则看板详情只会
+    /// 渲染「默认执行参数 · 尚无关联会话」，会话行的「移动会话到其他任务」按钮永远拿不到。
+    func testSessionsWithoutProviderLandInTerminalGroup() throws {
+        let json = """
+        {
+          "id": "task-pty",
+          "title": "空白终端",
+          "sessions": [
+            { "id": "pty-1", "provider": "", "sessionKind": "pty", "title": "/bin/zsh", "status": "running" },
+            { "id": "sh-2", "provider": "shell", "sessionKind": "pty", "title": "终端", "status": "running" },
+            { "id": "c-3", "provider": "claude", "sessionKind": "structured", "title": "修登录", "status": "idle" }
+          ]
+        }
+        """.data(using: .utf8)!
+        let task = try JSONDecoder().decode(WandBoardTask.self, from: json)
+        let groups = wandBoardSessionGroups(sessions: task.sessions, assigned: task.agent)
+        XCTAssertEqual(groups.map(\.provider), ["session", "shell", "claude"])
+        XCTAssertEqual(groups[0].sessions.map(\.id), ["pty-1"])
+        XCTAssertEqual(groups[1].sessions.map(\.id), ["sh-2"])
+        XCTAssertEqual(groups[2].sessions.map(\.id), ["c-3"])
+        XCTAssertEqual(groups[0].sessions.count, 1, "空 provider 的会话不能落进空分组")
+        XCTAssertEqual(wandBoardAgentTitle(groups[0].provider, groups[0].agent), "终端")
+        XCTAssertNil(wandBoardAgentLabels(sessions: [], assigned: nil))
+    }
+
     func testSessionsGroupByTheAgentsThatRan() {
         let json = """
         {

@@ -259,7 +259,10 @@ func wandBoardSessionGroups(
     var providers: [String] = []
     var agents: [String: WandBoardTaskAgent] = [:]
     var grouped: [String: [WandBoardTaskSession]] = [:]
-    func ensure(_ provider: String, _ agent: WandBoardTaskAgent?) {
+    /// 返回归一化后的分组键：空 provider（PTY / 老服务端会话）统一归到 "session"。
+    /// 调用方必须用返回值当字典键，否则会话会被挂到空串桶里，界面看到的是「尚无关联会话」。
+    @discardableResult
+    func ensure(_ provider: String, _ agent: WandBoardTaskAgent?) -> String {
         let key = provider.isEmpty ? "session" : provider
         if !providers.contains(key) {
             providers.append(key)
@@ -268,6 +271,7 @@ func wandBoardSessionGroups(
         if agents[key] == nil, let agent {
             agents[key] = agent
         }
+        return key
     }
     if let assigned, wandBoardProviders.contains(assigned.provider) {
         ensure(assigned.provider, assigned)
@@ -280,8 +284,7 @@ func wandBoardSessionGroups(
                 thinkingEffort: session.thinkingEffort.isEmpty ? "off" : session.thinkingEffort
             )
             : nil
-        let key = (agent?.provider ?? session.provider)
-        ensure(key, agent)
+        let key = ensure(agent?.provider ?? session.provider, agent)
         grouped[key, default: []].append(session)
     }
     return providers.map { key in

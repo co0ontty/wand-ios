@@ -155,7 +155,10 @@ struct WorkspaceTaskView: View {
                 deleteSessionError = nil
             }
             Button(deleteSessionBusy ? "删除中…" : "删除", role: .destructive) {
-                Task { await confirmDeleteSession() }
+                // 同 WorkspaceListView：SwiftUI 关闭弹窗时会立刻清空 pendingDeleteSession，
+                // 异步工作必须先把目标捕获下来，否则整个删除流程静默无操作。
+                guard let target = pendingDeleteSession else { return }
+                Task { await confirmDeleteSession(target) }
             }
             .disabled(deleteSessionBusy)
         } message: {
@@ -545,14 +548,15 @@ struct WorkspaceTaskView: View {
         pendingDeleteSession = session
     }
 
-    private func confirmDeleteSession() async {
-        guard let target = pendingDeleteSession, !deleteSessionBusy else { return }
+    private func confirmDeleteSession(_ target: WorkspaceSessionSummary) async {
+        guard !deleteSessionBusy else { return }
         deleteSessionBusy = true
         do {
             try await store.deleteSessions([target.id])
             pendingDeleteSession = nil
             deleteSessionError = nil
         } catch {
+            pendingDeleteSession = target
             deleteSessionError = error.localizedDescription
         }
         deleteSessionBusy = false
