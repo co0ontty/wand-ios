@@ -712,6 +712,8 @@ private final class MockWorktreeMergeService: WorkspaceServing {
 
     func deleteWorkspace(workspaceId: String) async throws {}
 
+    func renameSessionDirectory(path: String, name: String) async throws {}
+
     func createWorkspaceTask(
         workspaceId: String,
         name: String,

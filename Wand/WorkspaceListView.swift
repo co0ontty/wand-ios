@@ -103,10 +103,10 @@ struct WorkspaceListView: View {
     @State private var selectedTaskIds = Set<String>()
     @State private var selectedSessionIds = Set<String>()
 
-    @State private var renameWorkspaceTarget: Workspace?
-    @State private var renameWorkspaceDraft = ""
-    @State private var renameWorkspaceError: String?
-    @State private var renameWorkspaceBusy = false
+    @State private var renameDirectoryTarget: TaskDirectoryGroup?
+    @State private var renameDirectoryDraft = ""
+    @State private var renameDirectoryError: String?
+    @State private var renameDirectoryBusy = false
 
     @State private var reviewTarget: Workspace?
     @State private var moveSessionTarget: WorkspaceSessionSummary?
@@ -309,13 +309,13 @@ struct WorkspaceListView: View {
 
     private var alertContent: some View {
         stateContent
-            .alert("重命名项目", isPresented: renameWorkspacePresented) {
-                renameWorkspaceAlertContent
+            .alert("重命名工作区", isPresented: renameDirectoryPresented) {
+                renameDirectoryAlertContent
             } message: {
-                if let renameWorkspaceError {
-                    Text(renameWorkspaceError)
+                if let renameDirectoryError {
+                    Text(renameDirectoryError)
                 } else {
-                    Text("修改项目的显示名称。")
+                    Text("改的是工作区的显示名称，磁盘目录与已知会话都不变。")
                 }
             }
 
@@ -393,7 +393,7 @@ struct WorkspaceListView: View {
         case .deleteTask: return "删除任务并清理 Worktree？"
         case .clearSessions: return "清空全部终端？"
         case .deleteSession: return "删除终端？"
-        case .deleteWorkspace: return "删除项目？"
+        case .deleteWorkspace: return "删除工作区？"
         case .deleteManaged(let selection):
             return "\(TaskListPresentation.describeManagedAction(selection))？"
         case .none: return ""
@@ -432,7 +432,7 @@ struct WorkspaceListView: View {
         case .deleteSession(let session):
             return "终端「\(sessionDeleteLabel(session))」会结束并被删除，此操作无法撤销。"
         case .deleteWorkspace(let workspace):
-            return "项目「\(workspace.name)」及其任务、会话与独立 worktree 将被删除，此操作无法撤销。"
+            return "工作区「\(workspace.name)」及其任务、会话与独立 worktree 将被删除，此操作无法撤销。"
         case .deleteManaged(let selection):
             if selection.taskIds.isEmpty {
                 return "将结束所选终端，此操作无法撤销。"
@@ -449,7 +449,7 @@ struct WorkspaceListView: View {
     /// 左滑收起动画和 alert 抢同一帧时，确认框会被直接吞掉。
     private func presentAfterSwipe(_ action: @escaping () -> Void) {
         renameTarget = nil
-        renameWorkspaceTarget = nil
+        renameDirectoryTarget = nil
         pendingConfirm = nil
         confirmError = nil
         DispatchQueue.main.async(execute: action)
@@ -459,44 +459,55 @@ struct WorkspaceListView: View {
         presentAfterSwipe { pendingConfirm = confirm }
     }
 
-    private var renameWorkspacePresented: Binding<Bool> {
+    private var renameDirectoryPresented: Binding<Bool> {
         Binding(
-            get: { renameWorkspaceTarget != nil },
-            set: { if !$0 { renameWorkspaceTarget = nil } }
+            get: { renameDirectoryTarget != nil },
+            set: { if !$0 { renameDirectoryTarget = nil } }
         )
     }
 
-    @ViewBuilder
-    private var renameWorkspaceAlertContent: some View {
-        if let target = renameWorkspaceTarget {
-            TextField("项目名称", text: $renameWorkspaceDraft)
-                .textInputAutocapitalization(.never)
-            Button("取消", role: .cancel) { renameWorkspaceTarget = nil }
-            Button(renameWorkspaceBusy ? "保存中…" : "保存") {
-                guard !renameWorkspaceBusy else { return }
-                let trimmed = renameWorkspaceDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else {
-                    renameWorkspaceError = "名称不能为空"
-                    return
+    /// 目录组改名：合成目录走 session-directories（改的是该 cwd 的显示名），
+    /// 真实工作区走 PATCH /api/workspaces/:id；全局组不参与改名（对齐 web 的 canRenameDirectory）。
+    private func submitDirectoryRename(_ target: TaskDirectoryGroup) {
+        guard !renameDirectoryBusy else { return }
+        let trimmed = renameDirectoryDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            renameDirectoryError = "名称不能为空"
+            return
+        }
+        guard trimmed != target.workspaceName else {
+            renameDirectoryTarget = nil
+            return
+        }
+        renameDirectoryBusy = true
+        Task {
+            do {
+                if target.isSynthetic {
+                    try await store.renameDirectory(cwd: target.workspaceCwd, name: trimmed)
+                } else {
+                    _ = try await store.renameWorkspace(workspaceId: target.workspaceId, name: trimmed)
                 }
-                renameWorkspaceBusy = true
-                let workspaceId = target.id
-                Task {
-                    do {
-                        _ = try await store.renameWorkspace(
-                            workspaceId: workspaceId,
-                            name: trimmed
-                        )
-                        renameWorkspaceTarget = nil
-                        renameWorkspaceBusy = false
-                        showToast("已重命名为「\(trimmed)」")
-                    } catch {
-                        renameWorkspaceError = error.localizedDescription
-                        renameWorkspaceBusy = false
-                    }
-                }
+                renameDirectoryTarget = nil
+                renameDirectoryBusy = false
+                showToast("已将工作区重命名为「\(trimmed)」")
+            } catch {
+                renameDirectoryError = error.localizedDescription
+                renameDirectoryBusy = false
             }
-            .disabled(renameWorkspaceBusy || renameWorkspaceDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    @ViewBuilder
+    private var renameDirectoryAlertContent: some View {
+        if let target = renameDirectoryTarget {
+            TextField("工作区名称", text: $renameDirectoryDraft)
+                .textInputAutocapitalization(.never)
+            Button("取消", role: .cancel) { renameDirectoryTarget = nil }
+            Button(renameDirectoryBusy ? "保存中…" : "保存") { submitDirectoryRename(target) }
+                .disabled(
+                    renameDirectoryBusy
+                        || renameDirectoryDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
         }
     }
 
@@ -751,6 +762,25 @@ struct WorkspaceListView: View {
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("目录 \(group.workspaceName)，\(group.tasks.count) 个任务")
+        .contextMenu {
+            // 全局（未归属）组不参与改名，合成目录与真实工作区走各自接口；删除只留给真实工作区。
+            if !group.isGlobal {
+                Button {
+                    renameDirectoryDraft = group.workspaceName
+                    renameDirectoryError = nil
+                    renameDirectoryTarget = group
+                } label: {
+                    Label("重命名工作区", systemImage: "pencil")
+                }
+            }
+            if group.isBindableProject {
+                Button(role: .destructive) {
+                    presentConfirm(.deleteWorkspace(workspace(from: group)))
+                } label: {
+                    Label("删除工作区", systemImage: "trash")
+                }
+            }
+        }
     }
 
     private func treeDisclosureCaret(expanded: Bool) -> some View {
@@ -1154,7 +1184,7 @@ struct WorkspaceListView: View {
             case .deleteWorkspace(let workspace):
                 try await store.deleteWorkspace(workspaceId: workspace.id)
                 onWorkspaceDeleted?(workspace.id)
-                showToast("已删除项目「\(workspace.name)」")
+                showToast("已删除工作区「\(workspace.name)」")
             case .deleteManaged(let selection):
                 for taskId in selection.taskIds {
                     guard let task = store.taskGroups.flatMap(\.tasks).first(where: { $0.id == taskId }) else { continue }

@@ -10,6 +10,8 @@ protocol WorkspaceServing: AnyObject {
     func archiveWorkspaceTask(taskId: String) async throws -> WorkspaceTask
     /// 移动会话归属；会话本身、运行目录与历史都不变。
     func moveWorkspaceSession(taskId: String, sessionId: String) async throws
+    /// 合成目录（无工作区实体）改显示名。
+    func renameSessionDirectory(path: String, name: String) async throws
     func getWorkspaceTask(taskId: String) async throws -> WorkspaceTaskDetail
     func saveWorkspaceTaskLayout(
         taskId: String,
@@ -653,6 +655,13 @@ final class WorkspaceStore: ObservableObject {
         if let workspace = currentWorkspace, let task = currentTask {
             await openTask(workspace: workspace, task: task, preferredSessionId: visibleSessionID)
         }
+    }
+
+    /// 合成目录改名走 session-directories（改的是该 cwd 的显示名，没有工作区实体）。
+    func renameDirectory(cwd: String, name: String) async throws {
+        try await api.renameSessionDirectory(path: cwd, name: name)
+        invalidateTaskGroupsLoad()
+        await loadTaskGroups(force: true)
     }
 
     /// 移动会话归属：不动运行目录、不重启 CLI，只改任务归属。

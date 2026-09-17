@@ -414,6 +414,16 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertNil(shell.body["initialInput"])
     }
 
+    func testSyntheticDirectoryRenameUsesSessionDirectoryEndpoint() async throws {
+        let service = MockWorkspaceService()
+        let store = WorkspaceStore(api: service, serverID: "server-rename")
+
+        try await store.renameDirectory(cwd: "/repo/loose", name: "  临时目录  ")
+
+        XCTAssertEqual(service.directoryRenames.map(\.path), ["/repo/loose"])
+        XCTAssertEqual(service.directoryRenames.map(\.name), ["  临时目录  "])
+    }
+
     func testMoveAndArchiveStoreMutationsHitServerAndDropLocalState() async throws {
         let service = MockWorkspaceService()
         let source = try workspace(id: "ws-source")
@@ -943,6 +953,7 @@ private final class MockWorkspaceService: WorkspaceServing {
     var createRequests: [CreateRequest] = []
     var moveRequests: [MoveRequest] = []
     var archiveRequests: [String] = []
+    var directoryRenames: [(path: String, name: String)] = []
     var createdSnapshot: SessionSnapshot?
     var saveError: Error?
 
@@ -1043,6 +1054,10 @@ private final class MockWorkspaceService: WorkspaceServing {
             createdAt: detail.createdAt,
             lastOpenedAt: detail.lastOpenedAt
         )
+    }
+
+    func renameSessionDirectory(path: String, name: String) async throws {
+        directoryRenames.append((path, name))
     }
 
     func moveWorkspaceSession(taskId: String, sessionId: String) async throws {
