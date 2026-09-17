@@ -87,55 +87,40 @@ struct WorkspaceListView: View {
     @State private var toastMessage: String?
 
     var body: some View {
-        sheetContent
-            .background(WandAmbientBackground())
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar(hidesHomeChrome ? .hidden : .automatic, for: .navigationBar)
-            .toolbar {
-                if !hidesHomeChrome {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        if isSelecting {
-                            Button("完成") {
-                                isSelecting = false
-                                selectedTaskIds.removeAll()
-                                selectedSessionIds.removeAll()
-                            }
-                        }
-                    }
-                    ToolbarItemGroup(placement: .navigationBarTrailing) {
-                        if isSelecting {
-                            Button("删除", role: .destructive) {
-                                requestDeleteManagedSelection()
-                            }
-                            .disabled(selectedTaskIds.isEmpty && selectedSessionIds.isEmpty)
-                        } else {
-                            Button {
-                                isSelecting = true
-                                selectedTaskIds.removeAll()
-                                selectedSessionIds.removeAll()
-                            } label: {
-                                Image(systemName: "checkmark.circle")
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(Theme.brand)
-                            }
-                            .accessibilityLabel("多选任务和终端")
-                            Button {
-                                newTaskSheetCwd = ""
-                                newTaskSheetWorkspaceId = nil
-                                newTaskSheetPresented = true
-                            } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 20))
-                                    .foregroundColor(Theme.brand)
-                            }
-                            .accessibilityLabel("新建任务")
-                        }
-                    }
+        dialogs
+    }
+
+    /// 弹窗单独成串：把 body 拆成几段小表达式，避免 Swift type checker 一次求解整条
+    /// 修饰符链而超时（CI Xcode 26 曾报 WorkspaceListView.swift:170 unable to type-check
+    /// this expression in reasonable time）。
+    private var dialogs: some View {
+        lifecycleEvents
+            .alert("重命名任务", isPresented: renameTaskPresented) {
+                renameTaskAlertContent
+            } message: {
+                if let renameError {
+                    Text(renameError)
+                } else {
+                    Text("修改任务的显示名称。")
                 }
             }
-            .overlay(alignment: .top) { toastView }
-            .animation(.easeInOut(duration: 0.25), value: toastMessage)
+            .alert(confirmTitle, isPresented: confirmPresented) {
+                Button("取消", role: .cancel) {
+                    pendingConfirm = nil
+                    confirmError = nil
+                }
+                Button(confirmBusy ? "处理中…" : confirmActionTitle, role: .destructive) {
+                    Task { await performPendingConfirm() }
+                }
+                .disabled(confirmBusy)
+            } message: {
+                Text(confirmMessage)
+            }
+    }
+
+    /// 生命周期与状态同步回调。
+    private var lifecycleEvents: some View {
+        navigationChrome
             .task {
                 store.startTaskGroupsSync()
                 if case .idle = store.indexState {
@@ -166,38 +151,85 @@ struct WorkspaceListView: View {
             }
             .onChange(of: requestNewTask.wrappedValue) { _, requested in
                 guard requested else { return }
-                newTaskSheetCwd = ""
-                newTaskSheetWorkspaceId = nil
-                newTaskSheetPresented = true
+                presentNewTaskSheet()
                 requestNewTask.wrappedValue = false
             }
             .onChange(of: isSelecting) { _, selecting in
-                if !selecting {
-                    selectedTaskIds.removeAll()
-                    selectedSessionIds.removeAll()
-                }
+                if !selecting { clearManagedSelection() }
             }
-            .alert("重命名任务", isPresented: renameTaskPresented) {
-                renameTaskAlertContent
-            } message: {
-                if let renameError {
-                    Text(renameError)
-                } else {
-                    Text("修改任务的显示名称。")
-                }
+    }
+
+    /// 导航栏外观 + 工具栏 + 提示浮层。
+    private var navigationChrome: some View {
+        sheetContent
+            .background(WandAmbientBackground())
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(hidesHomeChrome ? .hidden : .automatic, for: .navigationBar)
+            .toolbar { navigationToolbar }
+            .overlay(alignment: .top) { toastView }
+            .animation(.easeInOut(duration: 0.25), value: toastMessage)
+    }
+
+    /// 工具栏内容独立成 builder：内联在 body 里时，嵌套的 if/else 加 Button label 闭包
+    /// 会把整条链的推导成本叠到超过 type checker 预算。
+    @ToolbarContentBuilder
+    private var navigationToolbar: some ToolbarContent {
+        if !hidesHomeChrome {
+            leadingToolbarItem
+            trailingToolbarItems
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var leadingToolbarItem: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarLeading) {
+            if isSelecting {
+                Button("完成") { endManagedSelection() }
             }
-            .alert(confirmTitle, isPresented: confirmPresented) {
-                Button("取消", role: .cancel) {
-                    pendingConfirm = nil
-                    confirmError = nil
-                }
-                Button(confirmBusy ? "处理中…" : confirmActionTitle, role: .destructive) {
-                    Task { await performPendingConfirm() }
-                }
-                .disabled(confirmBusy)
-            } message: {
-                Text(confirmMessage)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var trailingToolbarItems: some ToolbarContent {
+        ToolbarItemGroup(placement: .navigationBarTrailing) {
+            trailingToolbarButtons
+        }
+    }
+
+    @ViewBuilder
+    private var trailingToolbarButtons: some View {
+        if isSelecting {
+            Button("删除", role: .destructive) {
+                requestDeleteManagedSelection()
             }
+            .disabled(selectedTaskIds.isEmpty && selectedSessionIds.isEmpty)
+        } else {
+            toolbarSelectionToggle
+            toolbarNewTaskButton
+        }
+    }
+
+    private var toolbarSelectionToggle: some View {
+        Button {
+            beginManagedSelection()
+        } label: {
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(Theme.brand)
+        }
+        .accessibilityLabel("多选任务和终端")
+    }
+
+    private var toolbarNewTaskButton: some View {
+        Button {
+            presentNewTaskSheet()
+        } label: {
+            Image(systemName: "plus.circle.fill")
+                .font(.system(size: 20))
+                .foregroundColor(Theme.brand)
+        }
+        .accessibilityLabel("新建任务")
     }
 
     private var sheetContent: some View {
@@ -515,9 +547,7 @@ struct WorkspaceListView: View {
                         .foregroundColor(Theme.textSecondary)
                         .multilineTextAlignment(.center)
                     Button {
-                        newTaskSheetCwd = ""
-                        newTaskSheetWorkspaceId = nil
-                        newTaskSheetPresented = true
+                        presentNewTaskSheet()
                     } label: {
                         Label("新建任务", systemImage: "plus")
                             .frame(maxWidth: 220)
@@ -549,8 +579,7 @@ struct WorkspaceListView: View {
         return HStack(spacing: 10) {
             Button(allOn ? "取消全选" : "全选") {
                 if allOn {
-                    selectedTaskIds.removeAll()
-                    selectedSessionIds.removeAll()
+                    clearManagedSelection()
                 } else {
                     selectedTaskIds = all.taskIds
                     selectedSessionIds = all.sessionIds
@@ -568,9 +597,7 @@ struct WorkspaceListView: View {
             .font(.system(size: 13, weight: .semibold))
             .disabled(selectedCount == 0)
             Button("完成") {
-                isSelecting = false
-                selectedTaskIds.removeAll()
-                selectedSessionIds.removeAll()
+                endManagedSelection()
             }
             .font(.system(size: 13, weight: .semibold))
             .foregroundColor(Theme.textPrimary)
@@ -593,6 +620,27 @@ struct WorkspaceListView: View {
         if !resolved.isEmpty {
             presentConfirm(.deleteManaged(resolved))
         }
+    }
+
+    private func presentNewTaskSheet(cwd: String = "", workspaceId: String? = nil) {
+        newTaskSheetCwd = cwd
+        newTaskSheetWorkspaceId = workspaceId
+        newTaskSheetPresented = true
+    }
+
+    private func beginManagedSelection() {
+        isSelecting = true
+        clearManagedSelection()
+    }
+
+    private func endManagedSelection() {
+        isSelecting = false
+        clearManagedSelection()
+    }
+
+    private func clearManagedSelection() {
+        selectedTaskIds.removeAll()
+        selectedSessionIds.removeAll()
     }
 
     @ViewBuilder
@@ -691,9 +739,10 @@ struct WorkspaceListView: View {
                 worktreeBadge(workspace(from: group))
             }
             Button {
-                newTaskSheetCwd = group.workspaceCwd
-                newTaskSheetWorkspaceId = group.isBindableProject ? group.workspaceId : nil
-                newTaskSheetPresented = true
+                presentNewTaskSheet(
+                    cwd: group.workspaceCwd,
+                    workspaceId: group.isBindableProject ? group.workspaceId : nil
+                )
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 13, weight: .bold))
@@ -796,38 +845,7 @@ struct WorkspaceListView: View {
         let workspace = workspace(for: summary, group: group)
         let task = summary.asTask()
         return HStack(spacing: 8) {
-            HStack(spacing: 8) {
-                if isSelecting {
-                    Image(systemName: selectedTaskIds.contains(summary.id) ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(selectedTaskIds.contains(summary.id) ? Theme.brand : Theme.textMuted)
-                        .frame(width: 22, height: 22)
-                } else if summary.isIsolated {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Theme.success)
-                        .frame(width: 14, height: 18)
-                }
-                Text(summary.name)
-                    .font(.system(size: 15, weight: selected || isSelecting && selectedTaskIds.contains(summary.id) ? .semibold : .medium))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                Spacer(minLength: 4)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if isSelecting {
-                    if selectedTaskIds.contains(summary.id) {
-                        selectedTaskIds.remove(summary.id)
-                    } else {
-                        selectedTaskIds.insert(summary.id)
-                    }
-                    return
-                }
-                collapsedTaskIds.remove(summary.id)
-                onOpenTask(workspace, task)
-            }
+            taskSummaryTitle(summary, workspace: workspace, task: task)
 
             if summary.status == "done" {
                 Text("已完成")
@@ -837,35 +855,10 @@ struct WorkspaceListView: View {
             }
 
             if canCollapseSessions {
-                Button {
-                    toggleCollapsedTask(summary.id)
-                } label: {
-                    HStack(spacing: 2) {
-                        Text("\(summary.listedSessionCount)")
-                            .font(.system(size: 11, weight: .semibold))
-                            .monospacedDigit()
-                            .foregroundColor(Theme.textMuted)
-                        treeDisclosureCaret(expanded: expanded)
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled(isSelecting)
-                .accessibilityLabel(expanded ? "收起终端" : "展开终端")
+                taskSummaryDisclosureButton(summary, expanded: expanded)
             }
 
-            Button {
-                collapsedTaskIds.remove(summary.id)
-                onRequestNewSession?(workspace, task)
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(Theme.brand)
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.plain)
-            .disabled(isSelecting)
-            .opacity(isSelecting ? 0.35 : 1)
-            .accessibilityLabel("在任务 \(summary.name) 中新建终端")
+            taskSummaryNewSessionButton(summary, workspace: workspace, task: task)
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 6)
@@ -876,62 +869,159 @@ struct WorkspaceListView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("任务 \(summary.name)")
         .accessibilityAddTraits(.isButton)
-        .contextMenu {
-            Button {
-                collapsedTaskIds.remove(summary.id)
-                onOpenTask(workspace, task)
-            } label: {
-                Label("打开任务", systemImage: "arrow.forward")
+        .contextMenu { taskSummaryContextMenu(summary, workspace: workspace, task: task) }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            taskSummarySwipeActions(summary, task: task)
+        }
+    }
+
+    /// 任务名与多选勾选、点击行为单独成体：整行内联时这一个表达式就会占满 type
+    /// checker 预算（本地实测 137–145ms，CI 更慢）。
+    @ViewBuilder
+    private func taskSummaryTitle(
+        _ summary: WorkspaceTaskSummary,
+        workspace: Workspace,
+        task: WorkspaceTask
+    ) -> some View {
+        let selected = selectedTaskId == summary.id
+        let isSelected = selectedTaskIds.contains(summary.id)
+        HStack(spacing: 8) {
+            if isSelecting {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(isSelected ? Theme.brand : Theme.textMuted)
+                    .frame(width: 22, height: 22)
+            } else if summary.isIsolated {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Theme.success)
+                    .frame(width: 14, height: 18)
             }
-            Button {
-                collapsedTaskIds.remove(summary.id)
-                onRequestNewSession?(workspace, task)
-            } label: {
-                Label("新建终端", systemImage: "plus")
+            Text(summary.name)
+                .font(.system(size: 15, weight: selected || (isSelecting && isSelected) ? .semibold : .medium))
+                .foregroundColor(Theme.textPrimary)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 4)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isSelecting {
+                toggleSelectedTask(summary.id)
+                return
             }
-            Button {
-                presentAfterSwipe {
-                    renameDraft = summary.name
-                    renameError = nil
-                    renameTarget = task
-                }
-            } label: {
-                Label("重命名", systemImage: "pencil")
-            }
-            if summary.listedSessionCount > 0 {
-                Button(role: .destructive) {
-                    presentConfirm(.clearSessions(summary))
-                } label: {
-                    Label("清空会话(\(summary.listedSessionCount))", systemImage: "trash.slash")
-                }
-            }
-            if onOpenParallel != nil {
-                Button {
-                    onOpenParallel?(workspace, task)
-                } label: {
-                    Label("并行任务", systemImage: "square.stack.3d.up")
-                }
-            }
-            Button(role: .destructive) {
-                presentConfirm(.deleteTask(task))
-            } label: {
-                Label("删除", systemImage: "trash")
+            collapsedTaskIds.remove(summary.id)
+            onOpenTask(workspace, task)
+        }
+    }
+
+    private func toggleSelectedTask(_ taskId: String) {
+        if selectedTaskIds.contains(taskId) {
+            selectedTaskIds.remove(taskId)
+        } else {
+            selectedTaskIds.insert(taskId)
+        }
+    }
+
+    private func taskSummaryDisclosureButton(_ summary: WorkspaceTaskSummary, expanded: Bool) -> some View {
+        Button {
+            toggleCollapsedTask(summary.id)
+        } label: {
+            HStack(spacing: 2) {
+                Text("\(summary.listedSessionCount)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundColor(Theme.textMuted)
+                treeDisclosureCaret(expanded: expanded)
             }
         }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+        .buttonStyle(.plain)
+        .disabled(isSelecting)
+        .accessibilityLabel(expanded ? "收起终端" : "展开终端")
+    }
+
+    private func taskSummaryNewSessionButton(
+        _ summary: WorkspaceTaskSummary,
+        workspace: Workspace,
+        task: WorkspaceTask
+    ) -> some View {
+        Button {
+            collapsedTaskIds.remove(summary.id)
+            onRequestNewSession?(workspace, task)
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(Theme.brand)
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.plain)
+        .disabled(isSelecting)
+        .opacity(isSelecting ? 0.35 : 1)
+        .accessibilityLabel("在任务 \(summary.name) 中新建终端")
+    }
+
+    @ViewBuilder
+    private func taskSummaryContextMenu(
+        _ summary: WorkspaceTaskSummary,
+        workspace: Workspace,
+        task: WorkspaceTask
+    ) -> some View {
+        Button {
+            collapsedTaskIds.remove(summary.id)
+            onOpenTask(workspace, task)
+        } label: {
+            Label("打开任务", systemImage: "arrow.forward")
+        }
+        Button {
+            collapsedTaskIds.remove(summary.id)
+            onRequestNewSession?(workspace, task)
+        } label: {
+            Label("新建终端", systemImage: "plus")
+        }
+        Button {
+            presentAfterSwipe {
+                renameDraft = summary.name
+                renameError = nil
+                renameTarget = task
+            }
+        } label: {
+            Label("重命名", systemImage: "pencil")
+        }
+        if summary.listedSessionCount > 0 {
             Button(role: .destructive) {
-                presentConfirm(.deleteTask(task))
+                presentConfirm(.clearSessions(summary))
             } label: {
-                Label("删除", systemImage: "trash")
+                Label("清空会话(\(summary.listedSessionCount))", systemImage: "trash.slash")
             }
-            if summary.listedSessionCount > 0 {
-                Button {
-                    presentConfirm(.clearSessions(summary))
-                } label: {
-                    Label("清空", systemImage: "trash")
-                }
-                .tint(Theme.warning)
+        }
+        if onOpenParallel != nil {
+            Button {
+                onOpenParallel?(workspace, task)
+            } label: {
+                Label("并行任务", systemImage: "square.stack.3d.up")
             }
+        }
+        Button(role: .destructive) {
+            presentConfirm(.deleteTask(task))
+        } label: {
+            Label("删除", systemImage: "trash")
+        }
+    }
+
+    @ViewBuilder
+    private func taskSummarySwipeActions(_ summary: WorkspaceTaskSummary, task: WorkspaceTask) -> some View {
+        Button(role: .destructive) {
+            presentConfirm(.deleteTask(task))
+        } label: {
+            Label("删除", systemImage: "trash")
+        }
+        if summary.listedSessionCount > 0 {
+            Button {
+                presentConfirm(.clearSessions(summary))
+            } label: {
+                Label("清空", systemImage: "trash")
+            }
+            .tint(Theme.warning)
         }
     }
 
@@ -1054,9 +1144,7 @@ struct WorkspaceListView: View {
                 if !selection.sessionIds.isEmpty {
                     try await store.deleteSessions(Array(selection.sessionIds))
                 }
-                isSelecting = false
-                selectedTaskIds.removeAll()
-                selectedSessionIds.removeAll()
+                endManagedSelection()
                 showToast("已删除\(TaskListPresentation.describeManagedDeletion(selection))")
             }
             self.pendingConfirm = nil
@@ -1136,9 +1224,7 @@ struct WorkspaceListView: View {
         .listRowSeparator(.hidden)
         .contextMenu {
             Button {
-                newTaskSheetCwd = workspace.cwd
-                newTaskSheetWorkspaceId = workspace.id
-                newTaskSheetPresented = true
+                presentNewTaskSheet(cwd: workspace.cwd, workspaceId: workspace.id)
             } label: {
                 Label("新任务", systemImage: "plus")
             }
@@ -1200,9 +1286,7 @@ struct WorkspaceListView: View {
             Spacer(minLength: 6)
             worktreeBadge(workspace)
             Button {
-                newTaskSheetCwd = workspace.cwd
-                newTaskSheetWorkspaceId = workspace.id
-                newTaskSheetPresented = true
+                presentNewTaskSheet(cwd: workspace.cwd, workspaceId: workspace.id)
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 13, weight: .bold))
