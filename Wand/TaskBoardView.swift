@@ -853,6 +853,15 @@ private struct TaskBoardHero: View {
     }
 }
 
+///
+/// 任务卡：标题行 / 摘要 / 元信息 / 会话 / 状态五段纵向排列，段与段之间留 10pt。
+/// 与 Android `BoardTaskCard` 同一套顺序与截断规则：
+///
+/// - 勾选圈、标题、任务编号一行：编号贴右，扫一眼就能对上号；
+/// - 元信息统一成 8pt 圆角细边框小芯片（胶囊只留给状态圆点与计数）；
+/// - 会话不再是一排同名胶囊：左侧一根分组细线 + 每行「工具徽标 + 会话标题 + 运行跳动点」，
+///   点得到具体那一个终端，超出的会话折成「+N 个会话」；
+/// - 状态行（正在处理 / 等待验收）压到卡片底部当页脚，顺序对齐 Web 任务卡。
 private struct TaskBoardRow: View {
     let task: WandBoardTask
     var showWorkspace = true
@@ -861,90 +870,34 @@ private struct TaskBoardRow: View {
     var onOpenSession: (String) -> Void = { _ in }
 
     private var done: Bool { task.status == "done" || task.status == "archived" }
-    private var agentRunning: Bool { wandBoardAgentRunning(task) }
-    private var hasChips: Bool {
-        (showWorkspace && !(task.workspace?.name ?? "").isEmpty)
-            || (task.priority != "none" && !task.priority.isEmpty)
-            || wandBoardAgentLabels(sessions: task.sessions, assigned: task.agent) != nil
-            || task.labels.contains(where: { !$0.isEmpty })
-    }
+    private var model: WandBoardTaskCardModel { wandBoardCardModel(task, showWorkspace: showWorkspace) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 8) {
-                Button(action: onToggleComplete) {
-                    BoardStatusCheck(status: task.status)
-                }
-                .buttonStyle(.plain)
-                Text(wandBoardCardTitle(task))
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(done ? Theme.textMuted : Theme.textPrimary)
-                    .strikethrough(done)
+            header
+            if let summary = model.body {
+                Text(summary)
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.textSecondary)
                     .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: onOpen)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 6)
             }
-            VStack(alignment: .leading, spacing: 8) {
-                if hasChips {
-                    FlowLayout(spacing: 6) {
-                        if showWorkspace, let name = task.workspace?.name, !name.isEmpty {
-                            boardChip(name, icon: "folder")
-                        }
-                        if task.priority != "none", !task.priority.isEmpty {
-                            boardChip(
-                                WandBoardPriority(rawValue: task.priority)?.label ?? task.priority,
-                                color: wandBoardPriorityColor(task.priority)
-                            )
-                        }
-                        if let agent = wandBoardAgentLabels(sessions: task.sessions, assigned: task.agent) {
-                            boardChip(agent, color: agentRunning ? Theme.textPrimary : Theme.textSecondary) {
-                                if agentRunning { BoardAgentDots() }
-                            }
-                        }
-                        ForEach(task.labels.filter { !$0.isEmpty }.prefix(3), id: \.self) { label in
-                            boardChip(label)
-                        }
-                    }
-                    .padding(.top, 8)
-                }
-                if let processing = wandBoardProcessingLabel(task) {
-                    HStack(spacing: 6) {
-                        Circle().fill(Theme.success).frame(width: 7, height: 7)
-                        Text(processing)
-                            .font(.system(size: 11))
-                            .foregroundColor(Theme.success)
-                    }
-                    .padding(.top, 8)
-                }
-                if !task.sessions.isEmpty {
-                    FlowLayout(spacing: 6) {
-                        ForEach(task.sessions) { session in
-                            Button {
-                                onOpenSession(session.id)
-                            } label: {
-                                HStack(spacing: 4) {
-                                    BrandLogo(
-                                        provider: session.provider.isEmpty ? "terminal" : session.provider,
-                                        color: Theme.textPrimary
-                                    )
-                                    .frame(width: 12, height: 12)
-                                    Text(wandBoardProviderLabel(session.provider))
-                                        .font(.system(size: 11))
-                                        .foregroundColor(Theme.textSecondary)
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(Capsule().fill(Theme.surfaceSoft.opacity(0.8)))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.top, 8)
-                }
+            if model.hasChips {
+                metaChips.padding(.top, 10)
             }
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onOpen)
+            if !model.sessions.isEmpty || model.extraSessionCount > 0 {
+                sessionBlock.padding(.top, 10)
+            }
+            if let processing = model.processingLabel {
+                HStack(spacing: 6) {
+                    Circle().fill(Theme.success).frame(width: 7, height: 7)
+                    Text(processing)
+                        .font(.system(size: 11))
+                        .foregroundColor(Theme.success)
+                }
+                .padding(.top, 10)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -956,28 +909,158 @@ private struct TaskBoardRow: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Theme.border.opacity(0.55), lineWidth: 1)
         )
+        // 整张卡可点开详情；卡片里的会话行、勾选圈是各自的按钮，点它们不会走这一层。
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture(perform: onOpen)
     }
 
-    private func boardChip(
+    private var header: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Button(action: onToggleComplete) {
+                BoardStatusCheck(status: task.status)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
+            Text(model.title)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(done ? Theme.textMuted : Theme.textPrimary)
+                .strikethrough(done)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let identifier = model.identifier {
+                Text(identifier)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(Theme.textMuted)
+                    .lineLimit(1)
+                    .padding(.top, 3)
+                    .accessibilityLabel("任务编号 \(identifier)")
+            }
+        }
+    }
+
+    private var metaChips: some View {
+        FlowLayout(spacing: 6) {
+            if let name = model.workspaceName {
+                boardMetaChip(name, icon: "folder")
+            }
+            if let name = model.milestoneName {
+                boardMetaChip(name, icon: "flag")
+            }
+            if let priority = model.priority {
+                let color = wandBoardPriorityColor(priority)
+                boardMetaChip(
+                    WandBoardPriority(rawValue: priority)?.label ?? priority,
+                    icon: "chart.bar.fill",
+                    color: color,
+                    fill: color.opacity(0.14),
+                    stroke: color.opacity(0.32)
+                )
+            }
+            ForEach(model.labels, id: \.self) { label in
+                boardMetaChip(label)
+            }
+            if model.extraLabelCount > 0 {
+                Text("+\(model.extraLabelCount)")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textMuted)
+                    .frame(height: 22)
+            }
+            if let due = model.due {
+                boardMetaChip(
+                    due.label,
+                    icon: "calendar",
+                    color: due.overdue ? Theme.danger : Theme.textSecondary,
+                    fill: due.overdue ? Theme.danger.opacity(0.14) : nil,
+                    stroke: due.overdue ? Theme.danger.opacity(0.32) : nil
+                )
+                .accessibilityLabel(due.overdue ? "截止 \(due.label)，已逾期" : "截止 \(due.label)")
+            }
+            if let agent = model.agentLabel {
+                boardMetaChip(agent, icon: "sparkles")
+            }
+        }
+    }
+
+    private var sessionBlock: some View {
+        HStack(alignment: .top, spacing: 0) {
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                .fill(Theme.border)
+                .frame(width: 2)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(model.sessions) { session in
+                    Button {
+                        onOpenSession(session.id)
+                    } label: {
+                        HStack(spacing: 6) {
+                            BrandLogo(
+                                provider: session.provider.isEmpty ? "terminal" : session.provider,
+                                color: Theme.textPrimary
+                            )
+                            .frame(width: 12, height: 12)
+                            Text(session.label)
+                                .font(.system(size: 12))
+                                .foregroundColor(session.running ? Theme.textPrimary : Theme.textSecondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            if session.running { BoardAgentDots() }
+                        }
+                        .padding(.horizontal, 6)
+                        .frame(height: 26)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("打开会话 \(session.label)")
+                }
+                if model.extraSessionCount > 0 {
+                    Button(action: onOpen) {
+                        Text("+\(model.extraSessionCount) 个会话")
+                            .font(.system(size: 11))
+                            .foregroundColor(Theme.textMuted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 6)
+                            .frame(height: 26)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.leading, 10)
+        }
+    }
+
+    /// 元信息芯片：8pt 圆角细边框，不是胶囊——胶囊只有状态圆点和计数才用。
+    /// 语义色芯片（优先级 / 逾期）靠弱底色 + 同色文字区分，不额外造一套图标。
+    private func boardMetaChip(
         _ label: String,
         icon: String? = nil,
         color: Color = Theme.textSecondary,
-        @ViewBuilder trailing: () -> some View = { EmptyView() }
+        fill: Color? = nil,
+        stroke: Color? = nil
     ) -> some View {
         HStack(spacing: 4) {
             if let icon {
                 Image(systemName: icon)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold))
             }
             Text(label)
                 .font(.system(size: 11))
                 .lineLimit(1)
-            trailing()
+                .truncationMode(.tail)
         }
         .foregroundColor(color)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .overlay(Capsule().stroke(Theme.border, lineWidth: 0.5))
+        .padding(.horizontal, 7)
+        .frame(height: 22)
+        .frame(maxWidth: 170, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(fill ?? Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(stroke ?? Theme.border, lineWidth: 0.5)
+        )
     }
 }
 

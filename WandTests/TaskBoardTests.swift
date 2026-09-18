@@ -231,4 +231,114 @@ final class TaskBoardTests: XCTestCase {
         XCTAssertEqual(stats.high, 2)
     }
 
+    // MARK: - 卡片展示模型（与 Android BoardTaskCardModel 同一套规则）
+
+    func testCardModelCapsLabelsAndSessionsWithExplicitOverflow() throws {
+        let task = try decodeTask("""
+        {
+          "id": "t-1", "identifier": "WAND-7", "title": "修看板卡片", "status": "todo",
+          "priority": "high", "labels": ["ui", "ios", "extra", "more"],
+          "workspace": { "id": "ws-1", "name": "wand", "cwd": "/repo" },
+          "milestone": { "id": "m-1", "name": "  1.2 看板重构  " },
+          "sessions": [
+            { "id": "s1", "provider": "claude", "title": "修看板", "status": "idle" },
+            { "id": "s2", "provider": "codex", "title": "补接口", "status": "running" },
+            { "id": "s3", "provider": "pi", "title": "写测试", "status": "running" },
+            { "id": "s4", "provider": "grok", "title": "跑回归", "status": "running" }
+          ]
+        }
+        """)
+        let model = wandBoardCardModel(task, showWorkspace: true)
+        XCTAssertEqual(model.identifier, "WAND-7")
+        XCTAssertEqual(model.labels, ["ui", "ios"])
+        XCTAssertEqual(model.extraLabelCount, 2)
+        XCTAssertEqual(model.sessions.map(\.label), ["修看板", "补接口", "写测试"])
+        XCTAssertEqual(model.extraSessionCount, 1)
+        XCTAssertEqual(model.milestoneName, "1.2 看板重构")
+        XCTAssertTrue(model.hasChips)
+        XCTAssertTrue(model.running)
+        // 会话标题缺少时就退回工具名，避免出现空行。
+        XCTAssertEqual(
+            wandBoardSessionCardLabel(
+                WandBoardTaskSession.fixture(id: "s5", provider: "claude", title: "claude")
+            ),
+            "Claude"
+        )
+    }
+
+    func testCardModelCarriesDueStampAndOverdueFlag() throws {
+        let task = try decodeTask("""
+        { "id": "t-2", "title": "交周报", "status": "doing", "dueDate": "2026-03-20" }
+        """)
+        let overdue = wandBoardCardModel(task, showWorkspace: true, today: "2026-03-25")
+        XCTAssertEqual(overdue.due?.label, "逾期 · 3/20")
+        XCTAssertEqual(overdue.due?.overdue, true)
+        // 描述摘要只在没有会话/指派时出现，有状态行时卡片已经有内容了。
+        XCTAssertEqual(overdue.processingLabel, "等待派发")
+
+        let future = wandBoardCardModel(task, showWorkspace: true, today: "2026-03-11")
+        XCTAssertEqual(future.due?.label, "3/20")
+        XCTAssertEqual(future.due?.overdue, false)
+        XCTAssertNil(wandBoardCardDue("", status: "doing", today: "2026-03-25"))
+        XCTAssertNil(wandBoardCardDue("下周", status: "doing", today: "2026-03-25"))
+    }
+
+    func testClosedTasksNeverReadAsOverdue() throws {
+        let done = try decodeTask(
+            #"{ "id": "t-3", "title": "做完了", "status": "done", "dueDate": "2026-03-20" }"#
+        )
+        XCTAssertEqual(wandBoardCardModel(done, showWorkspace: true, today: "2026-03-25").due?.overdue, false)
+        let archived = try decodeTask(
+            #"{ "id": "t-4", "title": "归档了", "status": "archived", "dueDate": "2026-03-20" }"#
+        )
+        XCTAssertEqual(
+            wandBoardCardModel(archived, showWorkspace: true, today: "2026-03-25").due?.overdue,
+            false
+        )
+    }
+
+    func testCardBodyFallsBackToDescriptionWithoutDuplicatingTheTitle() throws {
+        // 描述里的换行要写成 JSON 转义，所以这里用原始字符串 `#"..."#` 包住。
+        let task = try decodeTask(
+            #"{"id":"t-5","title":"把登录页修好","status":"todo","description":"项目：wand\n把登录页修好\n目录：/repo\n第一个可点区域不能是登录按钮\n再加一个错误提示"}"#
+        )
+        let model = wandBoardCardModel(task, showWorkspace: false)
+        XCTAssertEqual(model.body, "第一个可点区域不能是登录按钮\n再加一个错误提示")
+
+        // 已经有会话的任务不再堆描述，卡片的重点在会话行。
+        let withSession = try decodeTask("""
+        {
+          "id": "t-6", "title": "把登录页修好", "status": "doing", "description": "补充说明",
+          "sessions": [{ "id": "s1", "provider": "claude", "title": "修登录", "status": "running" }]
+        }
+        """)
+        XCTAssertNil(wandBoardCardModel(withSession, showWorkspace: false).body)
+    }
+
+    func testCardModelHidesWorkspaceChipWhenWorkspaceIsNotShown() throws {
+        let task = try decodeTask("""
+        {
+          "id": "t-7", "title": "独立任务", "status": "todo",
+          "workspace": { "id": "ws-1", "name": "wand", "cwd": "/repo" }
+        }
+        """)
+        let hidden = wandBoardCardModel(task, showWorkspace: false)
+        XCTAssertNil(hidden.workspaceName)
+        XCTAssertFalse(hidden.hasChips)
+        XCTAssertEqual(wandBoardCardModel(task, showWorkspace: true).workspaceName, "wand")
+    }
+
+    private func decodeTask(_ json: String) throws -> WandBoardTask {
+        try JSONDecoder().decode(WandBoardTask.self, from: Data(json.utf8))
+    }
+}
+
+private extension WandBoardTaskSession {
+    /// 直接构造一个会话，省得为一行标签再拼一段 JSON。
+    static func fixture(id: String, provider: String, title: String, status: String = "idle") -> Self {
+        let json = """
+        { "id": "\(id)", "provider": "\(provider)", "title": "\(title)", "status": "\(status)" }
+        """
+        return try! JSONDecoder().decode(WandBoardTaskSession.self, from: Data(json.utf8))
+    }
 }

@@ -42,6 +42,11 @@ struct WandBoardWorkspace: Codable, Equatable, Identifiable {
     let cwd: String
 }
 
+struct WandBoardMilestone: Codable, Equatable, Identifiable {
+    let id: String
+    let name: String
+}
+
 struct WandBoardTaskSession: Codable, Equatable, Identifiable {
     let id: String
     let provider: String
@@ -99,7 +104,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         case taskDescription = "description"
         case status, priority, labels, dueDate
         case sortOrder, agent, createdAt, updatedAt, sessionIds, sessions, workspace
-        case workspaceTaskId
+        case milestone, workspaceTaskId
     }
 
     let id: String
@@ -120,6 +125,8 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
     let sessionIds: [String]
     let sessions: [WandBoardTaskSession]
     let workspace: WandBoardWorkspace?
+    /// 卡片上的里程碑芯片；服务端 DTO 已解好名字。
+    let milestone: WandBoardMilestone?
     /// 侧栏任务 ID：卡片与会话树共用同一套任务分组，打开会话时要带回真实工作区/任务上下文。
     let workspaceTaskId: String?
 
@@ -142,6 +149,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         sessionIds = (try? container.decode([String].self, forKey: .sessionIds)) ?? []
         sessions = (try? container.decode([WandBoardTaskSession].self, forKey: .sessions)) ?? []
         workspace = try? container.decodeIfPresent(WandBoardWorkspace.self, forKey: .workspace)
+        milestone = try? container.decodeIfPresent(WandBoardMilestone.self, forKey: .milestone)
         let rawWorkspaceTaskId = (try? container.decodeIfPresent(String.self, forKey: .workspaceTaskId)) ?? nil
         workspaceTaskId = (rawWorkspaceTaskId?.isEmpty == false) ? rawWorkspaceTaskId : nil
     }
@@ -396,6 +404,157 @@ func wandBoardAgentLabels(sessions: [WandBoardTaskSession], assigned: WandBoardT
         .map { wandBoardProviderLabel($0.provider) }
     return labels.isEmpty ? nil : labels.joined(separator: " · ")
 }
+
+// MARK: - 任务卡展示模型
+
+/// 卡片一行里最多画几个会话 / 标签；多出来的折成「+N」，长任务不会把卡片撑成一面墙。
+let wandBoardCardSessionLimit = 3
+let wandBoardCardLabelLimit = 2
+
+/// 卡片上的会话行：标题优先，没标题就退回工具名。
+struct WandBoardTaskSessionCard: Equatable, Identifiable {
+    let id: String
+    let provider: String
+    let label: String
+    let running: Bool
+    let isStructured: Bool
+}
+
+/// 卡片上的截止日期：已过期时交给 UI 换成警示语义色。
+struct WandBoardTaskDue: Equatable {
+    let label: String
+    let overdue: Bool
+}
+
+struct WandBoardTaskCardModel: Equatable {
+    let title: String
+    /// 任务编号（WAND-12），卡片右上角等宽小字；服务端没给编号时为 nil。
+    let identifier: String?
+    /// 没有会话也没有指派时补一行描述摘要，避免卡片只剩一个标题。
+    let body: String?
+    let workspaceName: String?
+    /// 里程碑名字；未归属里程碑时为 nil。
+    let milestoneName: String?
+    let priority: String?
+    let agentLabel: String?
+    let labels: [String]
+    let extraLabelCount: Int
+    let due: WandBoardTaskDue?
+    let processingLabel: String?
+    let running: Bool
+    let sessions: [WandBoardTaskSessionCard]
+    let extraSessionCount: Int
+
+    var hasChips: Bool {
+        workspaceName != nil || milestoneName != nil || priority != nil || agentLabel != nil
+            || !labels.isEmpty || extraLabelCount > 0 || due != nil
+    }
+}
+
+func wandBoardCardModel(
+    _ task: WandBoardTask,
+    showWorkspace: Bool,
+    today: String = wandBoardTodayIso()
+) -> WandBoardTaskCardModel {
+    let workspaceName = (task.workspace?.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let milestoneName = (task.milestone?.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let labels = task.labels.filter { !$0.isEmpty }
+    let identifier = task.identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+    return WandBoardTaskCardModel(
+        title: wandBoardCardTitle(task),
+        identifier: identifier.isEmpty ? nil : identifier,
+        body: wandBoardCardBody(task),
+        workspaceName: (showWorkspace && !workspaceName.isEmpty) ? workspaceName : nil,
+        milestoneName: milestoneName.isEmpty ? nil : milestoneName,
+        priority: (task.priority.isEmpty || task.priority == "none") ? nil : task.priority,
+        agentLabel: wandBoardAgentLabels(sessions: task.sessions, assigned: task.agent),
+        labels: Array(labels.prefix(wandBoardCardLabelLimit)),
+        extraLabelCount: max(0, labels.count - wandBoardCardLabelLimit),
+        due: wandBoardCardDue(task.dueDate, status: task.status, today: today),
+        processingLabel: wandBoardProcessingLabel(task),
+        running: wandBoardAgentRunning(task),
+        sessions: wandBoardCardSessions(task.sessions),
+        extraSessionCount: max(0, task.sessions.count - wandBoardCardSessionLimit)
+    )
+}
+
+/// 会话行按服务端顺序取前几条；标题缺失时用工具名占位，不出现空行。
+func wandBoardCardSessions(
+    _ sessions: [WandBoardTaskSession],
+    limit: Int = wandBoardCardSessionLimit
+) -> [WandBoardTaskSessionCard] {
+    sessions.prefix(limit).map { session in
+        WandBoardTaskSessionCard(
+            id: session.id,
+            provider: session.provider,
+            label: wandBoardSessionCardLabel(session),
+            running: wandBoardSessionRunning(session.status),
+            isStructured: session.isStructured
+        )
+    }
+}
+
+/// 会话标题；与工具名重复（或为空）时退回工具名，避免一行里出现两次「Claude」。
+func wandBoardSessionCardLabel(_ session: WandBoardTaskSession) -> String {
+    let provider = wandBoardProviderLabel(session.provider)
+    let title = session.title.trimmingCharacters(in: .whitespacesAndNewlines)
+    if title.isEmpty || title.caseInsensitiveCompare(provider) == .orderedSame { return provider }
+    return title
+}
+
+///
+/// 没有会话也没有指派时的描述摘要：
+/// 取描述里前两行有内容的正文（跳过同步写进去的「项目 / 目录 / 分支」行），
+/// 与标题重复的那行丢掉——自动标题本来就是从这行生成的。
+func wandBoardCardBody(_ task: WandBoardTask) -> String? {
+    guard task.sessions.isEmpty, task.agent == nil else { return nil }
+    let title = wandBoardCardTitle(task)
+    let lines = task.description
+        .split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty && !wandBoardIsSyncedWorkspaceLine($0) }
+        .filter { $0.caseInsensitiveCompare(title) != .orderedSame }
+        .prefix(2)
+    return lines.isEmpty ? nil : lines.joined(separator: "\n")
+}
+
+/// 截止日期标签：M/D（对齐 Web 的 issueDueStamp），过期时前面加「逾期」，不只靠颜色表示。
+func wandBoardCardDue(
+    _ dueDate: String?,
+    status: String,
+    today: String = wandBoardTodayIso()
+) -> WandBoardTaskDue? {
+    let value = (dueDate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard wandBoardDatePattern.firstMatch(
+        in: value,
+        range: NSRange(value.startIndex..., in: value)
+    ) != nil else { return nil }
+    let overdue = wandBoardIsOverdue(value, status: status, today: today)
+    let month = Int(value.dropFirst(5).prefix(2)) ?? 0
+    let day = Int(value.dropFirst(8).prefix(2)) ?? 0
+    return WandBoardTaskDue(
+        label: overdue ? "逾期 · \(month)/\(day)" : "\(month)/\(day)",
+        overdue: overdue
+    )
+}
+
+/// 已关闭的任务不再算逾期：做完/归档之后日期只剩记录意义。
+func wandBoardIsOverdue(_ dueDate: String, status: String, today: String = wandBoardTodayIso()) -> Bool {
+    status != "done" && status != "archived" && dueDate < today
+}
+
+/// 本机今天的 ISO 日期（与 Web 的 isoDate(new Date()) 同为浏览器/设备本地时区）。
+func wandBoardTodayIso(now: Date = Date()) -> String {
+    let parts = Calendar.current.dateComponents([.year, .month, .day], from: now)
+    return String(
+        format: "%04d-%02d-%02d",
+        parts.year ?? 0,
+        parts.month ?? 0,
+        parts.day ?? 0
+    )
+}
+
+private let wandBoardDatePattern = try! NSRegularExpression(pattern: "^\\d{4}-\\d{2}-\\d{2}$")
 
 func wandBoardProcessingLabel(_ task: WandBoardTask) -> String? {
     guard task.status == "doing" else { return nil }
