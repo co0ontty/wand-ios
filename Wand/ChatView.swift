@@ -727,7 +727,8 @@ struct ChatView: View {
     }
 
     private var shouldShowSubagentShelf: Bool {
-        store.isStructured && (store.isResponding || !subagentActivities.isEmpty || !completedClock.isEmpty)
+        // 没有子任务时不摆一条点不开的「子 Agent」栏：运行态提示交给输入栏，这里只承接真实子任务。
+        store.isStructured && !subagentActivities.isEmpty
     }
 
     private var groupedMessageItems: [MessageDisplayItem] {
@@ -2998,12 +2999,9 @@ private struct SubagentActivityShelf: View {
 
     private var summary: String {
         if isResponding {
-            if activities.isEmpty { return "正在协调子任务" }
-            if runningCount > 0 { return "\(runningCount) 个正在运行" }
-            return "\(activities.count) 个子任务已完成"
+            return runningCount > 0 ? "\(runningCount) 个正在运行" : "\(activities.count) 个子任务已完成"
         }
         if !completedClock.isEmpty { return "完成 \(completedClock)" }
-        if activities.isEmpty { return "暂无子任务" }
         return "\(activities.count) 个子任务已完成"
     }
 
@@ -3024,20 +3022,25 @@ private struct SubagentActivityShelf: View {
                         .foregroundColor(Theme.textSecondary)
                 }
                 Spacer(minLength: 0)
-                if isResponding && activities.isEmpty {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(Theme.brand)
-                        .accessibilityLabel("正在协调子任务")
-                }
+                // 头部整行都能开合子任务详情：只让 chip 可点是「点不开」的来源。
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.up")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Theme.textMuted)
+                    .frame(width: 32, height: 32, alignment: .trailing)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { toggleDetail() }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("子 Agent")
+            .accessibilityValue(summary)
+            .accessibilityHint(isExpanded ? "收起子任务详情" : "展开子任务详情")
+            .accessibilityAddTraits(.isButton)
 
-            if !activities.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(activities, id: \.id) { activity in
-                            activityChip(activity)
-                        }
+            // 栏只在有真实子任务时出现（见 shouldShowSubagentShelf），这里不再兜空列表。
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(activities, id: \.id) { activity in
+                        activityChip(activity)
                     }
                 }
             }
@@ -3065,7 +3068,6 @@ private struct SubagentActivityShelf: View {
         .onAppear { reconcileSelection() }
         .onChange(of: activities.map(\.id)) { _, _ in reconcileSelection() }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("子 Agent 活动，\(summary)")
     }
 
     private func activityChip(_ activity: SubagentActivity) -> some View {
@@ -3116,12 +3118,20 @@ private struct SubagentActivityShelf: View {
         }
     }
 
-    private func reconcileSelection() {
-        guard !activities.isEmpty else {
-            selectedActivityID = nil
-            isExpanded = false
+    /// 头部整行开合详情：展开时选中正在运行的（没有就用第一个），和 chip 的选中规则一致。
+    private func toggleDetail() {
+        guard !activities.isEmpty else { return }
+        if isExpanded {
+            setExpanded(false)
             return
         }
+        if selectedActivity == nil {
+            selectedActivityID = activities.first(where: { $0.state == .running })?.id ?? activities.first?.id
+        }
+        setExpanded(true)
+    }
+
+    private func reconcileSelection() {
         guard selectedActivity == nil else { return }
         selectedActivityID = activities.first(where: { $0.state == .running })?.id ?? activities.first?.id
     }
