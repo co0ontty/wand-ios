@@ -176,6 +176,25 @@ final class TaskBoardTests: XCTestCase {
         XCTAssertEqual(wandBoardToggledStatus("done"), "todo")
     }
 
+    /// 划开动作条必须比右下角悬浮的「新建任务」（56pt）宽，否则被悬浮按钮盖住的
+    /// 那一段点下去会变成新建任务。
+    func testSwipeActionWidthStaysWiderThanFloatingButton() {
+        XCTAssertGreaterThanOrEqual(wandBoardSwipeActionWidth, 100)
+    }
+
+    /// 松手判定与 Android `boardTaskSwipeShouldReveal` 一致：速度优先，速度过小才看位移过半。
+    func testSwipeSettleDecisionPrefersVelocityThenHalfWidth() {
+        let width: CGFloat = 104
+        // 快速左划：哪怕只拖了一点也划开；快速右划：哪怕已经拖过一半也收起。
+        XCTAssertTrue(wandBoardSwipeShouldReveal(offset: -10, revealWidth: width, velocity: -600))
+        XCTAssertFalse(wandBoardSwipeShouldReveal(offset: -100, revealWidth: width, velocity: 600))
+        // 速度不够时看位移是否过半。
+        XCTAssertTrue(wandBoardSwipeShouldReveal(offset: -52, revealWidth: width, velocity: -100))
+        XCTAssertFalse(wandBoardSwipeShouldReveal(offset: -51, revealWidth: width, velocity: 100))
+        // 没有动作条时永远不划开。
+        XCTAssertFalse(wandBoardSwipeShouldReveal(offset: -100, revealWidth: 0, velocity: -900))
+    }
+
     func testProcessingAndAgentRunningLabels() throws {
         let json = """
         {

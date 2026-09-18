@@ -31,6 +31,8 @@ struct TaskBoardView: View {
     @State private var archiveExpanded = false
     @State private var statusFilter = ""
     @State private var pendingSwipe: (task: WandBoardTask, action: WandBoardSwipeAction)?
+    /// 当前划开的卡片：同一时刻只允许一张，划开期间悬浮「新建任务」让位，动作条始终点得到。
+    @State private var swipedTaskId: String?
 
     var body: some View {
         Group {
@@ -296,21 +298,39 @@ struct TaskBoardView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .contentMargins(.bottom, 88, for: .scrollContent)
-
-            Button {
-                openCreate("todo")
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(width: 56, height: 56)
-                    .background(Circle().fill(Theme.success))
-                    .shadow(color: Theme.success.opacity(0.28), radius: 8, y: 3)
+            // 筛选条件变了就把划开状态收掉，否则卡片被筛走后悬浮按钮会一直被藏着。
+            .onChange(of: [statusFilter, filterWorkspaceId, query]) { _, _ in
+                swipedTaskId = nil
             }
-            .buttonStyle(.plain)
-            .padding(.trailing, 18)
-            .padding(.bottom, 18)
-            .accessibilityLabel("新建任务")
+            // 竖向滚动时也收掉：和系统 swipeActions 一样，否则划开的卡片滚出屏幕后悬浮按钮就回不来了。
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { value in
+                        guard swipedTaskId != nil else { return }
+                        let dx = abs(value.translation.width)
+                        let dy = abs(value.translation.height)
+                        if dy > dx, dy > 8 {
+                            swipedTaskId = nil
+                        }
+                    }
+            )
+
+            if swipedTaskId == nil {
+                Button {
+                    openCreate("todo")
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 56, height: 56)
+                        .background(Circle().fill(Theme.success))
+                        .shadow(color: Theme.success.opacity(0.28), radius: 8, y: 3)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 18)
+                .padding(.bottom, 18)
+                .accessibilityLabel("新建任务")
+            }
         }
         .confirmationDialog(
             pendingSwipe.map { wandBoardSwipeActionTitle($0.action) } ?? "确认",
@@ -464,28 +484,42 @@ struct TaskBoardView: View {
 
     @ViewBuilder
     private func boardRow(_ task: WandBoardTask) -> some View {
-        TaskBoardRow(
-            task: task,
-            showWorkspace: filterWorkspaceId.isEmpty,
-            onOpen: { selected = task },
-            onToggleComplete: {
-                Task { await mutate { _ = try await api.updateBoardTask(id: task.id, body: ["status": wandBoardToggledStatus(task.status)]) } }
+        let revealed = swipedTaskId == task.id
+        // 划开动作条自己画：系统 swipeActions 的按钮宽度被钳死，会被右下角悬浮按钮盖住。
+        TaskBoardSwipeCard(
+            status: task.status,
+            revealed: revealed,
+            onRevealedChange: { open in
+                swipedTaskId = open ? task.id : (swipedTaskId == task.id ? nil : swipedTaskId)
             },
-            onOpenSession: onOpenSession
-        )
+            onAction: { action in
+                pendingSwipe = (task, action)
+            }
+        ) {
+            TaskBoardRow(
+                task: task,
+                showWorkspace: filterWorkspaceId.isEmpty,
+                // 划开状态下点卡片只收起，不打开详情、不切完成状态（与 Android 的遮罩行为一致）。
+                onOpen: {
+                    swipedTaskId = nil
+                    if !revealed { selected = task }
+                },
+                onToggleComplete: {
+                    if revealed {
+                        swipedTaskId = nil
+                    } else {
+                        Task { await mutate { _ = try await api.updateBoardTask(id: task.id, body: ["status": wandBoardToggledStatus(task.status)]) } }
+                    }
+                },
+                onOpenSession: { sessionId in
+                    swipedTaskId = nil
+                    if !revealed { onOpenSession(sessionId) }
+                }
+            )
+        }
         .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            if let action = wandBoardSwipeAction(for: task.status) {
-                Button {
-                    pendingSwipe = (task, action)
-                } label: {
-                    Label(wandBoardSwipeActionLabel(action), systemImage: wandBoardSwipeSystemImage(action))
-                }
-                .tint(action == .archive ? Theme.danger : (action == .complete ? Theme.info : Theme.success))
-            }
-        }
     }
 
     /// 顺序以 GET /api/wand-tasks 返回为准，客户端不再本地排序。
@@ -533,6 +567,8 @@ struct TaskBoardView: View {
             errorMessage = error.localizedDescription
         }
         loading = false
+        // 卡片被筛掉或已经不在列表里（改状态、归档）时，清掉划开状态。
+        if let id = swipedTaskId, !tasks.contains(where: { $0.id == id }) { swipedTaskId = nil }
     }
 
     /**
@@ -589,6 +625,126 @@ private func wandBoardStatusColor(_ status: String) -> Color {
     case "doing": return Theme.success
     case "done": return Theme.info
     default: return Theme.textMuted
+    }
+}
+
+private func wandBoardSwipeActionColor(_ action: WandBoardSwipeAction) -> Color {
+    switch action {
+    case .start: return Theme.success
+    case .complete: return Theme.info
+    case .archive: return Theme.danger
+    }
+}
+
+/// 看板卡的划开动作条，自己画而不是用 `List` 的 `swipeActions`。
+///
+/// 系统 `swipeActions` 把动作按钮钳在约 50pt 宽，而且整行都在列表里：卡片贴到右下角悬浮的
+/// 「新建任务」时，露出的按钮大半被悬浮按钮盖着，点它只会变成新建任务。这里按 Android
+/// `BoardTaskSwipeCard` 的做法 —— 卡片向左平移露出固定宽度的动作按钮，同一时刻只允许一张卡
+/// 划开（`revealed` 由调用方持有），划开期间调用方把悬浮按钮藏起来，动作按钮就始终点得到。
+private struct TaskBoardSwipeCard<Content: View>: View {
+    let status: String
+    let revealed: Bool
+    let onRevealedChange: (Bool) -> Void
+    let onAction: (WandBoardSwipeAction) -> Void
+    @ViewBuilder let content: () -> Content
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 跟手期间的额外位移；松手和 `revealed` 一起写回，交给同一帧动画。
+    @State private var dragTranslation: CGFloat = 0
+    /// 只有横向占优的拖动才跟手，竖直方向的滑动留给列表滚动。
+    @State private var draggingHorizontally = false
+
+    private var action: WandBoardSwipeAction? { wandBoardSwipeAction(for: status) }
+
+    var body: some View {
+        if let action {
+            ZStack(alignment: .trailing) {
+                content()
+                    // 卡片自身半透明，底下垫一层页面底色，否则动作条颜色会透上来。
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Theme.background)
+                    )
+                    .offset(x: offset)
+                // 动作按钮盖在卡片上面、但只露出被推开的宽度：`.offset` 不会带走命中区域，
+                // 用遮罩盖卡片的话动作条永远点不到（点下去只会被遮罩收起）。
+                actionButton(action)
+                    .frame(width: max(0, -offset), alignment: .trailing)
+                    .clipped()
+                    .allowsHitTesting(revealed || draggingHorizontally)
+                    .accessibilityHidden(!revealed)
+            }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: revealed)
+            // 和列表的滚动手势并存：动作条要能拖，列表也要能滚。
+            .simultaneousGesture(dragGesture)
+        } else {
+            content()
+        }
+    }
+
+    private var offset: CGFloat {
+        let base = revealed ? -wandBoardSwipeActionWidth : 0
+        guard draggingHorizontally, dragTranslation != 0 else { return base }
+        return min(0, max(-wandBoardSwipeActionWidth, base + dragTranslation))
+    }
+
+    private var dragGesture: some Gesture {
+        // 12pt 起手：点按照常穿透到卡片里的按钮，不会误判成滑动。
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                let dx = value.translation.width
+                draggingHorizontally = abs(dx) > abs(value.translation.height)
+                dragTranslation = dx
+            }
+            .onEnded { value in
+                let dx = value.translation.width
+                let horizontal = abs(dx) > abs(value.translation.height)
+                let settled = min(
+                    0,
+                    max(-wandBoardSwipeActionWidth, (revealed ? -wandBoardSwipeActionWidth : 0) + (horizontal ? dx : 0))
+                )
+                // SwiftUI 只给惯性预测终点，按固定视界折回速度，喂给与 Android 同一个判定函数。
+                let velocity = horizontal
+                    ? (value.predictedEndTranslation.width - dx) / wandBoardSwipeVelocityHorizon
+                    : 0
+                let open = horizontal
+                    && wandBoardSwipeShouldReveal(
+                        offset: settled,
+                        revealWidth: wandBoardSwipeActionWidth,
+                        velocity: velocity
+                    )
+                dragTranslation = 0
+                draggingHorizontally = false
+                if open != revealed { onRevealedChange(open) }
+            }
+    }
+
+    private func actionButton(_ action: WandBoardSwipeAction) -> some View {
+        Button {
+            // 先收起再弹确认：Android 的 `onAction` 之后同样把 `revealed` 置回 false。
+            onRevealedChange(false)
+            onAction(action)
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: wandBoardSwipeSystemImage(action))
+                    .font(.system(size: 18, weight: .semibold))
+                Text(wandBoardSwipeActionLabel(action))
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundColor(.white)
+            .frame(width: wandBoardSwipeActionWidth)
+            .frame(maxHeight: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(wandBoardSwipeActionColor(action))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(wandBoardSwipeActionLabel(action))
     }
 }
 

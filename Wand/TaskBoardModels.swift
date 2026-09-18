@@ -294,9 +294,33 @@ func wandBoardSessionGroups(
 
 let wandUnnamedTaskName = "未命名任务"
 
+/// 划开看板卡后露出的动作条宽度。
+///
+/// Android 用 76.dp；iOS 再放宽一点，因为按钮上还要放图标 + 文字，而且划开期间
+/// 右下角悬浮的「新建任务」会让位，动作条越宽越好点。
+let wandBoardSwipeActionWidth: CGFloat = 104
+
+/// 松手时按速度判定「划开 / 收起」的最小速度（pt/s，对齐 Android `BOARD_TASK_SWIPE_OPEN_VELOCITY`）。
+let wandBoardSwipeOpenVelocity: CGFloat = 480
+
+/// SwiftUI 的手势只给「惯性预测终点」，按这个时间视界折回速度，
+/// 再交给 `wandBoardSwipeShouldReveal` 判定，保证与 Android 同一套规则。
+let wandBoardSwipeVelocityHorizon: CGFloat = 0.25
+
 enum WandBoardSwipeAction: String, Identifiable {
     case start, complete, archive
     var id: String { rawValue }
+}
+
+/// 松手后是否停在「已划开」状态：速度优先，速度过小才看位移过半。
+///
+/// 动作按钮露在右侧，所以划开方向是从右往左：位移为负、速度为负。
+/// 与 Android `boardTaskSwipeShouldReveal` 同一套规则。
+func wandBoardSwipeShouldReveal(offset: CGFloat, revealWidth: CGFloat, velocity: CGFloat) -> Bool {
+    if revealWidth <= 0 { return false }
+    if velocity <= -wandBoardSwipeOpenVelocity { return true }
+    if velocity >= wandBoardSwipeOpenVelocity { return false }
+    return offset <= -revealWidth / 2
 }
 
 func wandBoardSwipeAction(for status: String) -> WandBoardSwipeAction? {
