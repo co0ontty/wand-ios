@@ -42,6 +42,7 @@
 		B2000000000000000000AC09 /* SessionNotificationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC09 /* SessionNotificationController.swift */; };
 		B2000000000000000000AC13 /* SessionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC03 /* SessionActivityAttributes.swift */; };
 		B2000000000000000000AC05 /* WandWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC05 /* WandWidgetsBundle.swift */; };
+		B2000000000000000000AC20 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC20 /* Assets.xcassets */; };
 		B2000000000000000000AC06 /* WandWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B2000000000000000000F101 /* WandWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B2000000000000000000AC0A /* LocalNetworkPermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC0A /* LocalNetworkPermission.swift */; };
 		C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3000000000000000000BC01 /* WandProtocolTests.swift */; };
@@ -139,6 +140,7 @@
 		B2000000000000000000BC09 /* SessionNotificationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotificationController.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC0A /* LocalNetworkPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNetworkPermission.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC05 /* WandWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandWidgetsBundle.swift; sourceTree = "<group>"; };
+		B2000000000000000000BC20 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B2000000000000000000BC06 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B2000000000000000000F101 /* WandWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WandWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A100000000000000000000D1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -287,6 +289,7 @@
 			isa = PBXGroup;
 			children = (
 				B2000000000000000000BC05 /* WandWidgetsBundle.swift */,
+				B2000000000000000000BC20 /* Assets.xcassets */,
 				B2000000000000000000BC06 /* Info.plist */,
 			);
 			path = WandWidgets;
@@ -418,6 +421,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B2000000000000000000AC20 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -438,6 +442,7 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/scripts/generate-icons.swift",
+				"$(SRCROOT)/scripts/wand-logo.json",
 			);
 			name = "Generate App Icon";
 			outputPaths = (

@@ -191,7 +191,7 @@ struct UnifiedSessionListView: View {
             errorState(error) { Task { _ = await listStore.load() } }
         } else if listStore.entries.isEmpty {
             emptyState(
-                icon: "wand.and.stars",
+                icon: nil,
                 title: "还没有会话",
                 subtitle: "新建一个会话，开始与 AI 协作"
             ) { presentNewSession(cwd: nil) }
@@ -599,15 +599,19 @@ struct UnifiedSessionListView: View {
     }
 
     private func emptyState(
-        icon: String,
+        icon: String?,
         title: String,
         subtitle: String,
         action: @escaping () -> Void
     ) -> some View {
         VStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 34))
-                .foregroundColor(Theme.brand)
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 34))
+                    .foregroundColor(Theme.brand)
+            } else {
+                WandBrandMark(size: 48)
+            }
             Text(title).font(.system(size: 15, weight: .medium)).foregroundColor(Theme.textPrimary)
             Text(subtitle).font(.footnote).foregroundColor(Theme.textSecondary)
             Button("新建会话", action: action).buttonStyle(WandPrimaryButtonStyle())

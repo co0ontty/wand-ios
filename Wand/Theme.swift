@@ -418,23 +418,16 @@ struct WandSecondaryButtonStyle: ButtonStyle {
     }
 }
 
-/// 复用的品牌 logo：克制的品牌色圆角方块 + 魔杖图标。
+/// 与 Android 启动图标同源的像素猫；保留原色，不随按钮 tint 改色。
 struct WandBrandMark: View {
     var size: CGFloat = 64
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .fill(Theme.brand)
-                .frame(width: size, height: size)
-                .overlay(
-                    RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 0.7)
-                )
-                .shadow(color: Theme.brand.opacity(0.10), radius: 1, y: 1)
-            Image(systemName: "wand.and.stars")
-                .font(.system(size: size * 0.46, weight: .medium))
-                .foregroundColor(.white)
-        }
+        Image("WandLogo")
+            .renderingMode(.original)
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 }

@@ -90,9 +90,18 @@ private struct CompactIdentity: View {
     let state: SessionActivityAttributes.ContentState
 
     var body: some View {
-        Image(systemName: state.primarySession?.providerSymbol ?? "wand.and.stars")
-            .foregroundStyle(ActivityTint.brand)
-            .accessibilityLabel(state.primarySession?.providerText ?? "Wand")
+        if let session = state.primarySession {
+            Image(systemName: session.providerSymbol)
+                .foregroundStyle(ActivityTint.brand)
+                .accessibilityLabel(session.providerText)
+        } else {
+            Image("WandLogo")
+                .renderingMode(.original)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 20, height: 20)
+                .accessibilityLabel("Wand")
+        }
     }
 }
 

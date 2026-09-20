@@ -4508,11 +4508,7 @@ private struct AssistantReplyDisclosure: View {
     var body: some View {
         Button(action: onToggle) {
             HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.brand)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(Theme.brand.opacity(0.12)))
+                WandBrandMark(size: 28)
                 Text("Wand")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
