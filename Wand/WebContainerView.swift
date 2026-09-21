@@ -29,6 +29,8 @@ final class WebViewModel: ObservableObject {
     @Published var terminalScaleLabel = "100%"
     /// WebBridge 收到 backToNative 消息时调用，由容器视图注入（关闭 fullScreenCover）。
     var requestClose: (() -> Void)?
+    /// 网页内的真实点击已同步聚焦 xterm，原生只收起草稿，不再抢 first responder。
+    var requestTerminalInput: (() -> Void)?
     /// WebBridge attach 时回填，供"重试"调用 reload()。
     weak var webView: WKWebView?
     private var reconnectAttempt = 0
@@ -84,6 +86,7 @@ final class WebViewModel: ObservableObject {
         let script = """
         (function() {
           try {
+            document.documentElement.classList.remove('is-wand-terminal-passthrough');
             var nodes = document.querySelectorAll('.xterm-helper-textarea');
             for (var i = 0; i < nodes.length; i++) {
               var el = nodes[i];
@@ -101,7 +104,7 @@ final class WebViewModel: ObservableObject {
         let script = """
         (function() {
           try {
-            if (!document.documentElement.classList.contains('is-wand-terminal-passthrough')) return;
+            document.documentElement.classList.add('is-wand-terminal-passthrough');
             var nodes = document.querySelectorAll('.xterm-helper-textarea');
             for (var i = 0; i < nodes.length; i++) {
               nodes[i].readOnly = false;
@@ -665,7 +668,7 @@ struct WebViewRepresentable: UIViewRepresentable {
         return components.url ?? serverURL
     }
 
-    private static let terminalNativeUserScriptSource = """
+    static let terminalNativeUserScriptSource = """
     (function() {
       try {
         var root = document.documentElement;
@@ -748,6 +751,30 @@ struct WebViewRepresentable: UIViewRepresentable {
             }
           `;
           document.head.appendChild(style);
+        }
+
+        // WKWebView 必须在真实用户手势的同步调用栈里 focus；先异步通知原生再
+        // evaluateJavaScript 会丢失用户激活，无法可靠唤起软键盘。
+        if (!window.__wandNativeTerminalTapInstalled) {
+          window.__wandNativeTerminalTapInstalled = true;
+          document.addEventListener('click', function(event) {
+            var target = event.target;
+            if (!target || !target.closest || !target.closest('.terminal-scroll-wrap')) return;
+            if (target.closest('a, button, .wand-joystick-root, .terminal-scrollbar')) return;
+            var selection = window.getSelection();
+            if (selection && !selection.isCollapsed) return;
+            var term = window.__wandTerminal;
+            if (term && term.hasSelection && term.hasSelection()) return;
+            var textarea = target.closest('.terminal-scroll-wrap').querySelector('.xterm-helper-textarea');
+            if (!textarea) return;
+            root.classList.add('is-wand-terminal-passthrough');
+            textarea.readOnly = false;
+            textarea.removeAttribute('aria-readonly');
+            textarea.focus({ preventScroll: true });
+            try {
+              window.webkit.messageHandlers.wandNative.postMessage({ type: 'terminalInput' });
+            } catch (e) {}
+          }, true);
         }
 
         if (!window.__wandNativeJoystickFocusGuard) {

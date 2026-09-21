@@ -93,6 +93,9 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
             DispatchQueue.main.async { [weak self] in
                 self?.model.requestClose?()
             }
+        case "terminalInput":
+            guard msg.frameInfo.isMainFrame, msg.webView === webView else { return }
+            model.requestTerminalInput?()
         case "requestNotificationPermission":
             SessionNotificationController.shared.requestAuthorization()
         case "sendNotification":

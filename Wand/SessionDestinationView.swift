@@ -104,7 +104,10 @@ private struct PtySessionView: View {
                             .allowsHitTesting(terminalWebModel.phase == .ready)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    bottomBar(safeBottom: root.safeAreaInsets.bottom)
+                    bottomBar(
+                        safeBottom: root.safeAreaInsets.bottom,
+                        maximumInputHeight: min(160, max(60, (root.size.height - keyboard.lift) * 0.35))
+                    )
                 }
             }
         }
@@ -151,6 +154,10 @@ private struct PtySessionView: View {
             attachments.setPtyPasteHandler { files in
                 try await store.pasteUploadedPathsIntoPty(files)
             }
+            terminalWebModel.requestTerminalInput = {
+                inputFocused = false
+                inputDrawerOpen = false
+            }
             store.start()
             refreshGitStatus()
             allowWebView = false
@@ -168,7 +175,16 @@ private struct PtySessionView: View {
         .onChange(of: inputDrawerOpen) {
             terminalWebModel.refitEmbeddedTerminalViewport()
         }
+        .onChange(of: composerInputHeight) {
+            terminalWebModel.refitEmbeddedTerminalViewport()
+        }
+        .onChange(of: terminalWebModel.phase) { _, phase in
+            if phase == .ready, inputFocused {
+                terminalWebModel.suppressEmbeddedTerminalIme()
+            }
+        }
         .onDisappear {
+            terminalWebModel.requestTerminalInput = nil
             voiceHoldWork?.cancel()
             voiceHoldWork = nil
             speech.stop(cancelled: true)
@@ -200,7 +216,7 @@ private struct PtySessionView: View {
             ) {
                 // 抽屉折叠时文本框不在视图树里，必须先展开才能聚焦。
                 if !inputDrawerOpen { inputDrawerOpen = true }
-                inputFocused = true
+                focusNativeInput()
             },
             WandKeyboardShortcutAction(
                 id: "send",
@@ -337,7 +353,7 @@ private struct PtySessionView: View {
         .accessibilityLabel(accessibilityLabel)
     }
 
-    private func bottomBar(safeBottom: CGFloat) -> some View {
+    private func bottomBar(safeBottom: CGFloat, maximumInputHeight: CGFloat) -> some View {
         VStack(spacing: 0) {
             if voicePressed {
                 voiceBubble
@@ -345,7 +361,7 @@ private struct PtySessionView: View {
                     .padding(.bottom, 6)
             }
             if inputDrawerOpen {
-                inputBar
+                inputBar(maximumHeight: maximumInputHeight)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             terminalShortcutBar
@@ -386,7 +402,7 @@ private struct PtySessionView: View {
     private var inputDrawerHandle: some View {
         let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
         return HStack(spacing: 2) {
-            Image(systemName: inputDrawerOpen ? "keyboard.fill" : "keyboard")
+            Image(systemName: inputDrawerOpen ? "square.and.pencil" : "pencil")
                 .font(.system(size: 13, weight: .semibold))
             Image(systemName: inputDrawerOpen ? "chevron.down" : "chevron.up")
                 .font(.system(size: 11, weight: .bold))
@@ -404,7 +420,8 @@ private struct PtySessionView: View {
             shape.stroke(Theme.border.opacity(0.85), lineWidth: 0.6)
         )
         .contentShape(shape)
-        .accessibilityLabel(inputDrawerOpen ? "收起输入框" : "展开输入框")
+        .accessibilityLabel(inputDrawerOpen ? "收起草稿输入框" : "展开草稿输入框")
+        .accessibilityHint("点击终端可直接输入；草稿支持多行编辑后发送")
         .onTapGesture { toggleInputDrawer() }
         .gesture(
             DragGesture(minimumDistance: 12)
@@ -441,8 +458,7 @@ private struct PtySessionView: View {
             // 先压住网页侧 xterm 隐藏 textarea（readonly + blur），再展开抽屉并聚焦。
             // 顺序很重要：inputDrawerOpen 与 inputFocused 同帧置位，避免 inputExpanded
             // 用旧值算错一帧高度（抽屉刚展开却按折叠态布局，输入框看起来异常大）。
-            terminalWebModel.suppressEmbeddedTerminalIme()
-            inputFocused = true
+            focusNativeInput()
         } else {
             inputFocused = false
             terminalWebModel.restoreEmbeddedTerminalInput()
@@ -479,15 +495,13 @@ private struct PtySessionView: View {
         )
     }
 
-    private var inputBar: some View {
+    private func inputBar(maximumHeight: CGFloat) -> some View {
         NativeComposerShell(
             expanded: inputExpanded,
             focused: inputFocused,
-            onFocusInput: {
-                inputFocused = true
-            },
+            onFocusInput: focusNativeInput,
             collapsedLeading: { composerActionsMenu },
-            inputContent: { ptyTextField },
+            inputContent: { ptyTextField(maximumHeight: maximumHeight) },
             collapsedTrailing: {
                 trailingButtons
             },
@@ -544,7 +558,7 @@ private struct PtySessionView: View {
         .accessibilityLabel("更多操作")
     }
 
-    private var ptyTextField: some View {
+    private func ptyTextField(maximumHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             if !attachments.attachments.isEmpty {
                 PendingAttachmentsPreview(
@@ -558,6 +572,8 @@ private struct PtySessionView: View {
                 placeholder: ptyComposerPlaceholder,
                 isFocused: inputFocused,
                 disableAutocorrect: true,
+                maximumHeight: maximumHeight,
+                submitOnReturn: false,
                 onPasteImages: { items in
                     attachments.handlePastedImageData(items)
                 },
@@ -575,13 +591,11 @@ private struct PtySessionView: View {
                 }
             )
             .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
+            // 高度只约束 UITextView 本体，padding 不能吃掉已经测好的可视行。
+            .frame(height: inputExpanded ? max(32, composerInputHeight) : 34)
             .padding(.leading, inputExpanded ? 6 : 2)
             .padding(.trailing, inputExpanded ? 4 : 0)
             .padding(.vertical, inputExpanded ? 4 : 2)
-            // 折叠态固定 34pt，展开态才随 composerInputHeight 增高；用 min/max 双保险
-            // 避免折叠时因残留高度值撑大输入框。
-            .frame(minHeight: 34)
-            .frame(height: inputExpanded ? max(32, composerInputHeight) : 34)
             .contentShape(Rectangle())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -605,7 +619,7 @@ private struct PtySessionView: View {
         HStack(spacing: 4) {
             Image(systemName: "terminal")
                 .font(.system(size: 11, weight: .semibold))
-            Text("终端")
+            Text("草稿 · 回车换行")
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
         }
@@ -676,7 +690,7 @@ private struct PtySessionView: View {
         if voicePressed {
             return voiceCanceling ? "松开取消" : "松开结束 · 上滑取消"
         }
-        return "输入终端命令"
+        return "编辑草稿，点击 ↑ 发送"
     }
 
     private var voiceBubble: some View {

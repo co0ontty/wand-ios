@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import XCTest
+import WebKit
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
@@ -26,6 +27,112 @@ final class WandProtocolTests: XCTestCase {
                 }
             }
         }
+    }
+
+    @MainActor
+    func testComposerGrowsScrollsAndRemeasuresAfterWidthChanges() async throws {
+        let host = UIHostingController(rootView: ComposerSizingTestView())
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 700)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.frame = window.bounds
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        defer { window.isHidden = true }
+        try await Task.sleep(for: .milliseconds(100))
+        let textView = try XCTUnwrap(findComposer(in: host.view))
+        XCTAssertEqual(textView.selectedRange.location, (textView.text as NSString).length,
+                       "重建输入框后光标应在草稿末尾，不能把后续输入插到首字符之前")
+        XCTAssertEqual(textView.returnKeyType, .default)
+        XCTAssertEqual(textView.delegate?.textView?(textView, shouldChangeTextIn: NSRange(location: 0, length: 0), replacementText: "\n"), true)
+
+        for lines in [2, 4, 12] {
+            textView.text = (1...lines).map { "第 \($0) 行 terminal input" }.joined(separator: "\n")
+            textView.delegate?.textViewDidChange?(textView)
+            try await Task.sleep(for: .milliseconds(100))
+            host.view.layoutIfNeeded()
+            let expected = min(160, ceil(textView.sizeThatFits(
+                CGSize(width: textView.bounds.width, height: .greatestFiniteMagnitude)
+            ).height))
+            XCTAssertEqual(textView.bounds.height, expected, accuracy: 1)
+            XCTAssertEqual(textView.isScrollEnabled, lines == 12)
+        }
+        textView.text = String(repeating: "终端多行输入 test ", count: 8)
+        textView.delegate?.textViewDidChange?(textView)
+        try await Task.sleep(for: .milliseconds(100))
+        let narrowHeight = textView.bounds.height
+        window.frame.size.width = 820
+        host.view.frame = window.bounds
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertLessThan(textView.bounds.height, narrowHeight, "旋转/分屏后必须按新宽度重新测量")
+
+        textView.text = "短输入"
+        textView.delegate?.textViewDidChange?(textView)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertLessThan(textView.bounds.height, 40)
+        XCTAssertFalse(textView.isScrollEnabled)
+    }
+
+    @MainActor
+    func testTerminalTapRestoresInputAfterNativeComposerSuppressesIme() async throws {
+        let model = WebViewModel()
+        let bridge = WebBridge(model: model)
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(bridge, name: "wandNative")
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 400), configuration: config)
+        bridge.attach(webView: webView, serverURL: URL(string: "http://localhost")!)
+        defer {
+            bridge.detach(webView: webView)
+            config.userContentController.removeScriptMessageHandler(forName: "wandNative")
+        }
+        webView.loadHTMLString("""
+        <html><body><div class="terminal-scroll-wrap"><div class="xterm-screen">terminal</div>
+        <textarea class="xterm-helper-textarea"></textarea><a href="#">link</a></div></body></html>
+        """, baseURL: nil)
+        for _ in 0..<50 {
+            if (try? await webView.evaluateJavaScript("!!document.querySelector('textarea')")) as? Bool == true { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try await webView.evaluateJavaScript(WebViewRepresentable.terminalNativeUserScriptSource)
+        let stateScript = """
+        (() => ({ locked: document.querySelector('textarea').readOnly,
+          passthrough: document.documentElement.classList.contains('is-wand-terminal-passthrough'),
+          focused: document.activeElement === document.querySelector('textarea') }))()
+        """
+        // 不只是一次 readonly 写入：移除 passthrough 才能让网页后续状态同步也维持锁定。
+        model.suppressEmbeddedTerminalIme()
+        var state = try await webView.evaluateJavaScript(stateScript) as? [String: Bool] ?? [:]
+        XCTAssertEqual(state["locked"], true)
+        XCTAssertEqual(state["passthrough"], false)
+        let tapped = expectation(description: "terminal input bridge")
+        model.requestTerminalInput = { tapped.fulfill() }
+        try await webView.evaluateJavaScript("document.querySelector('.xterm-screen').click()")
+        await fulfillment(of: [tapped], timeout: 2)
+        state = try await webView.evaluateJavaScript(stateScript) as? [String: Bool] ?? [:]
+        XCTAssertEqual(state["locked"], false)
+        XCTAssertEqual(state["passthrough"], true)
+        XCTAssertEqual(state["focused"], true)
+
+        model.requestTerminalInput = { XCTFail("链接或已选中的文字不能抢输入焦点") }
+        model.suppressEmbeddedTerminalIme()
+        try await webView.evaluateJavaScript("document.querySelector('a').click()")
+        try await webView.evaluateJavaScript("window.__wandTerminal = { hasSelection: () => true }; document.querySelector('.xterm-screen').click()")
+        state = try await webView.evaluateJavaScript(stateScript) as? [String: Bool] ?? [:]
+        XCTAssertEqual(state["locked"], true)
+        model.restoreEmbeddedTerminalInput()
+        state = try await webView.evaluateJavaScript(stateScript) as? [String: Bool] ?? [:]
+        XCTAssertEqual(state["locked"], false)
+        XCTAssertEqual(state["focused"], false, "关闭草稿不应主动弹出终端键盘")
+    }
+
+    @MainActor
+    private func findComposer(in view: UIView) -> ComposerUITextView? {
+        if let composer = view as? ComposerUITextView { return composer }
+        return view.subviews.lazy.compactMap { self.findComposer(in: $0) }.first
     }
 
     func testFailureAndDisconnectUseLongNotice() {
@@ -1138,5 +1245,28 @@ final class WandProtocolTests: XCTestCase {
 
     private func decode<T: Decodable>(_ type: T.Type, from json: String) throws -> T {
         try JSONDecoder().decode(type, from: XCTUnwrap(json.data(using: .utf8)))
+    }
+}
+
+private struct ComposerSizingTestView: View {
+    @State private var text = "已有草稿"
+    @State private var height: CGFloat = 32
+
+    var body: some View {
+        VStack {
+            Color.black
+            IMEAwareComposerTextView(
+                text: $text,
+                placeholder: "输入终端命令",
+                isFocused: false,
+                maximumHeight: 160,
+                submitOnReturn: false,
+                onFocusChange: { _ in },
+                onCompositionChange: { _ in },
+                onSubmit: {},
+                onHeightChange: { height = $0 }
+            )
+            .frame(height: height)
+        }
     }
 }

@@ -304,6 +304,8 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
     let placeholder: String
     let isFocused: Bool
     var disableAutocorrect: Bool = false
+    var maximumHeight: CGFloat = 112
+    var submitOnReturn: Bool = true
     var onPasteImages: (([(data: Data, name: String?, mimeType: String?)]) -> Void)? = nil
     let onFocusChange: (Bool) -> Void
     let onCompositionChange: (Bool) -> Void
@@ -318,6 +320,9 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         let textView = ComposerUITextView()
         textView.delegate = context.coordinator
         textView.text = text
+        // 折叠/展开控制行可能重建 representable；UIKit 默认把新视图的光标放到
+        // 开头，会把正在连续输入的后续文字插到第一个字符之前。
+        textView.selectedRange = NSRange(location: (text as NSString).length, length: 0)
         textView.placeholder = placeholder
         textView.onMarkedTextChange = { active in
             context.coordinator.publishComposition(active)
@@ -332,8 +337,11 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
         textView.textContainer.lineFragmentPadding = 0
         textView.isScrollEnabled = false
+        textView.onLayoutSizeChange = { [weak coordinator = context.coordinator] textView in
+            coordinator?.reportHeight(for: textView)
+        }
         textView.keyboardDismissMode = .none
-        textView.returnKeyType = .send
+        textView.returnKeyType = submitOnReturn ? .send : .default
         textView.enablesReturnKeyAutomatically = false
         textView.smartQuotesType = .no
         textView.smartDashesType = .no
@@ -380,6 +388,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
             context.coordinator.reportHeight(for: textView)
         }
 
+        context.coordinator.reportHeight(for: textView)
         let coordinator = context.coordinator
         if composerShouldRequestFocus(isFocused: isFocused, isFirstResponder: textView.isFirstResponder) {
             // 不能只调一次 becomeFirstResponder：抽屉转场动画中段、或从
@@ -400,6 +409,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
     static func dismantleUIView(_ textView: ComposerUITextView, coordinator: Coordinator) {
         coordinator.cancelFocusRetry()
         textView.onMarkedTextChange = nil
+        textView.onLayoutSizeChange = nil
         textView.delegate = nil
     }
 
@@ -480,7 +490,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
             if textView.markedTextRange != nil {
                 return true
             }
-            if text == "\n" {
+            if text == "\n", parent.submitOnReturn {
                 guard composerShouldSubmitReturn(isComposing: false) else { return true }
                 parent.onSubmit()
                 return false
@@ -489,12 +499,14 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         }
 
         func reportHeight(for textView: UITextView) {
-            let width = textView.bounds.width > 0 ? textView.bounds.width : 280
+            // 首次挂载、抽屉展开与旋转都会改变真实宽度；不能用猜测的 280pt
+            // 测量一次后沿用，否则换行数和可滚动状态会停留在旧布局。
+            guard textView.bounds.width > 0 else { return }
             let fitted = textView.sizeThatFits(
-                CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+                CGSize(width: textView.bounds.width, height: CGFloat.greatestFiniteMagnitude)
             )
-            let height = min(112, max(24, ceil(fitted.height)))
-            textView.isScrollEnabled = fitted.height > 112
+            let height = min(parent.maximumHeight, max(24, ceil(fitted.height)))
+            textView.isScrollEnabled = fitted.height > parent.maximumHeight
             guard abs(height - lastReportedHeight) > 0.5 else { return }
             lastReportedHeight = height
             DispatchQueue.main.async { [weak self] in
@@ -505,6 +517,19 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
 }
 
 final class ComposerUITextView: UITextView {
+    var onLayoutSizeChange: ((ComposerUITextView) -> Void)?
+    private var lastLayoutSize: CGSize = .zero
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.size != lastLayoutSize else { return }
+        lastLayoutSize = bounds.size
+        onLayoutSizeChange?(self)
+        if isFirstResponder, markedTextRange == nil {
+            scrollRangeToVisible(selectedRange)
+        }
+    }
+
     var onMarkedTextChange: ((Bool) -> Void)?
     var onPasteImages: (([(data: Data, name: String?, mimeType: String?)]) -> Void)?
     private let placeholderLabel = UILabel()
