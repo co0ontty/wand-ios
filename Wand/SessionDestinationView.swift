@@ -544,14 +544,6 @@ private struct PtySessionView: View {
         .accessibilityLabel("更多操作")
     }
 
-    private var terminalGlyph: some View {
-        Image(systemName: "terminal")
-            .font(.system(size: 16, weight: .medium))
-            .foregroundColor(Theme.textSecondary)
-            .frame(width: 34, height: 34)
-            .contentShape(Rectangle())
-    }
-
     private var ptyTextField: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !attachments.attachments.isEmpty {

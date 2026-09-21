@@ -750,30 +750,6 @@ struct WebViewRepresentable: UIViewRepresentable {
           document.head.appendChild(style);
         }
 
-        if (!root.classList.contains('is-wand-terminal-passthrough') && !window.__wandNativeInputImeGuard) {
-          window.__wandNativeInputImeGuard = true;
-          function lockXtermIme() {
-            try {
-              var nodes = document.querySelectorAll('.xterm-helper-textarea');
-              for (var i = 0; i < nodes.length; i++) {
-                var el = nodes[i];
-                el.readOnly = true;
-                if (document.activeElement === el && typeof el.blur === 'function') el.blur();
-              }
-            } catch (e) {}
-          }
-          document.addEventListener('focusin', function(event) {
-            try {
-              var target = event.target;
-              if (target && target.classList && target.classList.contains('xterm-helper-textarea')) {
-                target.readOnly = true;
-                if (typeof target.blur === 'function') target.blur();
-              }
-            } catch (e) {}
-          }, true);
-          [0, 80, 220, 520].forEach(function(delay) { setTimeout(lockXtermIme, delay); });
-        }
-
         if (!window.__wandNativeJoystickFocusGuard) {
           window.__wandNativeJoystickFocusGuard = true;
           function blurJoystickFocus() {
