@@ -130,6 +130,72 @@ final class WandProtocolTests: XCTestCase {
     }
 
     @MainActor
+    func testComposerCommitsMarkedTextBeforeParentRefreshAndDeletesImmediately() async throws {
+        let probe = ComposerEditingProbe()
+        probe.text = "前后"
+        let host = UIHostingController(rootView: ComposerEditingTestView(probe: probe))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.layoutIfNeeded()
+        defer { window.isHidden = true }
+        try await Task.sleep(for: .milliseconds(100))
+        let textView = try XCTUnwrap(findComposer(in: host.view))
+        textView.becomeFirstResponder()
+        try await Task.sleep(for: .milliseconds(100))
+        textView.selectedRange = NSRange(location: 1, length: 0)
+        textView.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0))
+        XCTAssertNotNil(textView.markedTextRange)
+        XCTAssertEqual(probe.text, "前后", "组字期间不能把拼音写入草稿")
+        textView.setMarkedText("你", selectedRange: NSRange(location: 1, length: 0))
+        textView.unmarkText()
+        XCTAssertEqual(probe.text, "前你后", "确认候选必须同步发布文字，而非等下一次键盘事件")
+        probe.revision += 1
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(findComposer(in: host.view) === textView)
+        XCTAssertEqual(textView.text, "前你后")
+        XCTAssertEqual(textView.selectedRange, NSRange(location: 2, length: 0))
+        textView.deleteBackward()
+        XCTAssertEqual(textView.text, "前后")
+        XCTAssertEqual(probe.text, "前后")
+        probe.revision += 1
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(textView.text, "前后", "删除的字不能被旧 Binding 回灌")
+        XCTAssertEqual(textView.selectedRange, NSRange(location: 1, length: 0))
+    }
+
+    @MainActor
+    func testComposerKeepsMidTextCaretDuringRapidEditsAndLayoutRefreshes() async throws {
+        let probe = ComposerEditingProbe()
+        probe.text = String(repeating: "abcdef ", count: 80)
+        let host = UIHostingController(rootView: ComposerEditingTestView(probe: probe))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.layoutIfNeeded()
+        defer { window.isHidden = true }
+        try await Task.sleep(for: .milliseconds(100))
+        let textView = try XCTUnwrap(findComposer(in: host.view))
+        textView.becomeFirstResponder()
+        try await Task.sleep(for: .milliseconds(100))
+        textView.selectedRange = NSRange(location: 8, length: 0)
+        let original = probe.text
+        for _ in 0..<20 {
+            textView.insertText("中")
+            XCTAssertEqual(textView.selectedRange.location, 9)
+            textView.deleteBackward()
+            XCTAssertEqual(probe.text, original)
+            probe.revision += 1
+            try await Task.sleep(for: .milliseconds(10))
+            XCTAssertTrue(findComposer(in: host.view) === textView)
+            XCTAssertEqual(textView.selectedRange.location, 8)
+            XCTAssertEqual(textView.text, original)
+        }
+    }
+
+    @MainActor
     private func findComposer(in view: UIView) -> ComposerUITextView? {
         if let composer = view as? ComposerUITextView { return composer }
         return view.subviews.lazy.compactMap { self.findComposer(in: $0) }.first
@@ -1245,6 +1311,47 @@ final class WandProtocolTests: XCTestCase {
 
     private func decode<T: Decodable>(_ type: T.Type, from json: String) throws -> T {
         try JSONDecoder().decode(type, from: XCTUnwrap(json.data(using: .utf8)))
+    }
+}
+
+private final class ComposerEditingProbe: ObservableObject {
+    @Published var text = ""
+    @Published var focused = false
+    @Published var composing = false
+    @Published var height: CGFloat = 32
+    @Published var revision = 0
+}
+
+private struct ComposerEditingTestView: View {
+    @ObservedObject var probe: ComposerEditingProbe
+
+    var body: some View {
+        VStack {
+            Text("父视图刷新 \(probe.revision)")
+            Color.black
+            NativeComposerShell(
+                expanded: probe.focused || probe.height > 36,
+                focused: probe.focused,
+                onFocusInput: { probe.focused = true },
+                collapsedLeading: { Color.clear.frame(width: 44, height: 44) },
+                inputContent: {
+                    IMEAwareComposerTextView(
+                        text: $probe.text,
+                        placeholder: "消息输入",
+                        isFocused: probe.focused,
+                        maximumHeight: 160,
+                        submitOnReturn: false,
+                        onFocusChange: { probe.focused = $0 },
+                        onCompositionChange: { probe.composing = $0 },
+                        onSubmit: {},
+                        onHeightChange: { probe.height = $0 }
+                    )
+                    .frame(height: max(32, probe.height))
+                },
+                collapsedTrailing: { Color.clear.frame(width: 44, height: 44) },
+                expandedControls: { Color.clear.frame(height: 44) }
+            )
+        }
     }
 }
 
