@@ -1109,7 +1109,7 @@ final class WandProtocolTests: XCTestCase {
             """#
         )
 
-        guard case .toolResult(let toolUseID, let text, let isError, let truncated, _) = block else {
+        guard case .toolResult(let toolUseID, let text, let isError, let truncated, _, _) = block else {
             return XCTFail("Expected tool_result block")
         }
         XCTAssertEqual(toolUseID, "tool-42")
@@ -1177,10 +1177,10 @@ final class WandProtocolTests: XCTestCase {
             ConversationTurn(role: "assistant", content: [
                 .toolUse(id: "task-1", name: "Task", description: nil, input: [:], subagent: meta),
                 .text(text: "Searching", subagent: meta),
-                .toolResult(toolUseId: "nested-read", text: "result", isError: true, truncated: false, subagent: meta),
+                .toolResult(toolUseId: "nested-read", text: "result", isError: true, truncated: false, images: [], subagent: meta),
             ]),
             ConversationTurn(role: "assistant", content: [
-                .toolResult(toolUseId: "task-1", text: "done", isError: false, truncated: false, subagent: meta),
+                .toolResult(toolUseId: "task-1", text: "done", isError: false, truncated: false, images: [], subagent: meta),
             ]),
         ]
 
@@ -1203,7 +1203,7 @@ final class WandProtocolTests: XCTestCase {
             ConversationTurn(role: "assistant", content: [
                 .thinking(thinking: "checking", subagent: runningMeta),
                 .toolUse(id: "failed", name: "Task", description: nil, input: [:], subagent: failedMeta),
-                .toolResult(toolUseId: "failed", text: "failed", isError: true, truncated: false, subagent: failedMeta),
+                .toolResult(toolUseId: "failed", text: "failed", isError: true, truncated: false, images: [], subagent: failedMeta),
             ]),
         ]
 

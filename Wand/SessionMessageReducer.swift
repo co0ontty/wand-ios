@@ -25,7 +25,7 @@ private func contentBlockVolume(_ block: ContentBlock) -> Int {
     case .toolUse(_, _, let description, let input, _):
         return (description?.count ?? 0)
             + input.reduce(0) { $0 + $1.key.count + jsonValueVolume($1.value) }
-    case .toolResult(_, let text, _, _, _): return text.count
+    case .toolResult(_, let text, _, _, _, _): return text.count
     case .unknown(_, let payload): return payload.count
     }
 }

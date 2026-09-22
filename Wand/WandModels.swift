@@ -277,6 +277,9 @@ private func structuredContentText(_ value: JSONValue) -> String {
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n")
     case .object(let object):
+        // 图片 part 不抽文本也不兑底（否则会把整段 base64 倒进正文）。
+        if case .string("image")? = object["type"] { return "" }
+        if case .string("image_url")? = object["type"] { return "" }
         for key in ["text", "output_text", "input_text", "message", "summary"] {
             guard let nested = object[key] else { continue }
             let extracted = structuredContentText(nested)
@@ -284,6 +287,46 @@ private func structuredContentText(_ value: JSONValue) -> String {
         }
         return value.fullPayloadText()
     }
+}
+
+/// 抽 tool_result 内联图片：服务端已归一化为 `{type:"image", source:{type:"url"|"base64", …}}`，
+/// 统一成可直接加载的源（站内相对 URL 或 data URI）。
+private func structuredToolImages(_ value: JSONValue) -> [String] {
+    guard case .array(let parts) = value else { return [] }
+    var images: [String] = []
+    for part in parts {
+        guard case .object(let object) = part else { continue }
+        switch object["type"] {
+        case .string("image"):
+            if case .object(let source)? = object["source"] {
+                if case .string("url")? = source["type"], case .string(let url)? = source["url"], !url.isEmpty {
+                    images.append(url)
+                } else if case .string("base64")? = source["type"], case .string(let data)? = source["data"], !data.isEmpty {
+                    let mime = (source["media_type"].flatMap { if case .string(let m) = $0 { return m } else { return nil } }) ?? "image/png"
+                    images.append("data:\(mime);base64,\(data)")
+                }
+            } else if case .string(let url)? = object["url"], !url.isEmpty {
+                images.append(url)
+            } else if case .string(let data)? = object["data"], !data.isEmpty {
+                var mime = "image/png"
+                if case .string(let m)? = object["mimeType"] { mime = m }
+                else if case .string(let m)? = object["mime_type"] { mime = m }
+                images.append("data:\(mime);base64,\(data)")
+            }
+        case .string("image_url"):
+            switch object["image_url"] {
+            case .string(let url)? where !url.isEmpty:
+                images.append(url)
+            case .object(let inner)? where !inner.isEmpty:
+                if case .string(let url)? = inner["url"], !url.isEmpty { images.append(url) }
+            default:
+                break
+            }
+        default:
+            break
+        }
+    }
+    return images
 }
 
 /// 读取 tool_use input 里的数组字段，容忍服务端把数组拍成 JSON 字符串的情况。
@@ -407,7 +450,7 @@ struct TodoItem {
         var resultById: [String: String] = [:]
         for i in startIdx..<messages.count {
             for block in messages[i].content {
-                if case .toolResult(let toolUseId, let text, _, _, _) = block {
+                if case .toolResult(let toolUseId, let text, _, _, _, _) = block {
                     resultById[toolUseId] = text
                 }
             }
@@ -572,7 +615,7 @@ enum ContentBlock: Decodable {
     case text(text: String, subagent: SubagentMeta?)
     case thinking(thinking: String, subagent: SubagentMeta?)
     case toolUse(id: String, name: String, description: String?, input: [String: JSONValue], subagent: SubagentMeta?)
-    case toolResult(toolUseId: String, text: String, isError: Bool, truncated: Bool, subagent: SubagentMeta?)
+    case toolResult(toolUseId: String, text: String, isError: Bool, truncated: Bool, images: [String], subagent: SubagentMeta?)
     /// 协议升级兜底：保留类型和有界、脱敏的原始载荷，UI 可明确告知用户。
     case unknown(type: String, payload: String)
 
@@ -619,6 +662,7 @@ enum ContentBlock: Decodable {
                 text: structuredContentText(content),
                 isError: (try? c.decode(Bool.self, forKey: .isError)) ?? false,
                 truncated: (try? c.decode(Bool.self, forKey: .truncated)) ?? false,
+                images: structuredToolImages(content),
                 subagent: subagent
             )
         default:
@@ -682,7 +726,7 @@ extension ContentBlock {
         case .text(_, let subagent),
              .thinking(_, let subagent),
              .toolUse(_, _, _, _, let subagent),
-             .toolResult(_, _, _, _, let subagent):
+             .toolResult(_, _, _, _, _, let subagent):
             return subagent
         case .unknown:
             return nil
@@ -740,7 +784,7 @@ func collectSubagentActivities(
             activity.meta = meta
             activity.blocks.append(block)
             activity.lastSeenTurnIndex = turnIndex
-            if case .toolResult(let toolUseID, _, let isError, _, _) = block, toolUseID == taskID {
+            if case .toolResult(let toolUseID, _, let isError, _, _, _) = block, toolUseID == taskID {
                 activity.completed = true
                 activity.failed = isError
             }
@@ -944,6 +988,7 @@ struct ToolContentResponse: Decodable {
             text: text,
             isError: isError,
             truncated: false,
+            images: [],
             subagent: nil
         )
     }

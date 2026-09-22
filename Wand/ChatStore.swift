@@ -610,7 +610,7 @@ final class ChatStore: ObservableObject {
         }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty { return text }
         for block in lastUser.content {
-            if case .toolResult(_, let value, _, _, _) = block {
+            if case .toolResult(_, let value, _, _, _, _) = block {
                 let result = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 return result.isEmpty ? nil : result
             }

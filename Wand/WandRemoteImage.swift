@@ -213,6 +213,88 @@ enum WandImageCache {
 
 // MARK: - 缩略图（聊天里的内联图片）
 
+/// 工具结果内联图片缩略图：服务端取图 URL（/api/sessions/…/tool-images/…，按 baseURL 补全）
+/// 或 data URI。只读缩略图，对齐网页 `inline-tool-image`；加载失败整块不占位。
+struct WandToolImageThumbnail: View {
+    let baseURL: URL
+    let source: String
+    var maxWidth: CGFloat = 240
+    var maxHeight: CGFloat = 200
+
+    @StateObject private var endpointSession: WandRemoteImageSessionHandle
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    init(baseURL: URL, source: String, maxWidth: CGFloat = 240, maxHeight: CGFloat = 200) {
+        self.baseURL = baseURL
+        self.source = source
+        self.maxWidth = maxWidth
+        self.maxHeight = maxHeight
+        _endpointSession = StateObject(wrappedValue: WandRemoteImageSessionHandle(baseURL: baseURL))
+    }
+
+    var body: some View {
+        Group {
+            if failed {
+                EmptyView()
+            } else if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: maxWidth, maxHeight: maxHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Theme.border, lineWidth: 1)
+                    )
+            }
+        }
+        .task(id: source) { await load() }
+    }
+
+    private func load() async {
+        image = nil
+        failed = false
+        if source.hasPrefix("data:") {
+            guard let comma = source.firstIndex(of: ","),
+                  let data = Data(base64Encoded: String(source[source.index(after: comma)...])),
+                  let decoded = UIImage(data: data) else {
+                failed = true
+                return
+            }
+            image = decoded
+            return
+        }
+        let cacheKey = "\(baseURL.absoluteString)|\(source)" as NSString
+        if let cached = WandImageCache.shared.object(forKey: cacheKey) {
+            image = cached
+            return
+        }
+        guard let url = URL(string: source, relativeTo: baseURL)?.absoluteURL else {
+            failed = true
+            return
+        }
+        let handle = endpointSession.value
+        var request = URLRequest(url: url)
+        request.cachePolicy = .returnCacheDataElseLoad
+        do {
+            let (data, response) = try await handle.session.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                failed = true
+                return
+            }
+            guard let decoded = UIImage(data: data) else {
+                failed = true
+                return
+            }
+            WandImageCache.shared.setObject(decoded, forKey: cacheKey)
+            if !Task.isCancelled { image = decoded }
+        } catch {
+            if !Task.isCancelled { failed = true }
+        }
+    }
+}
+
 /// 聊天里的内联图片缩略图：最大 240×200、scaledToFit、圆角 + 细边框，点击放大。
 /// 上传附件气泡与 Read 读图卡片共用。
 struct WandImageThumbnail: View {

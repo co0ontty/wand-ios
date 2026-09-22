@@ -1853,7 +1853,7 @@ private func displayItemIdentity(_ item: DisplayItem) -> String {
         switch block {
         case .toolUse(let id, let name, _, _, _):
             return id.isEmpty ? "tool-use:\(name)" : "tool-use:\(id)"
-        case .toolResult(let id, _, _, _, _):
+        case .toolResult(let id, _, _, _, _, _):
             return id.isEmpty ? "tool-result" : "tool-result:\(id)"
         case .text(let text, _):
             return "text:\(text.hashValue)"
@@ -1924,7 +1924,7 @@ func computeHistoryStats(turns: [ConversationTurn], boundary: Int) -> HistorySta
                     || (input["subagent_type"]?.stringValue?.isEmpty == false) {
                     if !id.isEmpty { agentIds.insert(id) }
                 }
-            case .toolResult(_, _, let isError, _, let subagent):
+            case .toolResult(_, _, let isError, _, _, let subagent):
                 if isError { errors += 1 }
                 if let tid = subagent?.taskId, !tid.isEmpty { agentIds.insert(tid) }
             case .text(_, let subagent), .thinking(_, let subagent):
@@ -2248,7 +2248,7 @@ private func activitySummary(_ items: [DisplayItem], running: Bool) -> String {
         switch block {
         case .thinking:
             return running ? "正在思考" : "已思考"
-        case .toolResult(_, _, let isError, _, _):
+        case .toolResult(_, _, let isError, _, _, _):
             return isError ? "有 1 条执行错误" : "已生成 1 条执行结果"
         default:
             return "已完成 1 项活动"
@@ -2356,6 +2356,8 @@ struct ToolResultInfo {
     let text: String
     let isError: Bool
     let truncated: Bool
+    /// 结果内联图片（站内取图 URL 或 data URI）；服务端已归一化。
+    var images: [String] = []
 }
 
 /// 优先按 tool_use_id 精确配对（并行工具调用时顺序会交错）；
@@ -2373,7 +2375,7 @@ private func pairToolBlocks(_ content: [ContentBlock]) -> [DisplayItem] {
         if !id.isEmpty {
             // 1) 全局按 tool_use_id 精确配对
             for j in (i + 1)..<content.count where !consumed.contains(j) {
-                if case .toolResult(let rid, _, _, _, _) = content[j], rid == id {
+                if case .toolResult(let rid, _, _, _, _, _) = content[j], rid == id {
                     resultIndex = j
                     break
                 }
@@ -2383,20 +2385,21 @@ private func pairToolBlocks(_ content: [ContentBlock]) -> [DisplayItem] {
             // 2) 邻接兜底：中间隔着下一个 ToolUse 视为无结果；id 双方都有但不匹配时不抢配。
             for j in (i + 1)..<content.count where !consumed.contains(j) {
                 if case .toolUse = content[j] { break }
-                if case .toolResult(let rid, _, _, _, _) = content[j] {
+                if case .toolResult(let rid, _, _, _, _, _) = content[j] {
                     if rid.isEmpty || id.isEmpty { resultIndex = j }
                     break
                 }
             }
         }
         var result: ToolResultInfo?
-        if resultIndex >= 0, case .toolResult(let resultID, let text, let isError, let truncated, _) = content[resultIndex] {
+        if resultIndex >= 0, case .toolResult(let resultID, let text, let isError, let truncated, let images, _) = content[resultIndex] {
             consumed.insert(resultIndex)
             result = ToolResultInfo(
                 toolUseId: resultID.isEmpty ? id : resultID,
                 text: text,
                 isError: isError,
-                truncated: truncated
+                truncated: truncated,
+                images: images
             )
         }
         paired.append(.tool(
@@ -3442,7 +3445,7 @@ private struct BlockView: View {
                     initiallyExpanded: cardDefaults.shouldExpandTool(name)
                 )
             }
-        case .toolResult(let toolUseId, let text, let isError, let truncated, _):
+        case .toolResult(let toolUseId, let text, let isError, let truncated, let images, _):
             if !text.isEmpty || truncated {
                 CollapsibleSection(
                     icon: isError ? "xmark.octagon" : "doc.text",
@@ -4059,7 +4062,17 @@ private struct ToolUseCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            if let imagePath, let baseURL {
+            // 结果内联图片优先（服务端已归一化），没有时退回 Read 按路径取图；
+            // 两者同时渲染会出现同一张图两个缩略图。
+            if let baseURL, let resultImages = result?.images, !resultImages.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(resultImages.enumerated()), id: \.offset) { _, source in
+                        WandToolImageThumbnail(baseURL: baseURL, source: source)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+            } else if let imagePath, let baseURL {
                 // Read 读到图片：卡片里常驻内联缩略图（点击放大），对齐 Web。
                 WandImageThumbnail(baseURL: baseURL, path: imagePath)
                     .padding(.horizontal, 12)
