@@ -82,14 +82,6 @@
 			<key>UIApplicationShortcutItemIconSymbolName</key>
 			<string>plus.bubble</string>
 		</dict>
-		<dict>
-			<key>UIApplicationShortcutItemType</key>
-			<string>com.wand.app.shortcut.open-web</string>
-			<key>UIApplicationShortcutItemTitle</key>
-			<string>打开网页版</string>
-			<key>UIApplicationShortcutItemIconSymbolName</key>
-			<string>safari</string>
-		</dict>
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>

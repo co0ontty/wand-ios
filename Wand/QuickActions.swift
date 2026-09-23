@@ -2,26 +2,22 @@ import SwiftUI
 import UIKit
 
 /// 长按 App 图标的快捷操作（Home Screen Quick Actions）。
-/// 静态项在 Info.plist（新建会话 / 打开网页版）；动态项是最近会话
+/// 静态项在 Info.plist（新建会话）；动态项是最近会话
 /// （SessionListView 刷新时通过 updateRecentSessionShortcuts 同步）。
 /// 冷启动的 shortcutItem 在 AppDelegate.configurationForConnecting 捕获，
 /// App 已在运行时走 SceneDelegate.performActionFor。
 enum QuickAction: Equatable {
     case newSession
-    case openWeb
     case openSession(id: String, serverID: String?)
     case showSessions
 
     static let newSessionType = "com.wand.app.shortcut.new-session"
-    static let openWebType = "com.wand.app.shortcut.open-web"
     static let openSessionType = "com.wand.app.shortcut.open-session"
 
     init?(shortcutItem: UIApplicationShortcutItem) {
         switch shortcutItem.type {
         case Self.newSessionType:
             self = .newSession
-        case Self.openWebType:
-            self = .openWeb
         case Self.openSessionType:
             guard let id = shortcutItem.userInfo?["sessionId"] as? String, !id.isEmpty else { return nil }
             let serverID = (shortcutItem.userInfo?["serverId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -31,7 +27,7 @@ enum QuickAction: Equatable {
         }
     }
 
-    /// 只有会话级入口需要锁定服务器；静态「新建/网页版」沿用当前服务器。
+    /// 只有会话级入口需要锁定服务器；静态「新建」沿用当前服务器。
     var targetServerID: String? {
         if case .openSession(_, let serverID) = self { return serverID }
         return nil

@@ -2,13 +2,10 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// 原生设置页：服务器信息 / 功能开关 / 网页版入口 / 关于。
-/// 服务端的完整设置（更新通道、Android 下载等）仍在网页版里，这里聚焦客户端本身。
+/// 原生设置页：服务器信息 / 功能开关 / 关于。
 struct SettingsView: View {
     let serverURL: URL
     let token: String?
-    /// 请求打开网页版（由 NativeRootView 在 sheet 关闭后呈现 fullScreenCover）。
-    let onOpenWeb: () -> Void
 
     @EnvironmentObject private var store: ServerStore
     @Environment(\.dismiss) private var dismiss
@@ -38,7 +35,6 @@ struct SettingsView: View {
                 serverSection
                 diagnosticsSection
                 clientUpdateSection
-                moreSection
                 aboutSection
             }
             .scrollContentBackground(.hidden)
@@ -409,22 +405,6 @@ struct SettingsView: View {
         }
         guard let url = WandLog.shared.exportToFile(within: 5) else { return }
         logShare = LogShareItem(url: url)
-    }
-
-    private var moreSection: some View {
-        Section {
-            Button {
-                dismiss()
-                onOpenWeb()
-            } label: {
-                Label("打开网页版（完整设置）", systemImage: "safari")
-                    .font(.system(size: 15))
-            }
-        } header: {
-            Text("服务端设置")
-        } footer: {
-            Text("更新通道、模型配置等服务端设置在网页版里调整。")
-        }
     }
 
     private var aboutSection: some View {

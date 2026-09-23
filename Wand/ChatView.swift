@@ -1138,6 +1138,7 @@ struct ChatView: View {
                     inFlight: store.queueInFlight,
                     onPromote: { store.promoteQueued(index: $0) },
                     onDelete: { store.deleteQueued(index: $0) },
+                    onEdit: { store.editQueued(index: $0, text: $1) },
                     onClearAll: { store.clearQueued() }
                 )
                 .padding(.horizontal, 12)
@@ -5604,7 +5605,10 @@ private struct QueueBar: View {
     let inFlight: Bool
     let onPromote: (Int) -> Void
     let onDelete: (Int) -> Void
+    let onEdit: (Int, String) -> Void
     let onClearAll: () -> Void
+    @State private var editingIndex: Int?
+    @State private var editedText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -5631,6 +5635,16 @@ private struct QueueBar: View {
         )
         .animation(.easeInOut(duration: 0.18), value: expanded)
         .animation(.easeInOut(duration: 0.18), value: items.count)
+        .alert("编辑排队消息", isPresented: Binding(
+            get: { editingIndex != nil }, set: { if !$0 { editingIndex = nil } }
+        )) {
+            TextField("消息", text: $editedText)
+            Button("取消", role: .cancel) { editingIndex = nil }
+            Button("保存") {
+                if let index = editingIndex { onEdit(index, editedText) }
+                editingIndex = nil
+            }
+        }
     }
 
     private var header: some View {
@@ -5667,6 +5681,15 @@ private struct QueueBar: View {
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
+            Button {
+                editedText = text
+                editingIndex = index
+            } label: {
+                Image(systemName: "pencil")
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("编辑第 \(index + 1) 条")
             Button {
                 onPromote(index)
             } label: {

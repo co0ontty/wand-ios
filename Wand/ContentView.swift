@@ -10,8 +10,7 @@ struct ContentView: View {
             // 全屏背景，避免 ConnectView/加载中状态露出空白
             WandAmbientBackground()
             if let profile = store.activeProfile {
-                // 原生客户端为主界面（会话列表 + 聊天 + 权限审批），
-                // WebView 退居 NativeRootView 内的「网页版」兜底入口。
+                // 原生客户端主界面（会话列表 + 聊天 + 权限审批）。
                 NativeRootView(profile: profile)
                     .id(profile.connectionIdentity)
             } else {

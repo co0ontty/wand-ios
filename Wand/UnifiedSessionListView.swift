@@ -453,7 +453,6 @@ struct UnifiedSessionListView: View {
             guard action.belongs(to: serverID) else { return false }
             switch action {
             case .newSession, .openSession, .showSessions: return true
-            case .openWeb: return false
             }
         }) else { return }
 
@@ -485,8 +484,6 @@ struct UnifiedSessionListView: View {
         case .showSessions:
             showNewSession = false
             clearSelection()
-        case .openWeb:
-            break
         }
     }
 

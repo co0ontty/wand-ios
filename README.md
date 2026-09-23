@@ -1,9 +1,8 @@
 # iOS 客户端
 
 Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权限审批全部原生实现，
-直连 wand 服务端的 REST + WebSocket 协议；WKWebView 仅作为「网页版」兜底入口保留
-（设置、文件浏览等原生未覆盖的功能）。与 `macos/`、`android/` 的 WebView 壳不同，
-iOS 端原生化是为了根治 WebView 在移动端的键盘重叠、状态栏错位等问题。
+直连 wand 服务端的 REST + WebSocket 协议；仅 PTY 终端区域嵌入 WKWebView。
+原生化避免整页 WebView 在移动端的键盘重叠、状态栏错位等问题。
 
 核心目标：**不充钱买 Apple Developer 账号（$99/年）也能把它装进自己的 iPhone。**
 
@@ -11,8 +10,8 @@ iOS 端原生化是为了根治 WebView 在移动端的键盘重叠、状态栏�
 
 - 工程代码放在 `ios/Wand/`
 - `.app` / `.ipa` 构建产物**不要提交到仓库**（已在 `.gitignore`）
-- 与 macOS/Android 壳共享同一套连接逻辑：连接码（base64 `url#token`）→ `/api/login` 拿 cookie；
-  原生界面用同一份 cookie 调 `/api/*` 与 `/ws`（兜底 WebView 同样注入这份 cookie）
+- 与 Android/macOS 客户端共享连接协议：连接码（base64 `url#token`）→ `/api/login` 拿 cookie；
+  原生界面用 cookie 调 `/api/*` 与 `/ws`，嵌入终端独立注入认证 cookie。
 
 ## 客户端更新
 
@@ -142,7 +141,7 @@ ios/
     ├── App.swift              # @main 入口（WindowGroup）
     ├── ContentView.swift      # 容器：已连接→NativeRootView / 未连接→ConnectView
     ├── ConnectView.swift      # 连接界面（连接码 / 地址 + 最近连接）
-    ├── NativeRootView.swift   # 原生根视图：token 登录引导 + 列表导航 + 网页版兜底入口
+    ├── NativeRootView.swift   # 原生根视图：token 登录引导 + 列表导航
     ├── SessionListView.swift  # 会话列表（/api/sessions 轮询 + 下拉刷新 + 滑动删除）
     ├── ChatView.swift         # 聊天视图：消息块渲染 + 原生输入栏（含按住说话）+ 权限审批卡片
     ├── ChatStore.swift        # 单会话状态机：WS 订阅、增量合流、发送/停止/权限决策
@@ -151,8 +150,8 @@ ios/
     ├── WandAPI.swift          # REST 客户端（401 自动用 appToken 重登重试）
     ├── WandSocket.swift       # /ws 客户端：seq 间隙 resync、心跳看门狗、退避重连
     ├── WandModels.swift       # 协议 Codable 模型（SessionSnapshot / ConversationTurn / WS 消息）
-    ├── WebContainerView.swift # 兜底 WebView：UIViewRepresentable 包 WKWebView + 覆盖层
-    ├── WebBridge.swift        # WebView 导航委托 + 自签名证书放行 + JS 桥
+    ├── WebContainerView.swift # 嵌入式 PTY 终端：UIViewRepresentable 包 WKWebView + 覆盖层
+    ├── WebBridge.swift        # 终端 WebView 导航委托 + 自签名证书放行 + 输入桥
     ├── ServerStore.swift      # UserDefaults 持久化连接状态
     ├── WandAuth.swift         # 连接码解码 / token 登录 / 可达性探测（与 macOS 共享逻辑）
     ├── SelfSignedSession.swift# 放行 wand 自签名 HTTPS 的 URLSession（REST/WS 共用）

@@ -90,8 +90,6 @@ private struct PtySessionView: View {
                                 serverURL: api.baseURL,
                                 token: api.token,
                                 sessionId: session.id,
-                                embedTerminal: true,
-                                embedNativeInput: true,
                                 webViewModel: terminalWebModel
                             )
                         } else {

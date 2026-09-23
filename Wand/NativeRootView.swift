@@ -8,7 +8,7 @@ func quickActionRequiresRootSessionRouting(
     switch action {
     case .newSession, .openSession:
         return !rootIsSessions || hasPresentedSurface
-    case .openWeb, .showSessions:
+    case .showSessions:
         return true
     }
 }
@@ -36,15 +36,12 @@ enum HomeListMode: String, Equatable {
     }
 }
 
-/// 原生客户端根视图：先用 appToken 登录拿 session cookie（ephemeral 存储，
-/// 冷启动后为空），然后进入原生会话列表。WebView 仅作为「网页版」兜底入口保留，
-/// 覆盖设置、文件浏览等原生未实现的功能。
+/// 原生客户端根视图：先用 appToken 登录，然后进入原生会话列表。
 struct NativeRootView: View {
     let profile: ServerProfile
 
     @EnvironmentObject private var store: ServerStore
     @State private var phase: Phase = .authenticating
-    @State private var showWebFallback = false
     @State private var showSettings = false
     @State private var showMissions = false
     @AppStorage(HomeListMode.storageKey) private var homeListModeRaw = HomeListMode.sessions.rawValue
@@ -113,14 +110,6 @@ struct NativeRootView: View {
             sidebar: { sidebarContent },
             detail: { detailContent }
         )
-        .fullScreenCover(isPresented: $showWebFallback) {
-            // 网页版兜底：不再套壳顶栏，返回入口在网页侧边栏（「返回App」按钮）。
-            // 旧版网页 / 加载中 / 出错时 WebContainerView 内部自带回退返回方式。
-            WebContainerView(serverURL: serverURL, token: token) {
-                showWebFallback = false
-            }
-            .environmentObject(store)
-        }
         .fullScreenCover(isPresented: $showMissions) {
             MissionsView(
                 api: api,
@@ -131,20 +120,15 @@ struct NativeRootView: View {
             )
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView(serverURL: serverURL, token: token) {
-                // sheet 收起动画结束后再呈现 fullScreenCover，避免双 present 冲突。
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    showWebFallback = true
-                }
-            }
-            .environmentObject(store)
+            SettingsView(serverURL: serverURL, token: token)
+                .environmentObject(store)
         }
         .onAppear { authenticate() }
         .onChange(of: workspaceStore.taskGroups) { _, groups in
             syncSelectedWorkspaceTaskMetadata(groups)
         }
         .onDisappear { invalidateLifecycle() }
-        // 「打开网页版」快捷操作归本视图消费；登录完成前先挂起，ready 后再接。
+        // 登录完成前挂起会话快捷操作，ready 后再处理。
         .onReceive(quickActions.$pending) { _ in
             handleQuickAction()
         }
@@ -207,7 +191,6 @@ struct NativeRootView: View {
                 modifiers: .command,
                 isEnabled: !showSettings
             ) {
-                showWebFallback = false
                 showSettings = true
             },
             WandKeyboardShortcutAction(
@@ -215,11 +198,10 @@ struct NativeRootView: View {
                 title: "显示任务列表",
                 key: "1",
                 modifiers: .command,
-                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showWebFallback || showingBoard
+                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showingBoard
             ) {
                 showSettings = false
                 showMissions = false
-                showWebFallback = false
                 setHomeListMode(.sessions)
                 selectedWorkspaceTask = nil
                 selectedSessionID = nil
@@ -233,7 +215,6 @@ struct NativeRootView: View {
                 isEnabled: !showMissions
             ) {
                 showSettings = false
-                showWebFallback = false
                 showMissions = true
             },
             WandKeyboardShortcutAction(
@@ -244,7 +225,6 @@ struct NativeRootView: View {
                 isEnabled: !showingBoard
             ) {
                 showSettings = false
-                showWebFallback = false
                 showMissions = false
                 setHomeListMode(.board)
             },
@@ -253,7 +233,7 @@ struct NativeRootView: View {
                 title: "关闭当前页",
                 key: "w",
                 modifiers: .command,
-                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showWebFallback || showSettings || showMissions
+                isEnabled: selectedSessionID != nil || selectedWorkspaceTask != nil || showSettings || showMissions
             ) {
                 closeActiveSurfaceFromKeyboard()
             },
@@ -268,8 +248,6 @@ struct NativeRootView: View {
     private func closeActiveSurfaceFromKeyboard() {
         if showMissions {
             showMissions = false
-        } else if showWebFallback {
-            showWebFallback = false
         } else if showSettings {
             showSettings = false
         } else if selectedSessionID != nil {
@@ -357,7 +335,6 @@ struct NativeRootView: View {
                         },
                         onOpenMissions: { showMissions = true },
                         onOpenSettings: { showSettings = true },
-                        onOpenWeb: { showWebFallback = true },
                         onSwitchServer: {
                             NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
                         }
@@ -587,13 +564,9 @@ struct NativeRootView: View {
         guard phase == .ready,
               let pending = quickActions.pending,
               pending.belongs(to: serverID) else { return }
-        let hasPresentedSurface = showWebFallback || showSettings || showMissions
+        let hasPresentedSurface = showSettings || showMissions
 
         switch pending {
-        case .openWeb:
-            guard quickActions.consume(where: { $0 == pending }) != nil else { return }
-            showSettings = false
-            showWebFallback = true
         case .showSessions:
             guard quickActions.consume(where: { $0 == pending }) != nil else { return }
             showTaskRoot()
@@ -610,7 +583,6 @@ struct NativeRootView: View {
             quickActions.consume(where: { $0 == pending }) != nil else { return }
             showSettings = false
             showMissions = false
-            showWebFallback = false
             openSessionFromMissions(id)
         }
     }
@@ -618,7 +590,6 @@ struct NativeRootView: View {
     private func showTaskRoot() {
         showSettings = false
         showMissions = false
-        showWebFallback = false
         setHomeListMode(.sessions)
         selectedWorkspaceTask = nil
         selectedSessionID = nil
@@ -976,7 +947,6 @@ private struct HomeOverviewBar: View {
     let onStartSelection: () -> Void
     let onOpenMissions: () -> Void
     let onOpenSettings: () -> Void
-    let onOpenWeb: () -> Void
     let onSwitchServer: () -> Void
 
     var body: some View {
@@ -1025,9 +995,6 @@ private struct HomeOverviewBar: View {
                 }
                 Button(action: onOpenSettings) {
                     Label("设置", systemImage: "gearshape")
-                }
-                Button(action: onOpenWeb) {
-                    Label("打开网页版", systemImage: "safari")
                 }
                 Button(action: onSwitchServer) {
                     Label("切换服务器", systemImage: "server.rack")

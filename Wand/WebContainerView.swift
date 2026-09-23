@@ -23,12 +23,7 @@ final class WebViewModel: ObservableObject {
     }
 
     @Published var phase: Phase = .loading
-    /// 旧版网页（侧边栏没有「返回原生界面」按钮）：壳回退显示自己的顶部返回栏，
-    /// 避免用户被困在网页版里。由 WebBridge 在 didFinish 时检测后回填。
-    @Published var needsLegacyChrome = false
     @Published var terminalScaleLabel = "100%"
-    /// WebBridge 收到 backToNative 消息时调用，由容器视图注入（关闭 fullScreenCover）。
-    var requestClose: (() -> Void)?
     /// 网页内的真实点击已同步聚焦 xterm，原生只收起草稿，不再抢 first responder。
     var requestTerminalInput: (() -> Void)?
     /// WebBridge attach 时回填，供"重试"调用 reload()。
@@ -160,21 +155,11 @@ final class WebViewModel: ObservableObject {
     }
 }
 
-/// 对外的容器视图：底层是 WKWebView，加载中/出错时盖上不透明的主题覆盖层。
-/// 对称 macOS 的 WebContainerView，把 NSViewRepresentable 换成 UIViewRepresentable。
+/// 原生 PTY 页嵌入的 WKWebView 终端；加载中/出错时盖上主题覆盖层。
 struct WebContainerView: View {
     let serverURL: URL
     let token: String?
-    var sessionId: String? = nil
-    /// 嵌入终端模式：URL 带 ?embed=terminal，网页只渲染终端黑窗。
-    /// 用于把 PTY 会话套进原生导航头（见 PtySessionView）。此模式下不显示
-    /// 壳自带的顶部返回栏与加载覆盖层逃生按钮——返回交给原生导航条。
-    var embedTerminal: Bool = false
-    /// PTY 原生输入栏模式：URL 额外带 ?nativeInput=1，网页隐藏自己的 input-panel。
-    var embedNativeInput: Bool = false
-    /// 「返回原生界面」回调（网页版兜底入口传入）；触发途径：网页侧边栏的
-    /// 「返回App」按钮 → backToNative 消息，或加载中/出错覆盖层上的逃生按钮。
-    var onRequestClose: (() -> Void)? = nil
+    let sessionId: String
 
     @EnvironmentObject private var store: ServerStore
     @StateObject private var model: WebViewModel
@@ -182,18 +167,12 @@ struct WebContainerView: View {
     init(
         serverURL: URL,
         token: String?,
-        sessionId: String? = nil,
-        embedTerminal: Bool = false,
-        embedNativeInput: Bool = false,
-        webViewModel: WebViewModel? = nil,
-        onRequestClose: (() -> Void)? = nil
+        sessionId: String,
+        webViewModel: WebViewModel? = nil
     ) {
         self.serverURL = serverURL
         self.token = token
         self.sessionId = sessionId
-        self.embedTerminal = embedTerminal
-        self.embedNativeInput = embedNativeInput
-        self.onRequestClose = onRequestClose
         _model = StateObject(wrappedValue: webViewModel ?? WebViewModel())
     }
 
@@ -205,52 +184,18 @@ struct WebContainerView: View {
         return serverURL.absoluteString
     }
 
-    private var containerBackground: Color {
-        embedTerminal ? Theme.terminalBackground : Theme.background
-    }
-
     var body: some View {
         ZStack {
-            containerBackground.ignoresSafeArea()
-            webContent
-            overlay
-            escapeButton
-        }
-        .onAppear { model.requestClose = onRequestClose }
-        .onDisappear { model.cancelAutomaticReconnect() }
-    }
-
-    @ViewBuilder private var webContent: some View {
-        if embedTerminal {
-            // 嵌入终端：原生导航条已消费顶部安全区，WebView 贴在头部下沿，
-            // nativeInput 模式下底部由原生输入栏占位；旧模式仍向 home indicator 延伸。
-            let webView = WebViewRepresentable(
+            Theme.terminalBackground.ignoresSafeArea()
+            WebViewRepresentable(
                 serverURL: serverURL,
                 token: token,
                 sessionId: sessionId,
-                embedTerminal: true,
-                embedNativeInput: embedNativeInput,
                 model: model
             )
-            if embedNativeInput {
-                webView
-            } else {
-                webView.ignoresSafeArea(.container, edges: .bottom)
-            }
-        } else if model.needsLegacyChrome, let onRequestClose {
-            // 旧版网页：保留壳自带的顶部返回栏（网页里没有返回按钮）。
-            VStack(spacing: 0) {
-                legacyTopBar(onClose: onRequestClose)
-                Divider()
-                WebViewRepresentable(serverURL: serverURL, token: token, sessionId: sessionId, model: model)
-                    .ignoresSafeArea(.container, edges: .bottom)
-            }
-        } else {
-            // 新版网页：侧边栏自带「返回App」按钮，WebView 全屏贴到状态栏/灵动岛下，
-            // 顶部间距由网页用 env(safe-area-inset-top) 自己排（viewport-fit=cover）。
-            WebViewRepresentable(serverURL: serverURL, token: token, sessionId: sessionId, model: model)
-                .ignoresSafeArea(.container, edges: .all)
+            overlay
         }
+        .onDisappear { model.cancelAutomaticReconnect() }
     }
 
     @ViewBuilder private var overlay: some View {
@@ -268,53 +213,6 @@ struct WebContainerView: View {
         case .ready:
             EmptyView()
         }
-    }
-
-    /// 加载中/出错覆盖层上的逃生口：此时网页侧的返回按钮还不可用。
-    @ViewBuilder private var escapeButton: some View {
-        if !embedTerminal, model.phase != .ready, let onRequestClose {
-            VStack {
-                HStack {
-                    Button(action: onRequestClose) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 14, weight: .semibold))
-                            Text("返回")
-                                .font(.system(size: 14, weight: .medium))
-                        }
-                        .foregroundColor(Theme.brand)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(Capsule().fill(Theme.brand.opacity(0.12)))
-                    }
-                    Spacer()
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 6)
-        }
-    }
-
-    private func legacyTopBar(onClose: @escaping () -> Void) -> some View {
-        HStack {
-            Button(action: onClose) {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text("返回原生界面")
-                        .font(.system(size: 14, weight: .medium))
-                }
-                .foregroundColor(Theme.brand)
-            }
-            Spacer()
-            Text("网页版")
-                .font(.system(size: 13))
-                .foregroundColor(Theme.textSecondary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(Theme.background)
     }
 }
 
@@ -447,11 +345,8 @@ extension WKWebView {
 struct WebViewRepresentable: UIViewRepresentable {
     let serverURL: URL
     let token: String?
-    let sessionId: String?
-    var embedTerminal: Bool = false
-    var embedNativeInput: Bool = false
+    let sessionId: String
     let model: WebViewModel
-    @Environment(\.colorScheme) private var colorScheme
 
     func makeCoordinator() -> WebBridge {
         WebBridge(model: model)
@@ -461,41 +356,18 @@ struct WebViewRepresentable: UIViewRepresentable {
         let cfg = WKWebViewConfiguration()
         let userController = WKUserContentController()
         userController.add(context.coordinator, name: "wandNative")
-        // 暴露「返回原生界面」入口给网页：新版网页检测到这个函数后会在侧边栏
-        // 渲染「返回App」按钮（macOS 壳和浏览器里没有该函数，不会显示按钮）。
         userController.addUserScript(WKUserScript(
             source: """
             window.__wandIosNative = true;
-            window.__wandBackToNative = function() {
-              try { window.webkit.messageHandlers.wandNative.postMessage({ type: "backToNative" }); } catch (e) {}
-            };
-            window.WandNative = {
-              getPermission: function() { return "granted"; },
-              requestPermission: function() {
-                try { window.webkit.messageHandlers.wandNative.postMessage({ type: "requestNotificationPermission" }); } catch (e) {}
-              },
-              sendNotification: function(title, body, tag) {
-                try {
-                  window.webkit.messageHandlers.wandNative.postMessage({
-                    type: "sendNotification",
-                    title: String(title || "Wand"),
-                    body: String(body || ""),
-                    tag: String(tag || "")
-                  });
-                } catch (e) {}
-              }
-            };
             """,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
-        if embedTerminal {
-            userController.addUserScript(WKUserScript(
-                source: Self.terminalNativeUserScriptSource,
-                injectionTime: .atDocumentEnd,
-                forMainFrameOnly: true
-            ))
-        }
+        userController.addUserScript(WKUserScript(
+            source: Self.terminalNativeUserScriptSource,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        ))
         cfg.userContentController = userController
         cfg.websiteDataStore = EndpointWebDataStoreFactory.store(for: serverURL)
         cfg.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -595,11 +467,11 @@ struct WebViewRepresentable: UIViewRepresentable {
                         }
                         group.notify(queue: .main) {
                             guard isCurrent() else { return }
-                            wlog("web", "注入 \(cookies.count) 个 cookie，加载网页版 \(endpointURL.absoluteString)")
+                            wlog("web", "注入 \(cookies.count) 个 cookie，加载终端 \(endpointURL.absoluteString)")
                             webView.load(URLRequest(url: targetURL))
                         }
                     case .failure(let err):
-                        wlog("web", "网页版 token 登录失败: \(err.userMessage)")
+                        wlog("web", "终端 token 登录失败: \(err.userMessage)")
                         coordinator.fail(
                             title: "无法登录 wand 服务器",
                             message: err.userMessage,
@@ -611,7 +483,7 @@ struct WebViewRepresentable: UIViewRepresentable {
         } else {
             guard isCurrent() else { return }
             let endpointURL = serverURL
-            wlog("web", "无 token，直接加载网页版 \(endpointURL.absoluteString)")
+            wlog("web", "无 token，直接加载终端 \(endpointURL.absoluteString)")
             webView.load(URLRequest(url: targetURL))
         }
     }
@@ -632,19 +504,15 @@ struct WebViewRepresentable: UIViewRepresentable {
     }
 
     private func applyAppearance(to webView: WKWebView) {
-        let webBackground = embedTerminal
-            ? Theme.uiTerminalBackground
-            : Theme.uiBackground
-        webView.overrideUserInterfaceStyle = embedTerminal
-            ? .dark
-            : (colorScheme == .dark ? .dark : .light)
+        let webBackground = Theme.uiTerminalBackground
+        webView.overrideUserInterfaceStyle = .dark
         webView.backgroundColor = webBackground
         webView.scrollView.backgroundColor = webBackground
         webView.underPageBackgroundColor = webBackground
     }
 
     private func sessionURL() -> URL {
-        guard let sessionId, !sessionId.isEmpty,
+        guard !sessionId.isEmpty,
               var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false) else {
             return serverURL
         }
@@ -656,13 +524,9 @@ struct WebViewRepresentable: UIViewRepresentable {
                 || $0.name == "passthrough"
         }
         items.append(URLQueryItem(name: "session", value: sessionId))
-        if embedTerminal {
-            items.append(URLQueryItem(name: "embed", value: "terminal"))
-            if embedNativeInput {
-                items.append(URLQueryItem(name: "nativeInput", value: "1"))
-                items.append(URLQueryItem(name: "passthrough", value: "1"))
-            }
-        }
+        items.append(URLQueryItem(name: "embed", value: "terminal"))
+        items.append(URLQueryItem(name: "nativeInput", value: "1"))
+        items.append(URLQueryItem(name: "passthrough", value: "1"))
         guard let encodedQuery = WandEndpoint.percentEncodedQuery(items) else { return serverURL }
         components.percentEncodedQuery = encodedQuery
         return components.url ?? serverURL

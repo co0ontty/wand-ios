@@ -1000,6 +1000,24 @@ final class ChatStore: ObservableObject {
         isStructured && status == "running" && isResponding
     }
 
+    func editQueued(index: Int, text: String) {
+        guard isStructured, !queueMutationPending, queuedMessages.indices.contains(index) else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { toast = "排队消息不能为空。"; return }
+        let original = queuedMessages[index]
+        queueMutationPending = true
+        Task {
+            defer { queueMutationPending = false }
+            do {
+                let snapshot = try await api.editQueued(id: sessionId, index: index,
+                                                        expectedText: original, text: trimmed)
+                queuedMessages = snapshot.queuedMessages ?? []
+            } catch {
+                toast = error.localizedDescription
+            }
+        }
+    }
+
     /// 立即发送第 index 条排队消息（乐观剥掉本地、失败回滚）。对齐 Web queueBarPromoteIndex。
     func promoteQueued(index: Int) {
         guard isStructured else { return }

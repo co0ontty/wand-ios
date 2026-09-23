@@ -464,6 +464,12 @@ final class WandAPI {
         )
     }
 
+    func editQueued(id: String, index: Int, expectedText: String, text: String) async throws -> SessionSnapshot {
+        try await request(SessionSnapshot.self, method: "PATCH",
+                          path: "/api/structured-sessions/\(id)/queued/\(index)",
+                          body: ["expectedText": expectedText, "text": text])
+    }
+
     /// 删除第 index 条排队消息；expectedText 防止自动 flush 后 index 指向另一条。
     @discardableResult
     func deleteQueued(id: String, index: Int, expectedText: String) async throws -> SessionSnapshot {

@@ -7,7 +7,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
     private let model: WebViewModel
     private weak var webView: WKWebView?
     private var serverURL: URL?
-    private var serverID: String?
     private var endpointScope: WandEndpointScope?
     private var attachmentGeneration = 0
     private var hasLoadedOnce = false
@@ -22,7 +21,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         attachmentGeneration &+= 1
         self.webView = webView
         self.serverURL = serverURL
-        self.serverID = ServerProfiles.stableID(for: serverURL)
         self.endpointScope = WandEndpointScope(serverURL)
         self.model.webView = webView
         installKeyboardObservers()
@@ -38,7 +36,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         attachmentGeneration &+= 1
         self.webView = nil
         serverURL = nil
-        serverID = nil
         endpointScope = nil
         if model.webView === webView { model.webView = nil }
     }
@@ -85,36 +82,12 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
 
     // MARK: - JS → Native
 
-    /// 网页版把 IPA 更新发成 downloadUpdate / 直接跳 itms-services；原生侧打开系统安装器。
     func userContentController(_ uc: WKUserContentController, didReceive msg: WKScriptMessage) {
         guard let dict = msg.body as? [String: Any], let type = dict["type"] as? String else { return }
         switch type {
-        case "backToNative":
-            DispatchQueue.main.async { [weak self] in
-                self?.model.requestClose?()
-            }
         case "terminalInput":
             guard msg.frameInfo.isMainFrame, msg.webView === webView else { return }
             model.requestTerminalInput?()
-        case "requestNotificationPermission":
-            SessionNotificationController.shared.requestAuthorization()
-        case "sendNotification":
-            let title = dict["title"] as? String ?? "Wand"
-            let body = dict["body"] as? String ?? ""
-            let tag = dict["tag"] as? String ?? ""
-            SessionNotificationController.shared.sendWebNotification(
-                title: title,
-                body: body,
-                tag: tag,
-                serverID: serverID
-            )
-        case "downloadUpdate":
-            guard let raw = dict["url"] as? String else { return }
-            DispatchQueue.main.async { [weak self] in
-                let url = URL(string: raw)
-                    ?? URL(string: raw, relativeTo: self?.webView?.url)?.absoluteURL
-                if let url { UIApplication.shared.open(url) }
-            }
         default:
             wlog("web", "ignored native message type=\(type) (no-op on iOS)")
         }
@@ -298,12 +271,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate, W
         // WebContent 进程重建会换一个新的 WKContentView，键盘顶栏会复活，
         // 每次导航完成后重申一次（幂等）。
         webView.wandHideKeyboardAccessoryBar()
-        // 旧版网页没有 __wandNativeBackHooked 标记（侧边栏没有「返回App」按钮），
-        // 此时回退显示壳自带的顶部返回栏，避免用户被困在网页版里。
-        webView.evaluateJavaScript("!!(window.__wandNativeBackHooked)") { [weak self] result, _ in
-            let hooked = (result as? Bool) ?? false
-            self?.model.needsLegacyChrome = !hooked
-        }
         model.refreshEmbeddedTerminalScaleLabel()
     }
 }
