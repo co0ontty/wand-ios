@@ -552,10 +552,10 @@ struct WebViewRepresentable: UIViewRepresentable {
             .is-wand-embed-terminal .wand-joystick-ball{opacity:1!important;transform:none;}
             .is-wand-embed-terminal .wand-joystick-panel{z-index:124;}
             .is-wand-embed-terminal .terminal-scroll-wrap{
-              padding:8px 4px 8px!important;
-              --term-font-family:"SFMono-Regular","Menlo","Monaco","Noto Sans Symbols 2","Noto Sans Symbols",monospace!important;
-              --term-font-size:10px!important;
-              --term-row-height:15px!important;
+              padding:10px 8px 8px!important;
+              --term-font-family:ui-monospace,Menlo,"SF Mono",Monaco,Consolas,"Noto Sans Symbols 2","Noto Sans Symbols",monospace!important;
+              --term-font-size:13px!important;
+              --term-row-height:17px!important;
             }
             .is-wand-embed-terminal .input-panel{display:none!important;}
             .is-wand-embed-terminal .notification-bubble,
@@ -615,6 +615,37 @@ struct WebViewRepresentable: UIViewRepresentable {
             }
           `;
           document.head.appendChild(style);
+        }
+
+        // xterm 的字号在创建时写死。旧服务端嵌入模式用 10px；这里按当前缩放
+        // 把仍停在那个旧默认值的终端抬到 13px，并重新 fit。用户之后用缩放按钮
+        // 改过的字号不会被盖掉。
+        if (!window.__wandNativeTerminalFace) {
+          window.__wandNativeTerminalFace = true;
+          var faceTries = 0;
+          var faceTimer = setInterval(function() {
+            faceTries += 1;
+            var term = window.__wandTerminal;
+            var done = false;
+            try {
+              if (term && term.options) {
+                var scale = 1;
+                try {
+                  var parsed = Number(localStorage.getItem('wand-terminal-scale') || '1');
+                  if (isFinite(parsed) && parsed > 0) scale = parsed;
+                } catch (e) {}
+                var desired = Math.max(8, Math.round(13 * scale));
+                var legacy = Math.max(8, Math.round(10 * scale));
+                if (term.options.fontSize === legacy && desired !== legacy) {
+                  term.options.fontSize = desired;
+                  term.options.fontFamily = 'ui-monospace, Menlo, "SF Mono", Monaco, Consolas, monospace';
+                  try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+                }
+                done = true;
+              }
+            } catch (e) {}
+            if (done || faceTries > 40) clearInterval(faceTimer);
+          }, 200);
         }
 
         // WKWebView 必须在真实用户手势的同步调用栈里 focus；先异步通知原生再
