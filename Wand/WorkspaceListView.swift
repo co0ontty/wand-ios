@@ -823,7 +823,8 @@ struct WorkspaceListView: View {
     private func taskRows(_ summary: WorkspaceTaskSummary, group: TaskDirectoryGroup) -> some View {
         let expanded = TaskListPresentation.isTaskSessionsExpanded(
             userCollapsed: collapsedTaskIds.contains(summary.id),
-            sessionCount: summary.listedSessionCount
+            sessionCount: summary.listedSessionCount,
+            isOnlyTask: group.tasks.count == 1
         )
         let workspace = workspace(for: summary, group: group)
         taskSummaryRow(summary, group: group)
@@ -866,7 +867,8 @@ struct WorkspaceListView: View {
         let canCollapseSessions = TaskListPresentation.showsTaskSessionDisclosure(sessionCount: summary.listedSessionCount)
         let expanded = TaskListPresentation.isTaskSessionsExpanded(
             userCollapsed: collapsedTaskIds.contains(summary.id),
-            sessionCount: summary.listedSessionCount
+            sessionCount: summary.listedSessionCount,
+            isOnlyTask: group.tasks.count == 1
         )
         let workspace = workspace(for: summary, group: group)
         let task = summary.asTask()

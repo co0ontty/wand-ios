@@ -1247,7 +1247,7 @@ private struct TaskBoardDetailView: View {
                 }
             }
             Section(task.sessions.isEmpty ? "指派 Agent" : "再指派一个 Agent") {
-                TextField("提示词", text: $composePrompt, prompt: Text("输入这次派给 Agent 的提示词…"), axis: .vertical)
+                TextField("提示词", text: $composePrompt, prompt: Text("输入这次派给 Agent 的提示词。任务描述不会自动带上。"), axis: .vertical)
                     .lineLimit(3...8)
                 Picker("CLI 工具", selection: Binding(
                     get: { agent.provider },
@@ -1306,7 +1306,7 @@ private struct TaskBoardDetailView: View {
             Section("任务内的会话") {
                 let groups = wandBoardSessionGroups(sessions: task.sessions, assigned: task.agent)
                 if groups.isEmpty {
-                    Text("还没有关联会话。描述会作为第一次派发的任务内容。")
+                    Text("还没有关联会话。在下面输入提示词后再派发，任务描述不会自动带上。")
                         .foregroundColor(Theme.textMuted)
                 } else {
                     ForEach(groups) { group in

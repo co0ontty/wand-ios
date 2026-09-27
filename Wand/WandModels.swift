@@ -1407,24 +1407,21 @@ struct CardExpandDefaults: Decodable, Equatable {
     var inlineTools = false
     var terminal = false
     var thinking = false
-    var toolGroup = false
 
     init(
         editCards: Bool = false,
         inlineTools: Bool = false,
         terminal: Bool = false,
-        thinking: Bool = false,
-        toolGroup: Bool = false
+        thinking: Bool = false
     ) {
         self.editCards = editCards
         self.inlineTools = inlineTools
         self.terminal = terminal
         self.thinking = thinking
-        self.toolGroup = toolGroup
     }
 
     private enum CodingKeys: String, CodingKey {
-        case editCards, inlineTools, terminal, thinking, toolGroup
+        case editCards, inlineTools, terminal, thinking
     }
 
     init(from decoder: Decoder) throws {
@@ -1433,7 +1430,6 @@ struct CardExpandDefaults: Decodable, Equatable {
         inlineTools = try values.decodeIfPresent(Bool.self, forKey: .inlineTools) ?? false
         terminal = try values.decodeIfPresent(Bool.self, forKey: .terminal) ?? false
         thinking = try values.decodeIfPresent(Bool.self, forKey: .thinking) ?? false
-        toolGroup = try values.decodeIfPresent(Bool.self, forKey: .toolGroup) ?? false
     }
 
     func shouldExpandTool(_ toolName: String) -> Bool {

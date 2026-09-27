@@ -562,8 +562,14 @@ enum TaskListPresentation {
         sessionCount > 0
     }
 
-    static func isTaskSessionsExpanded(userCollapsed: Bool, sessionCount: Int) -> Bool {
-        !showsTaskSessionDisclosure(sessionCount: sessionCount) || !userCollapsed
+    /// 无终端的任务默认折叠、不显示空提示；只有当它是目录里唯一任务时才展开引导创建首个会话。
+    static func isTaskSessionsExpanded(
+        userCollapsed: Bool,
+        sessionCount: Int,
+        isOnlyTask: Bool = false
+    ) -> Bool {
+        guard showsTaskSessionDisclosure(sessionCount: sessionCount) else { return isOnlyTask }
+        return !userCollapsed
     }
 
     struct ManageSelection: Equatable {

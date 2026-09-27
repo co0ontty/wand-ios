@@ -459,7 +459,10 @@ final class WorkspaceTests: XCTestCase {
 
     func testTaskTreeHidesNeedlessCaretsAndKeepsTerminalsOpen() {
         XCTAssertFalse(TaskListPresentation.showsTaskSessionDisclosure(sessionCount: 0))
-        XCTAssertTrue(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: true, sessionCount: 0))
+        XCTAssertFalse(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: false, sessionCount: 0))
+        XCTAssertTrue(TaskListPresentation.isTaskSessionsExpanded(
+            userCollapsed: false, sessionCount: 0, isOnlyTask: true
+        ))
         XCTAssertFalse(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: true, sessionCount: 2))
         XCTAssertTrue(TaskListPresentation.isTaskSessionsExpanded(userCollapsed: false, sessionCount: 2))
     }
