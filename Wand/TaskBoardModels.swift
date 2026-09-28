@@ -214,11 +214,39 @@ func wandBoardModeLabel(_ mode: String) -> String {
     }
 }
 
+/// 「跟随 X 默认」这种没写明模型的文案不算名字，其余去掉「（X 默认）」尾巴后就是 CLI 报出来的默认模型。
+private let wandBoardGenericDefaultModelLabel = try! NSRegularExpression(pattern: "^跟随.*默认$")
+private let wandBoardDefaultModelLabelTail = try! NSRegularExpression(pattern: "\\s*[（(][^（()）]*默认[^（()）]*[）)]\\s*$")
+
+/// 界面上要显示的模型名：`default` / 空值是「跟随服务端默认」的哨兵值、不是模型名，
+/// 换成真正会用的那个模型：先看服务端为该 CLI 配置的默认模型，再看 CLI 自己报出来的默认项
+/// （Codex / Grok 的目录项里写了具体模型名）。三处都拿不到名字返回空串，由调用方决定兜底。
+/// 口径与 Web `wandModelDisplayName` 一致。
+func wandModelDisplayName(_ provider: String, _ model: String?, _ catalog: ModelsResponse?) -> String {
+    let id = (model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    if !id.isEmpty && id != "default" { return id }
+    // 认不出的 provider（`session` / `shell` = 终端）不猜默认模型。
+    guard WandProvider(rawValue: provider) != nil else { return "" }
+    let configured = (catalog?.defaultModelId(for: provider) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    if !configured.isEmpty && configured != "default" { return configured }
+    let label = catalog?.models(for: provider).first { $0.id == "default" }?.label ?? ""
+    let range = NSRange(label.startIndex..<label.endIndex, in: label)
+    let stripped = wandBoardDefaultModelLabelTail
+        .stringByReplacingMatches(in: label, range: range, withTemplate: "")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !stripped.isEmpty else { return "" }
+    let strippedRange = NSRange(stripped.startIndex..<stripped.endIndex, in: stripped)
+    return wandBoardGenericDefaultModelLabel.firstMatch(in: stripped, range: strippedRange) == nil ? stripped : ""
+}
+
 /// 已指派 Agent 的分组标题：provider · 模型 · 运行模式。
-func wandBoardAgentTitle(_ provider: String, _ agent: WandBoardTaskAgent?) -> String {
+/// 模型是 `default` 哨兵时显示服务端默认模型的具体名字（拿不到名字才省掉这一段，不写「默认模型」）。
+func wandBoardAgentTitle(_ provider: String, _ agent: WandBoardTaskAgent?, _ catalog: ModelsResponse? = nil) -> String {
     guard let agent else { return wandBoardProviderLabel(provider) }
-    let model = agent.model == "default" ? "默认模型" : agent.model
-    return "\(wandBoardProviderLabel(provider)) · \(model) · \(wandBoardModeLabel(agent.mode))"
+    let model = wandModelDisplayName(provider, agent.model, catalog)
+    return [wandBoardProviderLabel(provider), model, wandBoardModeLabel(agent.mode)]
+        .filter { !$0.isEmpty }
+        .joined(separator: " · ")
 }
 
 func wandBoardProviderLabel(_ provider: String) -> String {

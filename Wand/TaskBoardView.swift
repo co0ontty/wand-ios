@@ -1311,7 +1311,7 @@ private struct TaskBoardDetailView: View {
                 } else {
                     ForEach(groups) { group in
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(wandBoardAgentTitle(group.provider, group.agent))
+                            Text(wandBoardAgentTitle(group.provider, group.agent, catalog))
                                 .font(.subheadline.weight(.semibold))
                             if group.sessions.isEmpty {
                                 Text("默认执行参数 · 尚无关联会话")
@@ -1328,7 +1328,9 @@ private struct TaskBoardDetailView: View {
                                                     .frame(width: 14, height: 14)
                                                 VStack(alignment: .leading, spacing: 2) {
                                                     Text(session.title.isEmpty ? wandBoardProviderLabel(session.provider) : session.title)
-                                                    Text([session.model, session.status].filter { !$0.isEmpty }.joined(separator: " · "))
+                                                    Text([wandModelDisplayName(session.provider, session.model, catalog), session.status]
+                                                            .filter { !$0.isEmpty }
+                                                            .joined(separator: " · "))
                                                         .font(.caption)
                                                         .foregroundColor(Theme.textMuted)
                                                 }
