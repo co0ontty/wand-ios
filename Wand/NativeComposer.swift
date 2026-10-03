@@ -9,6 +9,92 @@ enum ComposerMetrics {
     static let actionSpacing: CGFloat = 0
 }
 
+enum ComposerSendPhase: Equatable {
+    case idle, sending, sent, failed
+}
+
+func composerPrimaryActionStops(phase: ComposerSendPhase, turnRunning: Bool, hasDraft: Bool) -> Bool {
+    phase == .idle && turnRunning && !hasDraft
+}
+
+/// The same button instance carries Send/Stop/loading/result in a fixed slot.
+struct NativeComposerActionButton: View {
+    let phase: ComposerSendPhase
+    let turnRunning: Bool
+    let hasDraft: Bool
+    let canSubmit: Bool
+    let message: String?
+    let onSend: () -> Void
+    let onStop: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var stopping: Bool {
+        composerPrimaryActionStops(phase: phase, turnRunning: turnRunning, hasDraft: hasDraft)
+    }
+    private var tint: Color {
+        switch phase {
+        case .sent: return Theme.success
+        case .failed: return Theme.danger
+        case .sending: return Theme.brand
+        case .idle: return canSubmit || stopping ? Theme.textPrimary : Theme.textSecondary.opacity(0.16)
+        }
+    }
+    private var label: String {
+        switch phase {
+        case .sending: return "发送中"
+        case .sent: return "已送达"
+        case .failed: return message ?? "发送失败"
+        case .idle: return stopping ? "停止任务" : "发送"
+        }
+    }
+
+    var body: some View {
+        Button {
+            if stopping { onStop() } else { onSend() }
+        } label: {
+            ZStack {
+                symbol("arrow.up", visible: phase == .idle && !stopping)
+                symbol("stop.fill", visible: stopping)
+                symbol("checkmark", visible: phase == .sent)
+                symbol("exclamationmark", visible: phase == .failed)
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(Theme.surface)
+                    .opacity(phase == .sending ? 1 : 0)
+            }
+            .font(.system(size: 16, weight: .bold))
+            .foregroundStyle(phase == .idle && !canSubmit && !stopping ? Theme.textSecondary : Theme.surface)
+            .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
+            .background(Circle().fill(tint))
+            .animation(reduceMotion ? nil : WandMotion.stateSwap, value: phase)
+            .animation(reduceMotion ? nil : WandMotion.stateSwap, value: stopping)
+        }
+        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+        .buttonStyle(.plain)
+        .disabled(phase == .sending || (!canSubmit && !stopping))
+        .accessibilityLabel(label)
+        .overlay(alignment: .bottomTrailing) {
+            if phase == .failed, let message {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(Theme.danger)
+                    .padding(8)
+                    .frame(width: 240, alignment: .leading)
+                    .background(Theme.elevated, in: RoundedRectangle(cornerRadius: 10))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .offset(y: -ComposerMetrics.actionTouchSize)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private func symbol(_ name: String, visible: Bool) -> some View {
+        Image(systemName: name)
+            .opacity(visible ? 1 : 0)
+            .scaleEffect(reduceMotion || visible ? 1 : 0.9)
+    }
+}
+
 struct ComposerInputHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
@@ -100,6 +186,44 @@ func appendingVoiceTranscript(_ transcript: String, to draft: String) -> String 
         draft.unicodeScalars.removeLast()
     }
     return draft.isEmpty ? transcript : draft + " " + transcript
+}
+
+struct ComposerDraftSubmission {
+    let text: String
+    let attachments: [UploadedFile]
+    let textRevision: Int
+    var prompt: String { buildAttachmentPrompt(attachments, body: text) }
+}
+
+/// One session-owned in-memory buffer; pages only bind/project it. Retain content
+/// until a receipt, and never persist an uncertain submission or clear newer input.
+@MainActor
+final class ComposerDraftState: ObservableObject {
+    @Published var text = "" {
+        didSet { textRevision += 1 }
+    }
+    private(set) var textRevision = 0
+    let attachments: ComposerAttachmentController
+
+    init(sessionId: String, api: WandAPI) {
+        attachments = ComposerAttachmentController(sessionId: sessionId, api: api)
+    }
+
+    func submission() -> ComposerDraftSubmission {
+        ComposerDraftSubmission(text: text, attachments: attachments.attachments, textRevision: textRevision)
+    }
+
+    func accepted(_ submission: ComposerDraftSubmission) {
+        if textRevision == submission.textRevision { text = "" }
+        let paths = Set(submission.attachments.map(\.savedPath))
+        attachments.attachments.removeAll { paths.contains($0.savedPath) }
+    }
+
+    func appendVoice(_ transcript: String, ifUnchangedSince startedRevision: Int) {
+        guard textRevision == startedRevision,
+              !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        text = appendingVoiceTranscript(transcript, to: text)
+    }
 }
 
 @MainActor

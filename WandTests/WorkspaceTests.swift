@@ -35,10 +35,19 @@ final class WorkspaceTests: XCTestCase {
                 title: "wand",
                 providerLabel: "Pi",
                 cwd: "/Users/me/wand",
-                index: 0,
-                parentNames: ["wand"]
+                index: 0
             ),
             "Pi 1"
+        )
+        // 任务名重复的标题照显示：最新会话的标题常常正好等于任务首行。
+        XCTAssertEqual(
+            TaskListPresentation.listSessionLabel(
+                title: "重构会话恢复流程",
+                providerLabel: "Pi",
+                cwd: "/Users/me/wand",
+                index: 0
+            ),
+            "重构会话恢复流程"
         )
     }
 

@@ -654,20 +654,37 @@ enum TaskListPresentation {
         session.inFlight == true || ["running", "thinking", "permission", "waiting-input", "reconnecting"].contains(session.activityStatus)
     }
 
+    /// 占位标题（空 / 会话 / 裸 CLI 名 / 「CLI N」）不是会话标题。
+    private static let placeholderSessionTitles: Set<String> = [
+        "会话", "wand 会话", "claude", "codex", "opencode", "grok", "qoder", "pi", "gemini", "终端",
+    ]
+
+    static func isPlaceholderSessionTitle(_ title: String) -> Bool {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.isEmpty || placeholderSessionTitles.contains(normalized) { return true }
+        return normalized.range(
+            of: #"^(claude|codex|opencode|grok|qoder|pi|gemini|终端)\s+\d+$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    /// 旧版终端把 cwd 末段当标题：目录名不算会话标题。
+    private static func isDirectoryFallbackTitle(_ title: String, cwd: String?) -> Bool {
+        let leaf = (cwd ?? "").replacingOccurrences(of: "\\", with: "/").split(separator: "/").map(String.init).last ?? ""
+        return !leaf.isEmpty && leaf.caseInsensitiveCompare(title) == .orderedSame
+    }
+
+    /// 有会话标题就显示标题（和任务名重复也照显示）；只有占位标题或目录名兜底时才回退「CLI 序号」。
     static func listSessionLabel(
         title: String?,
         providerLabel: String,
         cwd: String?,
-        index: Int,
-        parentNames: [String]
+        index: Int
     ) -> String {
         let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let leaf = (cwd ?? "").replacingOccurrences(of: "\\", with: "/").split(separator: "/").map(String.init).last ?? ""
-        let repeats = !trimmed.isEmpty && (
-            parentNames.contains { $0.caseInsensitiveCompare(trimmed) == .orderedSame } ||
-            (!leaf.isEmpty && leaf.caseInsensitiveCompare(trimmed) == .orderedSame)
-        )
-        if !trimmed.isEmpty && !repeats { return trimmed }
+        if !trimmed.isEmpty, !isPlaceholderSessionTitle(trimmed), !isDirectoryFallbackTitle(trimmed, cwd: cwd) {
+            return trimmed
+        }
         return "\(providerLabel) \(index + 1)"
     }
 }

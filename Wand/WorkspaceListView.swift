@@ -1073,8 +1073,7 @@ struct WorkspaceListView: View {
             title: session.title,
             providerLabel: session.providerLabel,
             cwd: session.cwd,
-            index: index,
-            parentNames: [workspace.name, summary.name]
+            index: index
         )
         return HStack(spacing: 10) {
             if isSelecting {
@@ -1152,8 +1151,7 @@ struct WorkspaceListView: View {
             title: session.title,
             providerLabel: session.providerLabel,
             cwd: session.cwd,
-            index: 0,
-            parentNames: []
+            index: 0
         )
     }
 
@@ -1162,8 +1160,7 @@ struct WorkspaceListView: View {
             title: session.title,
             providerLabel: session.providerLabel,
             cwd: session.cwd,
-            index: 0,
-            parentNames: []
+            index: 0
         )
     }
 
@@ -1278,8 +1275,7 @@ struct WorkspaceListView: View {
                     title: session.title,
                     providerLabel: session.providerLabel,
                     cwd: session.cwd,
-                    index: 0,
-                    parentNames: [workspace.name]
+                    index: 0
                 ))
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(Theme.textPrimary)

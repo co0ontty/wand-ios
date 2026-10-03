@@ -38,6 +38,12 @@ final class ChatStore: ObservableObject {
     @Published var loading = true
     @Published var loadError: String?
     @Published var toast: String?
+    @Published private(set) var inputSending = false
+    @Published private(set) var inputFeedback = ComposerSendPhase.idle
+    @Published private(set) var inputFeedbackMessage: String?
+    private var inputFeedbackTask: Task<Void, Never>?
+    /// Unknown delivery stays in memory only; never silently offer it for retransmission.
+    @Published private(set) var unconfirmedInput: String?
     @Published var availableModels: [ModelInfo] = []
     @Published var defaultModel: String?
     @Published var selectedModel: String?
@@ -68,6 +74,8 @@ final class ChatStore: ObservableObject {
 
     let sessionId: String
     let api: WandAPI
+    let composerDraft: ComposerDraftState
+    private let inputTransport: any SessionInputTransport
     let serverID: String
     @Published private(set) var snapshot: SessionSnapshot?
     private let socket: WandSocket
@@ -106,9 +114,15 @@ final class ChatStore: ObservableObject {
     var isStructured: Bool { snapshot?.isStructured ?? true }
     var sessionEnded: Bool { ["exited", "failed", "stopped"].contains(status) }
 
-    init(sessionId: String, api: WandAPI) {
+    init(
+        sessionId: String,
+        api: WandAPI,
+        inputTransport: (any SessionInputTransport)? = nil
+    ) {
         self.sessionId = sessionId
         self.api = api
+        self.composerDraft = ComposerDraftState(sessionId: sessionId, api: api)
+        self.inputTransport = inputTransport ?? api
         self.serverID = ServerProfiles.stableID(for: api.baseURL)
         self.socket = WandSocket(baseURL: api.baseURL)
         // init/resync/全量快照也按块级窗口下发（与 REST getSession 的 blockBudget 对齐）。
@@ -525,31 +539,37 @@ final class ChatStore: ObservableObject {
 
     /// 发送一条消息。PTY 会话走 chat 视图语义：文本和 Enter 分两次发，
     /// 对齐 Web 端 getTerminalSubmitChunks，避免回车被并入粘贴内容。
+    @discardableResult
     func send(
         text: String,
         forcePtyChat: Bool = false,
+        onAccepted: (() -> Void)? = nil,
         onFailure: (() -> Void)? = nil
-    ) {
+    ) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty, !inputSending else { return false }
+        guard unconfirmedInput != trimmed else {
+            finishInputFeedback(accepted: false, message: "上一条消息送达结果未知，请先核对会话，不要重复发送。")
+            return false
+        }
         let structured = forcePtyChat ? false : isStructured
         let queueing = structured && isResponding && status == "running"
         if queueing, queueMutationPending {
-            toast = "排队消息正在更新，请稍后再试。"
-            return
+            finishInputFeedback(accepted: false, message: "排队消息正在更新，请稍后再试。")
+            return false
         }
         if queueing, lastSubmittedStructuredInput() == trimmed {
-            toast = "与上一条消息相同，已忽略，不会加入排队。"
-            return
+            finishInputFeedback(accepted: false, message: "与上一条消息相同，已忽略，不会加入排队。")
+            return false
         }
         let requestRevision = realtimeRevision
         let previousMessages = messages
         let previousQueue = queuedMessages
+        beginInputFeedback()
         if structured {
             if queueing {
                 queueMutationPending = true
                 queuedMessages.append(trimmed)
-                toast = "已加入排队，等当前回复完成会自动发送。"
             } else {
                 messages.append(ConversationTurn(
                     role: "user",
@@ -561,14 +581,17 @@ final class ChatStore: ObservableObject {
             publishPresence()
         }
         Task {
+            defer {
+                inputSending = false
+                if queueing { queueMutationPending = false }
+            }
             do {
                 if structured {
                     // 结构化回复通过事件流持续更新；HTTP 只需确认服务端已接收。
                     // 若等待整轮完成，首轮生成标题与模型回复可能超过 30 秒并被误报为网络超时。
-                    let accepted = try await api.sendInput(
+                    let accepted = try await inputTransport.sendStructuredInput(
                         id: sessionId,
-                        input: trimmed,
-                        respondImmediately: !queueing
+                        input: trimmed
                     )
                     // HTTP 202 已包含服务端刚接受的 canonical snapshot。立刻应用它，
                     // 再向 socket 请求一次校准：这样 WS 正在重连/首帧丢失时，发送后也
@@ -580,9 +603,15 @@ final class ChatStore: ObservableObject {
                 } else {
                     try await sendPtyChatInput(trimmed)
                 }
+                onAccepted?()
+                finishInputFeedback(accepted: true)
             } catch {
-                toast = error.localizedDescription
-                if structured, realtimeRevision == requestRevision {
+                let rejected = isDefiniteInputRejection(error)
+                let message = rejected
+                    ? error.localizedDescription
+                    : "送达结果未知，请先核对会话，勿重复发送。"
+                finishInputFeedback(accepted: false, message: message)
+                if rejected, structured, realtimeRevision == requestRevision {
                     if queueing { queuedMessages = previousQueue }
                     else {
                         messages = previousMessages
@@ -591,9 +620,32 @@ final class ChatStore: ObservableObject {
                 } else if structured {
                     socket.requestResync()
                 }
-                onFailure?()
+                if rejected { onFailure?() }
+                else { unconfirmedInput = trimmed }
             }
-            if queueing { queueMutationPending = false }
+        }
+        return true
+    }
+
+    private func beginInputFeedback() {
+        inputFeedbackTask?.cancel()
+        inputFeedbackMessage = nil
+        inputFeedback = .sending
+        inputSending = true
+    }
+
+    private func finishInputFeedback(accepted: Bool, message: String? = nil) {
+        inputFeedbackTask?.cancel()
+        let phase: ComposerSendPhase = accepted ? .sent : .failed
+        inputFeedbackMessage = message
+        inputFeedback = phase
+        inputFeedbackTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: accepted ? WandMotion.submittedDwell : WandMotion.failedDwell)
+            } catch { return }
+            guard let self, inputFeedback == phase else { return }
+            inputFeedback = .idle
+            inputFeedbackMessage = nil
         }
     }
 
@@ -623,7 +675,30 @@ final class ChatStore: ObservableObject {
     }
 
     func sendPtyTerminalInput(_ text: String) async throws {
-        try await sendPtyInput(text, view: "terminal")
+        guard !inputSending else {
+            throw WandAPI.APIError.server(status: 400, message: "正在提交上一条输入")
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard unconfirmedInput != trimmed else {
+            finishInputFeedback(accepted: false, message: "上一条输入送达结果未知，请先核对终端。")
+            throw UnconfirmedSessionInput(underlying: WandAPI.APIError.network(
+                "上一条输入送达结果未知，请先核对终端"
+            ))
+        }
+        beginInputFeedback()
+        defer { inputSending = false }
+        do {
+            try await sendPtyInput(trimmed, view: "terminal")
+            finishInputFeedback(accepted: true)
+        } catch {
+            let rejected = isDefiniteInputRejection(error)
+            if !rejected { unconfirmedInput = trimmed }
+            finishInputFeedback(
+                accepted: false,
+                message: rejected ? error.localizedDescription : "送达结果未知，请先核对终端，勿重复发送。"
+            )
+            throw error
+        }
     }
 
     func sendPtyPasteSequence(_ sequence: String) async throws {
@@ -665,19 +740,14 @@ final class ChatStore: ObservableObject {
         let submission = ptyInputSubmission(text: text, view: view)
         try await enqueuePtyInput { [self] in
             try await ensurePtyRunningForInput()
-            try await api.sendPtyInputChunk(
-                id: sessionId,
-                input: submission.text.input,
-                view: submission.text.view,
-                shortcutKey: submission.text.shortcutKey
-            )
-            try await Task.sleep(nanoseconds: 30_000_000)
-            try await api.sendPtyInputChunk(
-                id: sessionId,
-                input: submission.enter.input,
-                view: submission.enter.view,
-                shortcutKey: submission.enter.shortcutKey
-            )
+            try await sendPtySubmission(submission) { chunk in
+                try await inputTransport.sendPtyInputChunk(
+                    id: sessionId,
+                    input: chunk.input,
+                    view: chunk.view,
+                    shortcutKey: chunk.shortcutKey
+                )
+            }
         }
     }
 
@@ -922,23 +992,39 @@ final class ChatStore: ObservableObject {
     /// 答案不乐观插入用户气泡——服务端会把它作为 tool_result 回推、卡片转只读态。
     func submitAskUser(toolUseId: String, answerText: String) {
         var sel = askUserSelections[toolUseId] ?? AskUserSelectionState()
-        guard !sel.submitted else { return }
+        guard !sel.submitted, !inputSending else { return }
+        let requestRevision = realtimeRevision
+        let wasResponding = isResponding
+        let structured = isStructured
         sel.submitted = true
         askUserSelections[toolUseId] = sel
-        if isStructured { isResponding = true }
+        beginInputFeedback()
+        if structured { isResponding = true }
         Task {
+            defer { inputSending = false }
             do {
-                if isStructured {
-                    try await api.sendInput(id: sessionId, input: answerText, respondImmediately: true)
+                if structured {
+                    let accepted = try await inputTransport.sendStructuredInput(
+                        id: sessionId, input: answerText
+                    )
+                    if realtimeRevision == requestRevision { apply(snapshot: accepted) }
+                    socket.requestResync()
                 } else {
                     try await sendPtyChatInput(answerText)
                 }
+                finishInputFeedback(accepted: true)
             } catch {
-                toast = error.localizedDescription
-                var rollback = askUserSelections[toolUseId] ?? AskUserSelectionState()
-                rollback.submitted = false
-                askUserSelections[toolUseId] = rollback
-                if isStructured { isResponding = false }
+                if isDefiniteInputRejection(error) {
+                    finishInputFeedback(accepted: false, message: error.localizedDescription)
+                    var rollback = askUserSelections[toolUseId] ?? AskUserSelectionState()
+                    rollback.submitted = false
+                    askUserSelections[toolUseId] = rollback
+                    if structured, realtimeRevision == requestRevision { isResponding = wasResponding }
+                } else {
+                    unconfirmedInput = answerText
+                    finishInputFeedback(accepted: false, message: "答案送达结果未知，请先核对会话，勿重复提交。")
+                    if structured { socket.requestResync() }
+                }
             }
         }
     }

@@ -46,7 +46,9 @@ private struct PtySessionView: View {
     @StateObject private var terminalWebModel = WebViewModel()
     @StateObject private var keyboard = KeyboardObserver()
     @StateObject private var speech = SpeechRecognizerService()
-    @State private var draft = ""
+    @StateObject private var composerDraft: ComposerDraftState
+    @State private var voiceDraftRevision = 0
+    private var draft: String { composerDraft.text }
     @State private var showStopConfirm = false
     @State private var showQuickCommit = false
     @StateObject private var attachments: ComposerAttachmentController
@@ -75,8 +77,10 @@ private struct PtySessionView: View {
         self.session = session
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
-        _store = StateObject(wrappedValue: ChatStore(sessionId: session.id, api: api))
-        _attachments = StateObject(wrappedValue: ComposerAttachmentController(sessionId: session.id, api: api))
+        let chatStore = ChatStore(sessionId: session.id, api: api)
+        _store = StateObject(wrappedValue: chatStore)
+        _composerDraft = StateObject(wrappedValue: chatStore.composerDraft)
+        _attachments = StateObject(wrappedValue: chatStore.composerDraft.attachments)
     }
 
     var body: some View {
@@ -148,8 +152,9 @@ private struct PtySessionView: View {
             }
         }
         .onAppear {
-            attachments.setToastHandler { store.toast = $0 }
-            attachments.setPtyPasteHandler { files in
+            attachments.setToastHandler { [weak store] in store?.toast = $0 }
+            attachments.setPtyPasteHandler { [weak store] files in
+                guard let store else { throw CancellationError() }
                 try await store.pasteUploadedPathsIntoPty(files)
             }
             terminalWebModel.requestTerminalInput = {
@@ -566,7 +571,7 @@ private struct PtySessionView: View {
                 )
             }
             IMEAwareComposerTextView(
-                text: $draft,
+                text: $composerDraft.text,
                 placeholder: ptyComposerPlaceholder,
                 isFocused: inputFocused,
                 disableAutocorrect: true,
@@ -629,30 +634,11 @@ private struct PtySessionView: View {
     }
 
     @ViewBuilder private var trailingButtons: some View {
-        if store.isResponding && !canSend {
-            composerVoiceButton
-            stopButtonPrimary
-        } else {
-            if store.isResponding {
-                stopButtonSecondary
-            }
-            composerVoiceButton
-            sendButton
+        if store.isResponding && canSend {
+            stopButtonSecondary
         }
-    }
-
-    private var stopButtonPrimary: some View {
-        Button { showStopConfirm = true } label: {
-            Image(systemName: "stop.fill")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(Theme.surface)
-                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-                .background(Circle().fill(Theme.textPrimary))
-                .overlay(Circle().stroke(Theme.border.opacity(0.25), lineWidth: 0.5))
-        }
-        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-        .buttonStyle(.plain)
-        .accessibilityLabel("停止任务")
+        composerVoiceButton
+        sendButton
     }
 
     private var stopButtonSecondary: some View {
@@ -669,19 +655,17 @@ private struct PtySessionView: View {
     }
 
     private var sendButton: some View {
-        Button(action: sendDraft) {
-            Image(systemName: "arrow.up")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundColor(canSend ? Theme.surface : Theme.textSecondary.opacity(0.55))
-                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-                .background(
-                    Circle().fill(canSend ? Theme.textPrimary : Theme.textSecondary.opacity(0.16))
-                )
-        }
-        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-        .buttonStyle(.plain)
-        .disabled(!canSend)
-        .accessibilityLabel("发送")
+        NativeComposerActionButton(
+            phase: store.inputFeedback,
+            turnRunning: store.isResponding,
+            hasDraft: composerDraftIsSendable(
+                draft, hasAttachments: !attachments.attachments.isEmpty, isComposing: false
+            ),
+            canSubmit: canSend,
+            message: store.inputFeedbackMessage,
+            onSend: sendDraft,
+            onStop: { showStopConfirm = true }
+        )
     }
 
     private var ptyComposerPlaceholder: String {
@@ -724,7 +708,7 @@ private struct PtySessionView: View {
     }
 
     private var canSend: Bool {
-        composerDraftIsSendable(
+        !store.inputSending && !attachments.isUploading && composerDraftIsSendable(
             draft,
             hasAttachments: !attachments.attachments.isEmpty,
             isComposing: composerIsComposing
@@ -733,27 +717,17 @@ private struct PtySessionView: View {
 
     private func sendDraft() {
         guard canSend else { return }
-        let text = buildAttachmentPrompt(attachments.attachments, body: draft)
-        let restoreDraft = draft
-        let restoreAttachments = attachments.attachments
-        draft = ""
-        attachments.attachments.removeAll()
-        sendPtyInput(text, restoreDraft: restoreDraft, restoreAttachments: restoreAttachments)
-        inputFocused = true
-    }
-
-    private func sendPtyInput(_ text: String, restoreDraft: String, restoreAttachments: [UploadedFile]) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let submission = composerDraft.submission()
         Task {
             do {
-                try await store.sendPtyTerminalInput(trimmed)
+                try await store.sendPtyTerminalInput(submission.prompt)
+                composerDraft.accepted(submission)
             } catch {
-                if draft.isEmpty { draft = restoreDraft }
-                if attachments.attachments.isEmpty { attachments.attachments = restoreAttachments }
-                store.toast = error.localizedDescription
+                // Draft remains in this session's memory. The shared submit button owns
+                // rejection/unknown-delivery feedback; never reconstruct or retry input.
             }
         }
+        inputFocused = true
     }
 
     private func stopPtyInput() {
@@ -797,14 +771,16 @@ private struct PtySessionView: View {
                 let cancelled = voiceCanceling
                 voicePressed = false
                 voiceCanceling = false
+                let revision = voiceDraftRevision
                 speech.stop(cancelled: cancelled) { text in
-                    appendTranscriptToDraft(text)
+                    composerDraft.appendVoice(text, ifUnchangedSince: revision)
                 }
             }
     }
 
     private func startVoiceRecording() {
         guard !voicePressed else { return }
+        voiceDraftRevision = composerDraft.textRevision
         voicePressed = true
         voiceCanceling = false
         speech.start { message in
@@ -812,10 +788,6 @@ private struct PtySessionView: View {
             voicePressed = false
             voiceCanceling = false
         }
-    }
-
-    private func appendTranscriptToDraft(_ text: String) {
-        draft = appendingVoiceTranscript(text, to: draft)
     }
 
     private func refreshGitStatus() {

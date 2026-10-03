@@ -8,6 +8,22 @@ struct WandApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = ServerStore.shared
 
+    init() {
+#if DEBUG
+        // Explicit simulator QA bootstrap. Credentials never enter process arguments,
+        // environment values, URLs, logs or screenshots. Release builds omit this hook.
+        guard ProcessInfo.processInfo.environment["WAND_DEBUG_ACCEPTANCE_PROFILE"] == "1" else { return }
+        let file = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Documents/.wand-acceptance-profile.json")
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size]) as? NSNumber,
+              size.intValue <= 16_384,
+              let data = try? Data(contentsOf: file),
+              let profile = try? JSONDecoder().decode(ServerProfile.self, from: data) else { return }
+        _ = ServerStore.shared.saveProfile(serverURL: profile.baseURL, token: profile.token)
+        try? FileManager.default.removeItem(at: file)
+#endif
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

@@ -28,6 +28,13 @@ extension View {
     }
 }
 
+/// Shared motion/feedback tokens; views never author per-page timings.
+enum WandMotion {
+    static let stateSwap = Animation.easeInOut(duration: 0.18)
+    static let submittedDwell: UInt64 = 720_000_000
+    static let failedDwell: UInt64 = 1_500_000_000
+}
+
 enum WandAppearanceMode: String, CaseIterable, Identifiable {
     case light
     case dark

@@ -24,6 +24,7 @@
 		A1000000000000000000AC04 /* ChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC04 /* ChatStore.swift */; };
 		A1000000000000000000AC0D /* SessionMessageReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC0D /* SessionMessageReducer.swift */; };
 		A1000000000000000000AC0E /* PtyInputProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC0E /* PtyInputProtocol.swift */; };
+		A1000000000000000000AC12 /* SessionInputProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC12 /* SessionInputProtocol.swift */; };
 		A1000000000000000000AC0F /* NativeComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC0F /* NativeComposer.swift */; };
 		A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC10 /* SessionTimeFormatting.swift */; };
 		A1000000000000000000AC05 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC05 /* ChatView.swift */; };
@@ -122,6 +123,7 @@
 		A1000000000000000000BC04 /* ChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStore.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC0D /* SessionMessageReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMessageReducer.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC0E /* PtyInputProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PtyInputProtocol.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC12 /* SessionInputProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionInputProtocol.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC0F /* NativeComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeComposer.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC10 /* SessionTimeFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimeFormatting.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC05 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
@@ -230,6 +232,7 @@
 				A1000000000000000000BC04 /* ChatStore.swift */,
 				A1000000000000000000BC0D /* SessionMessageReducer.swift */,
 				A1000000000000000000BC0E /* PtyInputProtocol.swift */,
+				A1000000000000000000BC12 /* SessionInputProtocol.swift */,
 				A1000000000000000000BC0F /* NativeComposer.swift */,
 				A1000000000000000000BC10 /* SessionTimeFormatting.swift */,
 				A1000000000000000000BC05 /* ChatView.swift */,
@@ -475,6 +478,7 @@
 				A1000000000000000000AC04 /* ChatStore.swift in Sources */,
 				A1000000000000000000AC0D /* SessionMessageReducer.swift in Sources */,
 				A1000000000000000000AC0E /* PtyInputProtocol.swift in Sources */,
+				A1000000000000000000AC12 /* SessionInputProtocol.swift in Sources */,
 				A1000000000000000000AC0F /* NativeComposer.swift in Sources */,
 				A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */,
 				A1000000000000000000AC05 /* ChatView.swift in Sources */,

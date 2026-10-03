@@ -11,7 +11,7 @@ private extension Data {
 /// wand 服务端 REST 客户端。复用当前 endpoint 的 SelfSignedSession（自签证书放行 +
 /// 独立 cookieStorage），所以 WandAuth.loginWithToken 拿到的 session cookie 在这里
 /// 的每个请求上自动携带；遇到 401 时用存储的 appToken 重新登录一次再重试。
-final class WandAPI {
+final class WandAPI: SessionInputTransport {
     /// 聊天块级窗口默认预算：打开会话只拉最近这么多个内容块，更早的滚动到顶时按需翻页。
     static let chatBlockWindow = 60
 
@@ -407,6 +407,16 @@ final class WandAPI {
             throw APIError.server(status: http.statusCode, message: "附件上传失败")
         }
         return try JSONDecoder().decode(UploadResponse.self, from: data).files
+    }
+
+    /// Structured input always asks for a receipt, including while the server is busy.
+    func sendStructuredInput(id: String, input: String) async throws -> SessionSnapshot {
+        try await request(
+            SessionSnapshot.self,
+            method: "POST",
+            path: "/api/sessions/\(percentEncodePathComponent(id))/input",
+            body: structuredInputRequest(input: input)
+        )
     }
 
     @discardableResult

@@ -188,6 +188,15 @@ ios/
 - **bundle id**：`com.wand.app`，与 macOS 端一致。免费签名时工具可能会改写它，不影响使用。
 - **entitlements**：刻意**不带**特殊 entitlements（推送 / App Groups 等），保持最干净，最大化兼容免费账号签名——带了反而可能签名失败。
 
+## 模拟器验收
+
+Debug 构建可显式设置 `SIMCTL_CHILD_WAND_DEBUG_ACCEPTANCE_PROFILE=1`，从应用私有
+`Documents/.wand-acceptance-profile.json` 读取一个 `ServerProfile`（`baseUrl`、`token`）。
+文件最多16 KiB，读取后通过正常 `ServerStore.saveProfile` 登录状态入口保存并删除临时文件；
+Release 不包含这个入口。凭据不放进启动参数、环境变量、日志或截图。
+可同时设置既有 `SIMCTL_CHILD_WAND_DEBUG_OPEN_SESSION=<验收会话ID>` 打开真实服务的会话。
+验收后恢复原有服务器偏好；不要用 mock 服务代替最终验收。
+
 ## 注意
 
 - 客户端更新检查：`GET /api/ios-ipa-update`；安装走 `itms-services` + `/ios/manifest.plist`。不要在 App 内自己解包安装 IPA。

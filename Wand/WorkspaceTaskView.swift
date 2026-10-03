@@ -493,8 +493,7 @@ struct WorkspaceTaskView: View {
             title: session.title,
             providerLabel: session.providerLabel,
             cwd: session.cwd,
-            index: index,
-            parentNames: [workspace.name, task.name]
+            index: index
         )
     }
 

@@ -68,7 +68,9 @@ struct ChatView: View {
     @StateObject private var store: ChatStore
     @StateObject private var keyboard = KeyboardObserver()
     @StateObject private var speech = SpeechRecognizerService()
-    @State private var draft = ""
+    @StateObject private var composerDraft: ComposerDraftState
+    @State private var voiceDraftRevision = 0
+    private var draft: String { composerDraft.text }
     @State private var showQuickCommit = false
     @State private var scrollMode: ChatScrollMode = .stickToBottom
     @State private var voicePressed = false
@@ -114,8 +116,10 @@ struct ChatView: View {
         self.sessionId = sessionId
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
-        _store = StateObject(wrappedValue: ChatStore(sessionId: sessionId, api: api))
-        _attachments = StateObject(wrappedValue: ComposerAttachmentController(sessionId: sessionId, api: api))
+        let chatStore = ChatStore(sessionId: sessionId, api: api)
+        _store = StateObject(wrappedValue: chatStore)
+        _composerDraft = StateObject(wrappedValue: chatStore.composerDraft)
+        _attachments = StateObject(wrappedValue: chatStore.composerDraft.attachments)
     }
 
     var body: some View {
@@ -238,7 +242,7 @@ struct ChatView: View {
             )
         }
         .onAppear {
-            attachments.setToastHandler { store.toast = $0 }
+            attachments.setToastHandler { [weak store] in store?.toast = $0 }
             store.start()
             refreshGitStatus()
         }
@@ -1244,30 +1248,11 @@ struct ChatView: View {
     /// - 运行中且无草稿 → 唯一按钮是白底停止（对齐 Codex 的白圆黑方块）；
     /// - 有草稿 → 发送按钮（运行中时左侧追加一个红色停止，可一边排队一边停）。
     @ViewBuilder private var trailingButtons: some View {
-        if store.isResponding && !canSend {
-            composerVoiceButton
-            stopButtonPrimary
-        } else {
-            if store.isResponding {
-                stopButtonSecondary
-            }
-            composerVoiceButton
-            sendButton
+        if store.isResponding && canSend {
+            stopButtonSecondary
         }
-    }
-
-    private var stopButtonPrimary: some View {
-        Button { showStopConfirm = true } label: {
-            Image(systemName: "stop.fill")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(Theme.surface)
-                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-                .background(Circle().fill(Theme.textPrimary))
-                .overlay(Circle().stroke(Theme.border.opacity(0.25), lineWidth: 0.5))
-        }
-        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-        .buttonStyle(.plain)
-        .accessibilityLabel("停止任务")
+        composerVoiceButton
+        sendButton
     }
 
     private var stopButtonSecondary: some View {
@@ -1284,19 +1269,17 @@ struct ChatView: View {
     }
 
     private var sendButton: some View {
-        Button(action: sendDraft) {
-            Image(systemName: "arrow.up")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundColor(canSend ? Theme.surface : Theme.textSecondary.opacity(0.55))
-                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-                .background(
-                    Circle().fill(canSend ? Theme.textPrimary : Theme.textSecondary.opacity(0.16))
-                )
-        }
-        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-        .buttonStyle(.plain)
-        .disabled(!canSend)
-        .accessibilityLabel("发送")
+        NativeComposerActionButton(
+            phase: store.inputFeedback,
+            turnRunning: store.isResponding,
+            hasDraft: composerDraftIsSendable(
+                draft, hasAttachments: !attachments.attachments.isEmpty, isComposing: false
+            ),
+            canSubmit: canSend,
+            message: store.inputFeedbackMessage,
+            onSend: sendDraft,
+            onStop: { showStopConfirm = true }
+        )
     }
 
     // MARK: - 控制行徽标（模式 / 模型·思考）
@@ -1487,7 +1470,7 @@ struct ChatView: View {
     /// 多行自增高输入框。走 UIKit marked-text，避免中文输入法组字被 SwiftUI Binding 打断。
     private var growingTextField: some View {
         IMEAwareComposerTextView(
-            text: $draft,
+            text: $composerDraft.text,
             placeholder: composerPlaceholder,
             isFocused: inputFocused,
             onPasteImages: { items in
@@ -1515,7 +1498,7 @@ struct ChatView: View {
         // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
         // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
         // 组字未确认时不能发，否则会把拼音半成品送出去，或把候选确认键当成发送。
-        composerDraftIsSendable(
+        !store.inputSending && !attachments.isUploading && composerDraftIsSendable(
             draft,
             hasAttachments: !attachments.attachments.isEmpty,
             isComposing: composerIsComposing
@@ -1524,19 +1507,12 @@ struct ChatView: View {
 
     private func sendDraft() {
         guard canSend else { return }
-        let text = buildAttachmentPrompt(attachments.attachments, body: draft)
-        let savedDraft = draft
-        let savedAttachments = attachments.attachments
-        draft = ""
-        attachments.attachments.removeAll()
+        let submission = composerDraft.submission()
+        let started = store.send(text: submission.prompt, onAccepted: {
+            composerDraft.accepted(submission)
+        })
+        guard started else { return }
         scrollMode = .stickToBottom
-        store.send(text: text) {
-            // 发送失败时把草稿还回来，避免网络抖动直接吞掉用户输入。
-            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                draft = savedDraft
-            }
-            attachments.attachments = savedAttachments
-        }
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让输入框丢焦点。
         // 发送后主动保持焦点，方便连续输入。
         inputFocused = true
@@ -1582,8 +1558,9 @@ struct ChatView: View {
                 let cancelled = voiceCanceling
                 voicePressed = false
                 voiceCanceling = false
+                let revision = voiceDraftRevision
                 speech.stop(cancelled: cancelled) { text in
-                    appendTranscriptToDraft(text)
+                    composerDraft.appendVoice(text, ifUnchangedSince: revision)
                 }
             }
     }
@@ -1591,6 +1568,7 @@ struct ChatView: View {
     /// 按满阈值进入录音态（原「按下立即录音」交互的主体）。
     private func startVoiceRecording() {
         guard !voicePressed else { return }
+        voiceDraftRevision = composerDraft.textRevision
         voicePressed = true
         voiceCanceling = false
         speech.start { message in
@@ -1598,11 +1576,6 @@ struct ChatView: View {
             voicePressed = false
             voiceCanceling = false
         }
-    }
-
-    /// 识别文本追加进草稿（不覆盖已有内容，对齐 Web 端 commitVoiceTranscript）。
-    private func appendTranscriptToDraft(_ text: String) {
-        draft = appendingVoiceTranscript(text, to: draft)
     }
 
     /// 输入栏上方的实时转写气泡。

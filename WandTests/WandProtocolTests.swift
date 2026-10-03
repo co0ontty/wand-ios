@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import SwiftUI
 import UIKit
 import XCTest
@@ -6,6 +7,264 @@ import WebKit
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
+    func testStructuredInputAlwaysRequestsImmediateReceipt() {
+        let body = structuredInputRequest(input: "next message")
+        XCTAssertEqual(body["input"] as? String, "next message")
+        XCTAssertEqual(body["respondImmediately"] as? Bool, true)
+        XCTAssertEqual(Set(body.keys), ["input", "respondImmediately"])
+    }
+
+    func testOnlyDefinitePreAcceptanceFailuresRestoreInput() {
+        for status in [400, 401, 403, 404, 413, 422, 429] {
+            XCTAssertTrue(isDefiniteInputRejection(
+                WandAPI.APIError.server(status: status, message: "rejected")
+            ), "status=\(status)")
+        }
+        for status in [408, 409, 500, 502, 503] {
+            XCTAssertFalse(isDefiniteInputRejection(
+                WandAPI.APIError.server(status: status, message: "unknown")
+            ), "status=\(status)")
+        }
+        XCTAssertTrue(isDefiniteInputRejection(WandAPI.APIError.invalidURL))
+        XCTAssertTrue(isDefiniteInputRejection(WandAPI.APIError.unauthorized))
+        XCTAssertFalse(isDefiniteInputRejection(WandAPI.APIError.network("decode failed")))
+        XCTAssertFalse(isDefiniteInputRejection(CancellationError()))
+        XCTAssertFalse(isDefiniteInputRejection(UnconfirmedSessionInput(
+            underlying: WandAPI.APIError.server(status: 400, message: "later rejection")
+        )))
+    }
+
+    @MainActor
+    func testPtySubmissionKeepsSeparateOrderedRequestsAndMarksPartialAcceptance() async throws {
+        let submission = ptyInputSubmission(text: "hello", view: "terminal")
+        var sent: [PtyInputChunk] = []
+        try await sendPtySubmission(submission) { chunk in sent.append(chunk) }
+        XCTAssertEqual(sent, [submission.text, submission.enter])
+        XCTAssertEqual(sent.last?.input, "\r")
+
+        sent = []
+        do {
+            try await sendPtySubmission(submission) { chunk in
+                sent.append(chunk)
+                if chunk == submission.enter {
+                    throw WandAPI.APIError.server(status: 400, message: "enter rejected")
+                }
+            }
+            XCTFail("Expected partial delivery")
+        } catch {
+            XCTAssertTrue(error is UnconfirmedSessionInput)
+            XCTAssertFalse(isDefiniteInputRejection(error))
+        }
+        XCTAssertEqual(sent, [submission.text, submission.enter])
+    }
+
+    @MainActor
+    func testPtyFirstChunkRejectionDoesNotWriteEnter() async {
+        let submission = ptyInputSubmission(text: "hello", view: "chat")
+        var sent: [PtyInputChunk] = []
+        do {
+            try await sendPtySubmission(submission) { chunk in
+                sent.append(chunk)
+                throw WandAPI.APIError.server(status: 413, message: "too large")
+            }
+            XCTFail("Expected rejection")
+        } catch {
+            XCTAssertTrue(isDefiniteInputRejection(error))
+        }
+        XCTAssertEqual(sent, [submission.text])
+    }
+
+    @MainActor
+    func testStructuredInputUsesReceiptWhileBusyAndBlocksConcurrentSubmit() async throws {
+        let transport = InputReceiptStub(response: try decode(SessionSnapshot.self, from: #"{"id":"s","sessionKind":"structured","status":"running","structuredState":{"inFlight":true},"queuedMessages":["next"]}"#))
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
+        let store = ChatStore(sessionId: "s", api: api, inputTransport: transport)
+        store.isResponding = true
+        let finished = expectation(description: "receipt processed")
+        let subscription = store.$inputSending.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
+        store.composerDraft.text = "next"
+        let submitted = store.composerDraft.submission()
+        var acknowledgements = 0
+        XCTAssertTrue(store.send(text: "next", onAccepted: {
+            acknowledgements += 1
+            store.composerDraft.accepted(submitted)
+        }))
+        XCTAssertEqual(store.composerDraft.text, "next")
+        store.composerDraft.text = "typed while waiting"
+        XCTAssertFalse(store.send(text: "another"))
+        await fulfillment(of: [finished], timeout: 2)
+        withExtendedLifetime(subscription) {}
+        XCTAssertEqual(acknowledgements, 1)
+        XCTAssertEqual(store.composerDraft.text, "typed while waiting")
+        XCTAssertEqual(transport.inputs, ["next"])
+        XCTAssertEqual(store.queuedMessages, ["next"])
+        XCTAssertFalse(store.inputSending)
+        XCTAssertEqual(store.inputFeedback, .sent)
+        XCTAssertFalse(store.send(text: "next"), "Duplicate queue input must not clear the next draft")
+    }
+
+    @MainActor
+    func testUnknownDeliveryStaysInMemoryWithoutRestoringOrAllowingRepeat() async throws {
+        let snapshot = try decode(SessionSnapshot.self, from: #"{"id":"s","sessionKind":"structured","status":"idle"}"#)
+        for failure in [
+            WandAPI.APIError.server(status: 409, message: "conflict"),
+            WandAPI.APIError.server(status: 503, message: "unavailable"),
+            WandAPI.APIError.network("successful receipt failed decoding"),
+        ] {
+            let transport = InputReceiptStub(response: snapshot, failure: failure)
+            let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport)
+            let finished = expectation(description: "unknown delivery recorded")
+            let subscription = store.$inputSending.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
+            var restored = false
+            XCTAssertTrue(store.send(text: "prompt") { restored = true })
+            await fulfillment(of: [finished], timeout: 2)
+            withExtendedLifetime(subscription) {}
+            XCTAssertFalse(restored)
+            XCTAssertEqual(store.unconfirmedInput, "prompt")
+            XCTAssertEqual(store.inputFeedback, .failed)
+            XCTAssertFalse(store.send(text: "prompt"))
+            XCTAssertEqual(transport.inputs, ["prompt"])
+        }
+    }
+
+    @MainActor
+    func testDefiniteRejectionRollsBackAndRestoresExactlyOnce() async throws {
+        let transport = InputReceiptStub(
+            response: try decode(SessionSnapshot.self, from: #"{"id":"s","sessionKind":"structured","status":"idle"}"#),
+            failure: WandAPI.APIError.server(status: 413, message: "too large")
+        )
+        let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport)
+        let finished = expectation(description: "rejection processed")
+        let subscription = store.$inputSending.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
+        var restorations = 0
+        XCTAssertTrue(store.send(text: "prompt") { restorations += 1 })
+        await fulfillment(of: [finished], timeout: 2)
+        withExtendedLifetime(subscription) {}
+        XCTAssertEqual(restorations, 1)
+        XCTAssertTrue(store.messages.isEmpty)
+        XCTAssertFalse(store.isResponding)
+        XCTAssertNil(store.unconfirmedInput)
+    }
+
+    @MainActor
+    func testQuestionUnknownDeliveryDoesNotReenableSubmit() async throws {
+        let transport = InputReceiptStub(
+            response: try decode(SessionSnapshot.self, from: #"{"id":"s","sessionKind":"structured","status":"idle"}"#),
+            failure: WandAPI.APIError.server(status: 408, message: "timeout")
+        )
+        let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport)
+        let finished = expectation(description: "question delivery recorded")
+        let subscription = store.$inputSending.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
+        store.submitAskUser(toolUseId: "question", answerText: "yes")
+        await fulfillment(of: [finished], timeout: 2)
+        withExtendedLifetime(subscription) {}
+        XCTAssertEqual(store.askUserSelections["question"]?.submitted, true)
+        XCTAssertEqual(store.unconfirmedInput, "yes")
+        store.submitAskUser(toolUseId: "question", answerText: "yes")
+        XCTAssertEqual(transport.inputs, ["yes"])
+    }
+
+    @MainActor
+    func testComposerRetainsContentUntilAckAndDoesNotClearNewerText() {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
+        let buffer = ComposerDraftState(sessionId: "one", api: api)
+        buffer.text = "original"
+        let submitted = buffer.submission()
+        XCTAssertEqual(buffer.text, "original", "Do not clear before an acknowledgement")
+        buffer.accepted(submitted)
+        XCTAssertEqual(buffer.text, "")
+
+        buffer.text = "second"
+        let next = buffer.submission()
+        buffer.text = "new input"
+        buffer.accepted(next)
+        XCTAssertEqual(buffer.text, "new input")
+        buffer.text = ""
+        buffer.accepted(next)
+        XCTAssertEqual(buffer.text, "")
+        XCTAssertEqual(ComposerDraftState(sessionId: "two", api: api).text, "")
+    }
+
+    @MainActor
+    func testComposerAckRemovesOnlySubmittedAttachments() throws {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
+        let buffer = ComposerDraftState(sessionId: "one", api: api)
+        let file = try decode(UploadedFile.self, from: #"{"savedPath":"/repo/example.txt","originalName":"example.txt","size":10,"mimeType":"text/plain"}"#)
+        buffer.text = "original"
+        buffer.attachments.attachments = [file]
+        let submitted = buffer.submission()
+        let newer = try decode(UploadedFile.self, from: #"{"savedPath":"/repo/new.txt","originalName":"new.txt","size":10,"mimeType":"text/plain"}"#)
+        buffer.attachments.attachments.append(newer)
+        buffer.accepted(submitted)
+        XCTAssertEqual(buffer.attachments.attachments.map(\.savedPath), [newer.savedPath])
+        buffer.attachments.attachments = []
+        buffer.accepted(submitted)
+        XCTAssertTrue(buffer.attachments.attachments.isEmpty)
+        XCTAssertTrue(buffer.text.isEmpty)
+    }
+
+    @MainActor
+    func testComposerVoiceCommitsOnlyToTheRevisionAtRecordingStart() {
+        let buffer = ComposerDraftState(sessionId: "one", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil))
+        buffer.text = "original"
+        let started = buffer.textRevision
+        buffer.appendVoice("  ", ifUnchangedSince: started)
+        XCTAssertEqual(buffer.textRevision, started)
+        buffer.appendVoice("voice", ifUnchangedSince: started)
+        XCTAssertEqual(buffer.text, "original voice")
+        buffer.appendVoice("late", ifUnchangedSince: started)
+        XCTAssertEqual(buffer.text, "original voice")
+        let beforeSend = buffer.textRevision
+        buffer.accepted(buffer.submission())
+        buffer.appendVoice("late after submit", ifUnchangedSince: beforeSend)
+        XCTAssertEqual(buffer.text, "")
+    }
+
+    @MainActor
+    func testSessionDraftControllerDoesNotKeepItsStoreAlive() {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
+        var owner: ChatStore? = ChatStore(sessionId: "one", api: api)
+        weak var releasedOwner = owner
+        let controller = owner!.composerDraft.attachments
+        controller.setToastHandler { [weak owner] in owner?.toast = $0 }
+        controller.setPtyPasteHandler { [weak owner] files in
+            guard let owner else { throw CancellationError() }
+            try await owner.pasteUploadedPathsIntoPty(files)
+        }
+        owner = nil
+        XCTAssertNil(releasedOwner)
+        withExtendedLifetime(controller) {}
+    }
+
+    func testImeDraftMustNotTurnThePrimaryActionIntoStop() {
+        XCTAssertFalse(composerPrimaryActionStops(phase: .idle, turnRunning: true, hasDraft: true))
+        XCTAssertTrue(composerPrimaryActionStops(phase: .idle, turnRunning: true, hasDraft: false))
+        for phase: ComposerSendPhase in [.sending, .sent, .failed] {
+            XCTAssertFalse(composerPrimaryActionStops(phase: phase, turnRunning: true, hasDraft: false))
+        }
+    }
+
+    @MainActor
+    func testNativeSendButtonKeepsFixedGeometryThroughAllFeedbackStates() {
+        for hasDraft in [false, true] {
+            for phase: ComposerSendPhase in [.idle, .sending, .sent, .failed] {
+                let button = NativeComposerActionButton(
+                    phase: phase,
+                    turnRunning: true,
+                    hasDraft: hasDraft,
+                    canSubmit: hasDraft,
+                    message: phase == .failed ? "送达结果未知，请先核对会话，勿重复发送。" : nil,
+                    onSend: {}, onStop: {}
+                )
+                let host = UIHostingController(rootView: button)
+                let fitted = host.sizeThatFits(in: CGSize(width: 320, height: 600))
+                XCTAssertEqual(fitted.width, ComposerMetrics.actionTouchSize, accuracy: 1)
+                XCTAssertEqual(fitted.height, ComposerMetrics.actionTouchSize, accuracy: 1)
+            }
+        }
+        XCTAssertGreaterThan(WandMotion.failedDwell, WandMotion.submittedDwell)
+    }
+
     @MainActor
     func testComposerHeightDoesNotConsumeRemainingScreenSpace() {
         for expanded in [false, true] {
@@ -1311,6 +1570,29 @@ final class WandProtocolTests: XCTestCase {
 
     private func decode<T: Decodable>(_ type: T.Type, from json: String) throws -> T {
         try JSONDecoder().decode(type, from: XCTUnwrap(json.data(using: .utf8)))
+    }
+}
+
+@MainActor
+private final class InputReceiptStub: SessionInputTransport {
+    let response: SessionSnapshot
+    let failure: Error?
+    private(set) var inputs: [String] = []
+
+    init(response: SessionSnapshot, failure: Error? = nil) {
+        self.response = response
+        self.failure = failure
+    }
+
+    func sendStructuredInput(id: String, input: String) async throws -> SessionSnapshot {
+        inputs.append(input)
+        await Task.yield()
+        if let failure { throw failure }
+        return response
+    }
+
+    func sendPtyInputChunk(id: String, input: String, view: String, shortcutKey: String?) async throws {
+        XCTFail("Structured receipt tests must not write PTY chunks")
     }
 }
 
