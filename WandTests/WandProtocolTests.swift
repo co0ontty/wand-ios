@@ -78,7 +78,7 @@ final class WandProtocolTests: XCTestCase {
     func testStructuredInputUsesReceiptWhileBusyAndBlocksConcurrentSubmit() async throws {
         let transport = InputReceiptStub(response: try decode(SessionSnapshot.self, from: #"{"id":"s","sessionKind":"structured","status":"running","structuredState":{"inFlight":true},"queuedMessages":["next"]}"#))
         let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
-        let store = ChatStore(sessionId: "s", api: api, inputTransport: transport)
+        let store = ChatStore(sessionId: "s", api: api, inputTransport: transport, drafts: SessionDraftStore())
         store.isResponding = true
         let finished = expectation(description: "receipt processed")
         let subscription = store.$inputSending.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
@@ -112,7 +112,7 @@ final class WandProtocolTests: XCTestCase {
             WandAPI.APIError.network("successful receipt failed decoding"),
         ] {
             let transport = InputReceiptStub(response: snapshot, failure: failure)
-            let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport)
+            let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport, drafts: SessionDraftStore())
             let finished = expectation(description: "unknown delivery recorded")
             let subscription = store.$inputSending.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
             var restored = false
@@ -133,7 +133,7 @@ final class WandProtocolTests: XCTestCase {
             response: try decode(SessionSnapshot.self, from: #"{"id":"s","sessionKind":"structured","status":"idle"}"#),
             failure: WandAPI.APIError.server(status: 413, message: "too large")
         )
-        let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport)
+        let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport, drafts: SessionDraftStore())
         let finished = expectation(description: "rejection processed")
         let subscription = store.$inputSending.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
         var restorations = 0
@@ -152,7 +152,7 @@ final class WandProtocolTests: XCTestCase {
             response: try decode(SessionSnapshot.self, from: #"{"id":"s","sessionKind":"structured","status":"idle"}"#),
             failure: WandAPI.APIError.server(status: 408, message: "timeout")
         )
-        let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport)
+        let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport, drafts: SessionDraftStore())
         let finished = expectation(description: "question delivery recorded")
         let subscription = store.$inputSending.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
         store.submitAskUser(toolUseId: "question", answerText: "yes")
@@ -1368,7 +1368,7 @@ final class WandProtocolTests: XCTestCase {
             """#
         )
 
-        guard case .toolResult(let toolUseID, let text, let isError, let truncated, _, _) = block else {
+        guard case .toolResult(let toolUseID, let text, let isError, let truncated, _, _, _) = block else {
             return XCTFail("Expected tool_result block")
         }
         XCTAssertEqual(toolUseID, "tool-42")

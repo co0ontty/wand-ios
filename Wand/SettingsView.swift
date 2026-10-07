@@ -11,9 +11,11 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
+    @AppStorage(WandFeedback.storageKey) private var hapticEnabled = true
 
     @State private var serverVersion: String?
     @State private var confirmDisconnect = false
+    @State private var confirmRemoveServer = false
     @State private var notificationStatus = "读取中…"
     @State private var logShare: LogShareItem?
     @State private var logExportEmpty = false
@@ -31,6 +33,7 @@ struct SettingsView: View {
             Form {
                 settingsOverview
                 appearanceSection
+                voiceSection
                 featureSection
                 serverSection
                 diagnosticsSection
@@ -72,6 +75,16 @@ struct SettingsView: View {
         } message: {
             Text("已保存服务器及各自认证信息会保留，可随时一键重新连接。")
         }
+        .confirmationDialog("移除当前服务器？", isPresented: $confirmRemoveServer, titleVisibility: .visible) {
+            Button("移除服务器", role: .destructive) {
+                guard let id = store.activeServerID else { return }
+                dismiss()
+                store.removeProfile(id: id)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将从这台设备移除该服务器及认证信息，重新连接需要连接码。服务端会话和文件保留。")
+        }
         .sheet(item: $logShare) { item in
             ActivityView(activityItems: [item.url])
         }
@@ -81,10 +94,10 @@ struct SettingsView: View {
             Text("打开会话、收发消息或复现问题后再导出，才能捕获到有用的上下文。")
         }
         .alert("IPA 尚未签名", isPresented: $confirmUnsignedInstall) {
-            Button("继续安装") { openIosUpdate() }
+            Button("查看安装页") { openIosUpdate() }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("系统安装器可能会失败。签发后的包放到服务器 ~/.wand/ios/ 即可覆盖安装。")
+            Text("当前包尚不能通过系统安装器安装。可在安装页查看原因和可用方式。")
         }
         .alert("服务器名称", isPresented: $showRenameServer) {
             TextField("留空使用地址", text: $serverNameDraft)
@@ -193,6 +206,12 @@ struct SettingsView: View {
                 Label("返回连接页", systemImage: "rectangle.portrait.and.arrow.right")
                     .font(.system(size: 15))
             }
+            Button(role: .destructive) {
+                confirmRemoveServer = true
+            } label: {
+                Label("移除当前服务器", systemImage: "trash")
+                    .font(.system(size: 15))
+            }
         }
     }
 
@@ -216,8 +235,10 @@ struct SettingsView: View {
                 .labelsHidden()
             }
             .padding(.vertical, 6)
+            Toggle("触感反馈", isOn: $hapticEnabled)
+                .tint(Theme.brand)
         } header: {
-            Text("外观")
+            Text("外观与反馈")
         } footer: {
             Text("选择明亮、黑暗，或跟随 iOS 系统外观。")
         }
@@ -225,6 +246,17 @@ struct SettingsView: View {
 
     private var currentAppearance: WandAppearanceMode {
         WandAppearanceMode.resolved(from: appearanceModeRaw)
+    }
+
+    private var voiceSection: some View {
+        Section {
+            Label("iOS 系统语音识别", systemImage: "waveform")
+            Button("打开系统设置") { openSystemSettings() }
+        } header: {
+            Text("语音输入")
+        } footer: {
+            Text("按住输入栏麦克风说话。优先使用设备上的听写模型；设备未提供离线识别时使用 Apple 在线识别。麦克风与语音识别权限可在系统设置中管理。")
+        }
     }
 
     private var featureSection: some View {
@@ -350,7 +382,7 @@ struct SettingsView: View {
 
     private var iosUpdateFooter: String {
         if iosUpdate?.updateAvailable == true, iosUpdate?.otaReadyValue != true {
-            return "已检测到新包，但还不能直接 OTA 安装（未签名或不是 HTTPS）。签发后放到服务器 ~/.wand/ios/，并用 Safari / 本页安装。"
+            return "已检测到新包，但还不能直接安装。请使用 HTTPS 连接，并由服务端提供已签名的安装包。"
         }
         return "签发后的 IPA 会通过系统安装器覆盖更新，无需第三方分发站。未签名包仍可用 SideStore / AltStore 安装。"
     }
@@ -360,13 +392,13 @@ struct SettingsView: View {
     }
 
     private func checkIosUpdate() async {
+        guard !iosUpdateChecking else { return }
         iosUpdateChecking = true
         iosUpdateError = nil
         defer { iosUpdateChecking = false }
         do {
             iosUpdate = try await api.iosIpaUpdate(currentVersion: marketingVersion)
         } catch {
-            iosUpdate = nil
             iosUpdateError = error.localizedDescription
         }
     }
@@ -382,7 +414,7 @@ struct SettingsView: View {
 
     private func openIosUpdate() {
         guard let info = iosUpdate else { return }
-        if let raw = info.installUrl, let url = URL(string: raw) {
+        if info.otaReadyValue, let raw = info.installUrl, let url = URL(string: raw) {
             UIApplication.shared.open(url)
             return
         }

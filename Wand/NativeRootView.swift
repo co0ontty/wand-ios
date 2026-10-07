@@ -39,6 +39,7 @@ enum HomeListMode: String, Equatable {
 /// 原生客户端根视图：先用 appToken 登录，然后进入原生会话列表。
 struct NativeRootView: View {
     let profile: ServerProfile
+    @State private var endpointAPI: WandAPI
 
     @EnvironmentObject private var store: ServerStore
     @State private var phase: Phase = .authenticating
@@ -68,6 +69,10 @@ struct NativeRootView: View {
     /// / NavigationStack push。提升到根视图是因为 detail 内容由根容器直接承载，
     /// 不再走隐藏 NavigationLink（在 .columns 双栏下不可靠）。
     @State private var selectedSessionID: String?
+    /// 「用户明确打开了这个会话」。只有带 intent 的那次打开才允许确认完成代次：
+    /// 自动选中最近会话、后台刷新、重连、切任务都不算（对齐 Web completionViewIntent / macOS）。
+    @State private var completionViewIntentSessionId: String?
+    @State private var acknowledgedCompletionRevision: Int?
     @State private var selectedSnapshot: SessionSnapshot?
     /// iPhone push 动画期间的会话身份。列表只允许这一次打开落入状态机，避免双击/连点
     /// 把 navigationDestination(isPresented:) 推进半截时再次改写 selection。
@@ -75,11 +80,26 @@ struct NativeRootView: View {
     @State private var selectedWorkspaceTask: WorkspaceTaskSelection?
     @State private var presentNewTask = false
     @StateObject private var workspaceStore: WorkspaceStore
+    @StateObject private var contactsStore: ContactsStore
+    @State private var showingContacts = false
+    @State private var selectedContactRunID: String?
+    @State private var homeEmployees: [SiliconEmployee] = []
+    @State private var homeTeams: [ContactTeam] = []
+    @State private var homeContactsGeneration = 0
+    @State private var homeModalVisible = false
+    @State private var homeMutationBusy = false
+    @State private var visibleCompletionSnapshot: SessionSnapshot?
+    @State private var selectedTaskSessionId: String?
+    @State private var selectedTaskShowsPicker = false
+    @Environment(\.scenePhase) private var scenePhase
 
     init(profile: ServerProfile) {
         self.profile = profile
+        let endpointAPI = WandAPI(baseURL: profile.baseURL, token: profile.token)
+        _endpointAPI = State(initialValue: endpointAPI)
+        _contactsStore = StateObject(wrappedValue: ContactsStore(service: endpointAPI))
         _workspaceStore = StateObject(wrappedValue: WorkspaceStore(
-            api: WandAPI(baseURL: profile.baseURL, token: profile.token),
+            api: endpointAPI,
             serverID: profile.id
         ))
     }
@@ -95,7 +115,7 @@ struct NativeRootView: View {
     private var serverID: String { profile.id }
 
     private var api: WandAPI {
-        WandAPI(baseURL: serverURL, token: token)
+        endpointAPI
     }
 
     private var homeListMode: HomeListMode {
@@ -107,8 +127,9 @@ struct NativeRootView: View {
     var body: some View {
         AdaptiveNavigationContainer(
             selection: navigationSelection,
+            parents: contactNavigationParents,
             sidebar: { sidebarContent },
-            detail: { detailContent }
+            detail: { marker in contactDestination(marker) }
         )
         .fullScreenCover(isPresented: $showMissions) {
             MissionsView(
@@ -129,7 +150,7 @@ struct NativeRootView: View {
         }
         .onDisappear { invalidateLifecycle() }
         // 登录完成前挂起会话快捷操作，ready 后再处理。
-        .onReceive(quickActions.$pending) { _ in
+        .onChange(of: quickActions.pending) { _, _ in
             handleQuickAction()
         }
         .onChange(of: phase) { _, _ in
@@ -144,6 +165,11 @@ struct NativeRootView: View {
             guard let sessionID else {
                 selectedSnapshot = nil
                 openingSessionID = nil
+                if selectedWorkspaceTask == nil && selectedContactRunID == nil {
+                    selectedTaskSessionId = nil
+                    selectedTaskShowsPicker = false
+                    clearCompletionIntent()
+                }
                 return
             }
             releaseSessionOpenGateAfterTransition(for: sessionID)
@@ -157,6 +183,9 @@ struct NativeRootView: View {
         .onDisappear {
             workspaceStore.stopTaskGroupsSync()
         }
+        .onChange(of: rootModalVisible) { _, visible in
+            if !visible, let snapshot = visibleCompletionSnapshot { acknowledgeCompletionIfViewed(snapshot) }
+        }
         .wandKeyboardShortcuts(rootKeyboardShortcuts)
     }
 
@@ -164,17 +193,60 @@ struct NativeRootView: View {
         Binding(
             get: { selectedWorkspaceTask?.task.id ?? selectedSessionID },
             set: { value in
-                guard value == nil else { return }
+                guard value == nil, !homeMutationBusy else { return }
                 selectedWorkspaceTask = nil
                 selectedSessionID = nil
                 selectedSnapshot = nil
                 openingSessionID = nil
+                selectedTaskSessionId = nil
+                selectedTaskShowsPicker = false
+                clearCompletionIntent()
             }
         )
     }
 
+    private var contactNavigationParents: Binding<[String]> {
+        Binding(
+            get: {
+                (showingContacts ? ["wand:contacts"] : []) + (selectedContactRunID.map { ["wand:team-run:" + $0] } ?? [])
+            },
+            set: { markers in
+                guard !contactsStore.busy, !homeMutationBusy else { return }
+                showingContacts = markers.contains("wand:contacts")
+                let runID = markers.first(where: { $0.hasPrefix("wand:team-run:") })
+                    .map { String($0.dropFirst("wand:team-run:".count)) }
+                if selectedContactRunID != runID { clearCompletionIntent() }
+                selectedContactRunID = runID
+            }
+        )
+    }
+
+    @ViewBuilder private func contactDestination(_ marker: String?) -> some View {
+        if marker == "wand:contacts" {
+            ContactsView(api: api, store: contactsStore, onBack: {
+                guard !contactsStore.busy else { return }
+                showingContacts = false; selectedContactRunID = nil
+            }, onOpenSession: { snapshot in
+                selectedWorkspaceTask = nil; selectedContactRunID = nil
+                openCompletionIntent(snapshot.id)
+                selectedSessionID = snapshot.id; selectedSnapshot = snapshot
+            }, onOpenRun: openTeamRun)
+        } else if let marker, marker.hasPrefix("wand:team-run:") {
+            ContactRunView(runId: String(marker.dropFirst("wand:team-run:".count)), api: api,
+                onOpenSession: openSessionFromMissions, onCompletionVisible: { snapshot in
+                    guard selectedContactRunID == String(marker.dropFirst("wand:team-run:".count)),
+                          selectedSessionID == nil, selectedWorkspaceTask == nil else { return }
+                    if completionViewIntentSessionId != snapshot.id { openCompletionIntent(snapshot.id) }
+                    acknowledgeCompletionIfViewed(snapshot)
+                })
+                .id(marker)
+        } else {
+            detailContent.toolbar(.visible, for: .navigationBar)
+        }
+    }
+
     private var rootKeyboardShortcuts: [WandKeyboardShortcutAction] {
-        guard phase == .ready else { return [] }
+        guard phase == .ready, !homeMutationBusy else { return [] }
         return [
             WandKeyboardShortcutAction(
                 id: "new-task",
@@ -241,11 +313,14 @@ struct NativeRootView: View {
     }
 
     private func setHomeListMode(_ mode: HomeListMode) {
+        guard !contactsStore.busy, !homeMutationBusy else { return }
+        showingContacts = false; selectedContactRunID = nil
         homeListModeRaw = mode.rawValue
         isSelectingHome = false
     }
 
     private func closeActiveSurfaceFromKeyboard() {
+        guard !contactsStore.busy, !homeMutationBusy else { return }
         if showMissions {
             showMissions = false
         } else if showSettings {
@@ -255,6 +330,10 @@ struct NativeRootView: View {
             selectedSnapshot = nil
         } else if selectedWorkspaceTask != nil {
             selectedWorkspaceTask = nil
+        } else if selectedContactRunID != nil {
+            selectedContactRunID = nil
+        } else if showingContacts {
+            showingContacts = false
         }
     }
 
@@ -316,9 +395,6 @@ struct NativeRootView: View {
                         mode: homeListMode,
                         showNewTask: !showingBoard,
                         canSelect: !showingBoard && !workspaceStore.taskGroups.isEmpty,
-                        onToggleMode: {
-                            setHomeListMode(homeListMode.next)
-                        },
                         onNewTask: { presentNewTask = true },
                         onRefresh: {
                             if showingBoard {
@@ -339,12 +415,14 @@ struct NativeRootView: View {
                             NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
                         }
                     )
+                    .disabled(homeMutationBusy)
                     if showingBoard {
                         TaskBoardView(
                             api: api,
                             workspaceStore: workspaceStore,
                             onOpenSession: openSessionFromMissions,
                             onOpenBoundSession: openBoardBoundSession,
+                            onOpenTeamRun: openTeamRun,
                             embedded: true,
                             refreshNonce: boardRefreshNonce
                         )
@@ -358,6 +436,9 @@ struct NativeRootView: View {
                             hidesHomeChrome: true,
                             isSelecting: $isSelectingHome,
                             onOpenTask: { workspace, task in
+                                clearCompletionIntent()
+                                selectedTaskSessionId = nil
+                                selectedTaskShowsPicker = false
                                 selectedSessionID = nil
                                 selectedSnapshot = nil
                                 openingSessionID = nil
@@ -384,32 +465,31 @@ struct NativeRootView: View {
                                 }
                             },
                             onOpenSession: { _, session in
-                                openWorkspaceStandaloneSession(session.id)
+                                if let chat = session.teamChat { openTeamRun(chat.runId) }
+                                else { openWorkspaceStandaloneSession(session.id) }
                             },
                             onOpenTaskSession: { workspace, task, session in
+                                if let chat = session.teamChat { openTeamRun(chat.runId); return }
+                                selectedSessionID = nil
+                                selectedSnapshot = nil
+                                selectedTaskSessionId = session.id
+                                selectedTaskShowsPicker = false
+                                openCompletionIntent(session.id)
                                 selectedWorkspaceTask = WorkspaceTaskSelection(
                                     workspace: workspace,
                                     task: task
                                 )
-                                Task {
-                                    await workspaceStore.openTask(
-                                        workspace: workspace,
-                                        task: task,
-                                        preferredSessionId: session.id
-                                    )
-                                }
                             },
                             onRequestNewSession: { workspace, task in
+                                clearCompletionIntent()
+                                selectedSessionID = nil
+                                selectedSnapshot = nil
+                                selectedTaskSessionId = nil
+                                selectedTaskShowsPicker = true
                                 selectedWorkspaceTask = WorkspaceTaskSelection(
                                     workspace: workspace,
                                     task: task
                                 )
-                                Task {
-                                    await workspaceStore.openTaskAndPresentPicker(
-                                        workspace: workspace,
-                                        task: task
-                                    )
-                                }
                             },
                             onOpenParallel: { workspace, task in
                                 selectedWorkspaceTask = WorkspaceTaskSelection(
@@ -426,8 +506,27 @@ struct NativeRootView: View {
                                     selectedWorkspaceTask = nil
                                 }
                             },
-                            requestNewTask: $presentNewTask
+                            requestNewTask: $presentNewTask,
+                            employees: homeEmployees,
+                            teams: homeTeams,
+                            onOpenTeamRun: { runId in
+                                openTeamRun(runId)
+                            },
+                            onModalVisibilityChanged: { homeModalVisible = $0 },
+                            onMutationBusyChanged: { homeMutationBusy = $0 }
                         )
+                    }
+                }
+                .safeAreaInset(edge: .bottom) {
+                    HStack {
+                        Spacer(minLength: 8)
+                        HomeMenuPill(mode: homeListMode, onMode: setHomeListMode) {
+                            guard !contactsStore.busy, !homeMutationBusy else { return }
+                            selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
+                            selectedContactRunID = nil; showingContacts = true
+                        }
+                        .disabled(homeMutationBusy)
+                        Spacer(minLength: 8)
                     }
                 }
                 .navigationTitle("")
@@ -444,11 +543,17 @@ struct NativeRootView: View {
                 workspace: selection.workspace,
                 task: selection.task,
                 api: api,
-                store: workspaceStore
+                store: workspaceStore,
+                initialSessionId: selectedTaskSessionId,
+                initialShowPicker: selectedTaskShowsPicker,
+                onExplicitOpen: openCompletionIntent,
+                onCompletionVisible: acknowledgeCompletionIfViewed,
+                onOpenTeamRun: openTeamRun,
+                onPickerRequestConsumed: { selectedTaskShowsPicker = false }
             )
             .id(selection.task.id)
         } else if let session = selectedSnapshot {
-            SessionDestinationView(session: session, api: api)
+            SessionDestinationView(session: session, api: api, onCompletionVisible: acknowledgeCompletionIfViewed)
                 .id(session.id)
         } else if selectedSessionID != nil {
             ProgressView().tint(Theme.brand)
@@ -629,6 +734,7 @@ struct NativeRootView: View {
         selectedWorkspaceTask = nil
         showMissions = false
         openingSessionID = sessionID
+        openCompletionIntent(sessionID)
         selectedSessionID = sessionID
         selectedSnapshot = nil
         Task {
@@ -666,21 +772,87 @@ struct NativeRootView: View {
                     workspace: workspace,
                     task: summary.asTask()
                 )
-                await workspaceStore.openTask(
-                    workspace: workspace,
-                    task: summary.asTask(),
-                    preferredSessionId: sessionId
-                )
+                selectedTaskSessionId = sessionId
+                selectedTaskShowsPicker = false
+                openCompletionIntent(sessionId)
                 return
             }
             openWorkspaceStandaloneSession(sessionId)
         }
     }
 
+    private func openCompletionIntent(_ sessionID: String) {
+        completionViewIntentSessionId = sessionID
+        acknowledgedCompletionRevision = nil
+        visibleCompletionSnapshot = nil
+    }
+
+    private func openTeamRun(_ runId: String) {
+        clearCompletionIntent()
+        selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
+        selectedTaskSessionId = nil; selectedTaskShowsPicker = false
+        showingContacts = true; selectedContactRunID = runId
+    }
+
+    private func clearCompletionIntent() {
+        completionViewIntentSessionId = nil
+        acknowledgedCompletionRevision = nil
+        visibleCompletionSnapshot = nil
+    }
+
+    /// 只在「明确打开 + 这一代结果真的在屏幕上 + 没有弹层」时确认完成代次。
+    /// 同一代次只发一次；失败保留未读提示，下一次明确打开还能重试。
+    private func acknowledgeCompletionIfViewed(_ session: SessionSnapshot) {
+        visibleCompletionSnapshot = session
+        let isJustCompleted = SessionCompletion.isJustCompleted(
+            completion: session.completionRevision,
+            viewed: session.viewedCompletionRevision,
+            status: session.status,
+            archived: session.archived,
+            ptyBusy: session.ptyBusy,
+            inFlight: session.structuredState?.inFlight,
+            permissionBlocked: session.permissionBlocked,
+            pendingEscalation: session.pendingEscalation != nil,
+            providerCliExitCode: session.providerCliExitCode
+        )
+        guard SessionCompletion.shouldAcknowledge(
+            isJustCompleted: isJustCompleted,
+            explicitOpen: completionViewIntentSessionId == session.id,
+            isSelected: scenePhase == .active && (
+                selectedSessionID == session.id ||
+                (selectedWorkspaceTask != nil && workspaceStore.visibleSessionID == session.id) ||
+                (selectedContactRunID != nil && selectedSessionID == nil && selectedWorkspaceTask == nil)),
+            // 本页挂的模态层（设置 / 任务 / 通讯录…）都算挡住结果；
+            // 子页自己 sheet 的判断交给各自的 onChange 条件。
+            modalVisible: rootModalVisible
+        ) else { return }
+        let revision = session.completionRevision ?? 0
+        guard revision > 0, acknowledgedCompletionRevision != revision else { return }
+        acknowledgedCompletionRevision = revision
+        Task {
+            do {
+                try await workspaceStore.markSessionCompletionViewed(
+                    sessionId: session.id,
+                    completionRevision: revision
+                )
+            } catch {
+                // 保留未读提示，让下一次明确打开重试。
+                guard completionViewIntentSessionId == session.id,
+                      acknowledgedCompletionRevision == revision else { return }
+                acknowledgedCompletionRevision = nil
+            }
+        }
+    }
+
+    private var rootModalVisible: Bool {
+        showSettings || showMissions || presentNewTask || homeModalVisible
+    }
+
     private func openWorkspaceStandaloneSession(_ sessionID: String) {
         guard openingSessionID != sessionID, selectedSessionID != sessionID else { return }
         selectedWorkspaceTask = nil
         openingSessionID = sessionID
+        openCompletionIntent(sessionID)
         selectedSessionID = sessionID
         selectedSnapshot = nil
         Task {
@@ -711,10 +883,18 @@ struct NativeRootView: View {
 #if DEBUG
     private func handleDebugSettingsLaunch() {
         guard !didApplyDebugSettingsLaunch,
-              phase == .ready,
-              ProcessInfo.processInfo.arguments.contains("--wand-open-settings") else { return }
+              phase == .ready else { return }
+        let environment = ProcessInfo.processInfo.environment
+        guard ProcessInfo.processInfo.arguments.contains("--wand-open-settings")
+            || environment["WAND_DEBUG_OPEN_SETTINGS"] == "1"
+            || environment["WAND_DEBUG_OPEN_CONTACTS"] == "1"
+            || environment["WAND_DEBUG_OPEN_TEAM_RUN"] != nil else { return }
         didApplyDebugSettingsLaunch = true
-        showSettings = true
+        if let runId = environment["WAND_DEBUG_OPEN_TEAM_RUN"], !runId.isEmpty {
+            showingContacts = true; selectedContactRunID = runId
+        } else if environment["WAND_DEBUG_OPEN_CONTACTS"] == "1" {
+            showingContacts = true
+        } else { showSettings = true }
     }
 #endif
 
@@ -825,6 +1005,22 @@ struct NativeRootView: View {
         phase = .ready
         startSystemSocket(generation: generation)
         refreshServerUpdateInfo(generation: generation)
+        refreshHomeContacts()
+    }
+
+    private func refreshHomeContacts() {
+        homeContactsGeneration &+= 1
+        let generation = homeContactsGeneration
+        let lifecycle = lifecycleGeneration
+        let endpointAPI = api
+        Task {
+            async let employees = try? endpointAPI.listContactEmployees()
+            async let teams = try? endpointAPI.listContactTeams()
+            let values = await (employees, teams)
+            guard generation == homeContactsGeneration, isCurrentLifecycle(lifecycle), !Task.isCancelled else { return }
+            if let employees = values.0 { homeEmployees = employees }
+            if let teams = values.1 { homeTeams = teams }
+        }
     }
 
     private func refreshServerUpdateInfo(generation: Int) {
@@ -864,6 +1060,9 @@ struct NativeRootView: View {
 
     private func handleSystemNotification(_ data: WsData) {
         switch data.kind {
+        case "silicon-employee-definition", "ai-team-definition":
+            contactsStore.refreshIfVisible()
+            refreshHomeContacts()
         case "update":
             guard let current = data.current, let latest = data.latest else { return }
             serverUpdate = ServerUpdateInfo(current: current, latest: latest, channel: nil)
@@ -941,7 +1140,6 @@ private struct HomeOverviewBar: View {
     let mode: HomeListMode
     let showNewTask: Bool
     let canSelect: Bool
-    let onToggleMode: () -> Void
     let onNewTask: () -> Void
     let onRefresh: () -> Void
     let onStartSelection: () -> Void
@@ -955,20 +1153,6 @@ private struct HomeOverviewBar: View {
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
                 .lineLimit(1)
-            Button(action: onToggleMode) {
-                HStack(spacing: 2) {
-                    Text(mode.label)
-                        .font(.system(size: 13, weight: .semibold))
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                }
-                .foregroundColor(Theme.brand)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("当前\(mode.label)，点按切换到\(mode.next.label)")
             Spacer(minLength: 8)
             if showNewTask {
                 Button(action: onNewTask) {
@@ -1022,8 +1206,9 @@ private struct HomeOverviewBar: View {
 /// 窄屏用 NavigationStack + navigationDestination(isPresented:)：点行 push 详情页。
 private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
     @Binding var selection: String?
+    @Binding var parents: [String]
     @ViewBuilder let sidebar: () -> Sidebar
-    @ViewBuilder let detail: () -> Detail
+    @ViewBuilder let detail: (String?) -> Detail
     @State private var containerSize = CGSize.zero
     @State private var navigationPath: [String] = []
 
@@ -1048,7 +1233,7 @@ private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
         NavigationSplitView {
             sidebar()
         } detail: {
-            detail()
+            detail(selection ?? parents.last)
         }
         .navigationSplitViewStyle(.balanced)
     }
@@ -1056,27 +1241,32 @@ private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
     private var narrowLayout: some View {
         NavigationStack(path: $navigationPath) {
             sidebar()
-                .navigationDestination(for: String.self) { _ in
-                    detail()
+                .navigationDestination(for: String.self) { marker in
+                    detail(marker)
                 }
         }
         .onChange(of: selection) { _, newValue in
             // 用 NavigationPath 驱动 push，而不是 isPresented。后者在 List 内部
             // 连续点击/切换任务时可能只更新布尔值，不会重新创建 destination。
-            let target = newValue.map { [$0] } ?? []
+            let target = contactNavigationPath(parents: parents, selection: newValue)
             if navigationPath != target {
                 navigationPath = target
             }
         }
+        .onChange(of: parents) { _, next in
+            let target = contactNavigationPath(parents: next, selection: selection)
+            if navigationPath != target { navigationPath = target }
+        }
         .onChange(of: navigationPath) { _, newPath in
-            // 系统返回手势会直接清空 path，必须同步根视图的 selection。
-            let current = newPath.last
-            if selection != current {
-                selection = current
-            }
+            let retained = parents.filter { newPath.contains($0) }
+            let current = newPath.last == retained.last ? nil : newPath.last
+            if parents != retained { parents = retained }
+            if selection != current { selection = current }
+            let accepted = contactNavigationPath(parents: parents, selection: selection)
+            if accepted != newPath { navigationPath = accepted }
         }
         .onAppear {
-            navigationPath = selection.map { [$0] } ?? []
+            navigationPath = contactNavigationPath(parents: parents, selection: selection)
         }
     }
 }

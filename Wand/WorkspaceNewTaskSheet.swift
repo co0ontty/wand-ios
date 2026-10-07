@@ -24,6 +24,12 @@ struct WorkspaceNewTaskSheet: View {
     @State private var recentPaths: [WorkspaceRecentPath] = []
     @State private var showingSuggestions = false
     @State private var creating = false
+    @State private var subject: ContactExecutionSubject?
+    @State private var employees: [SiliconEmployee] = []
+    @State private var teams: [ContactTeam] = []
+    @State private var contactsLoading = false
+    @State private var contactsError: String?
+    @State private var loadGeneration = 0
     @State private var errorMessage: String?
     @State private var defaultCwd = ""
     @State private var directoryPickerPresented = false
@@ -63,15 +69,24 @@ struct WorkspaceNewTaskSheet: View {
                         directoryCard
                         createModeCard
                         if startFirstSession {
-                            cliCard
+                            fieldCard(title: "执行主体") {
+                                ContactExecutionSubjectPicker(subject: Binding(get: { subject }, set: { value in
+                                    subject = value; if value != nil { sessionKind = .structured }
+                                }), employees: employees, teams: teams, teamAllowed: teamAllowed,
+                                   loading: contactsLoading, error: contactsError, onRetry: { Task { await loadContacts() } })
+                            }
+                            if subject == nil { cliCard }
                         }
                         advancedCard
-                        if let errorMessage {
-                            errorBanner(errorMessage)
+                        if let errorMessage { errorBanner(errorMessage) }
+                        if store.taskCreationUnconfirmed {
+                            Text("任务创建结果未确认，请先刷新并核对任务列表。").font(.caption).foregroundStyle(Theme.danger)
+                            Button("我已核对，开始新的创建操作") { store.acknowledgeUnconfirmedTaskCreation(); errorMessage = nil }
+                                .font(.caption).disabled(creating)
                         }
                     }
                     .padding(16)
-                }
+                }.disabled(creating)
             }
             .navigationTitle("新建任务")
             .navigationBarTitleDisplayMode(.inline)
@@ -81,7 +96,7 @@ struct WorkspaceNewTaskSheet: View {
                         .disabled(creating)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(creating ? "创建中…" : (startFirstSession ? "创建并启动会话" : "创建任务")) {
+                    Button(creating ? "创建中…" : (startFirstSession ? (subject?.type == "team" ? "创建并交给团队" : "创建并启动会话") : "创建任务")) {
                         Task { await submit() }
                     }
                     .font(.system(size: 15, weight: .semibold))
@@ -107,10 +122,10 @@ struct WorkspaceNewTaskSheet: View {
                 if recentPaths.isEmpty, let recent = try? await api.workspaceRecentPaths() {
                     recentPaths = recent
                 }
-                if cwd.isEmpty {
-                    cwd = defaultCwd.isEmpty ? (recentPaths.first?.path ?? "") : defaultCwd
-                }
+                if cwd.isEmpty { cwd = defaultCwd.isEmpty ? (recentPaths.first?.path ?? "") : defaultCwd }
+                await loadContacts()
             }
+            .onDisappear { loadGeneration += 1 }
             .task(id: debounceKey) {
                 guard cwdFocused else { return }
                 try? await Task.sleep(nanoseconds: 240_000_000)
@@ -146,14 +161,35 @@ struct WorkspaceNewTaskSheet: View {
 
     /// 首个会话的提示词：仅结构化会话能当描述用；PTY 的首行输入不走自动命名。
     private var taskPrompt: String? {
-        guard startFirstSession, target != .shell else { return nil }
+        guard startFirstSession, subject != nil || target != .shell else { return nil }
         return trimmedPrompt.isEmpty ? nil : trimmedPrompt
     }
 
     private var canSubmit: Bool {
-        guard !creating, !trimmedDirectory.isEmpty, trimmedName.count <= 80 else { return false }
-        // 名字和提示词至少有一个，否则服务端只能拿到一个没意义的占位标题。
+        guard !creating, !store.taskCreationUnconfirmed, !trimmedDirectory.isEmpty, trimmedName.count <= 80 else { return false }
+        if startFirstSession, let subject {
+            if subject.type == "employee", !employees.contains(where: { $0.id == subject.id && !$0.archived && !$0.agents.isEmpty }) { return false }
+            if subject.type == "team", (!teamAllowed || trimmedPrompt.isEmpty || !teams.contains(where: { $0.id == subject.id })) { return false }
+        }
         return !trimmedName.isEmpty || taskPrompt != nil
+    }
+
+    private var boundProjectID: String? {
+        selectedWorkspaceId ?? (matchingProjects.count == 1 ? matchingProjects.first?.workspaceId : nil)
+    }
+    private var teamAllowed: Bool {
+        guard let id = boundProjectID else { return false }
+        return id != "wand-global" && matchingProjects.contains { $0.workspaceId == id }
+    }
+    private func loadContacts() async {
+        loadGeneration += 1; let generation = loadGeneration; contactsLoading = true
+        async let people = try? api.listContactEmployees()
+        async let groups = try? api.listContactTeams()
+        let (p, t) = await (people, groups)
+        guard generation == loadGeneration, !Task.isCancelled else { return }
+        if let p { employees = p }; if let t { teams = t }
+        contactsError = p == nil || t == nil ? "通讯录未能完整刷新，已有选择已保留。" : nil
+        contactsLoading = false
     }
 
     private var matchingProjects: [TaskDirectoryGroup] {
@@ -575,6 +611,9 @@ struct WorkspaceNewTaskSheet: View {
 
     private func submit() async {
         guard canSubmit else { return }
+        let requestedSubject = startFirstSession ? subject : nil
+        let requestedPrompt = taskPrompt
+        let requestedTarget = target; let requestedKind = sessionKind
         creating = true
         errorMessage = nil
         defer { creating = false }
@@ -585,7 +624,7 @@ struct WorkspaceNewTaskSheet: View {
                 directory: trimmedDirectory,
                 worktree: worktreeEnabled,
                 workspaceId: selectedWorkspaceId,
-                description: taskPrompt
+                description: requestedPrompt
             )
             guard startFirstSession else {
                 dismiss()
@@ -597,14 +636,25 @@ struct WorkspaceNewTaskSheet: View {
                 ))
                 return
             }
-            // 会话启动失败时任务已经存在：错误交给调用方提示，任务照常打开。
+            // Task existence, dispatch receipt, and navigation reads are separate facts.
+            var teamDispatchAttempted = false
+            var acceptedTeamReceipt: WandBoardDispatchResult?
             do {
-                let snapshot = try await store.createFirstTaskWindow(
-                    taskId: creation.id,
-                    target: target,
-                    kind: sessionKind,
-                    prompt: taskPrompt
-                )
+                let snapshot: SessionSnapshot
+                if let requestedSubject, requestedSubject.type == "team" {
+                    let board = try await api.contactBoardTask(workspaceTaskID: creation.id, workspaceID: workspace.id)
+                    teamDispatchAttempted = true
+                    let result = try await api.dispatchContactTask(id: board.id, subject: requestedSubject, prompt: requestedPrompt ?? "")
+                    acceptedTeamReceipt = result
+                    store.scheduleAutoSelectSession(taskId: creation.id, sessionId: result.sessionId)
+                    // This read is navigation only; an accepted dispatch must never be repeated.
+                    snapshot = try await api.getSession(id: result.sessionId)
+                    await store.loadTaskGroups(force: true)
+                } else {
+                    snapshot = try await store.createFirstTaskWindow(taskId: creation.id, target: requestedTarget,
+                        kind: requestedKind, prompt: requestedPrompt,
+                        employeeID: requestedSubject?.type == "employee" ? requestedSubject?.id : nil)
+                }
                 dismiss()
                 onCreated(WorkspaceNewTaskResult(
                     workspace: workspace,
@@ -613,16 +663,19 @@ struct WorkspaceNewTaskSheet: View {
                     sessionError: nil
                 ))
             } catch {
+                if contactCreationNeedsReview(attempted: teamDispatchAttempted, accepted: acceptedTeamReceipt != nil, error: error) {
+                    store.markUnconfirmedWindow(taskID: creation.id)
+                }
                 dismiss()
                 onCreated(WorkspaceNewTaskResult(
                     workspace: workspace,
                     creation: creation,
                     session: nil,
-                    sessionError: "任务已创建，但启动会话失败：\(error.localizedDescription)"
+                    sessionError: acceptedTeamReceipt != nil ? "团队已开始执行，群聊暂时未能加载，请从任务会话进入。" : store.unconfirmedWindowTasks.contains(creation.id) ? "任务已创建，启动结果未确认，请核对任务会话，勿重复派发。" : isDefiniteInputRejection(error) ? "任务已创建，但本次启动被拒绝：\(error.localizedDescription)" : "任务已创建，启动结果未确认，请核对任务会话，勿重复派发：\(error.localizedDescription)"
                 ))
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = store.taskCreationUnconfirmed ? "任务创建结果未确认，请先刷新并核对任务列表，勿重复创建。" : error.localizedDescription
         }
     }
 }

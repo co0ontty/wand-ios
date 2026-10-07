@@ -342,6 +342,31 @@ final class WandAPI: SessionInputTransport {
     }
 
     @discardableResult
+    func setSessionProvider(id: String, provider: String) async throws -> SessionSnapshot {
+        try await request(
+            SessionSnapshot.self,
+            method: "POST",
+            path: "/api/sessions/\(percentEncodePathComponent(id))/provider",
+            body: ["provider": provider]
+        )
+    }
+
+    func optimizePrompt(id: String, prompt: String) async throws -> String {
+        struct Response: Decodable { let optimized: String }
+        let response = try await request(
+            Response.self,
+            method: "POST",
+            path: "/api/optimize-prompt",
+            body: ["sessionId": id, "text": prompt],
+            timeout: 160
+        )
+        guard !response.optimized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw APIError.network("优化结果为空，请保留原输入后重试。")
+        }
+        return response.optimized
+    }
+
+    @discardableResult
     func setModel(id: String, model: String?) async throws -> SessionSnapshot {
         try await request(
             SessionSnapshot.self,
@@ -686,13 +711,15 @@ final class WandAPI: SessionInputTransport {
         tag: String?,
         autoTag: Bool,
         push: Bool,
-        submodule: Bool
+        submodule: Bool,
+        archiveRelatedTasks: Bool = false
     ) async throws -> QuickCommitResult {
         var body: [String: Any] = [
             "autoMessage": customMessage == nil,
             "autoTag": autoTag,
             "push": push,
             "submodule": submodule,
+            "archiveRelatedTasks": archiveRelatedTasks,
         ]
         if let customMessage { body["customMessage"] = customMessage }
         if let tag, !tag.isEmpty { body["tag"] = tag }
@@ -846,7 +873,8 @@ final class WandAPI: SessionInputTransport {
         status: String,
         priority: String,
         workspaceId: String?,
-        agent: WandBoardTaskAgent? = nil
+        agent: WandBoardTaskAgent? = nil,
+        executionSubject: ContactExecutionSubject? = nil
     ) async throws -> WandBoardTask {
         var body: [String: Any] = [
             // 标题可选：留空由服务端按描述自动生成。
@@ -861,7 +889,10 @@ final class WandAPI: SessionInputTransport {
         } else {
             body["workspaceId"] = NSNull()
         }
-        if let agent {
+        if let executionSubject {
+            body["executionSubject"] = executionSubject.jsonObject()
+        }
+        if let agent, executionSubject == nil || executionSubject?.type == "cli" {
             body["agent"] = agent.jsonObject()
         }
         return try await request(WandBoardTask.self, method: "POST", path: "/api/wand-tasks", body: body)
@@ -978,6 +1009,9 @@ final class WandAPI: SessionInputTransport {
             case .pi:
                 body["defaultPiModel"] = model
                 body["defaultModels"] = ["pi": model]
+            case .gemini:
+                body["defaultGeminiModel"] = model
+                body["defaultModels"] = ["gemini": model]
             case .claude:
                 body["defaultModel"] = model
                 body["defaultModels"] = ["claude": model]

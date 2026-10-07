@@ -37,7 +37,7 @@ struct QRScannerSheet: View {
                         onCode: { code in
                             guard !handled else { return }
                             handled = true
-                            UINotificationFeedbackGenerator().notificationOccurred(.success)
+                            WandFeedback.success()
                             dismiss()
                             onScanned(code)
                         },

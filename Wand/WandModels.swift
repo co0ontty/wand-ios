@@ -8,6 +8,8 @@ import Foundation
 
 /// Wand 支持的 CLI provider。与 provider 相关的名称、runner 和模式约束
 /// 集中在这里，避免 UI 各自维护 Claude/Codex 二分判断而漏掉其他 Provider。
+/// 名单与顺序对齐服务端 `src/provider-catalog.ts` 的 `SESSION_PROVIDERS`：
+/// 新增 provider 只改这一处。macOS 有一份同构实现，改动必须两端同时做。
 enum WandProvider: String, CaseIterable, Identifiable, Codable {
     case claude
     case codex
@@ -15,27 +17,43 @@ enum WandProvider: String, CaseIterable, Identifiable, Codable {
     case grok
     case qoder
     case pi
+    case gemini
 
     var id: String { rawValue }
+
+    /// 历史别名 → 规范 id。与服务端别名表一致，归一与展示都从这里读。
+    private static let aliases: [String: WandProvider] = [
+        "open-code": .opencode,
+        "open_code": .opencode,
+        "qodercli": .qoder,
+        "pi-cli": .pi,
+        "pi-cli-json": .pi,
+        "gemini-cli": .gemini,
+        "gemini-cli-json": .gemini,
+    ]
+
+    /// 归一后的规范 id；未知或空值返回 nil。
+    /// 需要区分「就是 Claude / Pi」和「不认识」时用这个，别用 `normalizing:`。
+    static func normalizedID(_ rawProvider: String?) -> String? {
+        let raw = rawProvider?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        guard !raw.isEmpty else { return nil }
+        if let known = allCases.first(where: { $0.rawValue == raw }) {
+            return known.rawValue
+        }
+        return aliases[raw]?.rawValue
+    }
 
     /// 对旧数据、大小写与未知 provider 做安全归一；未知值按 Claude 处理。
     init(normalizing value: String?) {
         let raw = value?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
-        switch raw {
-        case Self.codex.rawValue:
-            self = .codex
-        case Self.opencode.rawValue, "open-code", "open_code":
-            self = .opencode
-        case Self.grok.rawValue:
-            self = .grok
-        case Self.qoder.rawValue, "qodercli":
-            self = .qoder
-        case Self.pi.rawValue, "pi-cli", "pi-cli-json":
-            self = .pi
-        default:
-            self = .claude
+        if let known = Self.allCases.first(where: { $0.rawValue == raw }) {
+            self = known
+        } else {
+            self = Self.aliases[raw] ?? .claude
         }
     }
 
@@ -52,7 +70,17 @@ enum WandProvider: String, CaseIterable, Identifiable, Codable {
         case .grok: return "Grok"
         case .qoder: return "Qoder"
         case .pi: return "Pi"
+        case .gemini: return "Gemini"
         }
+    }
+
+    /// 展示用：认不出的 provider 不伪装成已知的一个（错标比回退更糟）。
+    static func title(for rawProvider: String?) -> String {
+        guard let id = normalizedID(rawProvider) else {
+            let raw = rawProvider?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return raw.isEmpty ? claude.title : raw
+        }
+        return WandProvider(rawValue: id)?.title ?? claude.title
     }
 
     var structuredRunner: String {
@@ -63,20 +91,22 @@ enum WandProvider: String, CaseIterable, Identifiable, Codable {
         case .grok: return "grok-cli-headless"
         case .qoder: return "qoder-cli-print"
         case .pi: return "pi-cli-json"
+        case .gemini: return "gemini-cli-json"
         }
     }
 
-    /// 与 Web `getSupportedModes` / Android `supportedModeIds` 保持一致。
+    /// 与 Web `getSupportedModes` / Android `supportedModeIds` / macOS
+    /// `ModeOption.supported(for:)` 保持一致：四端同一份名单，不要只在一端收紧。
     var supportedModeIDs: Set<String> {
         switch self {
-        case .claude:
-            return ["default", "full-access", "auto-edit", "native", "managed"]
         case .codex:
             return ["full-access"]
         case .opencode, .grok, .pi:
             return ["default", "full-access", "managed"]
         case .qoder:
             return ["default", "full-access", "auto-edit", "managed"]
+        case .claude, .gemini:
+            return ["default", "full-access", "auto-edit", "native", "managed"]
         }
     }
 
@@ -450,7 +480,7 @@ struct TodoItem {
         var resultById: [String: String] = [:]
         for i in startIdx..<messages.count {
             for block in messages[i].content {
-                if case .toolResult(let toolUseId, let text, _, _, _, _) = block {
+                if case .toolResult(let toolUseId, let text, _, _, _, _, _) = block {
                     resultById[toolUseId] = text
                 }
             }
@@ -525,10 +555,15 @@ private struct ToolUseSemantic: Decodable {
     let kind: String
     let questions: [Question]?
     let items: [Task]?
+    let summary: DecisionCardSummary?
 }
 
 private func mergeSemantic(_ semantic: ToolUseSemantic, into input: inout [String: JSONValue]) {
-    if semantic.kind == "question_request" {
+    if semantic.kind == "decision" {
+        input["__wandDecision"] = .bool(true)
+        if let label = semantic.summary?.label { input["__wandDecisionLabel"] = .string(label) }
+        if let outcome = semantic.summary?.outcome { input["__wandDecisionOutcome"] = .string(outcome) }
+    } else if semantic.kind == "question_request" {
         input["__wandQuestions"] = .array((semantic.questions ?? []).map { question in
             .object([
                 "question": .string(question.question), "header": question.header.map(JSONValue.string) ?? .null,
@@ -546,6 +581,63 @@ private func mergeSemantic(_ semantic: ToolUseSemantic, into input: inout [Strin
             ])
         })
     }
+}
+
+/// Server projections stay factual and bounded; clients do not infer decisions
+/// from shell command text or rewrite the original tool arguments/results.
+struct DecisionCardSummary: Decodable {
+    let label: String?
+    let mode: String?
+    let questions: Int?
+    let preview: String?
+    let outcome: String?
+}
+
+struct ToolProjection: Decodable {
+    struct Semantic: Decodable {
+        let kind: String
+        let summary: DecisionCardSummary?
+    }
+    let preview: String?
+    let semantic: Semantic?
+    var isDecision: Bool { semantic?.kind == "decision" }
+    var decisionLabel: String? { semantic?.summary?.label }
+}
+
+func mergingToolProjection(local: ToolProjection?, incoming: ToolProjection?) -> ToolProjection? {
+    guard let incoming else { return local }
+    guard let local else { return incoming }
+    let preview = incoming.preview?.isEmpty == false ? incoming.preview : local.preview
+    let semantic: ToolProjection.Semantic?
+    if local.semantic?.summary?.outcome?.isEmpty == false,
+       incoming.semantic?.summary?.outcome?.isEmpty != false {
+        semantic = local.semantic
+    } else { semantic = incoming.semantic ?? local.semantic }
+    return ToolProjection(preview: preview, semantic: semantic)
+}
+
+func isDecisionTool(input: [String: JSONValue]) -> Bool {
+    input["__wandDecision"]?.boolValue == true
+}
+
+func toolInputPreview(_ input: [String: JSONValue]) -> String {
+    if let preview = input["__wandToolPreview"]?.stringValue, !preview.isEmpty { return preview }
+    for key in ["command", "cmd", "pattern", "query", "file_path", "path", "url", "subject", "task", "description"] {
+        if let value = input[key]?.stringValue, !value.isEmpty {
+            return String(value.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(180))
+        }
+    }
+    return ""
+}
+
+func toolInputDetail(_ input: [String: JSONValue]) -> String {
+    let original = input.filter { !$0.key.hasPrefix("__wand") }
+    return original.isEmpty ? "" : JSONValue.object(original).fullPayloadText()
+}
+
+func toolResultPreview(text: String, projection: ToolProjection?) -> String {
+    if let preview = projection?.preview, !preview.isEmpty { return preview }
+    return String(text.split(separator: "\n").filter { !$0.isEmpty }.prefix(2).joined(separator: " · ").prefix(180))
 }
 
 // MARK: - 会话消息块
@@ -615,12 +707,12 @@ enum ContentBlock: Decodable {
     case text(text: String, subagent: SubagentMeta?)
     case thinking(thinking: String, subagent: SubagentMeta?)
     case toolUse(id: String, name: String, description: String?, input: [String: JSONValue], subagent: SubagentMeta?)
-    case toolResult(toolUseId: String, text: String, isError: Bool, truncated: Bool, images: [String], subagent: SubagentMeta?)
+    case toolResult(toolUseId: String, text: String, isError: Bool, truncated: Bool, images: [String], subagent: SubagentMeta?, projection: ToolProjection? = nil)
     /// 协议升级兜底：保留类型和有界、脱敏的原始载荷，UI 可明确告知用户。
     case unknown(type: String, payload: String)
 
     private enum CodingKeys: String, CodingKey {
-        case type, text, thinking, id, name, description, input, content, semantic
+        case type, text, thinking, id, name, description, input, content, semantic, preview, activity
         case toolUseId = "tool_use_id"
         case isError = "is_error"
         case truncated = "_truncated"
@@ -647,6 +739,12 @@ enum ContentBlock: Decodable {
             if let semantic = try? c.decode(ToolUseSemantic.self, forKey: .semantic) {
                 mergeSemantic(semantic, into: &input)
             }
+            if let preview = try? c.decode(String.self, forKey: .preview) {
+                input["__wandToolPreview"] = .string(preview)
+            }
+            if let activity = try? c.decode([String: JSONValue].self, forKey: .activity) {
+                input["__wandToolActivity"] = .object(activity)
+            }
             self = .toolUse(
                 id: (try? c.decode(String.self, forKey: .id)) ?? "",
                 name: (try? c.decode(String.self, forKey: .name)) ?? "tool",
@@ -663,7 +761,8 @@ enum ContentBlock: Decodable {
                 isError: (try? c.decode(Bool.self, forKey: .isError)) ?? false,
                 truncated: (try? c.decode(Bool.self, forKey: .truncated)) ?? false,
                 images: structuredToolImages(content),
-                subagent: subagent
+                subagent: subagent,
+                projection: try? ToolProjection(from: decoder)
             )
         default:
             let rawPayload = (try? JSONValue(from: decoder)) ?? .null
@@ -726,7 +825,7 @@ extension ContentBlock {
         case .text(_, let subagent),
              .thinking(_, let subagent),
              .toolUse(_, _, _, _, let subagent),
-             .toolResult(_, _, _, _, _, let subagent):
+             .toolResult(_, _, _, _, _, let subagent, _):
             return subagent
         case .unknown:
             return nil
@@ -784,7 +883,7 @@ func collectSubagentActivities(
             activity.meta = meta
             activity.blocks.append(block)
             activity.lastSeenTurnIndex = turnIndex
-            if case .toolResult(let toolUseID, _, let isError, _, _, _) = block, toolUseID == taskID {
+            if case .toolResult(let toolUseID, _, let isError, _, _, _, _) = block, toolUseID == taskID {
                 activity.completed = true
                 activity.failed = isError
             }
@@ -852,7 +951,7 @@ struct StructuredSessionState: Decodable {
     let runner: String?
     let model: String?
     let lastError: String?
-    let inFlight: Bool?
+    var inFlight: Bool?
     let activeRequestId: String?
 }
 
@@ -868,11 +967,16 @@ struct SessionSnapshot: Decodable, Identifiable {
     let command: String?
     let cwd: String?
     let mode: String?
-    let status: String?
+    var status: String?
     let exitCode: Int?
     let startedAt: String?
     let endedAt: String?
-    let archived: Bool?
+    var archived: Bool?
+    var archivedAt: String?
+    /// 完成代次：由 storage 持有，runner 的 checkpoint 不得回写。
+    /// 「刚完成」= 完成代次 > 已查看代次，是纯展示态，不改 idle/running/exited。
+    var completionRevision: Int?
+    var viewedCompletionRevision: Int?
     var summary: String?
     var title: String? = nil
     var description: String? = nil
@@ -893,18 +997,23 @@ struct SessionSnapshot: Decodable, Identifiable {
     var leadingBlockOffset: Int? = nil
     var leadingBlockTotal: Int? = nil
     let queuedMessages: [String]?
-    let structuredState: StructuredSessionState?
-    let pendingEscalation: EscalationRequest?
-    let permissionBlocked: Bool?
+    var structuredState: StructuredSessionState?
+    var pendingEscalation: EscalationRequest?
+    var permissionBlocked: Bool?
     let autoApprovePermissions: Bool?
     var providerCliActive: Bool? = nil
     var providerCliExitCode: Int? = nil
     var ptyBusy: Bool? = nil
+    var employeeId: String? = nil
+    var employeeName: String? = nil
+    var employeeAvatar: String? = nil
+    var teamChat: HomeTeamChatIdentity? = nil
+    var teamStep: HomeTeamStepIdentity? = nil
 
     var isStructured: Bool { (sessionKind ?? "pty") == "structured" }
     var providerLabel: String {
         guard let provider, !provider.isEmpty, provider.lowercased() != "terminal" else { return "终端" }
-        return WandProvider(normalizing: provider).title
+        return WandProvider.title(for: provider)
     }
 
     /// 列表标题以服务端 title 为准，不再用任务名 / 目录名自行兜底。
@@ -967,9 +1076,12 @@ struct ToolContentResponse: Decodable {
     let toolUseId: String
     let text: String
     let isError: Bool
+    let input: [String: JSONValue]
+    let images: [String]
+    let projection: ToolProjection?
 
     private enum CodingKeys: String, CodingKey {
-        case content
+        case content, input
         case toolUseId = "tool_use_id"
         case isError = "is_error"
     }
@@ -979,7 +1091,10 @@ struct ToolContentResponse: Decodable {
         toolUseId = (try? container.decode(String.self, forKey: .toolUseId)) ?? ""
         isError = (try? container.decode(Bool.self, forKey: .isError)) ?? false
         let content = (try? container.decode(JSONValue.self, forKey: .content)) ?? .null
+        input = (try? container.decode([String: JSONValue].self, forKey: .input)) ?? [:]
         text = structuredContentText(content)
+        images = structuredToolImages(content)
+        projection = try? ToolProjection(from: decoder)
     }
 
     var contentBlock: ContentBlock {
@@ -988,8 +1103,9 @@ struct ToolContentResponse: Decodable {
             text: text,
             isError: isError,
             truncated: false,
-            images: [],
-            subagent: nil
+            images: images,
+            subagent: nil,
+            projection: projection
         )
     }
 }
@@ -1075,6 +1191,9 @@ struct WsData: Decodable {
     let startedAt: String?
     let endedAt: String?
     let archived: Bool?
+    let archivedAt: String?
+    let completionRevision: Int?
+    let viewedCompletionRevision: Int?
     let summary: String?
     let title: String?
     let description: String?
@@ -1098,6 +1217,11 @@ struct WsData: Decodable {
     let providerCliActive: Bool?
     let providerCliExitCode: Int?
     let ptyBusy: Bool?
+    var employeeId: String? = nil
+    var employeeName: String? = nil
+    var employeeAvatar: String? = nil
+    var teamChat: HomeTeamChatIdentity? = nil
+    var teamStep: HomeTeamStepIdentity? = nil
     // —— output 事件增量字段 ——
     let chunk: String?
     let lastMessage: ConversationTurn?
@@ -1191,17 +1315,19 @@ struct ModelsResponse: Decodable {
     let grokModels: [ModelInfo]
     let qoderModels: [ModelInfo]
     let piModels: [ModelInfo]
+    let geminiModels: [ModelInfo]
     let defaultModel: String?
     let defaultCodexModel: String?
     let defaultOpenCodeModel: String?
     let defaultGrokModel: String?
     let defaultQoderModel: String?
     let defaultPiModel: String?
+    let defaultGeminiModel: String?
     let defaultModels: ProviderDefaultModels?
 
     private enum CodingKeys: String, CodingKey {
-        case models, codexModels, opencodeModels, grokModels, qoderModels, piModels
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultModels
+        case models, codexModels, opencodeModels, grokModels, qoderModels, piModels, geminiModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultGeminiModel, defaultModels
     }
 
     init(from decoder: Decoder) throws {
@@ -1214,12 +1340,14 @@ struct ModelsResponse: Decodable {
         grokModels = (try? container.decode([ModelInfo].self, forKey: .grokModels)) ?? []
         qoderModels = (try? container.decode([ModelInfo].self, forKey: .qoderModels)) ?? []
         piModels = (try? container.decode([ModelInfo].self, forKey: .piModels)) ?? []
+        geminiModels = (try? container.decode([ModelInfo].self, forKey: .geminiModels)) ?? []
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
         defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)
         defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
         defaultGrokModel = try? container.decode(String.self, forKey: .defaultGrokModel)
         defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
         defaultPiModel = try? container.decode(String.self, forKey: .defaultPiModel)
+        defaultGeminiModel = try? container.decode(String.self, forKey: .defaultGeminiModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
     }
 
@@ -1235,6 +1363,7 @@ struct ModelsResponse: Decodable {
         case .grok: return grokModels
         case .qoder: return qoderModels
         case .pi: return piModels
+        case .gemini: return geminiModels
         }
     }
 
@@ -1252,11 +1381,13 @@ struct ModelsResponse: Decodable {
             return defaultModels?.qoder ?? defaultQoderModel ?? ""
         case .pi:
             return defaultModels?.pi ?? defaultPiModel ?? ""
+        case .gemini:
+            return defaultModels?.gemini ?? defaultGeminiModel ?? ""
         }
     }
 }
 
-struct UploadedFile: Decodable {
+struct UploadedFile: Codable {
     let originalName: String
     let savedPath: String
     let size: Int
@@ -1298,6 +1429,7 @@ struct ServerConfigInfo: Decodable {
     let defaultGrokModel: String?
     let defaultQoderModel: String?
     let defaultPiModel: String?
+    let defaultGeminiModel: String?
     let defaultModels: ProviderDefaultModels?
     let defaultThinkingEffort: String?
     let cardDefaults: CardExpandDefaults?
@@ -1309,7 +1441,7 @@ struct ServerConfigInfo: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case defaultCwd, defaultProvider, defaultSessionKind, defaultTaskWorktree, defaultMode
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultGeminiModel, defaultModels
         case defaultThinkingEffort, cardDefaults
         case currentVersion, latestVersion, updateAvailable, updateChannel, canManageSettings
     }
@@ -1327,6 +1459,7 @@ struct ServerConfigInfo: Decodable {
         defaultGrokModel = try? container.decode(String.self, forKey: .defaultGrokModel)
         defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
         defaultPiModel = try? container.decode(String.self, forKey: .defaultPiModel)
+        defaultGeminiModel = try? container.decode(String.self, forKey: .defaultGeminiModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
         defaultThinkingEffort = try? container.decode(String.self, forKey: .defaultThinkingEffort)
         cardDefaults = try? container.decode(CardExpandDefaults.self, forKey: .cardDefaults)
@@ -1351,6 +1484,8 @@ struct ServerConfigInfo: Decodable {
             return defaultModels?.qoder ?? defaultQoderModel ?? ""
         case .pi:
             return defaultModels?.pi ?? defaultPiModel ?? ""
+        case .gemini:
+            return defaultModels?.gemini ?? defaultGeminiModel ?? ""
         }
     }
 
@@ -1367,16 +1502,18 @@ struct ProviderDefaultModels: Decodable {
     let grok: String?
     let qoder: String?
     let pi: String?
+    let gemini: String?
 
-    private enum CodingKeys: String, CodingKey { case claude, codex, opencode, grok, qoder, pi }
+    private enum CodingKeys: String, CodingKey { case claude, codex, opencode, grok, qoder, pi, gemini }
 
-    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil, grok: String? = nil, qoder: String? = nil, pi: String? = nil) {
+    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil, grok: String? = nil, qoder: String? = nil, pi: String? = nil, gemini: String? = nil) {
         self.claude = claude
         self.codex = codex
         self.opencode = opencode
         self.grok = grok
         self.qoder = qoder
         self.pi = pi
+        self.gemini = gemini
     }
 
     init(from decoder: Decoder) throws {
@@ -1387,6 +1524,7 @@ struct ProviderDefaultModels: Decodable {
         grok = try? container.decode(String.self, forKey: .grok)
         qoder = try? container.decode(String.self, forKey: .qoder)
         pi = try? container.decode(String.self, forKey: .pi)
+        gemini = try? container.decode(String.self, forKey: .gemini)
     }
 
     func modelId(for provider: String) -> String? {
@@ -1397,6 +1535,7 @@ struct ProviderDefaultModels: Decodable {
         case .grok: return grok
         case .qoder: return qoder
         case .pi: return pi
+        case .gemini: return gemini
         }
     }
 }
@@ -1561,6 +1700,8 @@ struct QuickCommitResult: Decodable {
     let pushed: Bool?
     let pushError: String?
     let submoduleCommits: [SubmoduleCommit]?
+    let archivedTaskIds: [String]?
+    let archiveError: String?
 }
 
 // MARK: - Session activity (align Web ptyTurnActive)

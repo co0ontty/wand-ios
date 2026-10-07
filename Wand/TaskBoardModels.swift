@@ -78,6 +78,7 @@ struct WandBoardDispatchResult: Decodable {
     let sessionId: String
     let provider: String
     let cwd: String
+    let teamRun: ContactRunDetail?
 
     private struct Session: Decodable {
         let id: String?
@@ -85,7 +86,7 @@ struct WandBoardDispatchResult: Decodable {
         let cwd: String?
     }
 
-    private enum CodingKeys: String, CodingKey { case ok, taskId, session }
+    private enum CodingKeys: String, CodingKey { case ok, taskId, session, teamRun }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -95,6 +96,7 @@ struct WandBoardDispatchResult: Decodable {
         sessionId = session?.id ?? ""
         provider = session?.provider ?? ""
         cwd = session?.cwd ?? ""
+        teamRun = try? container.decodeIfPresent(ContactRunDetail.self, forKey: .teamRun)
     }
 }
 
@@ -104,7 +106,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         case taskDescription = "description"
         case status, priority, labels, dueDate
         case sortOrder, agent, createdAt, updatedAt, sessionIds, sessions, workspace
-        case milestone, workspaceTaskId
+        case milestone, workspaceTaskId, executionSubject
     }
 
     let id: String
@@ -129,6 +131,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
     let milestone: WandBoardMilestone?
     /// 侧栏任务 ID：卡片与会话树共用同一套任务分组，打开会话时要带回真实工作区/任务上下文。
     let workspaceTaskId: String?
+    let executionSubject: ContactExecutionSubject?
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -152,6 +155,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         milestone = try? container.decodeIfPresent(WandBoardMilestone.self, forKey: .milestone)
         let rawWorkspaceTaskId = (try? container.decodeIfPresent(String.self, forKey: .workspaceTaskId)) ?? nil
         workspaceTaskId = (rawWorkspaceTaskId?.isEmpty == false) ? rawWorkspaceTaskId : nil
+        executionSubject = try? container.decodeIfPresent(ContactExecutionSubject.self, forKey: .executionSubject)
     }
 }
 
@@ -250,17 +254,15 @@ func wandBoardAgentTitle(_ provider: String, _ agent: WandBoardTaskAgent?, _ cat
 }
 
 func wandBoardProviderLabel(_ provider: String) -> String {
-    switch provider {
-    case "claude": return "Claude"
-    case "codex": return "Codex"
-    case "opencode": return "OpenCode"
-    case "grok": return "Grok"
-    case "qoder": return "Qoder"
-    case "pi": return "Pi"
-    // 空白终端与老服务端的会话类型也是卡片上的“provider”，不能原样把 shell 当工具名印出来。
-    case "shell", "session": return "终端"
-    default: return provider.isEmpty ? "Agent" : provider
+    let normalized = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    // 空白终端与老服务端的会话类型也是卡片上的"provider"，不能原样把 shell 当工具名印出来。
+    if normalized == "shell" || normalized == "session" { return "终端" }
+    // 已知 provider 走与主界面同一份映射（含历史别名），未知值原样显示：
+    // 猜错工具名比显示原始 id 更糟。
+    if WandProvider.normalizedID(normalized) != nil {
+        return WandProvider.title(for: normalized)
     }
+    return provider.isEmpty ? "Agent" : provider
 }
 
 func wandBoardEffortLabel(_ effort: String) -> String {

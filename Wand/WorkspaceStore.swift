@@ -23,6 +23,7 @@ protocol WorkspaceServing: AnyObject {
         kind: WorkspaceSessionKind,
         prompt: String?
     ) async throws -> SessionSnapshot
+    func createWorkspaceEmployeeTaskWindow(employeeID: String, binding: WorkspaceBinding, prompt: String?) async throws -> SessionSnapshot
     func getSession(id: String, blockBudget: Int) async throws -> SessionSnapshot
     func workspaceDefaultProvider() async throws -> WandProvider
     func getWorkspaceDetail(workspaceId: String) async throws -> WorkspaceDetail
@@ -50,6 +51,9 @@ protocol WorkspaceServing: AnyObject {
     func listTaskGroups() async throws -> [TaskDirectoryGroup]
     func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage
     func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int
+    func batchArchiveWorkspaceSessions(sessionIds: [String], archived: Bool) async throws -> [String]
+    func archiveWorkspaceSession(sessionId: String, archived: Bool) async throws
+    func markSessionCompletionViewed(sessionId: String, completionRevision: Int) async throws -> SessionCompletionResponse
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview
     func startWorktreeMergeAgent(
         workspace: Workspace,
@@ -59,6 +63,10 @@ protocol WorkspaceServing: AnyObject {
 }
 
 extension WorkspaceServing {
+    func createWorkspaceEmployeeTaskWindow(employeeID: String, binding: WorkspaceBinding, prompt: String?) async throws -> SessionSnapshot {
+        throw WandAPI.APIError.network("当前服务不支持硅基员工会话。")
+    }
+
     /// Swift 协议不支持默认参数，用一个省略 prompt 的重载对齐 Android 端的 `prompt = null`。
     func createWorkspaceTaskWindow(
         target: WorkspaceSessionTarget,
@@ -144,6 +152,8 @@ final class WorkspaceStore: ObservableObject {
     @Published var selectedKind: WorkspaceSessionKind = .structured
     @Published private(set) var creating = false
     @Published private(set) var creationError: String?
+    @Published private(set) var unconfirmedWindowTasks = Set<String>()
+    @Published private(set) var taskCreationUnconfirmed = false
 
     let serverID: String
     private let api: WorkspaceServing
@@ -311,6 +321,7 @@ final class WorkspaceStore: ObservableObject {
             defaultProvider: defaultProvider
         )
         await loadWorkspaceIndex()
+        await loadTaskGroups(force: true)
         return created
     }
 
@@ -342,7 +353,35 @@ final class WorkspaceStore: ObservableObject {
 
     /// 级联删除项目（任务、会话与独立 worktree 一并清理），并清理本地状态。
     func deleteWorkspace(workspaceId: String) async throws {
+        var deletedSessionIds = Set(standaloneSessions[workspaceId]?.map(\.id) ?? [])
+        for group in taskGroups {
+            if group.workspaceId == workspaceId { deletedSessionIds.formUnion(group.standaloneSessions.map(\.id)) }
+            for task in group.tasks where task.workspaceId == workspaceId {
+                deletedSessionIds.formUnion(task.sessions.map(\.id))
+            }
+        }
+        if let detail = try? await api.getWorkspaceDetail(workspaceId: workspaceId) {
+            deletedSessionIds.formUnion(detail.sessions.map(\.id))
+        }
+        if let endpoint = api as? WandAPI,
+           let tasks = try? await endpoint.listWorkspaceTasks(workspaceId: workspaceId) {
+            let taskSessionIds = await withTaskGroup(of: [String].self) { group in
+                for task in tasks {
+                    group.addTask {
+                        (try? await endpoint.getWorkspaceTask(taskId: task.id).sessions.map(\.id)) ?? []
+                    }
+                }
+                var ids: [String] = []
+                for await taskIds in group { ids += taskIds }
+                return ids
+            }
+            deletedSessionIds.formUnion(taskSessionIds)
+        }
+        if currentWorkspace?.id == workspaceId, let detail = taskState.detail {
+            deletedSessionIds.formUnion(detail.sessions.map(\.id))
+        }
         try await api.deleteWorkspace(workspaceId: workspaceId)
+        await removeConfirmedDeletedDrafts(deletedSessionIds)
         workspaces.removeAll { $0.id == workspaceId }
         tasksByWorkspace[workspaceId] = nil
         standaloneSessions[workspaceId] = nil
@@ -454,12 +493,14 @@ final class WorkspaceStore: ObservableObject {
         workspaceId: String? = nil,
         description: String? = nil
     ) async throws -> (workspace: Workspace, creation: WorkspaceTaskCreation) {
+        guard !taskCreationUnconfirmed else { throw WandAPI.APIError.network("任务创建结果未确认，请先核对任务列表。") }
         let normalized = normalizeWorkspaceDirectory(directory)
         let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "未命名任务"
             : name
         let creation: WorkspaceTaskCreation
         let workspace: Workspace
+        do {
         if let workspaceId, let existing = workspaces.first(where: { $0.id == workspaceId }) {
             creation = try await api.createWorkspaceTask(
                 workspaceId: existing.id,
@@ -487,6 +528,10 @@ final class WorkspaceStore: ObservableObject {
                     createdAt: "",
                     lastOpenedAt: nil
                 )
+        }
+        } catch {
+            if contactCreationNeedsReview(attempted: true, error: error) { taskCreationUnconfirmed = true }
+            throw error
         }
         tasksByWorkspace[workspace.id] = (tasksByWorkspace[workspace.id] ?? []) + [WorkspaceTask(
             id: creation.id,
@@ -625,7 +670,15 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func deleteWorkspaceTask(workspaceId: String, taskId: String) async throws {
+        var deletedSessionIds = Set(taskGroups.flatMap(\.tasks).filter { $0.id == taskId }.flatMap { $0.sessions.map(\.id) })
+        if let detail = try? await api.getWorkspaceTask(taskId: taskId) {
+            deletedSessionIds.formUnion(detail.sessions.map(\.id))
+        }
+        if currentTask?.id == taskId, let detail = taskState.detail {
+            deletedSessionIds.formUnion(detail.sessions.map(\.id))
+        }
         try await api.deleteWorkspaceTask(taskId: taskId)
+        await removeConfirmedDeletedDrafts(deletedSessionIds)
         if var list = tasksByWorkspace[workspaceId] {
             list.removeAll { $0.id == taskId }
             tasksByWorkspace[workspaceId] = list
@@ -650,11 +703,51 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func deleteSessions(_ sessionIds: [String]) async throws {
-        _ = try await api.deleteWorkspaceSessions(sessionIds: sessionIds)
+        let deleted = try await api.deleteWorkspaceSessions(sessionIds: sessionIds)
+        if deleted == Set(sessionIds).count, let endpoint = api as? WandAPI {
+            for id in Set(sessionIds) { SessionDraftStore.shared.remove(sessionId: id, api: endpoint) }
+        }
         await loadTaskGroups(force: true)
         if let workspace = currentWorkspace, let task = currentTask {
             await openTask(workspace: workspace, task: task, preferredSessionId: visibleSessionID)
         }
+    }
+
+    /// A session may have moved since the pre-delete read. Only remove its draft
+    /// after successful cascade and an authoritative post-delete absence check.
+    private func removeConfirmedDeletedDrafts(_ ids: Set<String>) async {
+        guard !ids.isEmpty, let endpoint = api as? WandAPI,
+              let remaining = try? await endpoint.listSessions() else { return }
+        let liveIds = Set(remaining.map(\.id))
+        for id in ids.subtracting(liveIds) { SessionDraftStore.shared.remove(sessionId: id, api: endpoint) }
+    }
+
+    /// 归档 / 恢复会话。返回仍然失败的 ID；归档不杀进程也不删历史，
+    /// 只刷新列表投影。不在客户端手工改只读字段，让服务端投影回来做准。
+    @discardableResult
+    func archiveSessions(_ sessionIds: [String], archived: Bool) async throws -> [String] {
+        let failed = try await api.batchArchiveWorkspaceSessions(sessionIds: sessionIds, archived: archived)
+        await loadTaskGroups(force: true)
+        if let workspace = currentWorkspace, let task = currentTask {
+            await openTask(workspace: workspace, task: task, preferredSessionId: visibleSessionID)
+        }
+        return failed
+    }
+
+    func archiveSession(_ sessionId: String, archived: Bool) async throws {
+        try await api.archiveWorkspaceSession(sessionId: sessionId, archived: archived)
+        await loadTaskGroups(force: true)
+        if archived && visibleSessionID == sessionId { await reloadCurrentTask() }
+        else { await refreshCurrentTaskInBackground() }
+    }
+
+    /// 确认完成代次。失败不回滚：未读提示留在原样，下次明确打开还能重试。
+    func markSessionCompletionViewed(sessionId: String, completionRevision: Int) async throws {
+        _ = try await api.markSessionCompletionViewed(
+            sessionId: sessionId,
+            completionRevision: completionRevision
+        )
+        await loadTaskGroups(force: true)
     }
 
     /// 合成目录改名走 session-directories（改的是该 cwd 的显示名，没有工作区实体）。
@@ -852,8 +945,15 @@ final class WorkspaceStore: ObservableObject {
         creationError = nil
     }
 
-    func createSelectedWindow(expectedTaskId: String) async {
-        guard !creating,
+    func acknowledgeUnconfirmedTaskCreation() { taskCreationUnconfirmed = false }
+    func markUnconfirmedWindow(taskID: String) { unconfirmedWindowTasks.insert(taskID) }
+    func acknowledgeUnconfirmedWindow(taskID: String) { unconfirmedWindowTasks.remove(taskID); creationError = nil }
+    func contactEmployeesForPicker() async throws -> [SiliconEmployee] {
+        guard let nativeAPI = api as? WandAPI else { return [] }
+        return try await nativeAPI.listContactEmployees()
+    }
+    func createSelectedWindow(expectedTaskId: String, employeeID: String? = nil) async {
+        guard !creating, !unconfirmedWindowTasks.contains(expectedTaskId),
               let workspace = currentWorkspace,
               let task = currentTask,
               task.id == expectedTaskId,
@@ -871,11 +971,12 @@ final class WorkspaceStore: ObservableObject {
         layoutWarning = nil
 
         do {
-            let created = try await api.createWorkspaceTaskWindow(
-                target: target,
-                binding: binding,
-                kind: target == .shell ? .pty : selectedKind
-            )
+            let created: SessionSnapshot
+            if let employeeID {
+                created = try await api.createWorkspaceEmployeeTaskWindow(employeeID: employeeID, binding: binding, prompt: nil)
+            } else {
+                created = try await api.createWorkspaceTaskWindow(target: target, binding: binding, kind: target == .shell ? .pty : selectedKind)
+            }
             guard isCurrentTask(task.id, generation: generation), !Task.isCancelled else {
                 creating = false
                 return
@@ -925,12 +1026,13 @@ final class WorkspaceStore: ObservableObject {
             creating = false
             Task { await self.loadTaskGroups(force: true) }
         } catch {
+            if !isDefiniteInputRejection(error) { unconfirmedWindowTasks.insert(task.id) }
             guard isCurrentTask(task.id, generation: generation), !Task.isCancelled else {
                 creating = false
                 return
             }
             creating = false
-            creationError = error.localizedDescription
+            creationError = unconfirmedWindowTasks.contains(task.id) ? "创建结果未确认，请先刷新任务并核对会话，勿重复创建。" : error.localizedDescription
         }
     }
 
@@ -939,20 +1041,27 @@ final class WorkspaceStore: ObservableObject {
         taskId: String,
         target: WorkspaceSessionTarget,
         kind: WorkspaceSessionKind,
-        prompt: String?
+        prompt: String?,
+        employeeID: String? = nil
     ) async throws -> SessionSnapshot {
+        guard !unconfirmedWindowTasks.contains(taskId) else { throw WandAPI.APIError.network("会话创建结果未确认，请先核对任务会话。") }
         let detail = try await api.getWorkspaceTask(taskId: taskId)
         let binding = WorkspaceBinding(
             workspaceId: detail.workspaceId,
             workspaceTaskId: detail.id,
             cwd: detail.cwd
         )
-        let snapshot = try await api.createWorkspaceTaskWindow(
-            target: target,
-            binding: binding,
-            kind: target == .shell ? .pty : kind,
-            prompt: prompt
-        )
+        let snapshot: SessionSnapshot
+        do {
+        if let employeeID {
+            snapshot = try await api.createWorkspaceEmployeeTaskWindow(employeeID: employeeID, binding: binding, prompt: prompt)
+        } else {
+            snapshot = try await api.createWorkspaceTaskWindow(target: target, binding: binding, kind: target == .shell ? .pty : kind, prompt: prompt)
+        }
+        } catch {
+            if contactCreationNeedsReview(attempted: true, error: error) { markUnconfirmedWindow(taskID: taskId) }
+            throw error
+        }
         // 新会话要成为任务里的活动窗口，否则打开任务看到的还是旧窗口（对齐 Android 的
         // addSessionWindow(activate: true)）；布局写失败不影响会话已创建的事实。
         let refreshed = (try? await api.getWorkspaceTask(taskId: taskId)) ?? detail
@@ -981,24 +1090,26 @@ final class WorkspaceStore: ObservableObject {
         preferredSessionId: String?,
         generation: Int
     ) async {
+        guard isCurrentTask(source.id, generation: generation), !Task.isCancelled else { return }
         let ordered = WorkspaceLayoutReconciler.orderedSessions(source.sessions)
+        let available = ordered.filter { $0.archived != true || $0.id == preferredSessionId }
         let layout = WorkspaceLayoutReconciler.reconcile(
             persisted: source.layout,
-            sessionIds: ordered.map(\.id),
+            sessionIds: available.map(\.id),
             preferredSessionId: preferredSessionId
         )
         let detail = source.replacing(layout: layout, sessions: ordered)
-        taskState = ordered.isEmpty ? .empty(detail) : .ready(detail)
+        taskState = available.isEmpty ? .empty(detail) : .ready(detail)
 
         guard isCurrentTask(source.id, generation: generation), !Task.isCancelled else { return }
-        if ordered.isEmpty {
+        if available.isEmpty {
             visibleSessionID = nil
             visibleSnapshot = nil
         } else {
             let active = WorkspaceLayoutReconciler.activeSessionId(
                 in: layout,
-                validSessionIds: ordered.map(\.id)
-            ) ?? ordered[0].id
+                validSessionIds: available.map(\.id)
+            ) ?? available[0].id
             await selectSession(id: active)
         }
         guard isCurrentTask(source.id, generation: generation), !Task.isCancelled else { return }

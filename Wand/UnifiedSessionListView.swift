@@ -130,7 +130,7 @@ struct UnifiedSessionListView: View {
         .onChange(of: listStore.entries.map(\.key)) { _, keys in
             selectedKeys.formIntersection(keys)
         }
-        .onReceive(quickActions.$pending) { _ in handleQuickAction() }
+        .onChange(of: quickActions.pending) { _, _ in handleQuickAction() }
         .onReceive(NotificationCenter.default.publisher(for: .wandBeginSessionSelection)) { _ in
             guard viewMode == .sessions else { return }
             isSelecting = true

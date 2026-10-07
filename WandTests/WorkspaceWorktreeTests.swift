@@ -597,6 +597,9 @@ final class WorkspaceWorktreeTests: XCTestCase {
 
 @MainActor
 private final class MockWorktreeMergeService: WorkspaceServing {
+    /// 归档 / 刚完成确认的记录：这两类调用不能靠返回值推断，只能看实际请求。
+    var archivedSessionRequests: [(ids: [String], archived: Bool)] = []
+    var completionViewRequests: [(sessionId: String, revision: Int)] = []
     struct CreateTaskRequest {
         let workspaceId: String
         let name: String
@@ -747,6 +750,23 @@ private final class MockWorktreeMergeService: WorkspaceServing {
 
     func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int {
         sessionIds.count
+    }
+
+    func batchArchiveWorkspaceSessions(sessionIds: [String], archived: Bool) async throws -> [String] {
+        archivedSessionRequests.append((sessionIds, archived))
+        return []
+    }
+
+    func archiveWorkspaceSession(sessionId: String, archived: Bool) async throws {
+        archivedSessionRequests.append(([sessionId], archived))
+    }
+
+    func markSessionCompletionViewed(
+        sessionId: String,
+        completionRevision: Int
+    ) async throws -> SessionCompletionResponse {
+        completionViewRequests.append((sessionId, completionRevision))
+        return SessionCompletionResponse(completionRevision: completionRevision, viewedCompletionRevision: completionRevision)
     }
 
     func listTaskGroups() async throws -> [TaskDirectoryGroup] {

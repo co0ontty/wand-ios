@@ -238,12 +238,12 @@ final class WorkspaceTests: XCTestCase {
 
         let ordered = TaskListPresentation.orderedDirectoryGroups([global, project, emptyGlobal])
 
-        XCTAssertEqual(ordered.map(\.workspaceId), ["ws-1", "wand-global"])
+        XCTAssertEqual(ordered.map(\.workspaceId), ["wand-global", "ws-1"])
         // 侧栏不展示已完成任务（归档任务只在看板里看）。
-        XCTAssertEqual(ordered[0].tasks.map(\.id), ["active-1"])
-        // 全局空间在侧栏叫“未归属工作区”，且永远排最后。
-        XCTAssertEqual(ordered[1].workspaceName, TaskListPresentation.unassignedWorkspaceName)
-        XCTAssertEqual(ordered[1].standaloneSessions.map(\.id), ["loose-session"])
+        XCTAssertEqual(ordered[1].tasks.map(\.id), ["active-1"])
+        // 全局空间使用可读名称，顺序仍以服务端已保存的用户排序为准。
+        XCTAssertEqual(ordered[0].workspaceName, TaskListPresentation.unassignedWorkspaceName)
+        XCTAssertEqual(ordered[0].standaloneSessions.map(\.id), ["loose-session"])
     }
 
     func testGlobalGroupIsRecognisedByFlagOrLegacyId() throws {
@@ -352,6 +352,13 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/commands"))
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/structured-sessions"))
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/batch-delete"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/batch-archive"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/s1/archive"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/s1/unarchive"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/s1/provider"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/s1/completion/view"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/ai-teams/t1/runs"))
+        XCTAssertFalse(changesTaskHierarchy(method: "POST", path: "/api/sessions/s1/input"))
         // 查询串不能影响判定。
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/tasks?revision=1"))
         XCTAssertFalse(changesTaskHierarchy(method: "POST", path: "/api/unknown"))
@@ -656,6 +663,38 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertTrue(detail.sessions.isEmpty)
         XCTAssertEqual(service.createRequests.count, 0)
         XCTAssertNil(store.visibleSessionID)
+    }
+
+    func testTaskAutoSelectionSkipsArchivedSessions() async throws {
+        let service = MockWorkspaceService()
+        let workspace = try workspace(id: "workspace-archive")
+        let task = try task(id: "task-archive", workspaceId: workspace.id)
+        let archived = try decode(WorkspaceSessionSummary.self, from: #"{"id":"archived","startedAt":"2020","archived":true}"#)
+        let active = try decode(WorkspaceSessionSummary.self, from: #"{"id":"active","startedAt":"2026"}"#)
+        service.taskDetails[task.id] = try taskDetail(id: task.id, workspaceId: workspace.id, sessions: [archived, active])
+        service.sessions["active"] = try decode(SessionSnapshot.self, from: #"{"id":"active","sessionKind":"structured","status":"idle"}"#)
+        let store = WorkspaceStore(api: service, serverID: "archive")
+
+        await store.openTask(workspace: workspace, task: task)
+
+        XCTAssertEqual(store.visibleSessionID, "active")
+        XCTAssertEqual(store.taskState.detail?.sessions.count, 2, "Archived identities remain available for restore")
+    }
+
+    func testAllArchivedTaskStaysEmptyUntilExplicitArchivedSelection() async throws {
+        let service = MockWorkspaceService()
+        let workspace = try workspace(id: "workspace-archive")
+        let task = try task(id: "task-archive", workspaceId: workspace.id)
+        let archived = try decode(WorkspaceSessionSummary.self, from: #"{"id":"archived","archived":true}"#)
+        service.taskDetails[task.id] = try taskDetail(id: task.id, workspaceId: workspace.id, sessions: [archived])
+        service.sessions["archived"] = try decode(SessionSnapshot.self, from: #"{"id":"archived","sessionKind":"structured","archived":true,"status":"idle"}"#)
+        let store = WorkspaceStore(api: service, serverID: "archive")
+
+        await store.openTask(workspace: workspace, task: task)
+        guard case .empty = store.taskState else { return XCTFail("Archived-only tasks must not auto-open hidden sessions") }
+        XCTAssertNil(store.visibleSessionID)
+        await store.openTask(workspace: workspace, task: task, preferredSessionId: "archived")
+        XCTAssertEqual(store.visibleSessionID, "archived", "Explicit archived selection remains readable")
     }
 
     func testRapidTaskSwitchDropsOlderResponse() async throws {
@@ -967,6 +1006,9 @@ final class WorkspaceTests: XCTestCase {
 
 @MainActor
 private final class MockWorkspaceService: WorkspaceServing {
+    /// 归档 / 刚完成确认的记录：这两类调用不能靠返回值推断，只能看实际请求。
+    var archivedSessionRequests: [(ids: [String], archived: Bool)] = []
+    var completionViewRequests: [(sessionId: String, revision: Int)] = []
     struct CreateRequest {
         let target: WorkspaceSessionTarget
         let binding: WorkspaceBinding
@@ -1187,6 +1229,23 @@ private final class MockWorkspaceService: WorkspaceServing {
 
     func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int {
         sessionIds.count
+    }
+
+    func batchArchiveWorkspaceSessions(sessionIds: [String], archived: Bool) async throws -> [String] {
+        archivedSessionRequests.append((sessionIds, archived))
+        return []
+    }
+
+    func archiveWorkspaceSession(sessionId: String, archived: Bool) async throws {
+        archivedSessionRequests.append(([sessionId], archived))
+    }
+
+    func markSessionCompletionViewed(
+        sessionId: String,
+        completionRevision: Int
+    ) async throws -> SessionCompletionResponse {
+        completionViewRequests.append((sessionId, completionRevision))
+        return SessionCompletionResponse(completionRevision: completionRevision, viewedCompletionRevision: completionRevision)
     }
 
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview {

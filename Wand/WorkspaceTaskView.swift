@@ -99,10 +99,19 @@ struct WorkspaceTaskView: View {
     let task: WorkspaceTask
     let api: WandAPI
     @ObservedObject var store: WorkspaceStore
+    var initialSessionId: String? = nil
+    var initialShowPicker = false
+    var onExplicitOpen: ((String) -> Void)? = nil
+    var onCompletionVisible: ((SessionSnapshot) -> Void)? = nil
+    var onOpenTeamRun: ((String) -> Void)? = nil
+    var onPickerRequestConsumed: (() -> Void)? = nil
     @State private var pendingDeleteSession: WorkspaceSessionSummary?
     @State private var moveSessionTarget: WorkspaceSessionSummary?
     @State private var deleteSessionBusy = false
     @State private var deleteSessionError: String?
+    @State private var visibleCompletionSnapshot: SessionSnapshot?
+    @State private var archivedSessionsExpanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -144,7 +153,20 @@ struct WorkspaceTaskView: View {
             .presentationDetents([.medium, .large])
         }
         .task(id: task.id) {
-            await store.openTask(workspace: workspace, task: task)
+            await store.openTask(workspace: workspace, task: task, preferredSessionId: initialSessionId)
+            if initialShowPicker { store.presentTargetPicker(); onPickerRequestConsumed?() }
+        }
+        .onChange(of: initialSessionId) { _, id in
+            guard let id, store.currentTask?.id == task.id else { return }
+            Task { await store.selectSession(id: id) }
+        }
+        .onChange(of: initialShowPicker) { _, show in
+            if show, store.currentTask?.id == task.id {
+                store.presentTargetPicker(); onPickerRequestConsumed?()
+            }
+        }
+        .onChange(of: modalVisible) { _, visible in
+            if !visible, let snapshot = visibleCompletionSnapshot { reportCompletionVisible(snapshot) }
         }
         .alert("删除终端？", isPresented: Binding(
             get: { pendingDeleteSession != nil },
@@ -223,6 +245,8 @@ struct WorkspaceTaskView: View {
     private func emptyTask(_ detail: WorkspaceTaskDetail) -> some View {
         ScrollView {
             VStack(spacing: 0) {
+                archivedSessions(detail.sessions)
+                    .padding(.horizontal, 24)
                 Spacer(minLength: 54)
                 if let caption = emptyTaskWorkspaceCaption(workspace.name) {
                     Text(caption)
@@ -299,12 +323,15 @@ struct WorkspaceTaskView: View {
 
     private func readyTask(_ detail: WorkspaceTaskDetail) -> some View {
         VStack(spacing: 0) {
+            archivedSessions(detail.sessions)
+                .padding(.horizontal, 12)
             if let warning = store.layoutWarning {
                 warningBanner(warning)
             }
             // PTY 终端页固定深色铬（terminalBackground + 深色导航栏），Tab 条必须跟随
             // 当前会话的铬色，否则浅色主题下会出现「页面全黑、Tab 条还是米白」的割裂。
-            sessionStrip(detail.sessions, palette: SessionStripPalette.palette(terminalChrome: showsTerminalChrome))
+            sessionStrip(detail.sessions.filter { $0.archived != true || $0.id == store.visibleSessionID },
+                palette: SessionStripPalette.palette(terminalChrome: showsTerminalChrome))
             Divider().overlay(showsTerminalChrome ? AnyShapeStyle(Color.white.opacity(0.12)) : AnyShapeStyle(Theme.border))
             sessionContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -313,7 +340,44 @@ struct WorkspaceTaskView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    @ViewBuilder private func archivedSessions(_ sessions: [WorkspaceSessionSummary]) -> some View {
+        let archived = WorkspaceSessionSummary.splitArchived(sessions).archived
+        if let error = deleteSessionError, pendingDeleteSession == nil {
+            Text(error).font(.footnote).foregroundColor(Theme.danger).padding(.vertical, 6)
+        }
+        if !archived.isEmpty {
+            Button {
+                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { archivedSessionsExpanded.toggle() }
+            } label: {
+                HStack {
+                    Label("已归档会话 \(archived.count)", systemImage: "archivebox")
+                    Spacer()
+                    Image(systemName: "chevron.down").rotationEffect(.degrees(archivedSessionsExpanded ? 0 : -90))
+                }.font(.footnote).foregroundColor(Theme.textMuted).padding(.vertical, 8)
+            }.buttonStyle(.plain)
+            if archivedSessionsExpanded {
+                ForEach(Array(archived.enumerated()), id: \.element.id) { index, session in
+                    HStack {
+                        Text(sessionLabel(session, index: index)).font(.footnote).lineLimit(1)
+                        Spacer()
+                        Button("恢复") { Task { await restoreSession(session) } }
+                            .font(.footnote).foregroundColor(Theme.brand)
+                            .accessibilityLabel("恢复会话 \(sessionLabel(session, index: index))")
+                    }.padding(.vertical, 6)
+                }
+            }
+        }
+    }
+
+    private func restoreSession(_ session: WorkspaceSessionSummary) async {
+        do { try await store.archiveSession(session.id, archived: false); deleteSessionError = nil }
+        catch { deleteSessionError = error.localizedDescription }
+    }
+
     private func switchTaskSession(_ session: WorkspaceSessionSummary) {
+        if let chat = session.teamChat, let onOpenTeamRun { onOpenTeamRun(chat.runId); return }
+        onExplicitOpen?(session.id)
+        if let snapshot = visibleCompletionSnapshot, snapshot.id == session.id { reportCompletionVisible(snapshot) }
         Task { await store.selectSession(id: session.id) }
     }
 
@@ -359,7 +423,7 @@ struct WorkspaceTaskView: View {
     private func scrollSessionTab(_ proxy: ScrollViewProxy, id: String?, animated: Bool) {
         guard let id else { return }
         if animated {
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(reduceMotion ? nil : WandMotion.stateSwap) {
                 proxy.scrollTo(id, anchor: .center)
             }
         } else {
@@ -426,6 +490,14 @@ struct WorkspaceTaskView: View {
         )
         .contextMenu {
             Button {
+                Task {
+                    do { try await store.archiveSession(session.id, archived: true) }
+                    catch { deleteSessionError = error.localizedDescription; pendingDeleteSession = nil }
+                }
+            } label: {
+                Label("归档会话", systemImage: "archivebox")
+            }
+            Button {
                 moveSessionTarget = session
             } label: {
                 Label("移动到任务", systemImage: "folder")
@@ -462,7 +534,10 @@ struct WorkspaceTaskView: View {
     private var sessionContent: some View {
         if let snapshot = store.visibleSnapshot,
            snapshot.id == store.visibleSessionID {
-            SessionDestinationView(session: snapshot, api: api, showsNavigationChrome: false)
+            SessionDestinationView(session: snapshot, api: api, showsNavigationChrome: false, onCompletionVisible: { visible in
+                visibleCompletionSnapshot = visible
+                reportCompletionVisible(visible)
+            })
                 .id(snapshot.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if store.sessionLoading {
@@ -486,6 +561,15 @@ struct WorkspaceTaskView: View {
         } else {
             loadingState("正在选择工作窗口…")
         }
+    }
+
+    private var modalVisible: Bool {
+        store.pickerPresented || moveSessionTarget != nil || pendingDeleteSession != nil
+    }
+
+    private func reportCompletionVisible(_ snapshot: SessionSnapshot) {
+        guard store.currentTask?.id == task.id, store.visibleSessionID == snapshot.id, !modalVisible else { return }
+        onCompletionVisible?(snapshot)
     }
 
     private func sessionLabel(_ session: WorkspaceSessionSummary, index: Int) -> String {

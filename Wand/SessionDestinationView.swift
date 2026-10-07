@@ -20,13 +20,16 @@ struct SessionDestinationView: View {
     let session: SessionSnapshot
     let api: WandAPI
     var showsNavigationChrome: Bool = true
+    var onCompletionVisible: ((SessionSnapshot) -> Void)? = nil
 
     @ViewBuilder var body: some View {
         Group {
             if session.isStructured {
-                ChatView(sessionId: session.id, api: api, showsNavigationChrome: showsNavigationChrome)
+                ChatView(sessionId: session.id, api: api, showsNavigationChrome: showsNavigationChrome,
+                         onCompletionVisible: onCompletionVisible)
             } else {
-                PtySessionView(session: session, api: api, showsNavigationChrome: showsNavigationChrome)
+                PtySessionView(session: session, api: api, showsNavigationChrome: showsNavigationChrome,
+                               onCompletionVisible: onCompletionVisible)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -41,6 +44,8 @@ private struct PtySessionView: View {
     let session: SessionSnapshot
     let api: WandAPI
     let showsNavigationChrome: Bool
+    let onCompletionVisible: ((SessionSnapshot) -> Void)?
+    @State private var viewVisible = false
 
     @StateObject private var store: ChatStore
     @StateObject private var terminalWebModel = WebViewModel()
@@ -48,6 +53,7 @@ private struct PtySessionView: View {
     @StateObject private var speech = SpeechRecognizerService()
     @StateObject private var composerDraft: ComposerDraftState
     @State private var voiceDraftRevision = 0
+    @State private var voiceDraftLifecycle = 0
     private var draft: String { composerDraft.text }
     @State private var showStopConfirm = false
     @State private var showQuickCommit = false
@@ -73,10 +79,12 @@ private struct PtySessionView: View {
         Theme.terminalBackground
     }
 
-    init(session: SessionSnapshot, api: WandAPI, showsNavigationChrome: Bool = true) {
+    init(session: SessionSnapshot, api: WandAPI, showsNavigationChrome: Bool = true,
+         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil) {
         self.session = session
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
+        self.onCompletionVisible = onCompletionVisible
         let chatStore = ChatStore(sessionId: session.id, api: api)
         _store = StateObject(wrappedValue: chatStore)
         _composerDraft = StateObject(wrappedValue: chatStore.composerDraft)
@@ -151,7 +159,10 @@ private struct PtySessionView: View {
                 attachments.handlePhotoSelection(result)
             }
         }
+        .onChange(of: completionVisibilityToken) { _, _ in publishCompletionVisibility() }
         .onAppear {
+            viewVisible = true
+            composerDraft.activate()
             attachments.setToastHandler { [weak store] in store?.toast = $0 }
             attachments.setPtyPasteHandler { [weak store] files in
                 guard let store else { throw CancellationError() }
@@ -181,16 +192,24 @@ private struct PtySessionView: View {
         .onChange(of: composerInputHeight) {
             terminalWebModel.refitEmbeddedTerminalViewport()
         }
+        .onChange(of: composerDraft.text) { _, value in
+            if value.isEmpty {
+                draftNeedsExpanded = false
+                composerInputHeight = 32
+            }
+        }
         .onChange(of: terminalWebModel.phase) { _, phase in
             if phase == .ready, inputFocused {
                 terminalWebModel.suppressEmbeddedTerminalIme()
             }
         }
         .onDisappear {
+            viewVisible = false
             terminalWebModel.requestTerminalInput = nil
             voiceHoldWork?.cancel()
             voiceHoldWork = nil
             speech.stop(cancelled: true)
+            composerDraft.deactivate()
             voicePressed = false
             voiceCanceling = false
             inputDrawerOpen = false
@@ -206,6 +225,17 @@ private struct PtySessionView: View {
         .overlay(alignment: .top) { connectionBanner }
         .overlay(alignment: .bottom) { toastView }
         .wandKeyboardShortcuts(ptyKeyboardShortcuts)
+    }
+
+    private var completionVisibilityToken: String {
+        "\(viewVisible):\(scenePhase):\(store.loading):\(store.loadError == nil):\(showQuickCommit):\(showStopConfirm):\(attachments.showPhotoPicker):\(attachments.showFileImporter):\(store.snapshot?.completionRevision ?? 0):\(store.isResponding):\(store.permissionBlocked):\(store.pendingEscalation != nil):\(store.snapshot?.archived == true)"
+    }
+
+    private func publishCompletionVisibility() {
+        guard viewVisible, scenePhase == .active, !store.loading, store.loadError == nil,
+              !showQuickCommit, !showStopConfirm, !attachments.showPhotoPicker,
+              !attachments.showFileImporter, let snapshot = store.snapshot else { return }
+        onCompletionVisible?(snapshot)
     }
 
     private var ptyKeyboardShortcuts: [WandKeyboardShortcutAction] {
@@ -658,7 +688,7 @@ private struct PtySessionView: View {
         NativeComposerActionButton(
             phase: store.inputFeedback,
             turnRunning: store.isResponding,
-            hasDraft: composerDraftIsSendable(
+            hasDraft: composerIsComposing || composerDraftIsSendable(
                 draft, hasAttachments: !attachments.attachments.isEmpty, isComposing: false
             ),
             canSubmit: canSend,
@@ -708,7 +738,7 @@ private struct PtySessionView: View {
     }
 
     private var canSend: Bool {
-        !store.inputSending && !attachments.isUploading && composerDraftIsSendable(
+        !store.inputSending && !composerDraft.isOptimizing && !attachments.isUploading && composerDraftIsSendable(
             draft,
             hasAttachments: !attachments.attachments.isEmpty,
             isComposing: composerIsComposing
@@ -718,11 +748,13 @@ private struct PtySessionView: View {
     private func sendDraft() {
         guard canSend else { return }
         let submission = composerDraft.submission()
+        composerDraft.submitted(submission)
         Task {
             do {
                 try await store.sendPtyTerminalInput(submission.prompt)
                 composerDraft.accepted(submission)
             } catch {
+                if isDefiniteInputRejection(error) { composerDraft.rejected(submission) }
                 // Draft remains in this session's memory. The shared submit button owns
                 // rejection/unknown-delivery feedback; never reconstruct or retry input.
             }
@@ -772,8 +804,9 @@ private struct PtySessionView: View {
                 voicePressed = false
                 voiceCanceling = false
                 let revision = voiceDraftRevision
+                let lifecycle = voiceDraftLifecycle
                 speech.stop(cancelled: cancelled) { text in
-                    composerDraft.appendVoice(text, ifUnchangedSince: revision)
+                    composerDraft.appendVoice(text, ifUnchangedSince: revision, lifecycle: lifecycle)
                 }
             }
     }
@@ -781,6 +814,7 @@ private struct PtySessionView: View {
     private func startVoiceRecording() {
         guard !voicePressed else { return }
         voiceDraftRevision = composerDraft.textRevision
+        voiceDraftLifecycle = composerDraft.lifecycleRevision
         voicePressed = true
         voiceCanceling = false
         speech.start { message in
@@ -850,10 +884,14 @@ private struct PtySessionView: View {
         HStack(spacing: 8) {
             let provider = store.snapshot?.provider ?? session.provider
             // 与 Android 一致：透明底，只展示品牌 logo。
-            BrandLogo(provider: provider, color: Color.white.opacity(0.9), onDark: true)
+            if let employeeId = store.snapshot?.employeeId ?? session.employeeId {
+                ContactAvatar(id: employeeId, avatar: store.displayEmployeeAvatar ?? session.employeeAvatar ?? "",
+                              provider: provider, size: 26)
+            } else {
+                BrandLogo(provider: provider, color: Color.white.opacity(0.9), onDark: true)
                 .frame(width: 18, height: 18)
                 .frame(width: 26, height: 26)
-
+            }
             VStack(spacing: 0) {
                 Text(store.displayTitle)
                     .font(.system(size: 13, weight: .semibold))
@@ -870,7 +908,7 @@ private struct PtySessionView: View {
         }
         .shadow(color: Color.black.opacity(0.26), radius: 3, x: 0, y: 1)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(WandProvider(normalizing: store.snapshot?.provider ?? session.provider).title)，\(store.displayTitle)")
+        .accessibilityLabel("\(store.displayEmployeeName ?? store.snapshot?.providerLabel ?? session.providerLabel)，\(store.displayTitle)")
     }
 }
 
@@ -937,7 +975,7 @@ struct SessionRow: View {
     }
 
     private var providerTint: Color {
-        WandProvider(normalizing: session.provider) == .codex ? Theme.codex : Theme.brand
+        Theme.providerColor(session.provider)
     }
 
     private var durationLabel: String {
@@ -1053,7 +1091,7 @@ struct HistorySessionRow: View {
     }
 
     private var providerTint: Color {
-        WandProvider(normalizing: history.provider) == .codex ? Theme.codex : Theme.brand
+        Theme.providerColor(history.provider)
     }
 
     private var relativeTime: String {

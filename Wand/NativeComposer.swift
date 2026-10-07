@@ -7,6 +7,8 @@ enum ComposerMetrics {
     static let actionVisualSize: CGFloat = 34
     static let actionTouchSize: CGFloat = 44
     static let actionSpacing: CGFloat = 0
+    /// 与 Android 展开态输入框保持同一行数/高度预算。
+    static let expandedInputMaxHeight: CGFloat = 132
 }
 
 enum ComposerSendPhase: Equatable {
@@ -199,14 +201,150 @@ struct ComposerDraftSubmission {
 /// until a receipt, and never persist an uncertain submission or clear newer input.
 @MainActor
 final class ComposerDraftState: ObservableObject {
+    private let storageKey: String
+    private let defaults: UserDefaults
+    private(set) var active = true
+    private(set) var retired = false
+    private(set) var lifecycleRevision = 0
+    private var unconfirmedTextRevision: Int?
+    private var unconfirmedAttachments: [String: Set<Int>] = [:]
+    private var unconfirmedInputs = Set<String>()
+    var unconfirmedInput: String? {
+        didSet { if let unconfirmedInput { unconfirmedInputs.insert(unconfirmedInput) } }
+    }
+    func isUnconfirmed(_ input: String) -> Bool { unconfirmedInputs.contains(input) }
+    @Published private(set) var sendPhase = ComposerSendPhase.idle
+    @Published private(set) var sendFeedback: String?
+    private var sendFeedbackTask: Task<Void, Never>?
+
+    func beginSending() {
+        guard !retired else { return }
+        sendFeedbackTask?.cancel()
+        sendFeedback = nil
+        sendPhase = .sending
+    }
+
+    func finishSending(accepted: Bool, message: String?) {
+        sendFeedbackTask?.cancel()
+        let phase: ComposerSendPhase = accepted ? .sent : .failed
+        sendFeedback = message
+        sendPhase = phase
+        sendFeedbackTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: accepted ? WandMotion.submittedDwell : WandMotion.failedDwell) }
+            catch { return }
+            guard let self, sendPhase == phase else { return }
+            sendPhase = .idle
+            sendFeedback = nil
+        }
+    }
+    @Published private(set) var isOptimizing = false
+    @Published private(set) var optimizationMessage: String?
+    private var optimizationTask: Task<Void, Never>?
     @Published var text = "" {
-        didSet { textRevision += 1 }
+        didSet {
+            textRevision += 1
+            persist()
+        }
     }
     private(set) var textRevision = 0
     let attachments: ComposerAttachmentController
 
-    init(sessionId: String, api: WandAPI) {
+    init(sessionId: String, api: WandAPI, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        storageKey = "wand.composer.v1." + ServerProfiles.stableID(for: api.baseURL) + "." + sessionId
         attachments = ComposerAttachmentController(sessionId: sessionId, api: api)
+        if let saved = defaults.data(forKey: storageKey),
+           let draft = try? JSONDecoder().decode(SavedDraft.self, from: saved) {
+            text = draft.text
+            attachments.attachments = draft.attachments
+        }
+        attachments.onChange = { [weak self] in self?.persist() }
+    }
+
+    private struct SavedDraft: Codable {
+        let text: String
+        let attachments: [UploadedFile]
+    }
+
+    func activate() {
+        guard !retired else { return }
+        guard !active else { attachments.activate(); return }
+        active = true
+        lifecycleRevision += 1
+        attachments.activate()
+    }
+
+    func deactivate() {
+        active = false
+        lifecycleRevision += 1
+        attachments.deactivate()
+        optimizationTask?.cancel()
+        optimizationTask = nil
+        isOptimizing = false
+    }
+
+    func retire() {
+        retired = true
+        deactivate()
+        sendFeedbackTask?.cancel()
+        text = ""
+        attachments.attachments = []
+    }
+
+    var canEvict: Bool { !active && sendPhase != .sending && unconfirmedInput == nil }
+
+    func optimize(operation: @escaping (String) async throws -> String) {
+        let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard active, !isOptimizing, !attachments.isUploading, !prompt.isEmpty else { return }
+        let revision = textRevision
+        let lifecycle = lifecycleRevision
+        isOptimizing = true
+        optimizationMessage = nil
+        optimizationTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if lifecycleRevision == lifecycle { isOptimizing = false } }
+            do {
+                let optimized = try await operation(prompt)
+                guard !Task.isCancelled, active, lifecycleRevision == lifecycle else { return }
+                if applyOptimized(optimized, revision: revision, lifecycle: lifecycle) {
+                    optimizationMessage = "提示词已优化"
+                } else {
+                    optimizationMessage = "输入已更新，保留当前内容"
+                }
+            } catch {
+                guard !Task.isCancelled, active, lifecycleRevision == lifecycle else { return }
+                optimizationMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func submitted(_ submission: ComposerDraftSubmission) {
+        guard !retired else { return }
+        unconfirmedTextRevision = submission.textRevision
+        for file in submission.attachments {
+            unconfirmedAttachments[file.savedPath, default: []].insert(submission.textRevision)
+        }
+        persist()
+    }
+
+    func rejected(_ submission: ComposerDraftSubmission) {
+        guard !retired else { return }
+        if unconfirmedTextRevision == submission.textRevision { unconfirmedTextRevision = nil }
+        for file in submission.attachments {
+            unconfirmedAttachments[file.savedPath]?.remove(submission.textRevision)
+            if unconfirmedAttachments[file.savedPath]?.isEmpty == true { unconfirmedAttachments.removeValue(forKey: file.savedPath) }
+        }
+        persist()
+    }
+
+    private func persist() {
+        guard !retired else { return }
+        let saved = SavedDraft(
+            text: unconfirmedTextRevision == textRevision ? "" : text,
+            attachments: attachments.attachments.filter { unconfirmedAttachments[$0.savedPath] == nil }
+        )
+        if saved.text.isEmpty, saved.attachments.isEmpty { defaults.removeObject(forKey: storageKey) }
+        else if let data = try? JSONEncoder().encode(saved) { defaults.set(data, forKey: storageKey) }
     }
 
     func submission() -> ComposerDraftSubmission {
@@ -214,13 +352,22 @@ final class ComposerDraftState: ObservableObject {
     }
 
     func accepted(_ submission: ComposerDraftSubmission) {
+        guard !retired else { return }
         if textRevision == submission.textRevision { text = "" }
         let paths = Set(submission.attachments.map(\.savedPath))
         attachments.attachments.removeAll { paths.contains($0.savedPath) }
+        paths.forEach { unconfirmedAttachments.removeValue(forKey: $0) }
+        rejected(submission)
     }
 
-    func appendVoice(_ transcript: String, ifUnchangedSince startedRevision: Int) {
-        guard textRevision == startedRevision,
+    func applyOptimized(_ text: String, revision: Int, lifecycle: Int) -> Bool {
+        guard active, textRevision == revision, lifecycleRevision == lifecycle else { return false }
+        self.text = text
+        return true
+    }
+
+    func appendVoice(_ transcript: String, ifUnchangedSince startedRevision: Int, lifecycle: Int? = nil) {
+        guard active, lifecycle == nil || lifecycle == lifecycleRevision, textRevision == startedRevision,
               !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         text = appendingVoiceTranscript(transcript, to: text)
     }
@@ -231,10 +378,26 @@ final class ComposerAttachmentController: ObservableObject {
     @Published var showFileImporter = false
     @Published var showPhotoPicker = false
     @Published private(set) var isUploading = false
-    @Published var attachments: [UploadedFile] = []
+    @Published var attachments: [UploadedFile] = [] { didSet { onChange?() } }
+    var onChange: (() -> Void)?
+    private var active = true
+    private var generation = 0
+    private var uploadTask: Task<Void, Never>?
+
+    func activate() { active = true }
+    func deactivate() {
+        active = false
+        generation += 1
+        uploadTask?.cancel()
+        uploadTask = nil
+        isUploading = false
+        pasteIntoPty = nil
+        showToast = { _ in }
+    }
 
     private let sessionId: String
-    private let api: WandAPI
+    private var api: WandAPI
+    func bind(api: WandAPI) { self.api = api }
     private var showToast: (String) -> Void = { _ in }
     private var pasteIntoPty: (([UploadedFile]) async throws -> Void)?
 
@@ -291,10 +454,25 @@ final class ComposerAttachmentController: ObservableObject {
     }
 
     private func upload(_ urls: [URL], cleanupAfterUpload: Bool, preferPtyPaste: Bool) {
+        guard active, !isUploading else {
+            if cleanupAfterUpload { urls.forEach { try? FileManager.default.removeItem(at: $0) } }
+            return
+        }
+        let remaining = 5 - attachments.count
+        guard remaining > 0 else {
+            showToast("最多添加 5 个附件，请先移除已有附件")
+            if cleanupAfterUpload { urls.forEach { try? FileManager.default.removeItem(at: $0) } }
+            return
+        }
+        let selected = Array(urls.prefix(remaining))
+        let uploadAPI = api
+        generation += 1
+        let requestGeneration = generation
+        let pasteHandler = preferPtyPaste ? pasteIntoPty : nil
         isUploading = true
-        Task {
+        uploadTask = Task {
             defer {
-                isUploading = false
+                if generation == requestGeneration { isUploading = false }
                 if cleanupAfterUpload {
                     for url in urls {
                         try? FileManager.default.removeItem(at: url)
@@ -302,8 +480,9 @@ final class ComposerAttachmentController: ObservableObject {
                 }
             }
             do {
-                let uploaded = try await api.uploadAttachments(id: sessionId, urls: urls)
-                if preferPtyPaste, let pasteIntoPty {
+                let uploaded = try await uploadAPI.uploadAttachments(id: sessionId, urls: selected)
+                guard active, generation == requestGeneration, !Task.isCancelled else { return }
+                if let pasteIntoPty = pasteHandler {
                     let imageCount = uploaded.filter { isClipboardImageMimeType($0.mimeType) }.count
                     showToast(imageCount == uploaded.count ? "正在粘贴图片…" : "正在上传附件…")
                     try await pasteIntoPty(uploaded)
@@ -312,13 +491,46 @@ final class ComposerAttachmentController: ObservableObject {
                         : "\(uploaded.count) 个附件"
                     showToast("已将 \(countLabel)粘贴到 CLI 输入区。")
                 } else {
-                    attachments = Array((attachments + uploaded).suffix(5))
+                    let existing = Set(attachments.map(\.savedPath))
+                    attachments += uploaded.filter { !existing.contains($0.savedPath) }.prefix(max(0, 5 - attachments.count))
                     showToast("已上传 \(uploaded.count) 个附件")
                 }
             } catch {
-                showToast(error.localizedDescription)
+                if active, generation == requestGeneration, !Task.isCancelled { showToast(error.localizedDescription) }
             }
         }
+    }
+}
+
+/// Detail destinations can be destroyed when moving between sessions. Keep each
+/// server/session buffer in memory and persist only content known to be unsent.
+@MainActor
+final class SessionDraftStore {
+    static let shared = SessionDraftStore()
+    private var drafts: [String: ComposerDraftState] = [:]
+    private var accessOrder: [String] = []
+    private let cacheLimit = 100
+    func draft(sessionId: String, api: WandAPI) -> ComposerDraftState {
+        let key = ServerProfiles.stableID(for: api.baseURL) + "." + sessionId
+        accessOrder.removeAll { $0 == key }
+        accessOrder.append(key)
+        if let draft = drafts[key] {
+            draft.attachments.bind(api: api)
+            return draft
+        }
+        let draft = ComposerDraftState(sessionId: sessionId, api: api)
+        drafts[key] = draft
+        while drafts.count > cacheLimit, let oldest = accessOrder.first(where: { drafts[$0]?.canEvict == true }) {
+            drafts.removeValue(forKey: oldest)
+            accessOrder.removeAll { $0 == oldest }
+        }
+        return draft
+    }
+    func remove(sessionId: String, api: WandAPI) {
+        let key = ServerProfiles.stableID(for: api.baseURL) + "." + sessionId
+        drafts.removeValue(forKey: key)?.retire()
+        accessOrder.removeAll { $0 == key }
+        UserDefaults.standard.removeObject(forKey: "wand.composer.v1." + key)
     }
 }
 
@@ -428,7 +640,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
     let placeholder: String
     let isFocused: Bool
     var disableAutocorrect: Bool = false
-    var maximumHeight: CGFloat = 112
+    var maximumHeight: CGFloat = ComposerMetrics.expandedInputMaxHeight
     var submitOnReturn: Bool = true
     var onPasteImages: (([(data: Data, name: String?, mimeType: String?)]) -> Void)? = nil
     let onFocusChange: (Bool) -> Void
@@ -448,8 +660,10 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         // 开头，会把正在连续输入的后续文字插到第一个字符之前。
         textView.selectedRange = NSRange(location: (text as NSString).length, length: 0)
         textView.placeholder = placeholder
-        textView.onMarkedTextChange = { active in
-            context.coordinator.publishComposition(active)
+        textView.onMarkedTextChange = { [weak textView, weak coordinator = context.coordinator] active in
+            guard let textView, let coordinator else { return }
+            if !active { coordinator.commitText(from: textView) }
+            coordinator.publishComposition(active)
         }
         textView.onPasteImages = { items in
             context.coordinator.parent.onPasteImages?(items)
@@ -488,8 +702,10 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
     func updateUIView(_ textView: ComposerUITextView, context: Context) {
         context.coordinator.parent = self
         textView.placeholder = placeholder
-        textView.onMarkedTextChange = { active in
-            context.coordinator.publishComposition(active)
+        textView.onMarkedTextChange = { [weak textView, weak coordinator = context.coordinator] active in
+            guard let textView, let coordinator else { return }
+            if !active { coordinator.commitText(from: textView) }
+            coordinator.publishComposition(active)
         }
         textView.onPasteImages = { items in
             context.coordinator.parent.onPasteImages?(items)
@@ -504,10 +720,9 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
             textView.text = text
             context.coordinator.isApplyingBinding = false
             let maxLocation = (text as NSString).length
-            if selected.location <= maxLocation {
-                let length = min(selected.length, maxLocation - selected.location)
-                textView.selectedRange = NSRange(location: selected.location, length: length)
-            }
+            let location = min(selected.location, maxLocation)
+            let length = min(selected.length, maxLocation - location)
+            textView.selectedRange = NSRange(location: location, length: length)
             textView.refreshPlaceholder()
             context.coordinator.reportHeight(for: textView)
         }
@@ -596,9 +811,14 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
             let composing = textView.markedTextRange != nil
             publishComposition(composing)
             (textView as? ComposerUITextView)?.refreshPlaceholder()
-            if !isApplyingBinding, !composing {
-                parent.text = textView.text ?? ""
-            }
+            if !composing { commitText(from: textView) }
+            reportHeight(for: textView)
+        }
+
+        func commitText(from textView: UITextView) {
+            guard !isApplyingBinding, textView.markedTextRange == nil else { return }
+            let committed = textView.text ?? ""
+            if parent.text != committed { parent.text = committed }
             reportHeight(for: textView)
         }
 
@@ -670,7 +890,7 @@ final class ComposerUITextView: UITextView {
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
         placeholderLabel.font = .systemFont(ofSize: 16)
-        placeholderLabel.textColor = .placeholderText
+        placeholderLabel.textColor = Theme.textPlaceholderUI
         placeholderLabel.numberOfLines = 1
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(placeholderLabel)

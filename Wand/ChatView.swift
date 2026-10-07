@@ -42,6 +42,10 @@ private struct ChatAPIEnvironmentKey: EnvironmentKey {
     static let defaultValue: WandAPI? = nil
 }
 
+private struct ChatToolContentDidLoadKey: EnvironmentKey {
+    static let defaultValue: ((ToolContentResponse) -> Void)? = nil
+}
+
 private struct ChatSessionIDEnvironmentKey: EnvironmentKey {
     static let defaultValue = ""
 }
@@ -50,6 +54,11 @@ private extension EnvironmentValues {
     var chatAPI: WandAPI? {
         get { self[ChatAPIEnvironmentKey.self] }
         set { self[ChatAPIEnvironmentKey.self] = newValue }
+    }
+
+    var chatToolContentDidLoad: ((ToolContentResponse) -> Void)? {
+        get { self[ChatToolContentDidLoadKey.self] }
+        set { self[ChatToolContentDidLoadKey.self] = newValue }
     }
 
     var chatSessionID: String {
@@ -64,12 +73,16 @@ struct ChatView: View {
     /// 工作区任务页已经有系统返回键和任务标题。嵌套时再往导航栏塞 badge / 路径，
     /// 会和 iOS 26 圆形返回键叠在一起，浅色背景下看起来像残影。
     private let showsNavigationChrome: Bool
+    private let onCompletionVisible: ((SessionSnapshot) -> Void)?
+    @State private var viewVisible = false
+    @State private var showProviderPicker = false
 
     @StateObject private var store: ChatStore
     @StateObject private var keyboard = KeyboardObserver()
     @StateObject private var speech = SpeechRecognizerService()
     @StateObject private var composerDraft: ComposerDraftState
     @State private var voiceDraftRevision = 0
+    @State private var voiceDraftLifecycle = 0
     private var draft: String { composerDraft.text }
     @State private var showQuickCommit = false
     @State private var scrollMode: ChatScrollMode = .stickToBottom
@@ -112,10 +125,12 @@ struct ChatView: View {
     @State private var holdCompletedClock = ""
     @State private var sawResponding = false
 
-    init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true) {
+    init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true,
+         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil) {
         self.sessionId = sessionId
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
+        self.onCompletionVisible = onCompletionVisible
         let chatStore = ChatStore(sessionId: sessionId, api: api)
         _store = StateObject(wrappedValue: chatStore)
         _composerDraft = StateObject(wrappedValue: chatStore.composerDraft)
@@ -166,6 +181,9 @@ struct ChatView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(showsNavigationChrome ? Theme.background : Color.clear)
+        .onChange(of: composerDraft.text) { _, value in
+            if value.isEmpty { draftNeedsExpanded = false; composerInputHeight = 34 }
+        }
         // 点消息区任意空白处收起键盘；输入栏在 VStack 底部，不受 dismiss 手势误伤。
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -214,6 +232,14 @@ struct ChatView: View {
         }) { item in
             ServerFilePreviewView(item: item)
         }
+        .sheet(isPresented: $showProviderPicker) {
+            SearchableChoiceSheet(title: "切换 CLI 工具", sections: [
+                SearchableChoiceSection(id: "provider", items: WandProvider.allCases.map {
+                    SearchableChoiceItem(id: $0.rawValue, label: $0.title)
+                }, selectedId: store.snapshot?.provider ?? "")
+            ]) { _, provider in store.switchProvider(provider) }
+            .presentationDetents([.medium, .large])
+        }
         .sheet(item: $modelPicker) { picker in
             SearchableChoiceSheet(
                 title: picker == .session ? "模型与思考" : "选择模型",
@@ -241,7 +267,10 @@ struct ChatView: View {
                 dismissButton: .default(Text("好"))
             )
         }
+        .onChange(of: completionVisibilityToken) { _, _ in publishCompletionVisibility() }
         .onAppear {
+            viewVisible = true
+            composerDraft.activate()
             attachments.setToastHandler { [weak store] in store?.toast = $0 }
             store.start()
             refreshGitStatus()
@@ -250,9 +279,11 @@ struct ChatView: View {
             if !showing { refreshGitStatus() }
         }
         .onDisappear {
+            viewVisible = false
             voiceHoldWork?.cancel()
             voiceHoldWork = nil
             speech.stop(cancelled: true)
+            composerDraft.deactivate()
             voicePressed = false
             voiceCanceling = false
             store.shutdown()
@@ -289,6 +320,8 @@ struct ChatView: View {
         .environment(\.cardExpandDefaults, store.cardDefaults)
         .environment(\.chatAPI, api)
         .environment(\.chatSessionID, sessionId)
+        .environment(\.chatDecisionCards, store.decisionCards)
+        .environment(\.chatToolContentDidLoad, { [weak store] loaded in store?.applyLoadedToolContent(loaded) })
         .environment(\.serverFileLinkController, serverFileLinks)
         .wandKeyboardShortcuts(chatKeyboardShortcuts)
     }
@@ -360,6 +393,19 @@ struct ChatView: View {
             && !showStopConfirm
             && modelPicker == nil
             && composerChoice == nil
+            && !showProviderPicker
+            && serverFileLinks.previewItem == nil
+            && serverFileLinks.failure == nil
+    }
+
+    private var completionVisibilityToken: String {
+        "\(viewVisible):\(scenePhase):\(keyboardShortcutsActive):\(store.loading):\(store.loadError == nil):\(store.snapshot?.completionRevision ?? 0):\(store.isResponding):\(store.permissionBlocked):\(store.pendingEscalation != nil):\(store.snapshot?.archived == true)"
+    }
+
+    private func publishCompletionVisibility() {
+        guard viewVisible, scenePhase == .active, keyboardShortcutsActive,
+              !store.loading, store.loadError == nil, let snapshot = store.snapshot else { return }
+        onCompletionVisible?(snapshot)
     }
 
     @ViewBuilder private var mainContent: some View {
@@ -582,10 +628,17 @@ struct ChatView: View {
             let collapsed = collapsedAssistantTurns.contains(absoluteTurn)
             VStack(alignment: .leading, spacing: 4) {
                 if store.messages.indices.contains(turnIndex) {
-                    ChatMessageTime(
-                        clock: SessionTimeFormatting.conversationTurnClock(store.messages[turnIndex]),
-                        alignEnd: false
-                    )
+                    HStack(spacing: 6) {
+                        if let id = store.snapshot?.employeeId {
+                            ContactAvatar(id: id, avatar: store.displayEmployeeAvatar ?? "",
+                                          provider: store.snapshot?.provider, size: 24)
+                        }
+                        Text(store.displayEmployeeName ?? store.snapshot?.providerLabel ?? "助手")
+                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.textSecondary)
+                        Spacer(minLength: 0)
+                        ChatMessageTime(clock: SessionTimeFormatting.conversationTurnClock(store.messages[turnIndex]),
+                                        alignEnd: false)
+                    }
                 }
                 AssistantReplyDisclosure(
                     preview: preview,
@@ -738,7 +791,7 @@ struct ChatView: View {
     private var groupedMessageItems: [MessageDisplayItem] {
         let base = collapseActivityItems(
             flattenAssistantTurns(
-                groupExplorationTurns(store.messages),
+                groupExplorationTurns(toolPairedDisplayTurns(store.messages)),
                 liveTurnIndex: store.isResponding ? latestAssistantTurnIndex : nil
             ),
             latestTurnIndex: latestAssistantTurnIndex ?? -1
@@ -847,21 +900,30 @@ struct ChatView: View {
         WandProvider(normalizing: store.snapshot?.provider)
     }
 
-    private var providerTint: Color {
-        switch currentProvider {
-        case .codex: return Theme.codex
-        case .claude, .opencode, .grok, .qoder, .pi: return Theme.brand
-        }
-    }
+    private var providerTint: Color { Theme.providerColor(store.snapshot?.provider) }
 
     private var sessionLaunchPanel: some View {
         let provider = currentProvider
         let tint = providerTint
         return VStack(spacing: 14) {
             Spacer(minLength: 12)
-            BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
-                .frame(width: 36, height: 36)
-            Text("开始新的 \(provider.title) 对话")
+            Button { showProviderPicker = true } label: {
+                ZStack {
+                    if let employeeId = store.snapshot?.employeeId {
+                        ContactAvatar(id: employeeId, avatar: store.displayEmployeeAvatar ?? "",
+                                      provider: store.snapshot?.provider, size: 36)
+                            .opacity(store.providerSwitching ? 0 : 1)
+                    } else {
+                        BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
+                            .opacity(store.providerSwitching ? 0 : 1)
+                    }
+                    ProgressView().tint(tint).opacity(store.providerSwitching ? 1 : 0)
+                }.frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .disabled(!store.canSwitchProvider)
+            .accessibilityLabel("切换 CLI 工具")
+            Text("开始与 \(store.displayEmployeeName ?? store.snapshot?.providerLabel ?? provider.title) 的对话")
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Text("输入消息，让它帮你完成任务")
@@ -1044,13 +1106,15 @@ struct ChatView: View {
 
     /// 顶栏身份：logo 放在标题左侧，不要再塞进 navigationBarLeading。
     /// iOS 26 圆形返回键会占掉 leading 区域，badge / 路径叠在返回键下面会变成浅色残影。
-    private var providerBadge: some View {
-        let provider = currentProvider
-        let tint = providerTint
-        return BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
-            .frame(width: 18, height: 18)
-            .frame(width: 26, height: 26)
-            .accessibilityLabel(provider.title)
+    @ViewBuilder private var providerBadge: some View {
+        if let id = store.snapshot?.employeeId {
+            ContactAvatar(id: id, avatar: store.displayEmployeeAvatar ?? "",
+                          provider: store.snapshot?.provider, size: 26)
+        } else {
+            BrandLogo(provider: store.snapshot?.provider, color: providerTint.opacity(0.94))
+                .frame(width: 18, height: 18).frame(width: 26, height: 26)
+                .accessibilityLabel(store.snapshot?.providerLabel ?? "CLI")
+        }
     }
 
     private var navigationStatus: some View {
@@ -1194,12 +1258,15 @@ struct ChatView: View {
                     onRemove: attachments.remove
                 )
             }
+            if let message = composerDraft.optimizationMessage {
+                Text(message).font(.caption).foregroundStyle(Theme.textSecondary)
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
             growingTextField
+                .frame(height: max(inputExpanded ? 32 : 34, composerInputHeight))
                 .padding(.leading, inputExpanded ? 6 : 2)
                 .padding(.trailing, inputExpanded ? 4 : 0)
                 .padding(.vertical, inputExpanded ? 4 : 2)
-                .frame(minHeight: inputExpanded ? 32 : 34)
-                .frame(height: max(inputExpanded ? 32 : 34, composerInputHeight))
                 .contentShape(Rectangle())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1237,6 +1304,7 @@ struct ChatView: View {
     private func controlChipGroup(compact: Bool) -> some View {
         HStack(spacing: ComposerMetrics.actionSpacing) {
             composerActionsMenu
+            optimizeButton
             if store.isStructured {
                 modeChip(compact: compact)
                 modelThinkingChip(compact: compact)
@@ -1272,7 +1340,7 @@ struct ChatView: View {
         NativeComposerActionButton(
             phase: store.inputFeedback,
             turnRunning: store.isResponding,
-            hasDraft: composerDraftIsSendable(
+            hasDraft: composerIsComposing || composerDraftIsSendable(
                 draft, hasAttachments: !attachments.attachments.isEmpty, isComposing: false
             ),
             canSubmit: canSend,
@@ -1442,6 +1510,24 @@ struct ChatView: View {
         refreshGitStatus()
     }
 
+    private var optimizeButton: some View {
+        Button {
+            composerDraft.optimize { text in try await api.optimizePrompt(id: sessionId, prompt: text) }
+        } label: {
+            ZStack {
+                Image(systemName: "sparkles").opacity(composerDraft.isOptimizing ? 0 : 1)
+                ProgressView().controlSize(.small).opacity(composerDraft.isOptimizing ? 1 : 0)
+            }
+            .font(.system(size: 16))
+            .foregroundStyle(Theme.textSecondary)
+            .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+            .animation(reduceMotion ? nil : WandMotion.stateSwap, value: composerDraft.isOptimizing)
+        }
+        .buttonStyle(.plain)
+        .disabled(composerDraft.isOptimizing || store.inputSending || attachments.isUploading || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .accessibilityLabel(composerDraft.isOptimizing ? "正在优化提示词" : "优化提示词")
+    }
+
     private var composerActionsMenu: some View {
         Button {
             composerChoice = .attachments
@@ -1498,7 +1584,7 @@ struct ChatView: View {
         // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
         // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
         // 组字未确认时不能发，否则会把拼音半成品送出去，或把候选确认键当成发送。
-        !store.inputSending && !attachments.isUploading && composerDraftIsSendable(
+        !store.inputSending && !store.providerSwitching && !composerDraft.isOptimizing && !attachments.isUploading && composerDraftIsSendable(
             draft,
             hasAttachments: !attachments.attachments.isEmpty,
             isComposing: composerIsComposing
@@ -1510,8 +1596,11 @@ struct ChatView: View {
         let submission = composerDraft.submission()
         let started = store.send(text: submission.prompt, onAccepted: {
             composerDraft.accepted(submission)
+        }, onFailure: {
+            composerDraft.rejected(submission)
         })
         guard started else { return }
+        composerDraft.submitted(submission)
         scrollMode = .stickToBottom
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让输入框丢焦点。
         // 发送后主动保持焦点，方便连续输入。
@@ -1559,8 +1648,9 @@ struct ChatView: View {
                 voicePressed = false
                 voiceCanceling = false
                 let revision = voiceDraftRevision
+                let lifecycle = voiceDraftLifecycle
                 speech.stop(cancelled: cancelled) { text in
-                    composerDraft.appendVoice(text, ifUnchangedSince: revision)
+                    composerDraft.appendVoice(text, ifUnchangedSince: revision, lifecycle: lifecycle)
                 }
             }
     }
@@ -1569,6 +1659,7 @@ struct ChatView: View {
     private func startVoiceRecording() {
         guard !voicePressed else { return }
         voiceDraftRevision = composerDraft.textRevision
+        voiceDraftLifecycle = composerDraft.lifecycleRevision
         voicePressed = true
         voiceCanceling = false
         speech.start { message in
@@ -1822,7 +1913,7 @@ private func displayItemIdentity(_ item: DisplayItem) -> String {
         switch block {
         case .toolUse(let id, let name, _, _, _):
             return id.isEmpty ? "tool-use:\(name)" : "tool-use:\(id)"
-        case .toolResult(let id, _, _, _, _, _):
+        case .toolResult(let id, _, _, _, _, _, _):
             return id.isEmpty ? "tool-result" : "tool-result:\(id)"
         case .text(let text, _):
             return "text:\(text.hashValue)"
@@ -1894,7 +1985,7 @@ func computeHistoryStats(turns: [ConversationTurn], boundary: Int) -> HistorySta
                     || (input["subagent_type"]?.stringValue?.isEmpty == false) {
                     if !id.isEmpty { agentIds.insert(id) }
                 }
-            case .toolResult(_, _, let isError, _, _, let subagent):
+            case .toolResult(_, _, let isError, _, _, let subagent, _):
                 if isError { errors += 1 }
                 if let tid = subagent?.taskId, !tid.isEmpty { agentIds.insert(tid) }
             case .text(_, let subagent), .thinking(_, let subagent):
@@ -2049,9 +2140,21 @@ private func shouldSkipActivityItem(_ item: DisplayItem) -> Bool {
     if case .plain(.thinking(let text, _)) = item {
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
-    guard case .tool(let id, let name, _, let input, let subagent, _) = item else { return false }
-    return subagent?.taskId == id
-        && (name == "Task" || name == "Agent" || input["subagent_type"]?.stringValue?.isEmpty == false)
+    guard case .tool(let id, _, _, _, let subagent, _) = item else { return false }
+    return isSubagentDispatchBlock(id: id, subagent: subagent)
+}
+
+/// 派发块判据：服务端 `__subagent` 盖章是唯一来源——Claude 的 Task/Agent 与 pi 的
+/// `subagent`（agent+task / tasks / chain / workflow 脚本 / resume / mission 各形态）
+/// 都会盖章。旧代码另外按工具名和 `subagent_type` 判，pi 的 workflow 派发名字是
+/// `Pi/subagent`、又没有 `subagent_type`，于是被漏掉：同一块既进正文活动轨迹又进
+/// 子 Agent 状态坞，重复显示。
+///
+/// 块 id 与 taskId 相同 = 派发调用本身；子 Agent 内部的普通调用（Read/Bash…）共享
+/// 同一份 meta 但 id 不同，仍按普通活动轨迹处理。
+func isSubagentDispatchBlock(id: String, subagent: SubagentMeta?) -> Bool {
+    guard let taskId = subagent?.taskId, !taskId.isEmpty else { return false }
+    return !id.isEmpty && taskId == id
 }
 
 private func isCollapsibleActivityItem(_ item: DisplayItem) -> Bool {
@@ -2059,13 +2162,26 @@ private func isCollapsibleActivityItem(_ item: DisplayItem) -> Bool {
     case .plain(let block):
         switch block {
         case .text, .unknown, .toolUse: return false
-        case .thinking, .toolResult: return true
+        case .thinking: return true
+        case .toolResult(_, _, _, _, let images, _, let projection):
+            return images.isEmpty && projection?.isDecision != true
         }
-    case .tool(_, let name, _, let input, _, _):
-        if name == "AskUserQuestion" { return false }
-        if isReadImageTool(name: name, input: input) { return false }
-        return true
+    case .tool(_, let name, _, let input, _, let result):
+        return isCollapsibleActivityTool(name: name, input: input,
+                                         resultImages: result?.images ?? [], projection: result?.projection)
     }
+}
+
+func isCollapsibleActivityTool(name: String, input: [String: JSONValue],
+                               resultImages: [String] = [], projection: ToolProjection? = nil) -> Bool {
+    if isDecisionTool(input: input) || projection?.isDecision == true { return false }
+    if !AskUserQuestion.parse(input: input).isEmpty || name == "AskUserQuestion" { return false }
+    if name == "Task" || name == "Agent" || input["subagent_type"]?.stringValue?.isEmpty == false { return false }
+    if !resultImages.isEmpty || isReadImageTool(name: name, input: input) { return false }
+    let lower = name.lowercased()
+    if lower.contains("imagegen") || lower.contains("view_image") { return false }
+    if ["spawn_agent", "send_message", "wait_agent", "resume_agent", "close_agent"].contains(where: { lower.hasSuffix($0) }) { return false }
+    return true
 }
 
 private struct ActivityRunSummary {
@@ -2210,7 +2326,7 @@ private func activitySummary(_ items: [DisplayItem], running: Bool) -> String {
         switch block {
         case .thinking:
             return running ? "正在思考" : "已思考"
-        case .toolResult(_, _, let isError, _, _, _):
+        case .toolResult(_, _, let isError, _, _, _, _):
             return isError ? "有 1 条执行错误" : "已生成 1 条执行结果"
         default:
             return "已完成 1 项活动"
@@ -2298,7 +2414,9 @@ private func explorationToolsOnly(in turn: ConversationTurn) -> [ExplorationTool
     for item in pairToolBlocks(parentTranscriptBlocks(turn.content)) {
         switch item {
         case .tool(let id, let name, let description, let input, let subagent, let result)
-            where isGroupableExplorationTool(name: name, input: input):
+            where isGroupableExplorationTool(name: name, input: input)
+                && isCollapsibleActivityTool(name: name, input: input,
+                    resultImages: result?.images ?? [], projection: result?.projection):
             tools.append(ExplorationToolItem(
                 id: id, name: name, description: description,
                 input: input, subagent: subagent, result: result
@@ -2318,6 +2436,22 @@ struct ToolResultInfo {
     let truncated: Bool
     /// 结果内联图片（站内取图 URL 或 data URI）；服务端已归一化。
     var images: [String] = []
+    var projection: ToolProjection? = nil
+}
+
+private func toolResultMetadataToken(_ result: ToolResultInfo?) -> Int {
+    guard let result else { return 0 }
+    var token = Hasher()
+    token.combine(result.toolUseId)
+    token.combine(result.text)
+    token.combine(result.truncated)
+    token.combine(result.isError)
+    token.combine(result.images)
+    token.combine(result.projection?.preview)
+    token.combine(result.projection?.semantic?.kind)
+    token.combine(result.projection?.decisionLabel)
+    token.combine(result.projection?.semantic?.summary?.outcome)
+    return token.finalize()
 }
 
 /// 优先按 tool_use_id 精确配对（并行工具调用时顺序会交错）；
@@ -2335,7 +2469,7 @@ private func pairToolBlocks(_ content: [ContentBlock]) -> [DisplayItem] {
         if !id.isEmpty {
             // 1) 全局按 tool_use_id 精确配对
             for j in (i + 1)..<content.count where !consumed.contains(j) {
-                if case .toolResult(let rid, _, _, _, _, _) = content[j], rid == id {
+                if case .toolResult(let rid, _, _, _, _, _, _) = content[j], rid == id {
                     resultIndex = j
                     break
                 }
@@ -2345,21 +2479,22 @@ private func pairToolBlocks(_ content: [ContentBlock]) -> [DisplayItem] {
             // 2) 邻接兜底：中间隔着下一个 ToolUse 视为无结果；id 双方都有但不匹配时不抢配。
             for j in (i + 1)..<content.count where !consumed.contains(j) {
                 if case .toolUse = content[j] { break }
-                if case .toolResult(let rid, _, _, _, _, _) = content[j] {
+                if case .toolResult(let rid, _, _, _, _, _, _) = content[j] {
                     if rid.isEmpty || id.isEmpty { resultIndex = j }
                     break
                 }
             }
         }
         var result: ToolResultInfo?
-        if resultIndex >= 0, case .toolResult(let resultID, let text, let isError, let truncated, let images, _) = content[resultIndex] {
+        if resultIndex >= 0, case .toolResult(let resultID, let text, let isError, let truncated, let images, _, let projection) = content[resultIndex] {
             consumed.insert(resultIndex)
             result = ToolResultInfo(
                 toolUseId: resultID.isEmpty ? id : resultID,
                 text: text,
                 isError: isError,
                 truncated: truncated,
-                images: images
+                images: images,
+                projection: projection
             )
         }
         paired.append(.tool(
@@ -2856,6 +2991,10 @@ private struct ActivityFoldCard: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
+                ZStack {
+                    Circle().fill(isResponding && group.newest ? Theme.brand : Theme.success)
+                        .frame(width: 6, height: 6)
+                }.frame(width: 12, height: 12)
                 if !group.meta.isEmpty {
                     Text(group.meta)
                         .font(.system(size: 10))
@@ -3372,14 +3511,13 @@ private struct AssistantItemView: View {
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
     var onAskSubmit: (String, String) -> Void = { _, _ in }
     var showSubagentTags = true
-    /// 活动窗口里「最新一条」的下标与当前条目下标：只有最新一条默认展开，
-    /// 更早的条目退化成一行摘要。窗口外为 nil，沿用用户的卡片默认。
+    /// 活动窗口中的单条先显示输入/结果摘录；用户点击后才打开完整详情。
+    /// 窗口外为 nil，沿用用户的卡片默认。
     var activityTailIndex: Int? = nil
     var itemIndex: Int = -1
 
     private func expandDefault(_ configured: Bool) -> Bool {
-        guard let activityTailIndex else { return configured }
-        return itemIndex == activityTailIndex
+        activityTailIndex == nil ? configured : false
     }
 
     var body: some View {
@@ -3389,10 +3527,16 @@ private struct AssistantItemView: View {
         case .tool(let id, let name, let description, let input, let subagent, let result):
             VStack(alignment: .leading, spacing: 4) {
                 if showSubagentTags { subagentTag(subagent) }
-                toolView(
-                    id: id, name: name, description: description,
-                    input: input, result: result
-                )
+                if activityTailIndex != nil,
+                   isCollapsibleActivityTool(name: name, input: input,
+                        resultImages: result?.images ?? [], projection: result?.projection) {
+                    ActivityToolEntry(name: name, input: input, result: result,
+                                      running: result == nil && isLastTurn && isResponding) {
+                        toolView(id: id, name: name, description: description, input: input, result: result, openedFromActivity: true)
+                    }
+                } else {
+                    toolView(id: id, name: name, description: description, input: input, result: result)
+                }
             }
         }
     }
@@ -3401,10 +3545,13 @@ private struct AssistantItemView: View {
     /// AskUserQuestion → 交互卡；Edit/Write/MultiEdit → diff 卡；Bash → 终端卡；其余 → 通用卡。
     @ViewBuilder private func toolView(
         id: String, name: String, description: String?,
-        input: [String: JSONValue], result: ToolResultInfo?
+        input: [String: JSONValue], result: ToolResultInfo?, openedFromActivity: Bool = false
     ) -> some View {
-        let questions = name == "AskUserQuestion" ? AskUserQuestion.parse(input: input) : []
-        if !questions.isEmpty {
+        let questions = AskUserQuestion.parse(input: input)
+        if isDecisionTool(input: input) || result?.projection?.isDecision == true {
+            DecisionToolCard(id: id, label: result?.projection?.decisionLabel ?? input["__wandDecisionLabel"]?.stringValue,
+                             input: input, result: result, running: result == nil && isLastTurn && isResponding)
+        } else if !questions.isEmpty {
             AskUserQuestionCard(
                 toolUseId: id,
                 questions: questions,
@@ -3414,21 +3561,24 @@ private struct AssistantItemView: View {
                 onToggle: { qIdx, optIdx, multi in onAskToggle(id, qIdx, optIdx, multi) },
                 onSubmit: { answerText in onAskSubmit(id, answerText) }
             )
+        } else if let result, !result.images.isEmpty {
+            ToolUseCard(name: name, description: description, input: input, result: result,
+                        baseURL: baseURL, initiallyExpanded: openedFromActivity)
         } else if name == "Edit" || name == "Write" || name == "MultiEdit" {
-            DiffCard(toolName: name, input: input, result: result, initiallyExpanded: expandDefault(cardDefaults.editCards))
+            DiffCard(toolName: name, input: input, result: result, initiallyExpanded: openedFromActivity || expandDefault(cardDefaults.editCards))
         } else if name == "Bash" {
             TerminalCard(
                 input: input,
                 result: result,
                 running: result == nil && isLastTurn && isResponding,
-                initiallyExpanded: expandDefault(cardDefaults.terminal)
+                initiallyExpanded: openedFromActivity || expandDefault(cardDefaults.terminal)
             )
         } else {
             ToolUseCard(
                 name: name, description: description, input: input,
                 result: result, running: result == nil && isLastTurn && isResponding,
                 baseURL: baseURL,
-                initiallyExpanded: expandDefault(cardDefaults.shouldExpandTool(name))
+                initiallyExpanded: openedFromActivity || expandDefault(cardDefaults.shouldExpandTool(name))
             )
         }
     }
@@ -3446,9 +3596,147 @@ private struct AssistantItemView: View {
     }
 }
 
+@MainActor
+final class DecisionCardExpansionState: ObservableObject {
+    @Published private(set) var expanded: [String: Bool] = [:]
+    func isExpanded(_ id: String) -> Bool { expanded[id] ?? false }
+    func toggle(_ id: String) { expanded[id] = !isExpanded(id) }
+}
+
+private struct DecisionCardsEnvironmentKey: EnvironmentKey {
+    static let defaultValue: DecisionCardExpansionState? = nil
+}
+
+private extension EnvironmentValues {
+    var chatDecisionCards: DecisionCardExpansionState? {
+        get { self[DecisionCardsEnvironmentKey.self] }
+        set { self[DecisionCardsEnvironmentKey.self] = newValue }
+    }
+}
+
+private struct ToolPreviewText: View {
+    let text: String
+    var color = Theme.textSecondary
+    var body: some View {
+        if !text.isEmpty {
+            Text(text).font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(color).lineLimit(2).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct ActivityToolEntry<Details: View>: View {
+    let name: String
+    let input: [String: JSONValue]
+    let result: ToolResultInfo?
+    let running: Bool
+    @ViewBuilder let details: () -> Details
+    @State private var expanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var tint: Color { result?.isError == true ? Theme.danger : (running ? Theme.brand : Theme.success) }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { expanded.toggle() }
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        ZStack {
+                            Circle().fill(tint).frame(width: 5, height: 5).opacity(running ? 0 : 1)
+                            ProgressView().controlSize(.mini).tint(tint).opacity(running ? 1 : 0)
+                        }.frame(width: 14, height: 14)
+                        Text(toolLabel(name)).font(.system(size: 12, weight: .semibold))
+                        Spacer(minLength: 4)
+                        Text(result?.isError == true ? "失败" : (running ? "运行中" : "完成"))
+                            .font(.system(size: 10)).foregroundStyle(tint)
+                        Image(systemName: "chevron.down").rotationEffect(.degrees(expanded ? 180 : 0))
+                    }
+                    ToolPreviewText(text: toolInputPreview(input))
+                    if let result {
+                        ToolPreviewText(text: toolResultPreview(text: result.text, projection: result.projection), color: tint)
+                    }
+                }.foregroundStyle(Theme.textPrimary).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel("\(expanded ? "收起" : "展开")\(toolLabel(name))")
+            if expanded { details() }
+        }
+        .padding(8)
+        .background(Theme.surface.opacity(expanded || running || result?.isError == true ? 1 : 0.4),
+                    in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(tint.opacity(expanded || running || result?.isError == true ? 0.3 : 0.08)))
+    }
+}
+
+private struct DecisionToolCard: View {
+    let id: String
+    let label: String?
+    let input: [String: JSONValue]
+    let result: ToolResultInfo?
+    let running: Bool
+    @Environment(\.chatDecisionCards) private var sharedState
+    @StateObject private var fallback = DecisionCardExpansionState()
+    var body: some View {
+        DecisionToolCardContent(id: id, label: label, input: input, result: result, running: running,
+                                state: sharedState ?? fallback)
+    }
+}
+
+private struct DecisionToolCardContent: View {
+    let id: String
+    let label: String?
+    let input: [String: JSONValue]
+    let result: ToolResultInfo?
+    let running: Bool
+    @ObservedObject var state: DecisionCardExpansionState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var expanded: Bool { state.isExpanded(id) }
+    private var tint: Color { result?.isError == true ? Theme.danger : (running ? Theme.brand : Theme.success) }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if expanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let result { ToolResultBody(result: result, input: input, showsInput: true) }
+                    else {
+                        let details = toolInputDetail(input)
+                        if !details.isEmpty {
+                            Text(details).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                        }
+                    }
+                }.padding(12).transition(.opacity)
+                Divider()
+            }
+            Button {
+                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { state.toggle(id) }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "brain").foregroundStyle(Theme.brand)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text("本地决策").font(.system(size: 13, weight: .semibold))
+                            Text("实验性").font(.system(size: 9)).foregroundStyle(Theme.textSecondary)
+                        }
+                        if let label, !label.isEmpty { Text(label).font(.system(size: 12)).lineLimit(2) }
+                    }
+                    Spacer(minLength: 0)
+                    ZStack {
+                        Circle().fill(tint).frame(width: 6, height: 6).opacity(running ? 0 : 1)
+                        ProgressView().controlSize(.small).opacity(running ? 1 : 0)
+                    }.frame(width: 18, height: 18)
+                    Image(systemName: "chevron.down").rotationEffect(.degrees(expanded ? 180 : 0))
+                        .foregroundStyle(Theme.textSecondary)
+                }.foregroundStyle(Theme.textPrimary).padding(12).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+                .accessibilityLabel("本地决策，\(label ?? "")，\(running ? "运行中" : (result?.isError == true ? "失败" : "完成"))")
+                .accessibilityValue(expanded ? "已展开" : "已收起")
+        }.background(Theme.surfaceSoft, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(expanded ? Theme.brand.opacity(0.3) : Theme.border))
+    }
+}
+
 // MARK: - 内容块渲染
 
 private struct BlockView: View {
+    @Environment(\.chatAPI) private var api
     @Environment(\.cardExpandDefaults) private var cardDefaults
     @Environment(\.activityFoldCompact) private var compact
 
@@ -3492,8 +3780,20 @@ private struct BlockView: View {
                     initiallyExpanded: cardDefaults.shouldExpandTool(name)
                 )
             }
-        case .toolResult(let toolUseId, let text, let isError, let truncated, _, _):
-            if !text.isEmpty || truncated {
+        case .toolResult(let toolUseId, let text, let isError, let truncated, let images, _, let projection):
+            if projection?.isDecision == true {
+                DecisionToolCard(id: toolUseId, label: projection?.decisionLabel, input: [:],
+                    result: ToolResultInfo(toolUseId: toolUseId, text: text, isError: isError,
+                                           truncated: truncated, images: images, projection: projection), running: false)
+            } else {
+                if let baseURL = api?.baseURL, !images.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(images.enumerated()), id: \.offset) { _, image in
+                            WandToolImageThumbnail(baseURL: baseURL, source: image)
+                        }
+                    }
+                }
+                if !text.isEmpty || truncated {
                 CollapsibleSection(
                     icon: isError ? "xmark.octagon" : "doc.text",
                     title: isError ? "执行出错" : "执行结果",
@@ -3504,8 +3804,11 @@ private struct BlockView: View {
                         toolUseId: toolUseId,
                         text: text,
                         isError: isError,
-                        truncated: truncated
+                        truncated: truncated,
+                        images: images,
+                        projection: projection
                     ))
+                }
                 }
             }
         case .unknown(let type, let payload):
@@ -4009,6 +4312,11 @@ private struct ToolUseCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            if let result {
+                ToolPreviewText(text: toolResultPreview(text: result.text, projection: result.projection),
+                                color: result.isError ? Theme.danger : Theme.textSecondary)
+                    .padding(.horizontal, 12).padding(.bottom, 10)
+            }
             // 结果内联图片优先（服务端已归一化），没有时退回 Read 按路径取图；
             // 两者同时渲染会出现同一张图两个缩略图。
             if let baseURL, let resultImages = result?.images, !resultImages.isEmpty {
@@ -4102,8 +4410,8 @@ private struct ToolUseCard: View {
                         Text(summary)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(Theme.textSecondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
                     }
                 }
                 Spacer(minLength: 0)
@@ -4146,6 +4454,8 @@ private struct ToolUseCard: View {
 
     /// 摘要优先级：description > 常见关键参数 > 第一个参数。
     private var summary: String {
+        let preview = toolInputPreview(input)
+        if !preview.isEmpty { return preview }
         if let d = description, !d.isEmpty { return d }
         let preferredKeys = ["command", "file_path", "path", "pattern", "query", "prompt", "url", "description"]
         for key in preferredKeys {
@@ -4163,10 +4473,16 @@ private struct ToolUseCard: View {
 
 /// 工具结果正文：保留移动端展示上限；服务端截断时可按需加载并复制完整内容。
 private struct ToolResultBody: View {
+    @Environment(\.chatToolContentDidLoad) private var contentDidLoad
     @Environment(\.chatAPI) private var api
     @Environment(\.chatSessionID) private var sessionID
 
     let result: ToolResultInfo
+    let showsInput: Bool
+    @State private var fullInput: [String: JSONValue]
+    @State private var fullImages: [String]
+    @State private var fullIsError: Bool
+    @State private var sourceToolID: String
 
     @State private var fullText: String
     @State private var truncated: Bool
@@ -4178,8 +4494,13 @@ private struct ToolResultBody: View {
 
     private let displayLimit = 24_000
 
-    init(result: ToolResultInfo) {
+    init(result: ToolResultInfo, input: [String: JSONValue] = [:], showsInput: Bool = false) {
         self.result = result
+        self.showsInput = showsInput
+        _fullInput = State(initialValue: input)
+        _fullImages = State(initialValue: result.images)
+        _fullIsError = State(initialValue: result.isError)
+        _sourceToolID = State(initialValue: result.toolUseId)
         _fullText = State(initialValue: result.text)
         _truncated = State(initialValue: result.truncated)
     }
@@ -4193,11 +4514,23 @@ private struct ToolResultBody: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if showsInput, let baseURL = api?.baseURL, !fullImages.isEmpty {
+                ForEach(Array(fullImages.enumerated()), id: \.offset) { _, image in
+                    WandToolImageThumbnail(baseURL: baseURL, source: image)
+                }
+            }
+            if showsInput {
+                let details = toolInputDetail(fullInput)
+                if !details.isEmpty {
+                    Text(String(details.prefix(displayLimit)))
+                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                }
+            }
             if !displayText.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(displayText)
                         .font(.system(size: 12, design: .monospaced))
-                        .foregroundColor(result.isError ? Theme.danger : Theme.textPrimary)
+                        .foregroundColor(fullIsError ? Theme.danger : Theme.textPrimary)
                         .textSelection(.enabled)
                         .padding(10)
                 }
@@ -4209,9 +4542,9 @@ private struct ToolResultBody: View {
             if truncated {
                 fullContentRow
             } else if displayText.isEmpty {
-                Text(result.isError ? "工具执行失败，未返回错误详情" : "工具已完成，没有文本输出")
+                Text(fullIsError ? "工具执行失败，未返回错误详情" : "工具已完成，没有文本输出")
                     .font(.system(size: 11))
-                    .foregroundColor(result.isError ? Theme.danger : Theme.textSecondary)
+                    .foregroundColor(fullIsError ? Theme.danger : Theme.textSecondary)
             }
             if !fullText.isEmpty {
                 Button {
@@ -4225,17 +4558,24 @@ private struct ToolResultBody: View {
                 .accessibilityLabel("复制完整工具输出")
             }
         }
-        .onChange(of: result.text) { _, text in
+        .onAppear { if truncated { loadFullContent() } }
+        .onChange(of: toolResultMetadataToken(result)) { _, _ in
             cancelLoad()
-            fullText = text
-            truncated = result.truncated
-            loadError = nil
-        }
-        .onChange(of: result.toolUseId) { _, _ in
-            cancelLoad()
+            if sourceToolID != result.toolUseId {
+                sourceToolID = result.toolUseId
+                fullInput = [:]
+                fullImages = result.images
+                fullIsError = result.isError
+                fullText = result.text
+                truncated = result.truncated
+            }
+            if !result.images.isEmpty { fullImages = result.images }
+            fullIsError = fullIsError || result.isError
+            guard !(result.truncated && !truncated && fullText.count >= result.text.count) else { return }
             fullText = result.text
             truncated = result.truncated
             loadError = nil
+            if truncated { loadFullContent() }
         }
         .onDisappear { cancelLoad() }
     }
@@ -4291,6 +4631,10 @@ private struct ToolResultBody: View {
                     return
                 }
                 fullText = loaded.text
+                fullIsError = loaded.isError || result.isError
+                if !loaded.images.isEmpty { fullImages = loaded.images }
+                contentDidLoad?(loaded)
+                if !loaded.input.isEmpty { fullInput = loaded.input }
                 truncated = false
             } catch {
                 guard !Task.isCancelled,
@@ -5045,6 +5389,9 @@ private struct DiffCard: View {
 // MARK: - 终端卡片（Bash，对齐 Web 端 inline-terminal）
 
 private struct TerminalCard: View {
+    @Environment(\.chatToolContentDidLoad) private var contentDidLoad
+    @State private var fullInput: [String: JSONValue]
+    @State private var sourceToolID: String
     @Environment(\.chatAPI) private var api
     @Environment(\.chatSessionID) private var sessionID
 
@@ -5070,6 +5417,8 @@ private struct TerminalCard: View {
         initiallyExpanded: Bool = false
     ) {
         self.input = input
+        _fullInput = State(initialValue: input)
+        _sourceToolID = State(initialValue: result?.toolUseId ?? "")
         self.result = result
         self.running = running
         self.initiallyExpanded = initiallyExpanded
@@ -5078,7 +5427,7 @@ private struct TerminalCard: View {
     }
 
     private var command: String {
-        input["command"]?.stringValue ?? input["cmd"]?.stringValue ?? ""
+        fullInput["command"]?.stringValue ?? fullInput["cmd"]?.stringValue ?? ""
     }
     private var statusColor: Color {
         guard let result else { return Theme.brand }
@@ -5137,23 +5486,32 @@ private struct TerminalCard: View {
             guard !appliedInitialExpansion else { return }
             expanded = initiallyExpanded
             appliedInitialExpansion = true
+            if expanded, truncated { loadFullOutput() }
         }
         .onChange(of: result != nil) {
             if initiallyExpanded {
                 withAnimation(.easeInOut(duration: 0.15)) { expanded = true }
             }
         }
-        .onChange(of: result?.text) { _, text in
-            cancelFullOutputLoad()
-            outputText = text ?? ""
-            truncated = result?.truncated == true
-            outputLoadError = nil
+        .onChange(of: expanded) { _, open in
+            if open, truncated, !loadingFullOutput { loadFullOutput() }
         }
-        .onChange(of: result?.toolUseId) { _, _ in
+        .onChange(of: toolResultMetadataToken(result)) { _, _ in
             cancelFullOutputLoad()
+            if sourceToolID != (result?.toolUseId ?? "") {
+                sourceToolID = result?.toolUseId ?? ""
+                fullInput = input
+                outputText = result?.text ?? ""
+                truncated = result?.truncated == true
+            }
+            guard !(result?.truncated == true && !truncated && outputText.count >= (result?.text.count ?? 0)) else { return }
             outputText = result?.text ?? ""
             truncated = result?.truncated == true
             outputLoadError = nil
+            if expanded, truncated { loadFullOutput() }
+        }
+        .onChange(of: input["command"]?.stringValue ?? input["cmd"]?.stringValue) { _, command in
+            if command?.isEmpty == false { fullInput = input }
         }
         .onDisappear { cancelFullOutputLoad() }
     }
@@ -5212,6 +5570,8 @@ private struct TerminalCard: View {
                     return
                 }
                 outputText = loaded.text
+                if !loaded.input.isEmpty { fullInput = loaded.input }
+                contentDidLoad?(loaded)
                 truncated = false
             } catch {
                 guard !Task.isCancelled,

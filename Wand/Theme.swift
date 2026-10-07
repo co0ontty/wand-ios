@@ -31,8 +31,29 @@ extension View {
 /// Shared motion/feedback tokens; views never author per-page timings.
 enum WandMotion {
     static let stateSwap = Animation.easeInOut(duration: 0.18)
+    static let tabFront = Animation.easeInOut(duration: 0.22)
+    static let tabRear = Animation.easeInOut(duration: 0.22).delay(0.08)
     static let submittedDwell: UInt64 = 720_000_000
     static let failedDwell: UInt64 = 1_500_000_000
+    static let searchDebounce: UInt64 = 240_000_000
+}
+
+enum WandFeedback {
+    static let storageKey = "wand.hapticEnabled"
+
+    static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: storageKey) as? Bool ?? true
+    }
+
+    static func impact(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+        guard isEnabled() else { return }
+        UIImpactFeedbackGenerator(style: style).impactOccurred()
+    }
+
+    static func success() {
+        guard isEnabled() else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
 }
 
 enum WandAppearanceMode: String, CaseIterable, Identifiable {
@@ -96,7 +117,20 @@ enum Theme {
     static let brandStrong = dynamic(light: rgb(0.627, 0.306, 0.180), dark: rgb(0.725, 0.392, 0.263))
     /// Codex（OpenAI）标识蓝，与 Android / Web info 色对一致。
     static let codex = dynamic(light: rgb(0.290, 0.435, 0.647), dark: rgb(0.494, 0.612, 0.769)) // #4A6FA5 / #7E9CC4
+    /// Gemini 官方标是蓝紫粉渐变，单色 token 取渐变里的蓝段（与 macOS 同值）。
+    /// Web 用中性文字色避免假装有品牌色；这里保留可辨识的蓝，7 个 provider 不撞色。
+    static let gemini = dynamic(light: rgb(0.231, 0.435, 0.831), dark: rgb(0.498, 0.651, 0.941))
     static let info = codex
+
+    /// provider → 徽标色。与 macOS `Theme.providerColor(_:)` 同构。
+    /// 认不出的 provider 落回品牌色（中性「无品牌」信号），不要伪装成某个已知 provider 的颜色。
+    static func providerColor(_ provider: String?) -> Color {
+        switch WandProvider.normalizedID(provider) {
+        case WandProvider.codex.rawValue: return codex
+        case WandProvider.gemini.rawValue: return gemini
+        default: return brand
+        }
+    }
 
     // 表面 / 文本（自适应）
     static let background = dynamic(light: rgb(0.961, 0.953, 0.933), dark: rgb(0.075, 0.067, 0.059)) // #F5F3EE / #13110F
@@ -106,6 +140,8 @@ enum Theme {
     static let textPrimary = dynamic(light: rgb(0.157, 0.137, 0.122), dark: rgb(0.953, 0.933, 0.906)) // #28231F / #F3EEE7
     static let textSecondary = dynamic(light: rgb(0.384, 0.353, 0.325), dark: rgb(0.780, 0.745, 0.706)) // #625A53 / #C7BEB4
     static let textMuted = dynamic(light: rgb(0.545, 0.510, 0.475), dark: rgb(0.584, 0.545, 0.506)) // #8B8279 / #958B81
+    /// 输入框占位提示色。与 macOS `Theme.textPlaceholder` 同一组字面值，两端都显式上色。
+    static let textPlaceholderUI = dynamicUI(light: rgb(0.506, 0.459, 0.416), dark: rgb(0.584, 0.545, 0.506)) // #81756A / #958B81
     static let success = dynamic(light: rgb(0.310, 0.478, 0.345), dark: rgb(0.545, 0.729, 0.580)) // #4F7A58 / #8BBA94
     static let brandSoft = brand.opacity(0.14)
     static let successSoft = success.opacity(0.14)

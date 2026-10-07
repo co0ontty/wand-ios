@@ -25,6 +25,12 @@
 		A1000000000000000000AC0D /* SessionMessageReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC0D /* SessionMessageReducer.swift */; };
 		A1000000000000000000AC0E /* PtyInputProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC0E /* PtyInputProtocol.swift */; };
 		A1000000000000000000AC12 /* SessionInputProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC12 /* SessionInputProtocol.swift */; };
+		A1000000000000000000AC13 /* ContactsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC13 /* ContactsModels.swift */; };
+		A1000000000000000000AC14 /* ContactsAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC14 /* ContactsAPI.swift */; };
+		A1000000000000000000AC15 /* ContactsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC15 /* ContactsStore.swift */; };
+		A1000000000000000000AC16 /* ContactEditors.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC16 /* ContactEditors.swift */; };
+		A1000000000000000000AC17 /* ContactTeamViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC17 /* ContactTeamViews.swift */; };
+		A1000000000000000000AC18 /* ContactsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC18 /* ContactsView.swift */; };
 		A1000000000000000000AC0F /* NativeComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC0F /* NativeComposer.swift */; };
 		A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC10 /* SessionTimeFormatting.swift */; };
 		A1000000000000000000AC05 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC05 /* ChatView.swift */; };
@@ -47,6 +53,7 @@
 		B2000000000000000000AC06 /* WandWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B2000000000000000000F101 /* WandWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B2000000000000000000AC0A /* LocalNetworkPermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC0A /* LocalNetworkPermission.swift */; };
 		C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3000000000000000000BC01 /* WandProtocolTests.swift */; };
+		C3000000000000000000AC02 /* ContactsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3000000000000000000BC02 /* ContactsTests.swift */; };
 		D4000000000000000000AC01 /* MissionsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4000000000000000000BC01 /* MissionsModels.swift */; };
 		D4000000000000000000AC02 /* MissionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4000000000000000000BC02 /* MissionsView.swift */; };
 		D5000000000000000000AC01 /* TaskBoardModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5000000000000000000BC01 /* TaskBoardModels.swift */; };
@@ -73,6 +80,12 @@
 		E9000000000000000000AC14 /* SessionMoveSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9000000000000000000BC14 /* SessionMoveSheet.swift */; };
 		E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC08 /* WorkspaceTests.swift */; };
 		E8000000000000000000AC01 /* WorkspaceWorktreeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */; };
+		F1000000000000000000AC01 /* HomePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC01 /* HomePresentation.swift */; };
+		F1000000000000000000AC02 /* WorkspaceCreatePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC02 /* WorkspaceCreatePanel.swift */; };
+		F1000000000000000000AC03 /* WorkspaceHomeComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC03 /* WorkspaceHomeComponents.swift */; };
+		F1000000000000000000AC04 /* HomeParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC04 /* HomeParityTests.swift */; };
+		F1000000000000000000AC05 /* ComposerToolParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC05 /* ComposerToolParityTests.swift */; };
+		F1000000000000000000AC11 /* SubagentDispatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC11 /* SubagentDispatchTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -124,6 +137,12 @@
 		A1000000000000000000BC0D /* SessionMessageReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMessageReducer.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC0E /* PtyInputProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PtyInputProtocol.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC12 /* SessionInputProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionInputProtocol.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC13 /* ContactsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactsModels.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC14 /* ContactsAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactsAPI.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC15 /* ContactsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactsStore.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC16 /* ContactEditors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactEditors.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC17 /* ContactTeamViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactTeamViews.swift; sourceTree = "<group>"; };
+		A1000000000000000000BC18 /* ContactsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactsView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC0F /* NativeComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeComposer.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC10 /* SessionTimeFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimeFormatting.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC05 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
@@ -149,6 +168,7 @@
 		A100000000000000000000E1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A100000000000000000000F1 /* Wand.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Wand.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C3000000000000000000BC01 /* WandProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandProtocolTests.swift; sourceTree = "<group>"; };
+		C3000000000000000000BC02 /* ContactsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactsTests.swift; sourceTree = "<group>"; };
 		D4000000000000000000BC01 /* MissionsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissionsModels.swift; sourceTree = "<group>"; };
 		D4000000000000000000BC02 /* MissionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissionsView.swift; sourceTree = "<group>"; };
 		D5000000000000000000BC01 /* TaskBoardModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskBoardModels.swift; sourceTree = "<group>"; };
@@ -176,6 +196,12 @@
 		E9000000000000000000BC14 /* SessionMoveSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMoveSheet.swift; sourceTree = "<group>"; };
 		E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceWorktreeTests.swift; sourceTree = "<group>"; };
 		C3000000000000000000F101 /* WandTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WandTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F1000000000000000000BC01 /* HomePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomePresentation.swift; sourceTree = "<group>"; };
+		F1000000000000000000BC02 /* WorkspaceCreatePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCreatePanel.swift; sourceTree = "<group>"; };
+		F1000000000000000000BC03 /* WorkspaceHomeComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceHomeComponents.swift; sourceTree = "<group>"; };
+		F1000000000000000000BC04 /* HomeParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeParityTests.swift; sourceTree = "<group>"; };
+		F1000000000000000000BC05 /* ComposerToolParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerToolParityTests.swift; sourceTree = "<group>"; };
+		F1000000000000000000BC11 /* SubagentDispatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubagentDispatchTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -216,6 +242,9 @@
 		A1000000000000000000F500 /* Wand */ = {
 			isa = PBXGroup;
 			children = (
+				F1000000000000000000BC03 /* WorkspaceHomeComponents.swift */,
+				F1000000000000000000BC02 /* WorkspaceCreatePanel.swift */,
+				F1000000000000000000BC01 /* HomePresentation.swift */,
 				A100000000000000000000B1 /* App.swift */,
 				A100000000000000000000B2 /* ContentView.swift */,
 				A100000000000000000000B3 /* ConnectView.swift */,
@@ -233,6 +262,12 @@
 				A1000000000000000000BC0D /* SessionMessageReducer.swift */,
 				A1000000000000000000BC0E /* PtyInputProtocol.swift */,
 				A1000000000000000000BC12 /* SessionInputProtocol.swift */,
+				A1000000000000000000BC13 /* ContactsModels.swift */,
+				A1000000000000000000BC14 /* ContactsAPI.swift */,
+				A1000000000000000000BC15 /* ContactsStore.swift */,
+				A1000000000000000000BC16 /* ContactEditors.swift */,
+				A1000000000000000000BC17 /* ContactTeamViews.swift */,
+				A1000000000000000000BC18 /* ContactsView.swift */,
 				A1000000000000000000BC0F /* NativeComposer.swift */,
 				A1000000000000000000BC10 /* SessionTimeFormatting.swift */,
 				A1000000000000000000BC05 /* ChatView.swift */,
@@ -301,7 +336,11 @@
 		C3000000000000000000F501 /* WandTests */ = {
 			isa = PBXGroup;
 			children = (
+				F1000000000000000000BC05 /* ComposerToolParityTests.swift */,
+				F1000000000000000000BC11 /* SubagentDispatchTests.swift */,
+				F1000000000000000000BC04 /* HomeParityTests.swift */,
 				C3000000000000000000BC01 /* WandProtocolTests.swift */,
+				C3000000000000000000BC02 /* ContactsTests.swift */,
 				F6000000000000000000BC06 /* AlignmentParityTests.swift */,
 				E7000000000000000000BC08 /* WorkspaceTests.swift */,
 				E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */,
@@ -462,6 +501,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F1000000000000000000AC03 /* WorkspaceHomeComponents.swift in Sources */,
+				F1000000000000000000AC02 /* WorkspaceCreatePanel.swift in Sources */,
+				F1000000000000000000AC01 /* HomePresentation.swift in Sources */,
 				A100000000000000000000A1 /* App.swift in Sources */,
 				A100000000000000000000A2 /* ContentView.swift in Sources */,
 				A100000000000000000000A3 /* ConnectView.swift in Sources */,
@@ -479,6 +521,12 @@
 				A1000000000000000000AC0D /* SessionMessageReducer.swift in Sources */,
 				A1000000000000000000AC0E /* PtyInputProtocol.swift in Sources */,
 				A1000000000000000000AC12 /* SessionInputProtocol.swift in Sources */,
+				A1000000000000000000AC13 /* ContactsModels.swift in Sources */,
+				A1000000000000000000AC14 /* ContactsAPI.swift in Sources */,
+				A1000000000000000000AC15 /* ContactsStore.swift in Sources */,
+				A1000000000000000000AC16 /* ContactEditors.swift in Sources */,
+				A1000000000000000000AC17 /* ContactTeamViews.swift in Sources */,
+				A1000000000000000000AC18 /* ContactsView.swift in Sources */,
 				A1000000000000000000AC0F /* NativeComposer.swift in Sources */,
 				A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */,
 				A1000000000000000000AC05 /* ChatView.swift in Sources */,
@@ -534,7 +582,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F1000000000000000000AC05 /* ComposerToolParityTests.swift in Sources */,
+				F1000000000000000000AC11 /* SubagentDispatchTests.swift in Sources */,
+				F1000000000000000000AC04 /* HomeParityTests.swift in Sources */,
 				C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */,
+				C3000000000000000000AC02 /* ContactsTests.swift in Sources */,
 				F6000000000000000000AC06 /* AlignmentParityTests.swift in Sources */,
 				E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */,
 				E8000000000000000000AC01 /* WorkspaceWorktreeTests.swift in Sources */,

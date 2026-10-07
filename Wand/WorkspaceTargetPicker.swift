@@ -6,13 +6,19 @@ struct WorkspaceTargetPicker: View {
     var embedded: Bool = false
 
     @Environment(\.dismiss) private var dismiss
+    @State private var subject: ContactExecutionSubject?
+    @State private var employees: [SiliconEmployee] = []
+    @State private var contactsLoading = false
+    @State private var contactsError: String?
+    @State private var contactGeneration = 0
 
     var body: some View {
         if embedded {
             VStack(spacing: 12) {
                 pickerFields
                 submitBar
-            }
+            }.task { await loadContacts() }
+                .onDisappear { contactGeneration += 1 }
         } else {
         NavigationStack {
             ZStack(alignment: .bottom) {
@@ -39,16 +45,30 @@ struct WorkspaceTargetPicker: View {
             }
         }
         .interactiveDismissDisabled(store.creating)
+        .task { await loadContacts() }
+        .onDisappear { contactGeneration += 1 }
         }
     }
 
     private var pickerFields: some View {
         VStack(spacing: 8) {
+            ContactExecutionSubjectPicker(subject: Binding(get: { subject }, set: { value in
+                subject = value
+                if value?.type == "employee" { store.rememberCreationChoice(kind: .structured) }
+            }), employees: employees, loading: contactsLoading, error: contactsError,
+               onRetry: { Task { await loadContacts() } }).disabled(store.creating)
+            if subject == nil {
             ForEach(WorkspaceSessionTarget.allCases) { target in
                 targetRow(target)
             }
             if store.selectedTarget != .shell {
                 kindPicker
+            }
+            }
+            if store.unconfirmedWindowTasks.contains(taskId) {
+                Text("创建结果未确认，请先刷新任务并核对会话。").font(.caption).foregroundStyle(Theme.danger)
+                Button("我已核对，开始新的创建操作") { store.acknowledgeUnconfirmedWindow(taskID: taskId) }
+                    .font(.caption).disabled(store.creating)
             }
             if let error = store.creationError {
                 errorBanner(error)
@@ -61,7 +81,7 @@ struct WorkspaceTargetPicker: View {
         let selected = store.selectedTarget == target
         return Button {
             guard !store.creating else { return }
-            store.rememberCreationChoice(provider: target)
+            subject = nil; store.rememberCreationChoice(provider: target)
         } label: {
             HStack(spacing: 12) {
                 ZStack {
@@ -119,6 +139,7 @@ struct WorkspaceTargetPicker: View {
                     let selected = store.selectedKind == option
                     Button {
                         guard !store.creating else { return }
+                        if option != .structured { subject = nil }
                         store.rememberCreationChoice(kind: option)
                     } label: {
                         VStack(alignment: .leading, spacing: 3) {
@@ -151,7 +172,7 @@ struct WorkspaceTargetPicker: View {
 
     private var submitBar: some View {
         Button {
-            Task { await store.createSelectedWindow(expectedTaskId: taskId) }
+            Task { await store.createSelectedWindow(expectedTaskId: taskId, employeeID: subject?.type == "employee" ? subject?.id : nil) }
         } label: {
             HStack(spacing: 8) {
                 if store.creating {
@@ -160,7 +181,7 @@ struct WorkspaceTargetPicker: View {
                     Image(systemName: "plus")
                         .font(.system(size: 14, weight: .bold))
                 }
-                Text(store.creating ? "创建中…" : "创建 \(store.selectedTarget.title)")
+                Text(store.creating ? "创建中…" : "创建 " + (employees.first { $0.id == subject?.id }?.name ?? store.selectedTarget.title))
                     .font(.system(size: 15, weight: .semibold))
             }
             .frame(maxWidth: .infinity)
@@ -172,12 +193,22 @@ struct WorkspaceTargetPicker: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(store.creating)
+        .disabled(store.creating || store.unconfirmedWindowTasks.contains(taskId) ||
+                  (subject != nil && !employees.contains(where: { $0.id == subject?.id && !$0.archived && !$0.agents.isEmpty })))
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .wandGlassSurface()
     }
 
+    private func loadContacts() async {
+        contactGeneration += 1; let generation = contactGeneration; contactsLoading = true
+        do {
+            let people = try await store.contactEmployeesForPicker()
+            guard generation == contactGeneration, !Task.isCancelled else { return }
+            employees = people; contactsError = nil
+        } catch { if generation == contactGeneration { contactsError = error.localizedDescription } }
+        if generation == contactGeneration { contactsLoading = false }
+    }
     private func errorBanner(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle")
             .font(.footnote)

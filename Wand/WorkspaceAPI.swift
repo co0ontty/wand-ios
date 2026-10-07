@@ -61,6 +61,11 @@ func changesTaskHierarchy(method: String, path: String) -> Bool {
     if route == "/api/workspaces" || route.hasPrefix("/api/workspaces/") { return true }
     if route == "/api/wand-tasks" || route.hasPrefix("/api/wand-tasks/") { return true }
     if route == "/api/commands" || route == "/api/structured-sessions" { return true }
+    if route.hasPrefix("/api/sessions/") {
+        return ["/archive", "/unarchive", "/provider", "/completion/view"].contains { route.hasSuffix($0) }
+            || route == "/api/sessions/batch-archive" || route == "/api/sessions/batch-delete"
+    }
+    if route.hasPrefix("/api/ai-teams/"), route.hasSuffix("/runs") { return true }
     return route == "/api/sessions/batch-delete"
 }
 
@@ -247,6 +252,43 @@ extension WandAPI {
             body: ["sessionIds": ids]
         )
         return response.deleted ?? ids.count
+    }
+
+    /// 归档 / 恢复会话。归档是软标记：不杀进程、不删历史，也不改任务归属。
+    /// 返回服务端仍然失败的 ID，调用方据此保留原状态，不谎报成功。
+    func batchArchiveWorkspaceSessions(sessionIds: [String], archived: Bool) async throws -> [String] {
+        let ids = Array(Set(sessionIds.filter { !$0.isEmpty }))
+        guard !ids.isEmpty else { return [] }
+        let response = try await request(
+            SessionBatchArchiveResponse.self,
+            method: "POST",
+            path: "/api/sessions/batch-archive",
+            body: ["sessionIds": ids, "archived": archived]
+        )
+        return response.failed ?? []
+    }
+
+    func archiveWorkspaceSession(sessionId: String, archived: Bool) async throws {
+        let id = percentEncodePathComponent(sessionId)
+        _ = try await requestData(
+            method: "POST",
+            path: "/api/sessions/\(id)/\(archived ? "archive" : "unarchive")"
+        )
+    }
+
+    /// 确认「这一代完成结果已经在屏幕上」。只有用户明确打开的会话才调用；
+    /// 自动选中 / 列表刷新 / 重连都不算，否则未读提示会被后台刷新吃掉。
+    func markSessionCompletionViewed(
+        sessionId: String,
+        completionRevision: Int
+    ) async throws -> SessionCompletionResponse {
+        let id = percentEncodePathComponent(sessionId)
+        return try await request(
+            SessionCompletionResponse.self,
+            method: "POST",
+            path: "/api/sessions/\(id)/completion/view",
+            body: ["completionRevision": completionRevision]
+        )
     }
 
     func getWorkspaceTask(taskId: String) async throws -> WorkspaceTaskDetail {

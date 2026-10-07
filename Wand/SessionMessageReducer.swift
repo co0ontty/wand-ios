@@ -25,7 +25,7 @@ private func contentBlockVolume(_ block: ContentBlock) -> Int {
     case .toolUse(_, _, let description, let input, _):
         return (description?.count ?? 0)
             + input.reduce(0) { $0 + $1.key.count + jsonValueVolume($1.value) }
-    case .toolResult(_, let text, _, _, _, _): return text.count
+    case .toolResult(_, let text, _, _, _, _, _): return text.count
     case .unknown(_, let payload): return payload.count
     }
 }
@@ -40,16 +40,53 @@ private func shouldKeepLocalTurn(_ local: ConversationTurn, over incoming: Conve
         && turnContentVolume(local) > turnContentVolume(incoming)
 }
 
+/// Full local content can survive a compact snapshot while still receiving the
+/// server's late factual preview/decision projection for the same tool call.
+private func mergeToolMetadata(local: ContentBlock, incoming: ContentBlock, preferIncomingBody: Bool = false) -> ContentBlock {
+    switch (local, incoming) {
+    case let (.toolUse(id, name, description, input, subagent),
+              .toolUse(incomingID, incomingName, incomingDescription, incomingInput, incomingSubagent)) where id == incomingID:
+        var enriched = preferIncomingBody ? incomingInput : input
+        for (key, value) in input where enriched[key] == nil { enriched[key] = value }
+        for (key, value) in incomingInput where key.hasPrefix("__wand") { enriched[key] = value }
+        if input["__wandDecisionOutcome"]?.stringValue?.isEmpty == false,
+           incomingInput["__wandDecisionOutcome"]?.stringValue?.isEmpty != false {
+            enriched["__wandDecisionOutcome"] = input["__wandDecisionOutcome"]
+            enriched["__wandDecisionLabel"] = input["__wandDecisionLabel"]
+        }
+        return .toolUse(id: id, name: preferIncomingBody ? incomingName : name,
+                        description: incomingDescription ?? description,
+                        input: enriched, subagent: incomingSubagent ?? subagent)
+    case let (.toolResult(id, text, isError, truncated, images, subagent, projection),
+              .toolResult(incomingID, incomingText, incomingError, incomingTruncated, incomingImages, incomingSubagent, incomingProjection)) where id == incomingID:
+        return .toolResult(toolUseId: id, text: preferIncomingBody ? incomingText : text,
+                           isError: isError || incomingError,
+                           truncated: preferIncomingBody ? incomingTruncated : truncated,
+                           images: incomingImages.isEmpty ? images : incomingImages,
+                           subagent: incomingSubagent ?? subagent,
+                           projection: mergingToolProjection(local: projection, incoming: incomingProjection))
+    default: return preferIncomingBody ? incoming : local
+    }
+}
+
 private func mergeOverlappingTurns(
     local: ConversationTurn,
     incoming: ConversationTurn
 ) -> ConversationTurn {
     guard shouldKeepLocalTurn(local, over: incoming) else {
-        return mergeConversationTurnTimes(previous: local, incoming: incoming)
+        let enriched = ConversationTurn(role: incoming.role,
+            content: incoming.content.enumerated().map { index, block in
+                guard local.content.indices.contains(index) else { return block }
+                return mergeToolMetadata(local: local.content[index], incoming: block, preferIncomingBody: true)
+            }, usage: incoming.usage, createdAt: incoming.createdAt, completedAt: incoming.completedAt)
+        return mergeConversationTurnTimes(previous: local, incoming: enriched)
     }
     return ConversationTurn(
         role: local.role,
-        content: local.content,
+        content: local.content.enumerated().map { index, block in
+            guard incoming.content.indices.contains(index) else { return block }
+            return mergeToolMetadata(local: block, incoming: incoming.content[index])
+        },
         usage: incoming.usage ?? local.usage,
         createdAt: incoming.createdAt ?? local.createdAt,
         completedAt: incoming.completedAt ?? local.completedAt
@@ -92,9 +129,8 @@ private func mergeLeadingAssistantTurn(
             : nil
         if let localBlock, let incomingBlock {
             blocks.append(
-                contentBlockVolume(incomingBlock) >= contentBlockVolume(localBlock)
-                    ? incomingBlock
-                    : localBlock
+                mergeToolMetadata(local: localBlock, incoming: incomingBlock,
+                    preferIncomingBody: contentBlockVolume(incomingBlock) >= contentBlockVolume(localBlock))
             )
         } else if let incomingBlock {
             blocks.append(incomingBlock)
@@ -329,4 +365,45 @@ func applyingIncrementalMessage(
         result.loadedOffset + result.messages.count
     )
     return result
+}
+
+/// Providers may place a result in a later assistant turn or in the user answer
+/// turn. Pair by call ID only in the read-only display projection; stored roles,
+/// history, absolute turn offsets and completion facts remain untouched.
+func toolPairedDisplayTurns(_ turns: [ConversationTurn]) -> [ConversationTurn] {
+    var uses = Set<String>()
+    var results: [String: ContentBlock] = [:]
+    for turn in turns {
+        for block in turn.content {
+            switch block {
+            case .toolUse(let id, _, _, _, _) where !id.isEmpty:
+                uses.insert(id)
+            case .toolResult(let id, _, _, _, _, _, _) where !id.isEmpty:
+                if let existing = results[id] {
+                    results[id] = mergeToolMetadata(local: existing, incoming: block,
+                        preferIncomingBody: contentBlockVolume(block) >= contentBlockVolume(existing))
+                } else { results[id] = block }
+            default: break
+            }
+        }
+    }
+    return turns.map { turn in
+        var content: [ContentBlock] = []
+        for block in turn.content {
+            switch block {
+            case .toolUse(let id, _, _, _, _):
+                content.append(block)
+                if !id.isEmpty, let result = results[id] { content.append(result) }
+            case .toolResult(let id, _, _, _, _, _, _) where !id.isEmpty && uses.contains(id):
+                break
+            default: content.append(block)
+            }
+        }
+        let resultOnlyUser = turn.role == "user" && !turn.content.isEmpty && turn.content.allSatisfy {
+            if case .toolResult = $0 { return true }
+            return false
+        }
+        return ConversationTurn(role: resultOnlyUser ? "assistant" : turn.role, content: content,
+                                usage: turn.usage, createdAt: turn.createdAt, completedAt: turn.completedAt)
+    }
 }

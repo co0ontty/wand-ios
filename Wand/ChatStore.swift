@@ -41,9 +41,12 @@ final class ChatStore: ObservableObject {
     @Published private(set) var inputSending = false
     @Published private(set) var inputFeedback = ComposerSendPhase.idle
     @Published private(set) var inputFeedbackMessage: String?
-    private var inputFeedbackTask: Task<Void, Never>?
+    private var composerSubscriptions = Set<AnyCancellable>()
     /// Unknown delivery stays in memory only; never silently offer it for retransmission.
-    @Published private(set) var unconfirmedInput: String?
+    var unconfirmedInput: String? {
+        get { composerDraft.unconfirmedInput }
+        set { composerDraft.unconfirmedInput = newValue }
+    }
     @Published var availableModels: [ModelInfo] = []
     @Published var defaultModel: String?
     @Published var selectedModel: String?
@@ -55,6 +58,11 @@ final class ChatStore: ObservableObject {
     @Published var mode = "default"
     /// AskUserQuestion 卡片的选择状态（toolUseId → 各题已选项 + 是否已提交）。
     /// 放 store 而非卡片 @State：流式推送会整条替换消息重建视图，局部状态会丢。
+    @Published private(set) var displayEmployee: SiliconEmployee?
+    private var employeeDefinitionRevision = 0
+    private var employeeDefinitionID: String?
+    @Published private(set) var providerSwitching = false
+    let decisionCards = DecisionCardExpansionState()
     @Published var askUserSelections: [String: AskUserSelectionState] = [:]
 
     // 消息窗口化：messages 是完整历史的「后缀」，loadedOffset = messages[0] 的绝对下标，
@@ -117,16 +125,26 @@ final class ChatStore: ObservableObject {
     init(
         sessionId: String,
         api: WandAPI,
-        inputTransport: (any SessionInputTransport)? = nil
+        inputTransport: (any SessionInputTransport)? = nil,
+        drafts: SessionDraftStore = .shared
     ) {
         self.sessionId = sessionId
         self.api = api
-        self.composerDraft = ComposerDraftState(sessionId: sessionId, api: api)
+        self.composerDraft = drafts.draft(sessionId: sessionId, api: api)
         self.inputTransport = inputTransport ?? api
         self.serverID = ServerProfiles.stableID(for: api.baseURL)
         self.socket = WandSocket(baseURL: api.baseURL)
         // init/resync/全量快照也按块级窗口下发（与 REST getSession 的 blockBudget 对齐）。
         self.socket.blockBudget = WandAPI.chatBlockWindow
+        composerDraft.$sendPhase.sink { [weak self] phase in
+            guard let self else { return }
+            inputFeedback = phase
+            let sending = phase == .sending
+            if inputSending != sending { inputSending = sending }
+        }.store(in: &composerSubscriptions)
+        composerDraft.$sendFeedback.sink { [weak self] message in
+            self?.inputFeedbackMessage = message
+        }.store(in: &composerSubscriptions)
     }
 
     // MARK: - 生命周期
@@ -142,6 +160,7 @@ final class ChatStore: ObservableObject {
             active = true
             wlog("session", "start() session=\(sessionId)（恢复缓存详情连接）")
             connectSocket()
+            refreshEmployeeDefinition()
             if snapshot != nil {
                 Task { [weak self] in await self?.loadModels() }
             }
@@ -249,6 +268,7 @@ final class ChatStore: ObservableObject {
     /// 无论是否重连都拉一份最新快照（requestResync 未订阅时自身 no-op），消除后台期间可能的过期状态。
     func handleEnterForeground() {
         socket.reconnectForForeground()
+        refreshEmployeeDefinition()
         if snapshot != nil {
             Task { [weak self] in await self?.loadModels() }
         }
@@ -316,7 +336,12 @@ final class ChatStore: ObservableObject {
 
     private func apply(snapshot snap: SessionSnapshot) {
         let previousError = snapshot?.structuredState?.lastError
+        let previousCompletion = snapshot?.completionRevision ?? 0
+        let previousViewed = snapshot?.viewedCompletionRevision ?? 0
         self.snapshot = snap
+        snapshot?.completionRevision = max(previousCompletion, snap.completionRevision ?? 0)
+        snapshot?.viewedCompletionRevision = max(previousViewed, snap.viewedCompletionRevision ?? 0)
+        if employeeDefinitionID != snap.employeeId { refreshEmployeeDefinition() }
         applyWindowedMessages(
             snap.messages,
             offset: snap.messageOffset,
@@ -340,6 +365,31 @@ final class ChatStore: ObservableObject {
             toast = error
         }
         publishPresence()
+    }
+
+    var displayEmployeeName: String? { displayEmployee?.name ?? snapshot?.employeeName }
+    var displayEmployeeAvatar: String? { displayEmployee?.avatar ?? snapshot?.employeeAvatar }
+
+    private func refreshEmployeeDefinition() {
+        employeeDefinitionRevision += 1
+        let revision = employeeDefinitionRevision
+        let id = snapshot?.employeeId
+        if employeeDefinitionID != id { displayEmployee = nil }
+        employeeDefinitionID = id
+        guard let id, !id.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let employee = try await api.contactEmployee(id)
+                guard revision == employeeDefinitionRevision, snapshot?.employeeId == id else { return }
+                displayEmployee = employee
+            } catch WandAPI.APIError.server(let status, _) where status == 404 {
+                guard revision == employeeDefinitionRevision, snapshot?.employeeId == id else { return }
+                displayEmployee = nil
+            } catch {
+                // Transient refresh failures must not revert a renamed employee/avatar to its snapshot.
+            }
+        }
     }
 
     private func publishPresence() {
@@ -374,7 +424,11 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    private func handle(_ event: WsIncoming) {
+    func handle(_ event: WsIncoming) {
+        if event.type == "notification", event.data?.kind == "silicon-employee-definition" {
+            if event.data?.employeeId == snapshot?.employeeId { refreshEmployeeDefinition() }
+            return
+        }
         guard event.sessionId == sessionId || event.sessionId == nil else {
             wlog("ws", "丢弃事件 type=\(event.type) 来自 session=\(event.sessionId ?? "nil")，当前 session=\(sessionId)")
             return
@@ -409,6 +463,7 @@ final class ChatStore: ObservableObject {
                 status = "exited"
                 isResponding = false
             }
+            syncSnapshotRuntimeFacts()
             publishPresence()
         case "error":
             if let message = event.error, !message.isEmpty {
@@ -434,6 +489,9 @@ final class ChatStore: ObservableObject {
                 runner: data.runner, command: data.command, cwd: data.cwd,
                 mode: data.mode, status: data.status, exitCode: data.exitCode,
                 startedAt: data.startedAt, endedAt: data.endedAt, archived: data.archived,
+                archivedAt: data.archivedAt,
+                completionRevision: data.completionRevision,
+                viewedCompletionRevision: data.viewedCompletionRevision,
                 summary: data.summary, currentTaskTitle: data.currentTaskTitle,
                 selectedModel: data.selectedModel, thinkingEffort: data.thinkingEffort,
                 claudeSessionId: data.claudeSessionId,
@@ -450,12 +508,19 @@ final class ChatStore: ObservableObject {
             snapshot?.ptyBusy = data.ptyBusy
             snapshot?.providerCliActive = data.providerCliActive
             snapshot?.providerCliExitCode = data.providerCliExitCode
+            snapshot?.employeeId = data.employeeId
+            snapshot?.employeeName = data.employeeName
+            snapshot?.employeeAvatar = data.employeeAvatar
+            snapshot?.teamChat = data.teamChat
+            snapshot?.teamStep = data.teamStep
         }
+        if employeeDefinitionID != snapshot?.employeeId { refreshEmployeeDefinition() }
         // WS init 常先于 REST。PTY 的 isResponding 看 ptyBusy / providerCliActive，
         // 不能只信 structuredState.inFlight（PTY 上经常是 nil/false）。
         if let snapshot {
             isResponding = snapshot.isResponding
         }
+        syncSnapshotRuntimeFacts()
         publishPresence()
     }
 
@@ -493,10 +558,21 @@ final class ChatStore: ObservableObject {
             legacyPermissionPrompt = prompt
             permissionBlocked = true
         }
+        syncSnapshotRuntimeFacts()
         publishPresence()
     }
 
     private func applyCommonFields(_ data: WsData) {
+        if let revision = data.completionRevision { snapshot?.completionRevision = max(snapshot?.completionRevision ?? 0, revision) }
+        if let revision = data.viewedCompletionRevision { snapshot?.viewedCompletionRevision = max(snapshot?.viewedCompletionRevision ?? 0, revision) }
+        if let archived = data.archived { snapshot?.archived = archived }
+        if let archivedAt = data.archivedAt { snapshot?.archivedAt = archivedAt }
+        if let structured = data.structuredState { snapshot?.structuredState = structured }
+        if let value = data.employeeId { snapshot?.employeeId = value }
+        if let value = data.employeeName { snapshot?.employeeName = value }
+        if let value = data.employeeAvatar { snapshot?.employeeAvatar = value }
+        if let value = data.teamChat { snapshot?.teamChat = value }
+        if let value = data.teamStep { snapshot?.teamStep = value }
         if let title = data.title { snapshot?.title = title }
         if let description = data.description { snapshot?.description = description }
         if let summary = data.summary, snapshot?.summary != summary {
@@ -533,6 +609,41 @@ final class ChatStore: ObservableObject {
         if let model = data.selectedModel { selectedModel = model }
         if let effort = data.thinkingEffort { thinkingEffort = effort }
         if let m = data.mode { mode = m }
+        syncSnapshotRuntimeFacts()
+    }
+
+    private func syncSnapshotRuntimeFacts() {
+        snapshot?.status = status
+        snapshot?.permissionBlocked = permissionBlocked
+        snapshot?.pendingEscalation = pendingEscalation
+        if snapshot?.isStructured == true {
+            if snapshot?.structuredState == nil {
+                snapshot?.structuredState = StructuredSessionState(runner: snapshot?.runner, model: selectedModel,
+                    lastError: nil, inFlight: isResponding, activeRequestId: nil)
+            } else { snapshot?.structuredState?.inFlight = isResponding }
+        }
+    }
+
+    func applyLoadedToolContent(_ loaded: ToolContentResponse) {
+        guard !loaded.toolUseId.isEmpty else { return }
+        messages = messages.map { turn in
+            let content = turn.content.map { block -> ContentBlock in
+                switch block {
+                case .toolUse(let id, let name, let description, var input, let subagent) where id == loaded.toolUseId:
+                    if !loaded.input.isEmpty {
+                        for (key, value) in loaded.input { input[key] = value }
+                    }
+                    return .toolUse(id: id, name: name, description: description, input: input, subagent: subagent)
+                case .toolResult(let id, _, let isError, _, let images, let subagent, let projection) where id == loaded.toolUseId:
+                    return .toolResult(toolUseId: id, text: loaded.text, isError: loaded.isError || isError,
+                        truncated: false, images: loaded.images.isEmpty ? images : loaded.images,
+                        subagent: subagent, projection: mergingToolProjection(local: projection, incoming: loaded.projection))
+                default: return block
+                }
+            }
+            return ConversationTurn(role: turn.role, content: content, usage: turn.usage,
+                                    createdAt: turn.createdAt, completedAt: turn.completedAt)
+        }
     }
 
     // MARK: - 用户动作
@@ -547,8 +658,8 @@ final class ChatStore: ObservableObject {
         onFailure: (() -> Void)? = nil
     ) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !inputSending else { return false }
-        guard unconfirmedInput != trimmed else {
+        guard !trimmed.isEmpty, !inputSending, !providerSwitching, !composerDraft.retired else { return false }
+        guard !composerDraft.isUnconfirmed(trimmed) else {
             finishInputFeedback(accepted: false, message: "上一条消息送达结果未知，请先核对会话，不要重复发送。")
             return false
         }
@@ -582,7 +693,6 @@ final class ChatStore: ObservableObject {
         }
         Task {
             defer {
-                inputSending = false
                 if queueing { queueMutationPending = false }
             }
             do {
@@ -627,26 +737,10 @@ final class ChatStore: ObservableObject {
         return true
     }
 
-    private func beginInputFeedback() {
-        inputFeedbackTask?.cancel()
-        inputFeedbackMessage = nil
-        inputFeedback = .sending
-        inputSending = true
-    }
+    private func beginInputFeedback() { composerDraft.beginSending() }
 
     private func finishInputFeedback(accepted: Bool, message: String? = nil) {
-        inputFeedbackTask?.cancel()
-        let phase: ComposerSendPhase = accepted ? .sent : .failed
-        inputFeedbackMessage = message
-        inputFeedback = phase
-        inputFeedbackTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: accepted ? WandMotion.submittedDwell : WandMotion.failedDwell)
-            } catch { return }
-            guard let self, inputFeedback == phase else { return }
-            inputFeedback = .idle
-            inputFeedbackMessage = nil
-        }
+        composerDraft.finishSending(accepted: accepted, message: message)
     }
 
     private func lastSubmittedStructuredInput() -> String? {
@@ -662,7 +756,7 @@ final class ChatStore: ObservableObject {
         }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty { return text }
         for block in lastUser.content {
-            if case .toolResult(_, let value, _, _, _, _) = block {
+            if case .toolResult(_, let value, _, _, _, _, _) = block {
                 let result = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 return result.isEmpty ? nil : result
             }
@@ -675,18 +769,17 @@ final class ChatStore: ObservableObject {
     }
 
     func sendPtyTerminalInput(_ text: String) async throws {
-        guard !inputSending else {
+        guard !composerDraft.retired, !inputSending else {
             throw WandAPI.APIError.server(status: 400, message: "正在提交上一条输入")
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard unconfirmedInput != trimmed else {
+        guard !composerDraft.isUnconfirmed(trimmed) else {
             finishInputFeedback(accepted: false, message: "上一条输入送达结果未知，请先核对终端。")
             throw UnconfirmedSessionInput(underlying: WandAPI.APIError.network(
                 "上一条输入送达结果未知，请先核对终端"
             ))
         }
         beginInputFeedback()
-        defer { inputSending = false }
         do {
             try await sendPtyInput(trimmed, view: "terminal")
             finishInputFeedback(accepted: true)
@@ -802,6 +895,7 @@ final class ChatStore: ObservableObject {
     }
 
     func setModel(_ model: String?) {
+        guard !providerSwitching else { return }
         let previousModel = selectedModel
         let previousThinkingEffort = thinkingEffort
         let previouslyNeededThinkingSync = thinkingEffortNeedsSync
@@ -863,6 +957,7 @@ final class ChatStore: ObservableObject {
     }
 
     func setThinkingEffort(_ effort: String) {
+        guard !providerSwitching else { return }
         let previous = thinkingEffort
         let previouslyNeededSync = thinkingEffortNeedsSync
 
@@ -920,6 +1015,7 @@ final class ChatStore: ObservableObject {
 
     /// 中途切换执行模式（乐观更新，失败回滚）。codex 会话固定 full-access，调用方负责拦。
     func setMode(_ newMode: String) {
+        guard !providerSwitching else { return }
         let previous = mode
         modeUpdateRevision &+= 1
         let revision = modeUpdateRevision
@@ -972,6 +1068,40 @@ final class ChatStore: ObservableObject {
         cardDefaults = config.cardDefaults ?? CardExpandDefaults()
     }
 
+    var canSwitchProvider: Bool {
+        !loading && !providerSwitching && !inputSending && isStructured && !isResponding
+            && snapshot?.archived != true && status == "idle" && messages.isEmpty
+            && queuedMessages.isEmpty && (snapshot?.claudeSessionId?.isEmpty ?? true)
+    }
+
+    func switchProvider(_ provider: String) {
+        guard canSwitchProvider, snapshot?.provider != provider else { return }
+        providerSwitching = true
+        let requestRevision = realtimeRevision
+        modelCatalogRevision += 1
+        Task { [weak self] in
+            guard let self else { return }
+            defer { providerSwitching = false }
+            do {
+                if let settingsMutationTail { await settingsMutationTail.value }
+                let updated = try await api.setSessionProvider(id: sessionId, provider: provider)
+                if realtimeRevision == requestRevision { apply(snapshot: updated) }
+                else {
+                    let previousCompletion = snapshot?.completionRevision ?? 0
+                    let previousViewed = snapshot?.viewedCompletionRevision ?? 0
+                    snapshot = updated
+                    snapshot?.completionRevision = max(previousCompletion, updated.completionRevision ?? 0)
+                    snapshot?.viewedCompletionRevision = max(previousViewed, updated.viewedCompletionRevision ?? 0)
+                }
+                await loadModels()
+                socket.requestResync()
+            } catch {
+                toast = error.localizedDescription
+                socket.requestResync()
+            }
+        }
+    }
+
     // MARK: - AskUserQuestion 交互（对齐 Web 端 __askSelect / __askSubmit）
 
     /// 点选一个选项：单选点同一项取消、换选项替换；多选逐项 toggle。已提交后不可改。
@@ -1001,7 +1131,6 @@ final class ChatStore: ObservableObject {
         beginInputFeedback()
         if structured { isResponding = true }
         Task {
-            defer { inputSending = false }
             do {
                 if structured {
                     let accepted = try await inputTransport.sendStructuredInput(

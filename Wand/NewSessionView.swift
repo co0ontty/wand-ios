@@ -86,6 +86,7 @@ struct NewSessionView: View {
     @State private var grokModels: [ModelInfo] = []
     @State private var qoderModels: [ModelInfo] = []
     @State private var piModels: [ModelInfo] = []
+    @State private var geminiModels: [ModelInfo] = []
     @State private var serverDefaultModels = ProviderDefaultModels(
         claude: nil,
         codex: nil,
@@ -105,6 +106,10 @@ struct NewSessionView: View {
     @State private var thinkingEffort = "off"
     @State private var firstMessage = ""
     @State private var creating = false
+    @State private var contactSubject: ContactExecutionSubject?
+    @State private var contactEmployees: [SiliconEmployee] = []
+    @State private var contactsError: String?
+    @State private var unconfirmedCreations = Set<String>()
     @State private var errorMessage: String?
     @State private var showBrowser = false
     @State private var showModelPicker = false
@@ -205,6 +210,7 @@ struct NewSessionView: View {
         case .grok: grokModels
         case .qoder: qoderModels
         case .pi: piModels
+        case .gemini: geminiModels
         case .claude: availableModels
         }
     }
@@ -246,6 +252,7 @@ struct NewSessionView: View {
                                 defaultsSaveTask = nil
                                 pendingModelDefaults.removeAll()
                                 cwd = newServerID == hostServerID ? (initialCwd ?? "") : ""
+                                contactSubject = nil; contactEmployees = []; contactsError = nil
                                 Task { await bootstrap() }
                             }
                             fieldHint("配置、目录和会话都会从所选服务器读取，认证信息彼此隔离。")
@@ -259,21 +266,22 @@ struct NewSessionView: View {
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: sessionKind) { _, newKind in
+                            if newKind != .structured { contactSubject = nil }
                             if newKind.preferenceValue != nil {
                                 scheduleDefaultsSave()
                             }
                         }
                         fieldHint(Self.sessionKindHint(provider: provider, kind: sessionKind))
 
-                        if sessionKind != .shell {
+                        if sessionKind == .structured {
+                            sectionHeader("执行身份")
+                            ContactExecutionSubjectPicker(subject: $contactSubject, employees: contactEmployees, error: contactsError,
+                                onRetry: { Task { await loadContacts() } })
+                        }
+                        if sessionKind != .shell && contactSubject == nil {
                             sectionHeader("Provider")
                             Picker("Provider", selection: $provider) {
-                                Text("Claude").tag("claude")
-                                Text("Codex").tag("codex")
-                                Text("OpenCode").tag("opencode")
-                                Text("Grok").tag("grok")
-                                Text("Qoder").tag("qoder")
-                                Text("Pi").tag("pi")
+                                ForEach(WandProvider.allCases) { Text($0.title).tag($0.rawValue) }
                             }
                             .pickerStyle(.segmented)
                             .onChange(of: provider) { _, newProvider in
@@ -332,8 +340,11 @@ struct NewSessionView: View {
                             firstMessageCard
                         }
 
-                        if let errorMessage {
-                            errorBanner(errorMessage)
+                        if let errorMessage { errorBanner(errorMessage) }
+                        if unconfirmedCreations.contains(selectedServerID) {
+                            Button("我已核对会话列表，开始新的创建操作") {
+                                unconfirmedCreations.remove(selectedServerID); errorMessage = nil
+                            }.font(.caption).foregroundStyle(Theme.brand).padding(.top, 8)
                         }
 
                         Spacer(minLength: 24)
@@ -497,6 +508,7 @@ struct NewSessionView: View {
         grokModels = []
         qoderModels = []
         piModels = []
+        geminiModels = []
         recentPaths = []
 
         do {
@@ -517,7 +529,8 @@ struct NewSessionView: View {
                 opencode: config.defaultModelId(for: WandProvider.opencode.rawValue),
                 grok: config.defaultModelId(for: WandProvider.grok.rawValue),
                 qoder: config.defaultModelId(for: WandProvider.qoder.rawValue),
-                pi: config.defaultModelId(for: WandProvider.pi.rawValue)
+                pi: config.defaultModelId(for: WandProvider.pi.rawValue),
+                gemini: config.defaultModelId(for: WandProvider.gemini.rawValue)
             )
             selectedModel = ""
             thinkingEffort = config.resolvedDefaultThinkingEffort
@@ -541,6 +554,8 @@ struct NewSessionView: View {
 
             // Provider / 类型 / 模式 / 模型偏好已完成 hydration；从这里开始才允许
             // 即时保存与创建，避免失败的配置请求产生半套默认值。
+            await loadContacts()
+            guard !Task.isCancelled, generation == bootstrapGeneration else { return }
             didLoadDefaults = true
             bootstrapState = .ready
             if normalizedThinkingEffort {
@@ -711,6 +726,7 @@ struct NewSessionView: View {
         case .grok: models = grokModels
         case .qoder: models = qoderModels
         case .pi: models = piModels
+        case .gemini: models = geminiModels
         case .claude: models = availableModels
         }
         guard !models.isEmpty else { return normalized }
@@ -724,6 +740,7 @@ struct NewSessionView: View {
         case .grok: serverDefaultModels.grok ?? ""
         case .qoder: serverDefaultModels.qoder ?? ""
         case .pi: serverDefaultModels.pi ?? ""
+        case .gemini: serverDefaultModels.gemini ?? ""
         case .claude: serverDefaultModels.claude ?? ""
         }
     }
@@ -763,13 +780,15 @@ struct NewSessionView: View {
         grokModels = response.models(for: WandProvider.grok.rawValue)
         qoderModels = response.models(for: WandProvider.qoder.rawValue)
         piModels = response.models(for: WandProvider.pi.rawValue)
+        geminiModels = response.models(for: WandProvider.gemini.rawValue)
         serverDefaultModels = ProviderDefaultModels(
             claude: response.defaultModelId(for: WandProvider.claude.rawValue),
             codex: response.defaultModelId(for: WandProvider.codex.rawValue),
             opencode: response.defaultModelId(for: WandProvider.opencode.rawValue),
             grok: response.defaultModelId(for: WandProvider.grok.rawValue),
             qoder: response.defaultModelId(for: WandProvider.qoder.rawValue),
-            pi: response.defaultModelId(for: WandProvider.pi.rawValue)
+            pi: response.defaultModelId(for: WandProvider.pi.rawValue),
+            gemini: response.defaultModelId(for: WandProvider.gemini.rawValue)
         )
         didLoadModels = true
 
@@ -959,6 +978,8 @@ struct NewSessionView: View {
                 return "Qoder stream-json 结构化聊天界面，支持续聊、思考过程和工具调用展示。"
             case .pi:
                 return "Pi JSON 结构化聊天界面，支持续聊、思考过程和工具调用展示。"
+            case .gemini:
+                return "Gemini stream-json 结构化聊天界面，支持多轮续聊和工具调用展示。"
             case .claude:
                 return "结构化聊天界面，支持多轮对话、流式输出和工具调用展示。"
             }
@@ -974,6 +995,8 @@ struct NewSessionView: View {
             return "Qoder CLI TUI 的原始 PTY 终端会话。"
         case .pi:
             return "Pi TUI 的原始 PTY 终端会话。"
+        case .gemini:
+            return "Gemini CLI TUI 的原始 PTY 终端会话。"
         case .claude:
             return "原始 PTY 终端会话，支持持续交互、终端视图和权限流。"
         }
@@ -1005,6 +1028,19 @@ struct NewSessionView: View {
                 return "Pi 将自动批准工具调用；支持 TUI 与 JSON 结构化会话。"
             }
             return "Pi 使用自身权限确认；支持 TUI 与 JSON 结构化会话。"
+        case .gemini:
+            // Gemini CLI 只有 --approval-mode yolo/auto_edit/default，
+            // 没有对应 .native 的开关；如实说明它退化成什么，别给"原生输出"的错觉。
+            switch mode {
+            case "full-access", "managed":
+                return "Gemini 以 yolo 运行，会自动批准工具调用；支持 TUI 与 stream-json 结构化会话。"
+            case "auto-edit":
+                return "Gemini 以 auto_edit 运行，自动确认文件修改，其他操作保持 CLI 的权限流程。"
+            case "native":
+                return "Gemini 没有独立的原生输出开关，这一档与「标准」等价（--approval-mode default）。"
+            default:
+                return "Gemini 使用自身权限确认；支持 TUI 与 stream-json 结构化会话。"
+            }
         case .claude:
             break
         }
@@ -1020,13 +1056,17 @@ struct NewSessionView: View {
     // MARK: - 创建
 
     private var canCreate: Bool {
-        bootstrapReady && !cwd.trimmingCharacters(in: .whitespaces).isEmpty && !creating
+        bootstrapReady && !cwd.trimmingCharacters(in: .whitespaces).isEmpty && !creating &&
+        !unconfirmedCreations.contains(selectedServerID) &&
+        (contactSubject == nil || (sessionKind == .structured && contactEmployees.contains {
+            $0.id == contactSubject?.id && !$0.archived && !$0.agents.isEmpty
+        }))
     }
 
     /// 保存当前完整选择而不是单字段补丁。快速输入只取消尚未入队的 debounce；已开始
     /// 的 HTTP 写入会完成，后续快照再按 endpoint FIFO 执行，保证最终选择最后提交。
     private func scheduleDefaultsSave() {
-        guard didLoadDefaults, !creating, sessionKind != .shell else { return }
+        guard didLoadDefaults, !creating, sessionKind != .shell, contactSubject == nil else { return }
         let values = currentDefaults
         let api = targetAPI
         defaultsSaveTask?.cancel()
@@ -1103,6 +1143,7 @@ struct NewSessionView: View {
         var grok = serverDefaultModels.grok
         var qoder = serverDefaultModels.qoder
         var pi = serverDefaultModels.pi
+        var gemini = serverDefaultModels.gemini
         for (provider, model) in values.modelUpdates {
             switch WandProvider(normalizing: provider) {
             case .claude: claude = model
@@ -1111,6 +1152,7 @@ struct NewSessionView: View {
             case .grok: grok = model
             case .qoder: qoder = model
             case .pi: pi = model
+            case .gemini: gemini = model
             }
             if pendingModelDefaults[provider] == model {
                 pendingModelDefaults.removeValue(forKey: provider)
@@ -1122,8 +1164,21 @@ struct NewSessionView: View {
             opencode: opencode,
             grok: grok,
             qoder: qoder,
-            pi: pi
+            pi: pi,
+            gemini: gemini
         )
+    }
+
+    private func loadContacts() async {
+        let serverID = selectedServerID; let generation = bootstrapGeneration; let contactAPI = targetAPI
+        do {
+            let people = try await contactAPI.listContactEmployees()
+            guard !Task.isCancelled, generation == bootstrapGeneration, serverID == selectedServerID else { return }
+            contactEmployees = people; contactsError = nil
+        } catch {
+            guard generation == bootstrapGeneration, serverID == selectedServerID else { return }
+            contactsError = "通讯录未能刷新，已有选择已保留：" + error.localizedDescription
+        }
     }
 
     private func create() {
@@ -1133,6 +1188,7 @@ struct NewSessionView: View {
         let path = cwd.trimmingCharacters(in: .whitespaces)
         let prompt = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         let kind = sessionKind
+        let employeeID = kind == .structured && contactSubject?.type == "employee" ? contactSubject?.id : nil
         let defaults = currentDefaults
         let effectiveMode = defaults.mode
         let effectiveModel = selectedModelForRequest
@@ -1141,15 +1197,22 @@ struct NewSessionView: View {
         defaultsSaveTask?.cancel()
         defaultsSaveTask = nil
         Task {
+            var creationAttempted = false
             do {
                 let snapshot = try await NewSessionEndpointMutationQueue.shared.run(
                     endpointID: targetServerID
                 ) {
                     switch kind {
                     case .shell:
+                        creationAttempted = true
                         return try await api.createShellSession(cwd: path)
                     case .structured:
+                        if let employeeID {
+                            creationAttempted = true
+                            return try await api.createContactEmployeeSession(employeeID: employeeID, cwd: path, prompt: prompt.isEmpty ? nil : prompt)
+                        }
                         try await persistDefaults(defaults, using: api)
+                        creationAttempted = true
                         return try await api.createStructuredSession(
                             provider: defaults.provider,
                             cwd: path,
@@ -1160,6 +1223,7 @@ struct NewSessionView: View {
                         )
                     case .pty:
                         try await persistDefaults(defaults, using: api)
+                        creationAttempted = true
                         return try await api.createPtySession(
                             provider: defaults.provider,
                             cwd: path,
@@ -1170,12 +1234,15 @@ struct NewSessionView: View {
                         )
                     }
                 }
-                if kind != .shell { commitPersistedDefaults(defaults) }
+                if kind != .shell && employeeID == nil { commitPersistedDefaults(defaults) }
                 creating = false
                 onCreated(snapshot, targetServerID)
             } catch {
                 creating = false
-                errorMessage = error.localizedDescription
+                if contactCreationNeedsReview(attempted: creationAttempted, error: error) {
+                    unconfirmedCreations.insert(targetServerID)
+                    errorMessage = "创建结果未确认，请先核对该服务器的会话列表，勿重复创建。"
+                } else { errorMessage = error.localizedDescription }
             }
         }
     }

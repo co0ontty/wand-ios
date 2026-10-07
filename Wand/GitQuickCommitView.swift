@@ -157,6 +157,7 @@ struct GitQuickCommitView: View {
     @State private var committing = false
     @State private var autoGenerating = false
     @State private var submoduleIntent = false
+    @State private var archiveRelatedTasks = false
     @State private var errorMessage: String?
 
     // 结果
@@ -452,6 +453,18 @@ struct GitQuickCommitView: View {
             .background(RoundedRectangle(cornerRadius: 14).fill(Theme.surface))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border, lineWidth: 1))
         } else {
+            Toggle(isOn: $archiveRelatedTasks) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("归档当前任务")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("提交成功后把这个会话的任务移出列表。其它进行中的任务不动。")
+                        .font(.system(size: 11))
+                        .foregroundColor(Theme.textSecondary)
+                }
+            }
+            .disabled(!hasChanges || committing)
+            .tint(Theme.brand)
+
             MagneticDockView(
                 hasChanges: hasChanges,
                 hasSubmodule: status?.hasSubmodule == true,
@@ -461,6 +474,7 @@ struct GitQuickCommitView: View {
 
             Text(hasChanges
                 ? "拖动磁吸组合 · 丢进提交区执行 · 单击直接执行该项"
+                    + (archiveRelatedTasks ? "\n本次会归档当前任务" : "")
                     + (status?.hasSubmodule == true ? "\nSub 球可选，纳入后递归处理 submodule" : "")
                 : "工作区干净，无可提交")
                 .font(.system(size: 11))
@@ -691,6 +705,7 @@ struct GitQuickCommitView: View {
         let userTag = withTag ? tagName.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         let msg = message.trimmingCharacters(in: .whitespacesAndNewlines)
         let before = status
+        let archiveIntent = archiveRelatedTasks
 
         committing = true
         onRunning()
@@ -707,8 +722,13 @@ struct GitQuickCommitView: View {
                     tag: userTag.isEmpty ? nil : userTag,
                     autoTag: withTag && userTag.isEmpty,
                     push: push,
-                    submodule: includeSubmodule
+                    submodule: includeSubmodule,
+                    archiveRelatedTasks: archiveIntent
                 )
+                if !(r.archivedTaskIds ?? []).isEmpty {
+                    api.taskChanges.send()
+                }
+                let archiveNote = archiveResultNote(requested: archiveIntent, result: r)
                 let o = CommitOutcome(
                     includeSubmodule: includeSubmodule,
                     pushed: r.pushed == true,
@@ -722,11 +742,11 @@ struct GitQuickCommitView: View {
                     submoduleCount: r.submoduleCommits?.count ?? 0
                 )
                 if push && o.pushError == nil {
-                    onCompleted(summaryText(o) + "，已推送")
+                    onCompleted(summaryText(o) + "，已推送" + archiveNote)
                 } else if let pushError = o.pushError {
-                    onFailed("推送失败：\(pushError)")
+                    onFailed("推送失败：\(pushError)" + archiveNote)
                 } else {
-                    onCompleted(summaryText(o))
+                    onCompleted(summaryText(o) + archiveNote)
                 }
             } catch {
                 errorMessage = error.localizedDescription
@@ -792,6 +812,13 @@ struct GitQuickCommitView: View {
             }
             pushing = false
         }
+    }
+
+    private func archiveResultNote(requested: Bool, result: QuickCommitResult) -> String {
+        guard requested else { return "" }
+        if let error = result.archiveError, !error.isEmpty { return "，归档失败：\(error)" }
+        let count = result.archivedTaskIds?.count ?? 0
+        return count > 0 ? "，已归档 \(count) 个关联任务" : "，没有可归档的关联任务"
     }
 
     private func summaryText(_ outcome: CommitOutcome) -> String {
@@ -1027,7 +1054,7 @@ private struct MagneticDockView: View {
                     let center = CGPoint(x: hp.x + w(cand) / 2, y: hp.y + chipH / 2)
                     if hypot(loc.x - center.x, loc.y - center.y) < 58 {
                         members.append(cand)
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        WandFeedback.impact(.light)
                     }
                 }
                 dragMembers = members
@@ -1051,7 +1078,7 @@ private struct MagneticDockView: View {
                 // 拖出场地右缘 → 悬在发射区上方（hot）。
                 let nowHot = loc.x > fieldSize.width + 4
                 if nowHot && !hot {
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    WandFeedback.impact(.medium)
                 }
                 hot = nowHot
             }

@@ -8,6 +8,7 @@ struct TaskBoardView: View {
     let onOpenSession: (String) -> Void
     /// 会话已绑定任务时优先打开任务上下文（对齐 web / Android 的 openSessionWithOwningTask）。
     var onOpenBoundSession: ((String, String) -> Void)? = nil
+    var onOpenTeamRun: ((String) -> Void)? = nil
     var onDismiss: (() -> Void)? = nil
     var embedded: Bool = false
     var refreshNonce: Int = 0
@@ -16,6 +17,13 @@ struct TaskBoardView: View {
     @State private var tasks: [WandBoardTask] = []
     @State private var workspaces: [Workspace] = []
     @State private var catalog: ModelsResponse?
+    @State private var contactEmployees: [SiliconEmployee] = []
+    @State private var contactTeams: [ContactTeam] = []
+    @State private var contactsError: String?
+    @State private var unconfirmedDispatches = Set<String>()
+    @State private var unconfirmedCreate = false
+    @State private var activeView = false
+    @State private var operationGeneration = 0
     @State private var loading = true
     @State private var refreshInFlight: Task<Void, Never>?
     @State private var errorMessage: String?
@@ -64,40 +72,63 @@ struct TaskBoardView: View {
                 }
             }
         }
+        .onAppear { activeView = true }
+        .onDisappear { activeView = false; operationGeneration += 1 }
         .sheet(isPresented: $showCreate) {
             TaskBoardCreateView(
                 workspaces: workspaces,
                 catalog: catalog,
                 lastAgent: lastAgent,
+                employees: contactEmployees,
+                teams: contactTeams,
+                contactsError: contactsError,
+                unconfirmed: unconfirmedCreate,
+                onVerify: { unconfirmedCreate = false; errorMessage = nil },
+                onContactsRetry: { Task { await loadContacts() } },
                 defaultWorkspaceId: filterWorkspaceId,
                 initialStatus: createStatus,
                 busy: busy,
                 error: errorMessage
-            ) { title, description, status, priority, workspaceId, agent in
+            ) { title, description, status, priority, workspaceId, agent, subject in
+                guard activeView, !busy, !unconfirmedCreate else { return }
+                let actionGeneration = operationGeneration
                 await mutate {
-                    let created = try await api.createBoardTask(
+                    let created: WandBoardTask
+                    do { created = try await api.createBoardTask(
                         title: title,
                         description: description,
                         status: status,
                         priority: priority,
                         workspaceId: workspaceId,
-                        agent: agent
-                    )
-                    rememberAgent(agent)
+                        agent: agent,
+                        executionSubject: subject
+                    ) } catch {
+                        if !isDefiniteInputRejection(error) { unconfirmedCreate = true }
+                        throw error
+                    }
+                    guard activeView, actionGeneration == operationGeneration, !Task.isCancelled else { return }
+                    if subject == nil { rememberAgent(agent) }
                     showCreate = false
                     selected = created
                     // 只有「进行中」列的新建才顺带第一次指派；「待办」列只创建任务。
                     if wandBoardCreateDispatches(status: status),
                        !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         var dispatchError: String?
+                        var acceptedRunID: String?
                         do {
-                            _ = try await api.dispatchBoardTask(id: created.id, agent: agent, prompt: description)
+                            if let subject {
+                                let receipt = try await api.dispatchContactTask(id: created.id, subject: subject, prompt: description)
+                                acceptedRunID = receipt.teamRun?.run.id
+                            } else { _ = try await api.dispatchBoardTask(id: created.id, agent: agent, prompt: description) }
                         } catch {
-                            dispatchError = "任务已创建，但第一次指派失败：\(error.localizedDescription)"
+                            if !isDefiniteInputRejection(error) { unconfirmedDispatches.insert(created.id) }
+                            dispatchError = unconfirmedDispatches.contains(created.id) ? "任务已创建，指派结果未确认，请核对任务会话，勿重复派发。" : "任务已创建，但第一次指派失败：\(error.localizedDescription)"
                         }
                         await refresh(showProgress: false)
                         // refresh 成功会清掉旧错误，所以错误必须放在刷新之后写回。
                         if let dispatchError { errorMessage = dispatchError }
+                        if activeView, actionGeneration == operationGeneration, selected?.id == created.id,
+                           !Task.isCancelled, let acceptedRunID, let onOpenTeamRun { busy = false; onOpenTeamRun(acceptedRunID) }
                     }
                     if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                        created.titleSource == "auto" {
@@ -122,6 +153,7 @@ struct TaskBoardView: View {
             workspaces = (try? await api.listWorkspaces()) ?? []
             catalog = try? await api.models()
             lastAgent = (try? await api.boardTaskAgentDefaults()) ?? .default
+            await loadContacts()
         }
         .task {
             // 看板不参与会话树的 10s 轮询：独立周期低调重取，跟上另一端的任务/会话变更。
@@ -135,7 +167,7 @@ struct TaskBoardView: View {
             Task { await refresh(showProgress: false) }
         }
         .onChange(of: refreshNonce) { _, _ in
-            Task { await refresh(showProgress: false) }
+            Task { await refresh(showProgress: false); await loadContacts() }
         }
         .alert("任务操作失败", isPresented: Binding(
             // 新建弹窗上时用弹窗内联错误，弹窗外再弹 alert 会与 sheet 争同一个呈现通道。
@@ -178,15 +210,14 @@ struct TaskBoardView: View {
                         catalog: catalog,
                         lastAgent: lastAgent,
                         busy: busy,
+                        employees: contactEmployees, teams: contactTeams, contactsError: contactsError,
+                        unconfirmed: unconfirmedDispatches.contains(selected.id),
+                        onVerify: { unconfirmedDispatches.remove(selected.id); errorMessage = nil },
+                        onContactsRetry: { Task { await loadContacts() } },
                         onPatch: { body in await mutate { _ = try await api.updateBoardTask(id: selected.id, body: body) } },
                         onRemember: rememberAgent,
-                        onDispatch: { agent, prompt in
-                            rememberAgent(agent)
-                            await mutate {
-                                _ = try await api.updateBoardTask(id: selected.id, body: ["agent": agent.jsonObject()])
-                                let result = try await api.dispatchBoardTask(id: selected.id, agent: agent, prompt: prompt)
-                                if !result.sessionId.isEmpty { openBoardSession(result.sessionId) }
-                            }
+                        onDispatch: { agent, prompt, subject in
+                            await dispatchTask(task: selected, agent: agent, prompt: prompt, subject: subject)
                         },
                         onDelete: {
                             await mutate {
@@ -602,6 +633,39 @@ struct TaskBoardView: View {
             return
         }
         onOpenSession(sessionId)
+    }
+
+    private func loadContacts() async {
+        async let people = try? api.listContactEmployees()
+        async let teams = try? api.listContactTeams()
+        let (p, t) = await (people, teams)
+        guard !Task.isCancelled else { return }
+        if let p { contactEmployees = p }; if let t { contactTeams = t }
+        contactsError = p == nil || t == nil ? "通讯录未能完整刷新，已有资料已保留。" : nil
+    }
+    private func dispatchTask(task: WandBoardTask, agent: WandBoardTaskAgent, prompt: String,
+                              subject: ContactExecutionSubject?) async -> Bool {
+        guard activeView, !busy, !unconfirmedDispatches.contains(task.id) else { return false }
+        let actionGeneration = operationGeneration
+        busy = true
+        defer { busy = false }
+        do {
+            let result: WandBoardDispatchResult
+            if let subject { result = try await api.dispatchContactTask(id: task.id, subject: subject, prompt: prompt) }
+            else { result = try await api.dispatchBoardTask(id: task.id, agent: agent, prompt: prompt); rememberAgent(agent) }
+            guard result.ok, result.taskId == task.id, !result.sessionId.isEmpty else { throw WandAPI.APIError.network("派发回执无效") }
+            await refresh(showProgress: false)
+            guard activeView, actionGeneration == operationGeneration, selected?.id == task.id, !Task.isCancelled else { return true }
+            selected = tasks.first { $0.id == task.id } ?? selected
+            busy = false
+            if let runID = result.teamRun?.run.id, let onOpenTeamRun { onOpenTeamRun(runID) }
+            else { openBoardSession(result.sessionId) }
+            return true
+        } catch {
+            if !isDefiniteInputRejection(error) { unconfirmedDispatches.insert(task.id) }
+            errorMessage = unconfirmedDispatches.contains(task.id) ? "指派结果未确认，请核对任务会话，勿重复派发。" : error.localizedDescription
+            return false
+        }
     }
 
     private func mutate(_ work: () async throws -> Void) async {
@@ -1162,9 +1226,15 @@ private struct TaskBoardDetailView: View {
     let catalog: ModelsResponse?
     let lastAgent: WandBoardTaskAgent
     let busy: Bool
+    let employees: [SiliconEmployee]
+    let teams: [ContactTeam]
+    let contactsError: String?
+    let unconfirmed: Bool
+    let onVerify: () -> Void
+    let onContactsRetry: () -> Void
     let onPatch: ([String: Any]) async -> Void
     let onRemember: (WandBoardTaskAgent) -> Void
-    let onDispatch: (WandBoardTaskAgent, String) async -> Void
+    let onDispatch: (WandBoardTaskAgent, String, ContactExecutionSubject?) async -> Bool
     let onDelete: () async -> Void
     let onOpenSession: (String) -> Void
     let onMoveSession: (WandBoardTaskSession) -> Void
@@ -1174,6 +1244,7 @@ private struct TaskBoardDetailView: View {
     @State private var description: String
     @State private var agent: WandBoardTaskAgent
     @State private var composePrompt = ""
+    @State private var subject: ContactExecutionSubject?
 
     init(
         task: WandBoardTask,
@@ -1181,9 +1252,11 @@ private struct TaskBoardDetailView: View {
         catalog: ModelsResponse?,
         lastAgent: WandBoardTaskAgent,
         busy: Bool,
+        employees: [SiliconEmployee], teams: [ContactTeam], contactsError: String?, unconfirmed: Bool,
+        onVerify: @escaping () -> Void, onContactsRetry: @escaping () -> Void,
         onPatch: @escaping ([String: Any]) async -> Void,
         onRemember: @escaping (WandBoardTaskAgent) -> Void,
-        onDispatch: @escaping (WandBoardTaskAgent, String) async -> Void,
+        onDispatch: @escaping (WandBoardTaskAgent, String, ContactExecutionSubject?) async -> Bool,
         onDelete: @escaping () async -> Void,
         onOpenSession: @escaping (String) -> Void,
         onClose: @escaping () -> Void,
@@ -1193,7 +1266,9 @@ private struct TaskBoardDetailView: View {
         self.workspaces = workspaces
         self.catalog = catalog
         self.lastAgent = lastAgent
-        self.busy = busy
+        self.busy = busy; self.employees = employees; self.teams = teams
+        self.contactsError = contactsError; self.unconfirmed = unconfirmed
+        self.onVerify = onVerify; self.onContactsRetry = onContactsRetry
         self.onPatch = onPatch
         self.onRemember = onRemember
         self.onDispatch = onDispatch
@@ -1204,6 +1279,7 @@ private struct TaskBoardDetailView: View {
         _title = State(initialValue: task.title)
         _description = State(initialValue: task.description)
         _agent = State(initialValue: task.agent ?? lastAgent)
+        _subject = State(initialValue: task.executionSubject?.isCLI == false ? task.executionSubject : nil)
     }
 
     var body: some View {
@@ -1249,6 +1325,9 @@ private struct TaskBoardDetailView: View {
             Section(task.sessions.isEmpty ? "指派 Agent" : "再指派一个 Agent") {
                 TextField("提示词", text: $composePrompt, prompt: Text("输入这次派给 Agent 的提示词。任务描述不会自动带上。"), axis: .vertical)
                     .lineLimit(3...8)
+                ContactExecutionSubjectPicker(subject: $subject, employees: employees, teams: teams,
+                    teamAllowed: task.workspaceId != nil && task.workspaceId != "wand-global", error: contactsError, onRetry: onContactsRetry)
+                if subject == nil {
                 Picker("CLI 工具", selection: Binding(
                     get: { agent.provider },
                     set: { provider in
@@ -1298,10 +1377,17 @@ private struct TaskBoardDetailView: View {
                         Text(wandBoardModeLabel(mode)).tag(mode)
                     }
                 }
-                Button(task.sessions.isEmpty ? "派发 Agent" : "再派发一次") {
-                    Task { await onDispatch(agent, composePrompt.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 }
-                .disabled(busy || composePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if unconfirmed {
+                    Text("指派结果未确认，请先核对任务会话。").font(.caption).foregroundStyle(Theme.danger)
+                    Button("我已核对，开始新的指派", action: onVerify).font(.caption)
+                }
+                Button(task.sessions.isEmpty ? "派发" : "再派发一次") {
+                    let submitted = composePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let draftAtStart = composePrompt
+                    Task { if await onDispatch(agent, submitted, subject), composePrompt == draftAtStart { composePrompt = "" } }
+                }
+                .disabled(busy || unconfirmed || composePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !subjectAvailable)
             }
             Section("任务内的会话") {
                 let groups = wandBoardSessionGroups(sessions: task.sessions, assigned: task.agent)
@@ -1361,22 +1447,36 @@ private struct TaskBoardDetailView: View {
                 .disabled(busy)
             }
         }
+        .disabled(busy)
         .onChange(of: task.id) { _, _ in
             title = task.title
             description = task.description
-            agent = task.agent ?? lastAgent
+            agent = task.agent ?? lastAgent; subject = task.executionSubject?.isCLI == false ? task.executionSubject : nil
+            composePrompt = ""
         }
     }
+    private var subjectAvailable: Bool {
+        guard let subject else { return true }
+        if subject.type == "employee" { return employees.contains { $0.id == subject.id && !$0.archived && !$0.agents.isEmpty } }
+        return subject.type == "team" && task.workspaceId != nil && task.workspaceId != "wand-global" && teams.contains { $0.id == subject.id }
+    }
+
 }
 
 private struct TaskBoardCreateView: View {
     let workspaces: [Workspace]
     let catalog: ModelsResponse?
     let lastAgent: WandBoardTaskAgent
+    let employees: [SiliconEmployee]
+    let teams: [ContactTeam]
+    let contactsError: String?
+    let unconfirmed: Bool
+    let onVerify: () -> Void
+    let onContactsRetry: () -> Void
     let defaultWorkspaceId: String
     var busy = false
     var error: String?
-    let onCreate: (String, String, String, String, String?, WandBoardTaskAgent) async -> Void
+    let onCreate: (String, String, String, String, String?, WandBoardTaskAgent, ContactExecutionSubject?) async -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
@@ -1385,20 +1485,25 @@ private struct TaskBoardCreateView: View {
     @State private var priority = "none"
     @State private var workspaceId = ""
     @State private var agent: WandBoardTaskAgent
+    @State private var subject: ContactExecutionSubject?
 
     init(
         workspaces: [Workspace],
         catalog: ModelsResponse?,
         lastAgent: WandBoardTaskAgent,
+        employees: [SiliconEmployee], teams: [ContactTeam], contactsError: String?, unconfirmed: Bool,
+        onVerify: @escaping () -> Void, onContactsRetry: @escaping () -> Void,
         defaultWorkspaceId: String,
         initialStatus: String = "todo",
         busy: Bool = false,
         error: String? = nil,
-        onCreate: @escaping (String, String, String, String, String?, WandBoardTaskAgent) async -> Void
+        onCreate: @escaping (String, String, String, String, String?, WandBoardTaskAgent, ContactExecutionSubject?) async -> Void
     ) {
         self.workspaces = workspaces
         self.catalog = catalog
-        self.lastAgent = lastAgent
+        self.lastAgent = lastAgent; self.employees = employees; self.teams = teams
+        self.contactsError = contactsError; self.unconfirmed = unconfirmed
+        self.onVerify = onVerify; self.onContactsRetry = onContactsRetry
         self.defaultWorkspaceId = defaultWorkspaceId
         self.busy = busy
         self.error = error
@@ -1430,6 +1535,9 @@ private struct TaskBoardCreateView: View {
                         Text(workspace.name).tag(workspace.id)
                     }
                 }
+                ContactExecutionSubjectPicker(subject: $subject, employees: employees, teams: teams,
+                    teamAllowed: !workspaceId.isEmpty && workspaceId != "wand-global", error: contactsError, onRetry: onContactsRetry)
+                if subject == nil {
                 if dispatches {
                     Picker("第一次指派", selection: Binding(
                         get: { agent.provider },
@@ -1472,6 +1580,11 @@ private struct TaskBoardCreateView: View {
                         Text(wandBoardModeLabel(mode)).tag(mode)
                     }
                 }
+                }
+                if unconfirmed {
+                    Text("创建结果未确认，请先核对任务列表。").font(.caption).foregroundStyle(Theme.danger)
+                    Button("我已核对，开始新的创建操作", action: onVerify).font(.caption)
+                }
                 Picker("状态", selection: $status) {
                     ForEach(WandBoardStatus.allCases) { item in
                         Text(item.label).tag(item.rawValue)
@@ -1483,6 +1596,7 @@ private struct TaskBoardCreateView: View {
                     }
                 }
             }
+            .disabled(busy)
             .navigationTitle("新建任务")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -1503,17 +1617,25 @@ private struct TaskBoardCreateView: View {
                                 status,
                                 priority,
                                 workspaceId.isEmpty ? nil : workspaceId,
-                                agent
+                                agent,
+                                subject
                             )
                         }
                     }
-                    .disabled(busy || (title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    .disabled(busy || unconfirmed || !subjectAvailable || (title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         && description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
                 }
             }
         }
         .onAppear { workspaceId = defaultWorkspaceId }
+        .interactiveDismissDisabled(busy)
     }
+    private var subjectAvailable: Bool {
+        guard let subject else { return true }
+        if subject.type == "employee" { return employees.contains { $0.id == subject.id && !$0.archived && !$0.agents.isEmpty } }
+        return subject.type == "team" && !workspaceId.isEmpty && workspaceId != "wand-global" && teams.contains { $0.id == subject.id }
+    }
+
 }
 
 /**

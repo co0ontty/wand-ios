@@ -686,6 +686,121 @@ final class AlignmentParityTests: XCTestCase {
 
     // MARK: - Provider and activity parity
 
+    /// provider 名单与服务端 `SESSION_PROVIDERS` 一致。历史回归：iOS 与 macOS 都只有
+    /// 6 个 case 且未知值兜底成 Claude，Gemini 会话因此被错标成 Claude。
+    func testProviderCatalogCoversEveryServerProvider() throws {
+        XCTAssertEqual(
+            WandProvider.allCases.map(\.rawValue),
+            ["claude", "codex", "opencode", "grok", "qoder", "pi", "gemini"]
+        )
+    }
+
+    func testGeminiNormalizesFromServerAliasesAndKeepsItsRunner() throws {
+        for raw in ["gemini", "Gemini", " gemini-cli ", "gemini-cli-json"] {
+            XCTAssertEqual(WandProvider(normalizing: raw), .gemini, raw)
+            XCTAssertEqual(WandProvider.normalizedID(raw), "gemini", raw)
+        }
+        XCTAssertEqual(WandProvider.gemini.title, "Gemini")
+        XCTAssertEqual(WandProvider.gemini.structuredRunner, "gemini-cli-json")
+        // 任务派发目标必须认得 gemini，否则 init(provider:) 会静默回落成 Claude。
+        XCTAssertEqual(WorkspaceSessionTarget(provider: .gemini), .gemini)
+    }
+
+    func testUnknownProviderIsNotDisguisedAsAKnownOne() throws {
+        XCTAssertEqual(WandProvider.title(for: "gemini"), "Gemini")
+        XCTAssertEqual(WandProvider.title(for: "some-future-cli"), "some-future-cli")
+        XCTAssertEqual(WandProvider.title(for: nil), "Claude")
+        XCTAssertNil(WandProvider.normalizedID("some-future-cli"))
+        XCTAssertEqual(WandProvider(normalizing: "some-future-cli"), .claude)
+        // 实时活动与看板卡片不得把 Gemini 说成 Claude。
+        XCTAssertEqual(wandBoardProviderLabel("gemini"), "Gemini")
+        XCTAssertEqual(wandBoardProviderLabel("shell"), "终端")
+    }
+
+    /// 档位名单是跨端不变量：iOS / macOS / Web / Android 必须是同一份。
+    func testModeListsMatchTheCrossClientInvariant() throws {
+        XCTAssertEqual(WandProvider.codex.supportedModeIDs, ["full-access"])
+        XCTAssertEqual(WandProvider.opencode.supportedModeIDs, ["default", "full-access", "managed"])
+        XCTAssertEqual(WandProvider.grok.supportedModeIDs, ["default", "full-access", "managed"])
+        XCTAssertEqual(WandProvider.pi.supportedModeIDs, ["default", "full-access", "managed"])
+        XCTAssertEqual(WandProvider.qoder.supportedModeIDs, ["default", "full-access", "auto-edit", "managed"])
+        XCTAssertEqual(
+            WandProvider.claude.supportedModeIDs,
+            ["default", "full-access", "auto-edit", "native", "managed"]
+        )
+        // gemini 与 claude 同走兜底全量；客户端不单方面收紧。
+        XCTAssertEqual(WandProvider.gemini.supportedModeIDs, WandProvider.claude.supportedModeIDs)
+    }
+
+    /// Gemini 的模型与默认模型必须来自自己的目录，不能落到 Claude 的。
+    func testGeminiModelsComeFromItsOwnCatalog() throws {
+        let models = try decode(
+            ModelsResponse.self,
+            from: #"""
+            {
+              "models": [{"id":"claude-model","label":"Claude"}],
+              "codexModels": [],
+              "geminiModels": [{"id":"gemini-model","label":"Gemini"}],
+              "defaultModels": {"gemini":"gemini-model"}
+            }
+            """#
+        )
+        XCTAssertEqual(models.models(for: WandProvider.gemini).map(\.id), ["gemini-model"])
+        XCTAssertEqual(models.models(for: WandProvider.claude).map(\.id), ["claude-model"])
+        XCTAssertEqual(models.defaultModelId(for: "gemini"), "gemini-model")
+    }
+
+    /// 会话归档的语义边界：归档是软标记，只是从活跃列表拆进折叠区，不改身份与归属。
+    func testArchivedSessionsSplitOutOfTheActiveListOnce() throws {
+        let json = #"""
+        [
+          { "id": "a", "archived": false },
+          { "id": "b", "archived": true },
+          { "id": "c" },
+          { "id": "d", "archived": true }
+        ]
+        """#
+        let sessions = try JSONDecoder().decode([WorkspaceSessionSummary].self, from: Data(json.utf8))
+        let split = WorkspaceSessionSummary.splitArchived(sessions)
+        XCTAssertEqual(split.active.map(\.id), ["a", "c"])
+        XCTAssertEqual(split.archived.map(\.id), ["b", "d"])
+    }
+
+    /// 「刚完成」是纯展示态；确认只在明确打开且无弹层时发生，列表刷新不能消耗未读。
+    func testJustCompletedAndAcknowledgementGating() throws {
+        func justCompleted(
+            completion: Int?, viewed: Int?, status: String? = "idle",
+            archived: Bool? = false, ptyBusy: Bool? = false, inFlight: Bool? = false,
+            exitCode: Int? = nil
+        ) -> Bool {
+            SessionCompletion.isJustCompleted(
+                completion: completion, viewed: viewed, status: status, archived: archived,
+                ptyBusy: ptyBusy, inFlight: inFlight, permissionBlocked: nil,
+                pendingEscalation: nil, providerCliExitCode: exitCode
+            )
+        }
+        XCTAssertTrue(justCompleted(completion: 3, viewed: 2))
+        XCTAssertFalse(justCompleted(completion: 2, viewed: 2))
+        XCTAssertFalse(justCompleted(completion: 3, viewed: 2, status: "failed"))
+        XCTAssertTrue(justCompleted(completion: 3, viewed: 2, status: "exited"))
+        XCTAssertFalse(justCompleted(completion: 3, viewed: 2, archived: true))
+        XCTAssertFalse(justCompleted(completion: 3, viewed: 2, ptyBusy: true))
+        XCTAssertFalse(justCompleted(completion: 3, viewed: 2, inFlight: true))
+        XCTAssertFalse(justCompleted(completion: 3, viewed: 2, exitCode: 1))
+
+        XCTAssertFalse(SessionCompletion.shouldAcknowledge(
+            isJustCompleted: true, explicitOpen: false, isSelected: true, modalVisible: false))
+        XCTAssertFalse(SessionCompletion.shouldAcknowledge(
+            isJustCompleted: true, explicitOpen: true, isSelected: true, modalVisible: true))
+        XCTAssertTrue(SessionCompletion.shouldAcknowledge(
+            isJustCompleted: true, explicitOpen: true, isSelected: true, modalVisible: false))
+
+        let merged = SessionCompletion.merge(
+            current: (completion: 5, viewed: 2), incoming: (completion: 3, viewed: 6))
+        XCTAssertEqual(merged.completion, 5)
+        XCTAssertEqual(merged.viewed, 6)
+    }
+
     func testPiProviderRunnerModelsDefaultsAndShellLabels() throws {
         XCTAssertEqual(WandProvider(normalizing: "PI-CLI-JSON"), .pi)
         XCTAssertEqual(WandProvider.pi.title, "Pi")
@@ -1375,5 +1490,33 @@ private final class MockSessionListService: SessionListServing {
 
     func fetchManagedSessionsForPresence() async throws -> [SessionSnapshot] {
         throw MockError.unexpectedCall("fetchManagedSessionsForPresence")
+    }
+}
+
+@MainActor
+final class SettingsParityTests: XCTestCase {
+    func testHapticPreferenceDefaultsToEnabledAndSurvivesReload() throws {
+        let suite = "SettingsParityTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertTrue(WandFeedback.isEnabled(in: defaults))
+        defaults.set(false, forKey: WandFeedback.storageKey)
+        XCTAssertFalse(WandFeedback.isEnabled(in: defaults))
+        XCTAssertFalse(WandFeedback.isEnabled(in: try XCTUnwrap(UserDefaults(suiteName: suite))))
+    }
+
+    func testUnknownSessionProviderDoesNotDisplayClaudeIdentity() throws {
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(#"{"id":"s","provider":"future-cli"}"#.utf8))
+        XCTAssertEqual(snapshot.providerLabel, "future-cli")
+    }
+
+    func testSnapshotAndWebsocketKeepEmployeeAndTeamIdentity() throws {
+        let fields = #"{"id":"s","employeeId":"e1","employeeName":"Employee","employeeAvatar":"cat:1","teamChat":{"runId":"r","teamName":"Team"},"teamStep":{"runId":"r","memberName":"Member"}}"#
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(fields.utf8))
+        let update = try JSONDecoder().decode(WsData.self, from: Data(fields.utf8))
+        XCTAssertEqual(snapshot.employeeId, "e1")
+        XCTAssertEqual(update.employeeId, snapshot.employeeId)
+        XCTAssertEqual(update.teamChat?.runId, snapshot.teamChat?.runId)
+        XCTAssertEqual(update.teamStep?.memberName, snapshot.teamStep?.memberName)
     }
 }

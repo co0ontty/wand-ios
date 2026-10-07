@@ -28,6 +28,7 @@ enum WorkspaceSessionTarget: String, CaseIterable, Codable, Identifiable {
     case grok
     case qoder
     case pi
+    case gemini
     case shell
 
     var id: String { rawValue }
@@ -48,6 +49,7 @@ enum WorkspaceSessionTarget: String, CaseIterable, Codable, Identifiable {
         case .grok: return "Grok Build CLI"
         case .qoder: return "Qoder CLI"
         case .pi: return "Pi coding agent"
+        case .gemini: return "Gemini CLI"
         case .shell: return "不启动 Agent 的交互式 Shell"
         }
     }
@@ -323,6 +325,26 @@ struct Workspace: Codable, Equatable, Identifiable {
     }
 }
 
+struct HomeTeamChatIdentity: Codable, Equatable {
+    let runId: String
+    let teamName: String?
+    let memberCount: Int?
+    let teamId: String?
+}
+
+struct HomeTeamStepIdentity: Codable, Equatable {
+    let runId: String
+    let stepId: String?
+    let kind: String?
+    let title: String?
+    let memberId: String?
+    let memberName: String?
+    let teamName: String?
+    let stepStatus: String?
+    let runStatus: String?
+    let runFinished: Bool?
+}
+
 struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
     let id: String
     let provider: String?
@@ -336,6 +358,19 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
     let ptyBusy: Bool?
     let providerCliActive: Bool?
     let inFlight: Bool?
+    /// 归档是软标记：不杀进程、不删历史，只是把它收进每层自己的「已归档会话」折叠区。
+    let archived: Bool?
+    let archivedAt: String?
+    /// 完成代次由 storage 持有；「刚完成」是纯展示态，不改 runner 生命周期。
+    let completionRevision: Int?
+    let viewedCompletionRevision: Int?
+    let employeeId: String?
+    let employeeName: String?
+    let employeeAvatar: String?
+    let teamChat: HomeTeamChatIdentity?
+    let teamStep: HomeTeamStepIdentity?
+    let permissionBlocked: Bool?
+    let providerCliExitCode: Int?
 
     init(snapshot: SessionSnapshot) {
         id = snapshot.id
@@ -350,10 +385,36 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
         ptyBusy = snapshot.ptyBusy
         providerCliActive = snapshot.providerCliActive
         inFlight = snapshot.structuredState?.inFlight
+        archived = snapshot.archived
+        archivedAt = snapshot.archivedAt
+        completionRevision = snapshot.completionRevision
+        viewedCompletionRevision = snapshot.viewedCompletionRevision
+        employeeId = snapshot.employeeId
+        employeeName = snapshot.employeeName
+        employeeAvatar = snapshot.employeeAvatar
+        teamChat = snapshot.teamChat
+        teamStep = snapshot.teamStep
+        permissionBlocked = snapshot.permissionBlocked
+        providerCliExitCode = snapshot.providerCliExitCode
+    }
+
+    /// 列表只展示活跃会话；归档项由调用方拆进折叠区（对齐 Web `splitArchivedSessions`、
+    /// macOS `WorkspaceSessionSummary.splitArchived`）。在这里分一次而不是每处渲染时过滤，
+    /// 避免「归档了却仍出现在活跃列表」的两套口径。
+    static func splitArchived(
+        _ sessions: [WorkspaceSessionSummary]
+    ) -> (active: [WorkspaceSessionSummary], archived: [WorkspaceSessionSummary]) {
+        var active: [WorkspaceSessionSummary] = []
+        var archived: [WorkspaceSessionSummary] = []
+        for session in sessions {
+            if session.archived == true { archived.append(session) } else { active.append(session) }
+        }
+        return (active, archived)
     }
 
     var activityStatus: String {
-        effectiveSessionStatus(
+        if permissionBlocked == true { return "permission" }
+        return effectiveSessionStatus(
             sessionKind: sessionKind,
             status: status,
             provider: provider,
@@ -365,7 +426,22 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
 
     var providerLabel: String {
         guard let provider, !provider.isEmpty else { return "终端" }
-        return WandProvider(normalizing: provider).title
+        return WandProvider.title(for: provider)
+    }
+
+    /// 完成但还没被明确打开看过。纯展示态，不改会话状态。
+    var isJustCompleted: Bool {
+        SessionCompletion.isJustCompleted(
+            completion: completionRevision,
+            viewed: viewedCompletionRevision,
+            status: status,
+            archived: archived,
+            ptyBusy: ptyBusy,
+            inFlight: inFlight,
+            permissionBlocked: permissionBlocked,
+            pendingEscalation: nil,
+            providerCliExitCode: providerCliExitCode
+        )
     }
 }
 
@@ -634,8 +710,8 @@ enum TaskListPresentation {
             )
         }
         .filter { !$0.isGlobal || !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
-        // 未归属工作区永远排在最后，并且保持服务端给的其余顺序（不依赖非稳定排序）。
-        return visible.filter { !$0.isGlobal } + visible.filter(\.isGlobal)
+        // 服务端已保存用户顺序；不能再把全局组推到末尾覆盖拖动结果。
+        return visible
     }
 
     /// 未绑定任务的历史任务统一挂在服务端全局空间下；侧栏要给它一个能读懂的名字。
@@ -779,4 +855,62 @@ struct WorkspaceTaskDetail: Codable, Equatable, Identifiable {
             sessions: sessions ?? self.sessions
         )
     }
+}
+
+/// 「刚完成」的判定与确认口径，对齐服务端 `src/session-completion-state.ts`
+/// 与 Web `markSessionCompletionViewed`。这是**纯展示态**：不改 runner 的
+/// idle/running/exited，不影响输入资格，也不因为读了列表就消耗掉。
+enum SessionCompletion {
+    /// 迟到的 HTTP/WS 投影可以推进代次，但不能把代次拉回去。
+    static func merge(
+        current: (completion: Int, viewed: Int),
+        incoming: (completion: Int?, viewed: Int?)
+    ) -> (completion: Int, viewed: Int) {
+        (
+            max(current.completion, incoming.completion ?? 0),
+            max(current.viewed, incoming.viewed ?? 0)
+        )
+    }
+
+    static func isJustCompleted(
+        completion: Int?,
+        viewed: Int?,
+        status: String?,
+        archived: Bool?,
+        ptyBusy: Bool?,
+        inFlight: Bool?,
+        permissionBlocked: Bool?,
+        pendingEscalation: Bool?,
+        providerCliExitCode: Int?
+    ) -> Bool {
+        guard (completion ?? 0) > (viewed ?? 0) else { return false }
+        guard archived != true, ptyBusy != true, inFlight != true else { return false }
+        guard permissionBlocked != true, pendingEscalation != true else { return false }
+        // CLI 非零退出是失败，不算「完成但还没看」。
+        if let code = providerCliExitCode, code != 0 { return false }
+        return ["idle", "running", "exited"].contains(status ?? "")
+    }
+
+    /// 只有「用户明确打开且这一代结果真的在屏幕上」才确认。
+    /// 自动选中、后台轮询、重连、切服务器都不算。
+    static func shouldAcknowledge(
+        isJustCompleted: Bool,
+        explicitOpen: Bool,
+        isSelected: Bool,
+        modalVisible: Bool
+    ) -> Bool {
+        isJustCompleted && explicitOpen && isSelected && !modalVisible
+    }
+}
+
+/// `POST /api/sessions/batch-archive` 的响应：`failed` 缺省即全部成功。
+struct SessionBatchArchiveResponse: Decodable {
+    let archived: Int?
+    let failed: [String]?
+}
+
+/// `POST /api/sessions/:id/completion/view` 的响应：回带确认后的两个代次。
+struct SessionCompletionResponse: Decodable {
+    let completionRevision: Int?
+    let viewedCompletionRevision: Int?
 }

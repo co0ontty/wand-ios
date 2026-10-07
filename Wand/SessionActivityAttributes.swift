@@ -52,14 +52,21 @@ extension SessionActivityAttributes.SessionEntry {
 
     private var normalizedProvider: String { providerRaw.lowercased() }
 
+    /// Widget target 只编译 `WandWidgetsBundle.swift` + 本文件（刻意不依赖 app 代码，
+    /// 见 Wand.xcodeproj 的 WandWidgets Sources），所以这里无法引用 `WandProvider`。
+    /// 这份别名表因此必须与 `WandModels.WandProvider.aliases` 同步：
+    /// 旧版本 default 到 Claude，Gemini 会在实时活动里被错标成 Claude。
     var providerText: String {
         switch normalizedProvider {
+        case "claude": return "Claude"
         case "codex": return "Codex"
         case "opencode", "open-code", "open_code": return "OpenCode"
         case "grok": return "Grok"
         case "qoder", "qodercli": return "Qoder"
         case "pi": return "Pi"
-        default: return "Claude"
+        case "gemini", "gemini-cli", "gemini-cli-json": return "Gemini"
+        // 未知 provider 不伪装成已知的一个：错标比显示原始 id 更糟。
+        default: return normalizedProvider.isEmpty ? "Claude" : normalizedProvider
         }
     }
 
