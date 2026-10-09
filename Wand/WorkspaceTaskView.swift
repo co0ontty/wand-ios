@@ -204,12 +204,12 @@ struct WorkspaceTaskView: View {
         let chrome = workspaceTaskNavigationChrome(taskName: task.name, workspaceName: workspace.name)
         return VStack(spacing: 1) {
             Text(chrome.title)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.wand(size: 15, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
                 .lineLimit(1)
             if let subtitle = chrome.subtitle {
                 Text(subtitle)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.wand(size: 11, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(1)
             }
@@ -250,7 +250,7 @@ struct WorkspaceTaskView: View {
                 Spacer(minLength: 54)
                 if let caption = emptyTaskWorkspaceCaption(workspace.name) {
                     Text(caption)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.wand(size: 11, weight: .semibold))
                         .foregroundColor(Theme.brand)
                         .padding(.bottom, 18)
                 }
@@ -270,14 +270,14 @@ struct WorkspaceTaskView: View {
                     .padding(.bottom, 20)
 
                 Text(detail.name)
-                    .font(.system(size: 24, weight: .bold))
+                    .font(.wand(size: 24, weight: .bold))
                     .foregroundColor(Theme.textPrimary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 24)
 
                 Text("选择 CLI 工具，以及结构化或 PTY，开始这个任务。")
-                    .font(.system(size: 13))
+                    .font(.wand(size: 13))
                     .foregroundColor(Theme.textSecondary)
                     .padding(.top, 8)
 
@@ -287,10 +287,10 @@ struct WorkspaceTaskView: View {
 
                 VStack(alignment: .leading, spacing: 7) {
                     Text("工作目录")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.wand(size: 11, weight: .semibold))
                         .foregroundColor(Theme.textMuted)
                     Text(detail.cwd)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.wand(size: 12, design: .monospaced))
                         .foregroundColor(Theme.textSecondary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -449,7 +449,7 @@ struct WorkspaceTaskView: View {
                     )
                     .frame(width: 14, height: 14)
                     Text(label)
-                        .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                        .font(.wand(size: 12, weight: selected ? .semibold : .medium))
                         .lineLimit(1)
                         .foregroundColor(selected ? palette.selectedText : palette.text)
                         .frame(maxWidth: sessionTabTitleMaxWidth(selected: selected), alignment: .leading)

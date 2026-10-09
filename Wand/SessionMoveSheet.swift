@@ -66,7 +66,7 @@ struct SessionMoveSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(sessionTitle.isEmpty ? "CLI 会话" : sessionTitle)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.wand(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(2)
                 Text("只改变任务归属，保留运行目录、历史和正在执行的 CLI。")
@@ -90,7 +90,7 @@ struct SessionMoveSheet: View {
                         .font(.footnote)
                         .foregroundColor(Theme.danger)
                     Button("重新加载任务") { reloadNonce += 1 }
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.wand(size: 13, weight: .semibold))
                         .foregroundColor(Theme.brand)
                         .disabled(busy)
                 }
@@ -127,7 +127,7 @@ struct SessionMoveSheet: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Theme.textMuted)
             TextField("搜索任务或工作区", text: $query)
-                .font(.system(size: 14))
+                .font(.wand(size: 14))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .disabled(busy)
@@ -167,11 +167,11 @@ struct SessionMoveSheet: View {
                         : (selected ? Theme.brand : Theme.textMuted))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(target.name.isEmpty ? "未命名任务" : target.name)
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.wand(size: 15, weight: .medium))
                         .foregroundColor(target.current ? Theme.textMuted : Theme.textPrimary)
                         .lineLimit(2)
                     Text(target.subtitle(ambiguous: ambiguousKeys.contains(target.key)))
-                        .font(.system(size: 11))
+                        .font(.wand(size: 11))
                         .foregroundColor(Theme.textMuted)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -179,7 +179,7 @@ struct SessionMoveSheet: View {
                 Spacer(minLength: 8)
                 if target.current {
                     Text("当前任务")
-                        .font(.system(size: 11))
+                        .font(.wand(size: 11))
                         .foregroundColor(Theme.textMuted)
                 }
             }

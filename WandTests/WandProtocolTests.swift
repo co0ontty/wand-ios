@@ -3,7 +3,7 @@ import Combine
 import SwiftUI
 import UIKit
 import XCTest
-import WebKit
+import SwiftTerm
 @testable import Wand
 
 final class WandProtocolTests: XCTestCase {
@@ -153,6 +153,7 @@ final class WandProtocolTests: XCTestCase {
             failure: WandAPI.APIError.server(status: 408, message: "timeout")
         )
         let store = ChatStore(sessionId: "s", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil), inputTransport: transport, drafts: SessionDraftStore())
+        store.messages = [try decode(ConversationTurn.self, from: #"{"role":"assistant","content":[{"type":"tool_use","id":"question","name":"AskUserQuestion","input":{}}]}"#)]
         let finished = expectation(description: "question delivery recorded")
         let subscription = store.$inputSending.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
         store.submitAskUser(toolUseId: "question", answerText: "yes")
@@ -337,55 +338,21 @@ final class WandProtocolTests: XCTestCase {
     }
 
     @MainActor
-    func testTerminalTapRestoresInputAfterNativeComposerSuppressesIme() async throws {
-        let model = WebViewModel()
-        let bridge = WebBridge(model: model)
-        let config = WKWebViewConfiguration()
-        config.userContentController.add(bridge, name: "wandNative")
-        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 400), configuration: config)
-        bridge.attach(webView: webView, serverURL: URL(string: "http://localhost")!)
-        defer {
-            bridge.detach(webView: webView)
-            config.userContentController.removeScriptMessageHandler(forName: "wandNative")
-        }
-        webView.loadHTMLString("""
-        <html><body><div class="terminal-scroll-wrap"><div class="xterm-screen">terminal</div>
-        <textarea class="xterm-helper-textarea"></textarea><a href="#">link</a></div></body></html>
-        """, baseURL: nil)
-        for _ in 0..<50 {
-            if (try? await webView.evaluateJavaScript("!!document.querySelector('textarea')")) as? Bool == true { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        try await webView.evaluateJavaScript(WebViewRepresentable.terminalNativeUserScriptSource)
-        let stateScript = """
-        (() => ({ locked: document.querySelector('textarea').readOnly,
-          passthrough: document.documentElement.classList.contains('is-wand-terminal-passthrough'),
-          focused: document.activeElement === document.querySelector('textarea') }))()
-        """
-        // 不只是一次 readonly 写入：移除 passthrough 才能让网页后续状态同步也维持锁定。
-        model.suppressEmbeddedTerminalIme()
-        var state = try await webView.evaluateJavaScript(stateScript) as? [String: Bool] ?? [:]
-        XCTAssertEqual(state["locked"], true)
-        XCTAssertEqual(state["passthrough"], false)
-        let tapped = expectation(description: "terminal input bridge")
-        model.requestTerminalInput = { tapped.fulfill() }
-        try await webView.evaluateJavaScript("document.querySelector('.xterm-screen').click()")
-        await fulfillment(of: [tapped], timeout: 2)
-        state = try await webView.evaluateJavaScript(stateScript) as? [String: Bool] ?? [:]
-        XCTAssertEqual(state["locked"], false)
-        XCTAssertEqual(state["passthrough"], true)
-        XCTAssertEqual(state["focused"], true)
-
-        model.requestTerminalInput = { XCTFail("链接或已选中的文字不能抢输入焦点") }
-        model.suppressEmbeddedTerminalIme()
-        try await webView.evaluateJavaScript("document.querySelector('a').click()")
-        try await webView.evaluateJavaScript("window.__wandTerminal = { hasSelection: () => true }; document.querySelector('.xterm-screen').click()")
-        state = try await webView.evaluateJavaScript(stateScript) as? [String: Bool] ?? [:]
-        XCTAssertEqual(state["locked"], true)
-        model.restoreEmbeddedTerminalInput()
-        state = try await webView.evaluateJavaScript(stateScript) as? [String: Bool] ?? [:]
-        XCTAssertEqual(state["locked"], false)
-        XCTAssertEqual(state["focused"], false, "关闭草稿不应主动弹出终端键盘")
+    func testNativeTerminalAndComposerTransferImeWithoutSendingPreedit() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene), host = UIViewController(), terminal = NativeTerminalView()
+        window.rootViewController = host; window.makeKeyAndVisible()
+        terminal.frame = CGRect(x: 0, y: 0, width: 390, height: 400); host.view.addSubview(terminal)
+        defer { terminal.blurTerminal(); window.isHidden = true }
+        var inputs: [String] = []; var focused = 0
+        terminal.onInput = { text, _, _ in inputs.append(text) }; terminal.onTerminalFocus = { focused += 1 }
+        terminal.focusTerminal(); XCTAssertTrue(terminal.isFirstResponder); XCTAssertGreaterThan(focused, 0)
+        terminal.setMarkedText("zhongwen", selectedRange: NSRange(location: 8, length: 0))
+        terminal.blurTerminal(); XCTAssertFalse(terminal.isFirstResponder); XCTAssertNil(terminal.markedTextRange); XCTAssertTrue(inputs.isEmpty)
+        terminal.feedOutput("selectable")
+        terminal.selection.setSelection(start: SwiftTerm.Position(col: 0, row: 0), end: SwiftTerm.Position(col: 4, row: 0))
+        let before = focused; _ = terminal.becomeFirstResponder()
+        XCTAssertEqual(focused, before, "选择文字不能收起另一侧草稿或触发终端输入意图")
     }
 
     @MainActor
@@ -688,7 +655,7 @@ final class WandProtocolTests: XCTestCase {
     func testComposerExpansionFollowsFocusVoiceOrContentHeight() {
         XCTAssertFalse(composerShouldExpand(focused: false, voiceMode: false))
         XCTAssertTrue(composerShouldExpand(focused: true, voiceMode: false))
-        XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: true))
+        XCTAssertFalse(composerShouldExpand(focused: false, voiceMode: true), "Holding the idle input must not move its touch target")
         XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: false, contentNeedsSpace: true))
     }
 

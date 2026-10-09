@@ -26,8 +26,12 @@ struct ContactsView: View {
     let onBack: () -> Void
     let onOpenSession: (SessionSnapshot) -> Void
     let onOpenRun: (String) -> Void
+    var onOpenConversation: ((String) -> Void)? = nil
+    var onTeamConversation: ((String) -> Void)? = nil
+    var embedded = false
     @State private var query = ""
     @State private var createChooser = false
+    @State private var dispatching = false
     @State private var createKind: String?
     @State private var expandedID: String?
     @State private var pendingPanelChange: (() -> Void)?
@@ -39,6 +43,10 @@ struct ContactsView: View {
             header
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    if dispatching {
+                        TeamDispatchPanel(api: api, projects: store.workspaces, onClose: { dispatching = false }, onOpenRun: onOpenRun)
+                            .padding(.vertical, 10)
+                    }
                     if createChooser {
                         HStack {
                             Button("新建硅基员工") { createChooser = false; createKind = "employee" }
@@ -126,15 +134,19 @@ struct ContactsView: View {
     private var header: some View {
         VStack(spacing: 4) {
             HStack(spacing: 6) {
-                Button { requestPanelChange(onBack) } label: { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
-                    .disabled(store.busy).accessibilityLabel("返回通讯录上级")
+                if !embedded {
+                    Button { requestPanelChange(onBack) } label: { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
+                        .disabled(store.busy).accessibilityLabel("返回通讯录上级")
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     Text("通讯录").font(.headline)
-                    Text("点名字开新对话，点头像改资料").font(.caption2).foregroundStyle(Theme.textSecondary)
                 }.frame(maxWidth: .infinity, alignment: .leading)
+                ContactMorphButton(expanded: dispatching, symbol: "paperplane", label: dispatching ? "关闭派工" : "派工", disabled: store.busy) {
+                    requestPanelChange { let next = !dispatching; clearPanels(); dispatching = next }
+                }
                 ContactMorphButton(expanded: creationOpen, symbol: "plus", label: creationOpen ? "关闭创建面板" : "创建联系人", disabled: store.busy) {
                     if creationOpen { closePanels() }
-                    else { requestPanelChange { searchFocused = false; expandedID = nil; createChooser = true } }
+                    else { requestPanelChange { clearPanels(); searchFocused = false; createChooser = true } }
                 }
             }
             HStack(spacing: 8) {
@@ -158,7 +170,7 @@ struct ContactsView: View {
         guard !store.busy else { return }
         if store.editorDirty { pendingPanelChange = action } else { action() }
     }
-    private func clearPanels() { createChooser = false; createKind = nil; expandedID = nil }
+    private func clearPanels() { createChooser = false; createKind = nil; expandedID = nil; dispatching = false }
     private func closePanels() { requestPanelChange(clearPanels) }
     @ViewBuilder private func uncertainty(_ key: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -181,7 +193,11 @@ struct ContactsView: View {
                 } label: { ContactAvatar(id: employee.id, avatar: employee.avatar, systemKey: employee.systemKey, size: 40) }
                 .buttonStyle(.plain).accessibilityLabel("员工资料：\(employee.name)")
                 Button {
-                    requestPanelChange { clearPanels(); store.openEmployee(employee.id, onOpen: onOpenSession) }
+                    requestPanelChange {
+                        clearPanels()
+                        if let onOpenConversation { onOpenConversation(ConversationStore.employeeID(employee.id)) }
+                        else { store.openEmployee(employee.id, onOpen: onOpenSession) }
+                    }
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(employee.name).font(.subheadline.weight(.semibold))
@@ -217,7 +233,11 @@ struct ContactsView: View {
                     }
                 } label: { ContactAvatar(id: team.id, avatar: "", team: true, size: 40) }
                 .buttonStyle(.plain).accessibilityLabel("团队资料：\(team.name)")
-                Button { requestPanelChange { clearPanels(); store.openTeam(team.id, onOpen: onOpenRun) } } label: {
+                Button { requestPanelChange {
+                    clearPanels()
+                    if let onTeamConversation { onTeamConversation(team.id) }
+                    else { store.openTeam(team.id, onOpen: onOpenRun) }
+                } } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(team.name).font(.subheadline.weight(.semibold))
                         Text("\(team.members.count)位成员 · 开新群聊").font(.caption).foregroundStyle(Theme.textSecondary)
@@ -250,28 +270,33 @@ struct HomeMenuPill: View {
     @Environment(\.accessibilityReduceMotion) private var reduced
     @State private var leadingIndex = 0
     @State private var trailingIndex = 0
+    @ScaledMetric(relativeTo: .caption) private var itemHeight: CGFloat = 56
+    private var modeIndex: Int {
+        switch mode { case .im: return 0; case .contacts: return 1; case .sessions: return 2; case .board: return 3 }
+    }
     var body: some View {
         HStack(spacing: 0) {
-            item("对话", symbol: "bubble.left.and.bubble.right", active: mode == .sessions) { onMode(.sessions) }
+            item("聊天", symbol: "bubble.left.and.bubble.right", active: mode == .im) { onMode(.im) }
+            item("通讯录", symbol: "person.crop.rectangle", active: mode == .contacts, action: onContacts)
+            item("工作区", symbol: "folder", active: mode == .sessions) { onMode(.sessions) }
             item("任务", symbol: "square.grid.2x2", active: mode == .board) { onMode(.board) }
-            item("通讯录", symbol: "person.crop.rectangle", active: false, action: onContacts)
         }
         .background(alignment: .bottomLeading) {
             GeometryReader { proxy in
-                let cell = proxy.size.width / 3
+                let cell = proxy.size.width / 4
                 Capsule().fill(Theme.brand)
                     .frame(width: CGFloat(abs(leadingIndex - trailingIndex) + 1) * cell - 28, height: 3)
                     .offset(x: CGFloat(min(leadingIndex, trailingIndex)) * cell + 14, y: proxy.size.height - 5)
             }.allowsHitTesting(false)
         }
         .background(Theme.elevated, in: Capsule()).overlay(Capsule().stroke(Theme.border.opacity(0.6)))
-        .frame(maxWidth: 300).frame(height: 56).padding(.bottom, 8)
+        .frame(maxWidth: 440).frame(minHeight: itemHeight).padding(.bottom, 8)
         .onAppear {
-            let index = mode == .board ? 1 : 0
+            let index = modeIndex
             leadingIndex = index; trailingIndex = index
         }
-        .onChange(of: mode) { _, value in
-            let target = value == .board ? 1 : 0
+        .onChange(of: mode) { _, _ in
+            let target = modeIndex
             if reduced { leadingIndex = target; trailingIndex = target }
             else {
                 // The front edge starts first, the rear edge follows using the shared token.
@@ -283,9 +308,9 @@ struct HomeMenuPill: View {
     private func item(_ title: String, symbol: String, active: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 3) {
-                Image(systemName: symbol).font(.system(size: 17, weight: .medium))
+                Image(systemName: symbol).font(.body.weight(.medium))
                 Text(title).font(.caption.weight(.semibold))
-            }.foregroundStyle(active ? Theme.brand : Theme.textSecondary).frame(maxWidth: .infinity).frame(height: 56)
+            }.foregroundStyle(active ? Theme.brand : Theme.textSecondary).frame(maxWidth: .infinity).frame(minHeight: itemHeight)
         }.buttonStyle(.plain).accessibilityLabel(title).accessibilityAddTraits(active ? .isSelected : [])
     }
 }

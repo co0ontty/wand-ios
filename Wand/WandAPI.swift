@@ -20,6 +20,7 @@ final class WandAPI: SessionInputTransport {
     /// 任务层级（目录组 / 任务 / 会话归属）的写操作完成后发一次：
     /// 侧栏、任务看板、任务详情用同一份无效化信号对齐（对齐 Android 的 TaskChangeSource）。
     let taskChanges = PassthroughSubject<Void, Never>()
+    let conversationRequests: ConversationRequestLedger
     /// Captured once so resetting an endpoint retires this client instead of letting a stale
     /// owner recreate a session and authenticate again with an obsolete token.
     let endpointSession: SelfSignedSession
@@ -28,6 +29,7 @@ final class WandAPI: SessionInputTransport {
         self.baseURL = baseURL
         self.token = token
         self.endpointSession = SelfSignedSession.forEndpoint(baseURL)
+        self.conversationRequests = ConversationRequestLedger(baseURL: baseURL)
     }
 
     enum APIError: LocalizedError {
@@ -183,6 +185,26 @@ final class WandAPI: SessionInputTransport {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/?#[]@!$&'()*+,;=:%")
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    // MARK: - 语音（复用当前 endpoint 的认证与 URLSession；音频与转写不写日志）
+
+    func speechStatus() async throws -> ServerSpeechStatus {
+        try await request(ServerSpeechStatus.self, method: "GET", path: "/api/speech/status")
+    }
+    func transcribeSpeech(_ wav: Data) async throws -> String {
+        var request = try makeRequest(method: "POST", path: "/api/speech/transcribe", body: nil, timeout: 125)
+        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
+        request.httpBody = wav
+        let (data, response) = try await performAuthenticated(request, method: "POST", path: "/api/speech/transcribe")
+        guard (200...299).contains(response.statusCode) else {
+            let error = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
+            throw APIError.server(status: response.statusCode, message: error ?? "服务端语音识别失败")
+        }
+        guard let result = try? JSONDecoder().decode(ServerSpeechResult.self, from: data), result.text.count <= 8000 else {
+            throw APIError.network("语音转写响应无效")
+        }
+        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - 会话
@@ -342,13 +364,19 @@ final class WandAPI: SessionInputTransport {
     }
 
     @discardableResult
-    func setSessionProvider(id: String, provider: String) async throws -> SessionSnapshot {
-        try await request(
+    func setSessionProvider(id: String, provider: String, engine: String? = nil) async throws -> SessionSnapshot {
+        var body: [String: Any] = ["provider": provider]
+        if let engine { body["engine"] = engine }
+        return try await request(
             SessionSnapshot.self,
             method: "POST",
             path: "/api/sessions/\(percentEncodePathComponent(id))/provider",
-            body: ["provider": provider]
+            body: body
         )
+    }
+
+    func setSessionDirectory(id: String, cwd: String) async throws -> SessionSnapshot {
+        try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions/" + percentEncodePathComponent(id) + "/directory", body: ["cwd": cwd])
     }
 
     func optimizePrompt(id: String, prompt: String) async throws -> String {
@@ -644,7 +672,8 @@ final class WandAPI: SessionInputTransport {
         mode: String?,
         model: String?,
         thinkingEffort: String?,
-        prompt: String?
+        prompt: String?,
+        engine: String? = nil
     ) async throws -> SessionSnapshot {
         let normalizedProvider = WandProvider(normalizing: provider)
         var body: [String: Any] = [
@@ -656,6 +685,7 @@ final class WandAPI: SessionInputTransport {
         if let model, !model.isEmpty { body["model"] = model }
         if let thinkingEffort, !thinkingEffort.isEmpty { body["thinkingEffort"] = thinkingEffort }
         if let prompt, !prompt.isEmpty { body["prompt"] = prompt }
+        if let engine { body["engine"] = engine }
         return try await request(
             SessionSnapshot.self,
             method: "POST",
@@ -988,7 +1018,8 @@ final class WandAPI: SessionInputTransport {
         thinkingEffort: String? = nil,
         defaultProvider: String? = nil,
         defaultSessionKind: String? = nil,
-        defaultTaskWorktree: Bool? = nil
+        defaultTaskWorktree: Bool? = nil,
+        defaultEngine: String? = nil
     ) async throws {
         var body: [String: Any] = [:]
         if let mode { body["defaultMode"] = mode }
@@ -1021,18 +1052,21 @@ final class WandAPI: SessionInputTransport {
         if let defaultProvider { body["defaultProvider"] = defaultProvider }
         if let defaultSessionKind { body["defaultSessionKind"] = defaultSessionKind }
         if let defaultTaskWorktree { body["defaultTaskWorktree"] = defaultTaskWorktree }
+        if let defaultEngine { body["defaultEngine"] = defaultEngine }
         _ = try await requestData(method: "POST", path: "/api/settings/config", body: body)
     }
 
     func updateCreationDefaults(
         defaultProvider: String? = nil,
         defaultSessionKind: String? = nil,
-        defaultTaskWorktree: Bool? = nil
+        defaultTaskWorktree: Bool? = nil,
+        defaultEngine: String? = nil
     ) async throws {
         try await updateNewSessionDefaults(
             defaultProvider: defaultProvider,
             defaultSessionKind: defaultSessionKind,
-            defaultTaskWorktree: defaultTaskWorktree
+            defaultTaskWorktree: defaultTaskWorktree,
+            defaultEngine: defaultEngine
         )
     }
 }

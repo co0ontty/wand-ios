@@ -57,6 +57,8 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<key>UIAppFonts</key>
+	<array><string>JetBrainsMono-Regular.ttf</string></array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -67,9 +69,9 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Wand 使用相机扫描电脑端设置页的连接二维码，快速连接服务器。</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Wand 使用麦克风进行「按住说话」语音输入，把语音转成文字填入聊天输入框。</string>
+	<string>Wand 使用麦克风进行语音输入；选择服务端识别时，音频发送到你连接的 Wand 服务器离线转写；选择本地识别时不上传音频。</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Wand 使用系统语音识别（优先端侧模型，音频不离开设备）把你的语音转成文字。</string>
+	<string>选择客户端本地识别时，Wand 使用系统端侧听写将语音转成文字，音频不离开设备。</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIApplicationShortcutItems</key>

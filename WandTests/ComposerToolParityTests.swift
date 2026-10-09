@@ -22,6 +22,39 @@ private final class ComposerTransportStub: SessionInputTransport {
 }
 
 final class ComposerToolParityTests: XCTestCase {
+    func testIdleInputHoldToTalkPreservesEditingAndKeyboardStates() {
+        XCTAssertTrue(composerHoldToTalkEligible(text: "", focused: false, keyboardVisible: false))
+        XCTAssertFalse(composerHoldToTalkEligible(text: "", focused: true, keyboardVisible: false))
+        XCTAssertFalse(composerHoldToTalkEligible(text: "", focused: false, keyboardVisible: true))
+        XCTAssertFalse(composerHoldToTalkEligible(text: "草稿", focused: false, keyboardVisible: false))
+        XCTAssertFalse(composerHoldToTalkEligible(text: " ", focused: false, keyboardVisible: false))
+        XCTAssertFalse(composerShouldExpand(focused: false, voiceMode: true))
+    }
+
+    func testServerSpeechWavUsesCanonicalPCM16HeaderAndBounds() throws {
+        let pcm = Data(repeating: 12, count: 3200)
+        let wav = try SpeechWav.encode(pcm)
+        XCTAssertEqual(wav.count, 3244)
+        XCTAssertEqual(String(data: wav.subdata(in: 0..<4), encoding: .ascii), "RIFF")
+        XCTAssertEqual(String(data: wav.subdata(in: 8..<16), encoding: .ascii), "WAVEfmt ")
+        XCTAssertEqual(wav.subdata(in: 44..<wav.count), pcm)
+        XCTAssertEqual(Array(wav[20..<24]), [1, 0, 1, 0])
+        XCTAssertEqual(Array(wav[24..<28]), [128, 62, 0, 0])
+        XCTAssertEqual(Array(wav[34..<36]), [16, 0])
+        for count in [0, 100, 3201, SpeechWav.maxPCMBytes + 2] {
+            XCTAssertThrowsError(try SpeechWav.encode(Data(repeating: 0, count: count)))
+        }
+    }
+    func testServerSpeechStatusDecodesReadyAndRecoveryReason() throws {
+        let status = try JSONDecoder().decode(ServerSpeechStatus.self, from: Data("""
+        {"ready":false,"reason":"模型未下载","settings":{"model":"base"},"runtime":{"backend":"cpu"}}
+        """.utf8))
+        XCTAssertFalse(status.ready)
+        XCTAssertEqual(status.reason, "模型未下载")
+        XCTAssertEqual(status.settings.model, "base")
+        XCTAssertEqual(status.runtime.backend, "cpu")
+    }
+
     private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         try JSONDecoder().decode(type, from: Data(json.utf8))
     }

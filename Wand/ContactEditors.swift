@@ -131,13 +131,15 @@ struct ContactCandidateEditor: View {
                             Button("移除") { agents.remove(at: index) }.foregroundStyle(Theme.danger)
                         }
                     }
-                    Picker("CLI 工具", selection: Binding(
-                        get: { agents[index].provider }, set: { provider in
-                            agents[index].provider = provider; agents[index].model = "default"
-                            agents[index].thinkingEffort = "off"; agents[index].mode = wandBoardNormalizedMode(provider: provider, mode: "default")
+                    Picker("执行工具", selection: Binding(
+                        get: { WandAgentTool(provider: agents[index].provider, engine: agents[index].engine).rawValue }, set: { id in
+                            guard let tool = WandAgentTool(rawValue: id) else { return }
+                            agents[index].provider = tool.provider.rawValue; agents[index].engine = tool.engine; agents[index].model = "default"
+                            agents[index].thinkingEffort = "off"; agents[index].mode = wandBoardNormalizedMode(provider: tool.provider.rawValue, mode: "default")
+                            if tool.structuredOnly { agents[index].kind = "structured" }
                         }
                     )) {
-                        ForEach(WandProvider.allCases) { Text($0.title).tag($0.rawValue) }
+                        ForEach(WandAgentTool.allCases) { Text($0.title).tag($0.rawValue) }
                     }
                     HStack {
                         TextField("模型（default 跟随默认）", text: $agents[index].model)

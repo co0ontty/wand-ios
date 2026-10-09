@@ -21,12 +21,13 @@ struct SessionDestinationView: View {
     let api: WandAPI
     var showsNavigationChrome: Bool = true
     var onCompletionVisible: ((SessionSnapshot) -> Void)? = nil
+    var sharedChatStore: ChatStore? = nil
 
     @ViewBuilder var body: some View {
         Group {
             if session.isStructured {
                 ChatView(sessionId: session.id, api: api, showsNavigationChrome: showsNavigationChrome,
-                         onCompletionVisible: onCompletionVisible)
+                         onCompletionVisible: onCompletionVisible, sharedStore: sharedChatStore)
             } else {
                 PtySessionView(session: session, api: api, showsNavigationChrome: showsNavigationChrome,
                                onCompletionVisible: onCompletionVisible)
@@ -36,10 +37,8 @@ struct SessionDestinationView: View {
     }
 }
 
-/// PTY 会话的原生外壳：套用与 ChatView 一致的原生导航头（provider 徽章 + 标题 +
-/// cwd），中间嵌入 embed=terminal 的 WebView 只渲染终端黑窗，底部输入栏走原生组件。
-/// 这样 PTY 会话不再是「直接打开整张网页版」，而是和对话模式同样的原生观感，
-/// 只是内容区换成了那块黑色终端窗口。
+/// UIKit/SwiftTerm PTY surface. ChatStore owns draft/input/permission semantics;
+/// PtyTerminalStore owns only checkpoint replay, rendering, ACK and native keyboard input.
 private struct PtySessionView: View {
     let session: SessionSnapshot
     let api: WandAPI
@@ -48,7 +47,7 @@ private struct PtySessionView: View {
     @State private var viewVisible = false
 
     @StateObject private var store: ChatStore
-    @StateObject private var terminalWebModel = WebViewModel()
+    @StateObject private var terminal: PtyTerminalStore
     @StateObject private var keyboard = KeyboardObserver()
     @StateObject private var speech = SpeechRecognizerService()
     @StateObject private var composerDraft: ComposerDraftState
@@ -69,10 +68,9 @@ private struct PtySessionView: View {
     @State private var voiceHoldWork: DispatchWorkItem?
     @State private var gitStatus: GitStatusResult?
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
+    @StateObject private var sessionFiles: SessionFilesStore
     /// 与 ChatView 相同：UIKit 输入框不能绑 @FocusState，否则键盘会被立刻 resign。
     @State private var inputFocused = false
-    /// 首帧先让原生铬稳定，再挂 WebView，避免和打开会话抢同一帧。
-    @State private var allowWebView = false
     @Environment(\.scenePhase) private var scenePhase
 
     private var ptyBackground: Color {
@@ -87,6 +85,8 @@ private struct PtySessionView: View {
         self.onCompletionVisible = onCompletionVisible
         let chatStore = ChatStore(sessionId: session.id, api: api)
         _store = StateObject(wrappedValue: chatStore)
+        _terminal = StateObject(wrappedValue: PtyTerminalStore(sessionId: session.id, api: api))
+        _sessionFiles = StateObject(wrappedValue: SessionFilesStore(service: api))
         _composerDraft = StateObject(wrappedValue: chatStore.composerDraft)
         _attachments = StateObject(wrappedValue: chatStore.composerDraft.attachments)
     }
@@ -97,21 +97,17 @@ private struct PtySessionView: View {
                 ptyBackground.ignoresSafeArea()
                 VStack(spacing: 0) {
                     ZStack(alignment: .topTrailing) {
-                        if allowWebView {
-                            WebContainerView(
-                                serverURL: api.baseURL,
-                                token: api.token,
-                                sessionId: session.id,
-                                webViewModel: terminalWebModel
-                            )
-                        } else {
-                            ptyBackground
+                        NativeTerminalSurface(terminal: terminal.terminal)
+                        if terminal.loading { ProgressView().tint(Theme.terminalText).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                        if let error = terminal.error {
+                            VStack { Text(error).font(.footnote).foregroundStyle(Theme.terminalText); Button("重新同步") { terminal.refresh() } }
+                                .padding(12).background(Theme.terminalBackground).frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                         terminalScaleControls
                             .padding(.top, 10)
                             .padding(.trailing, 10)
-                            .opacity(terminalWebModel.phase == .ready ? 1 : 0)
-                            .allowsHitTesting(terminalWebModel.phase == .ready)
+                            .opacity(terminal.ready ? 1 : 0)
+                            .allowsHitTesting(terminal.ready)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     bottomBar(
@@ -127,6 +123,11 @@ private struct PtySessionView: View {
             if showsNavigationChrome {
                 ToolbarItem(placement: .principal) { titleStatus }
                     .sharedBackgroundVisibility(.hidden)
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { sessionFiles.show(cwd: store.snapshot?.cwd ?? session.cwd ?? "") } label: {
+                    Image(systemName: "folder").frame(width: 44, height: 44)
+                }.accessibilityLabel("会话文件")
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 GitChangesToolbarButton(status: gitStatus, phase: quickCommitFeedback.phase) {
@@ -147,6 +148,9 @@ private struct PtySessionView: View {
                 .presentationDetents([.height(620), .large])
                 .presentationDragIndicator(.visible)
         }
+        .sheet(isPresented: Binding(get: { sessionFiles.open }, set: { if !$0 { sessionFiles.requestClose() } })) {
+            SessionFilesView(store: sessionFiles, api: api)
+        }
         .fileImporter(
             isPresented: $attachments.showFileImporter,
             allowedContentTypes: [.item],
@@ -161,36 +165,22 @@ private struct PtySessionView: View {
         }
         .onChange(of: completionVisibilityToken) { _, _ in publishCompletionVisibility() }
         .onAppear {
+            if !viewVisible { store.attachView() }
             viewVisible = true
-            composerDraft.activate()
-            attachments.setToastHandler { [weak store] in store?.toast = $0 }
-            attachments.setPtyPasteHandler { [weak store] files in
-                guard let store else { throw CancellationError() }
-                try await store.pasteUploadedPathsIntoPty(files)
+            let activeStore = store
+            attachments.setToastHandler { [weak activeStore] in activeStore?.toast = $0 }
+            attachments.setPtyPasteHandler { [weak activeStore] files in
+                guard let activeStore else { throw CancellationError() }
+                try await activeStore.pasteUploadedPathsIntoPty(files)
             }
-            terminalWebModel.requestTerminalInput = {
-                inputFocused = false
-                inputDrawerOpen = false
-            }
-            store.start()
+            terminal.terminal.provider = session.provider
+            terminal.terminal.onTerminalFocus = { inputFocused = false; inputDrawerOpen = false }
+            terminal.terminal.onPasteImages = attachments.handlePastedImageData
+            terminal.start()
             refreshGitStatus()
-            allowWebView = false
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(220))
-                allowWebView = true
-            }
         }
         .onChange(of: showQuickCommit) { _, showing in
             if !showing { refreshGitStatus() }
-        }
-        .onChange(of: keyboard.lift) {
-            terminalWebModel.refitEmbeddedTerminalViewport()
-        }
-        .onChange(of: inputDrawerOpen) {
-            terminalWebModel.refitEmbeddedTerminalViewport()
-        }
-        .onChange(of: composerInputHeight) {
-            terminalWebModel.refitEmbeddedTerminalViewport()
         }
         .onChange(of: composerDraft.text) { _, value in
             if value.isEmpty {
@@ -198,28 +188,24 @@ private struct PtySessionView: View {
                 composerInputHeight = 32
             }
         }
-        .onChange(of: terminalWebModel.phase) { _, phase in
-            if phase == .ready, inputFocused {
-                terminalWebModel.suppressEmbeddedTerminalIme()
-            }
-        }
         .onDisappear {
+            if viewVisible { store.detachView() }
             viewVisible = false
-            terminalWebModel.requestTerminalInput = nil
+            terminal.shutdown()
+            terminal.terminal.onTerminalFocus = nil
+            terminal.terminal.onPasteImages = nil
             voiceHoldWork?.cancel()
             voiceHoldWork = nil
             speech.stop(cancelled: true)
-            composerDraft.deactivate()
             voicePressed = false
             voiceCanceling = false
             inputDrawerOpen = false
             inputFocused = false
             composerInputHeight = 32
             draftNeedsExpanded = false
-            store.shutdown()
         }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active { store.handleEnterForeground() }
+            if newPhase == .active { store.handleEnterForeground(); terminal.foreground() }
             else if newPhase == .background { store.handleEnterBackground() }
         }
         .overlay(alignment: .top) { connectionBanner }
@@ -293,27 +279,27 @@ private struct PtySessionView: View {
                 title: "刷新终端",
                 key: "r",
                 modifiers: .command,
-                isEnabled: keyboardShortcutsActive && terminalWebModel.phase == .ready
+                isEnabled: keyboardShortcutsActive && terminal.ready
             ) {
-                terminalWebModel.refreshEmbeddedTerminal()
+                terminal.refresh()
             },
             WandKeyboardShortcutAction(
                 id: "zoom-terminal-in",
                 title: "放大终端",
                 key: "=",
                 modifiers: .command,
-                isEnabled: keyboardShortcutsActive && terminalWebModel.phase == .ready
+                isEnabled: keyboardShortcutsActive && terminal.ready
             ) {
-                terminalWebModel.adjustEmbeddedTerminalScale(delta: 0.25)
+                terminal.adjustScale(0.25)
             },
             WandKeyboardShortcutAction(
                 id: "zoom-terminal-out",
                 title: "缩小终端",
                 key: "-",
                 modifiers: .command,
-                isEnabled: keyboardShortcutsActive && terminalWebModel.phase == .ready
+                isEnabled: keyboardShortcutsActive && terminal.ready
             ) {
-                terminalWebModel.adjustEmbeddedTerminalScale(delta: -0.25)
+                terminal.adjustScale(-0.25)
             },
             WandKeyboardShortcutAction(
                 id: "dismiss-input",
@@ -337,24 +323,24 @@ private struct PtySessionView: View {
     private var terminalScaleControls: some View {
         HStack(spacing: 2) {
             terminalScaleButton(systemName: "minus", accessibilityLabel: "缩小终端") {
-                terminalWebModel.adjustEmbeddedTerminalScale(delta: -0.25)
+                terminal.adjustScale(-0.25)
             }
-            Text(terminalWebModel.terminalScaleLabel)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            Text(terminal.scaleLabel)
+                .font(.wand(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundColor(Color.white.opacity(0.92))
                 .frame(width: 42, height: 28)
                 .lineLimit(1)
                 .minimumScaleFactor(0.78)
-                .accessibilityLabel("终端缩放 \(terminalWebModel.terminalScaleLabel)")
+                .accessibilityLabel("终端缩放 \(terminal.scaleLabel)")
             terminalScaleButton(systemName: "plus", accessibilityLabel: "放大终端") {
-                terminalWebModel.adjustEmbeddedTerminalScale(delta: 0.25)
+                terminal.adjustScale(0.25)
             }
             Rectangle()
                 .fill(Color.white.opacity(0.18))
                 .frame(width: 1, height: 16)
                 .padding(.horizontal, 3)
             terminalScaleButton(systemName: "arrow.clockwise", accessibilityLabel: "刷新终端") {
-                terminalWebModel.refreshEmbeddedTerminal()
+                terminal.refresh()
             }
         }
         .padding(4)
@@ -388,7 +374,7 @@ private struct PtySessionView: View {
 
     private func bottomBar(safeBottom: CGFloat, maximumInputHeight: CGFloat) -> some View {
         VStack(spacing: 0) {
-            if voicePressed {
+            if voicePressed || speech.isProcessing {
                 voiceBubble
                     .padding(.horizontal, 12)
                     .padding(.bottom, 6)
@@ -400,8 +386,8 @@ private struct PtySessionView: View {
             terminalShortcutBar
         }
         .padding(.bottom, safeBottom + keyboard.lift)
-        .animation(.easeOut(duration: 0.2), value: keyboard.lift)
-        .animation(.easeOut(duration: 0.22), value: inputDrawerOpen)
+        .animation(WandMotion.scroll, value: keyboard.lift)
+        .animation(WandMotion.scroll, value: inputDrawerOpen)
     }
 
     /// 终端快捷键栏：输入入口固定在左侧，只有快捷键区域横向滚动，避免窄屏时输入入口被带走。
@@ -472,7 +458,7 @@ private struct PtySessionView: View {
         let compact = shortcut.label.count <= 2
         let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
         return Text(shortcut.label)
-            .font(.system(size: compact ? 15 : 12, weight: .semibold, design: .monospaced))
+            .font(.wand(size: compact ? 15 : 12, weight: .semibold, design: .monospaced))
             .foregroundColor(Color.white.opacity(0.9))
             .frame(height: 40)
             .frame(minWidth: compact ? 42 : 52)
@@ -488,23 +474,21 @@ private struct PtySessionView: View {
         let opening = !inputDrawerOpen
         inputDrawerOpen = opening
         if opening {
-            // 先压住网页侧 xterm 隐藏 textarea（readonly + blur），再展开抽屉并聚焦。
+            // 先释放原生终端的 IME，再展开抽屉并聚焦。
             // 顺序很重要：inputDrawerOpen 与 inputFocused 同帧置位，避免 inputExpanded
             // 用旧值算错一帧高度（抽屉刚展开却按折叠态布局，输入框看起来异常大）。
             focusNativeInput()
         } else {
             inputFocused = false
-            terminalWebModel.restoreEmbeddedTerminalInput()
+            terminal.terminal.focusTerminal()
         }
     }
 
-    /// 唤起原生输入：先压住网页侧 xterm 隐藏 textarea（readonly + blur），再把
-    /// 焦点交给抽屉里的文本框。IMEAwareComposerTextView 内部带多次重试，
-    /// 转场动画/WKWebView 抢焦点导致的单次失败会自动补上。
+    /// 原生终端与草稿互斥持有 IME；释放终端预编辑后聚焦草稿，不把预编辑误发到 PTY。
     /// 注意：inputDrawerOpen 必须先于本次调用置位（见 toggleInputDrawer / 快捷键），
     /// 否则 inputFocused 与 inputDrawerOpen 不同帧会导致布局闪烁。
     private func focusNativeInput() {
-        terminalWebModel.suppressEmbeddedTerminalIme()
+        terminal.terminal.blurTerminal()
         if inputDrawerOpen { inputFocused = true }
     }
 
@@ -613,7 +597,7 @@ private struct PtySessionView: View {
                 onFocusChange: { focused in
                     inputFocused = focused
                     if focused {
-                        terminalWebModel.suppressEmbeddedTerminalIme()
+                        terminal.terminal.blurTerminal()
                     }
                 },
                 onCompositionChange: { composerIsComposing = $0 },
@@ -623,6 +607,12 @@ private struct PtySessionView: View {
                     draftNeedsExpanded = !draft.isEmpty && height > 36
                 }
             )
+            .overlay {
+                if composerHoldToTalkEligible(text: draft, focused: inputFocused, keyboardVisible: keyboard.isVisible) {
+                    ComposerVoiceControl(draft: composerDraft, speech: speech, inputSurface: true, onTap: focusNativeInput,
+                        onPressChanged: { voicePressed = $0; voiceCanceling = $1 }) { store.toast = $0 }
+                }
+            }
             .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
             // 高度只约束 UITextView 本体，padding 不能吃掉已经测好的可视行。
             .frame(height: inputExpanded ? max(32, composerInputHeight) : 34)
@@ -653,7 +643,7 @@ private struct PtySessionView: View {
             Image(systemName: "terminal")
                 .font(.system(size: 11, weight: .semibold))
             Text("草稿 · 回车换行")
-                .font(.system(size: 12, weight: .medium))
+                .font(.wand(size: 12, weight: .medium))
                 .lineLimit(1)
         }
         .foregroundColor(Theme.textSecondary)
@@ -702,6 +692,7 @@ private struct PtySessionView: View {
         if voicePressed {
             return voiceCanceling ? "松开取消" : "松开结束 · 上滑取消"
         }
+        if composerHoldToTalkEligible(text: draft, focused: inputFocused, keyboardVisible: keyboard.isVisible) { return "发消息或按住说话" }
         return "编辑草稿，点击 ↑ 发送"
     }
 
@@ -712,12 +703,12 @@ private struct PtySessionView: View {
                     .font(.system(size: 16))
                     .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(voiceCanceling ? "松开取消" : (speech.transcript.isEmpty ? "正在聆听…" : speech.transcript))
-                        .font(.system(size: 14, weight: .medium))
+                    Text(voiceCanceling ? "松开取消" : (speech.isProcessing ? "服务端识别中…" : speech.transcript.isEmpty ? "正在聆听…" : speech.transcript))
+                        .font(.wand(size: 14, weight: .medium))
                         .foregroundColor(voiceCanceling ? Theme.danger : Theme.textPrimary)
                         .lineLimit(3)
-                    Text(speech.usingOnDevice ? "端侧识别" : "语音识别")
-                        .font(.system(size: 11))
+                    Text(speech.usingServer ? "服务端识别" : "端侧识别")
+                        .font(.wand(size: 11))
                         .foregroundColor(Theme.textSecondary)
                 }
                 Spacer(minLength: 0)
@@ -817,7 +808,7 @@ private struct PtySessionView: View {
         voiceDraftLifecycle = composerDraft.lifecycleRevision
         voicePressed = true
         voiceCanceling = false
-        speech.start { message in
+        speech.start(api: api) { message in
             store.toast = message
             voicePressed = false
             voiceCanceling = false
@@ -851,7 +842,7 @@ private struct PtySessionView: View {
                 Image(systemName: "wifi.slash")
                     .font(.system(size: 12, weight: .semibold))
                 Text("连接已断开，正在重连…")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.wand(size: 13, weight: .medium))
             }
             .foregroundColor(.white)
             .frame(maxWidth: .infinity)
@@ -864,7 +855,7 @@ private struct PtySessionView: View {
     @ViewBuilder private var toastView: some View {
         if let toast = store.toast {
             Text(toast)
-                .font(.system(size: 13, weight: .medium))
+                .font(.wand(size: 13, weight: .medium))
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
@@ -894,14 +885,14 @@ private struct PtySessionView: View {
             }
             VStack(spacing: 0) {
                 Text(store.displayTitle)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.wand(size: 13, weight: .semibold))
                     .foregroundColor(Color.white.opacity(0.88))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: 175)
                     .topicTitleRhythm(store.titleGenerating)
                 if let cwd = session.cwd, !cwd.isEmpty {
-                    WandPathRevealText(path: cwd, fontSize: 9, color: Color.white.opacity(0.58), staggerWindow: 0)
+                    WandPathRevealText(path: cwd, fontSize: 9, color: Color.white.opacity(0.58))
                         .frame(width: 175)
                 }
             }
@@ -935,7 +926,7 @@ struct SessionRow: View {
                 .frame(width: 46, height: 30)
 
                 Text(session.displayTitle)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.wand(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -943,7 +934,7 @@ struct SessionRow: View {
 
             HStack(spacing: 7) {
                 Text(trailingTimeLabel)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.wand(size: 10, weight: .medium))
                     .foregroundColor(Theme.textMuted)
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
@@ -954,7 +945,7 @@ struct SessionRow: View {
                         .frame(maxWidth: .infinity)
                 } else {
                     Text(statusLabel)
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(.wand(size: 10.5, weight: .medium))
                         .foregroundColor(Theme.textSecondary)
                 }
             }
@@ -1012,7 +1003,7 @@ struct SessionRow: View {
                     .fill(statusTint)
                     .frame(width: 5, height: 5)
                 Text(statusLabel)
-                    .font(.system(size: 10.5, weight: .semibold))
+                    .font(.wand(size: 10.5, weight: .semibold))
                     .foregroundColor(statusTint)
                     .lineLimit(1)
             }
@@ -1054,7 +1045,7 @@ struct HistorySessionRow: View {
                     .frame(width: 23, height: 23)
                     .frame(width: 46, height: 30)
                 Text(history.firstUserMessage.isEmpty ? "空会话" : history.firstUserMessage)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.wand(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1065,7 +1056,7 @@ struct HistorySessionRow: View {
             }
             HStack(spacing: 7) {
                 Text(loading ? "恢复中" : relativeTime)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.wand(size: 10, weight: .medium))
                     .foregroundColor(loading ? providerTint : Theme.textMuted)
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
@@ -1074,7 +1065,7 @@ struct HistorySessionRow: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(providerTint)
                 Text("可恢复")
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(.wand(size: 10.5, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                 if !history.cwd.isEmpty {
                     Text("·").foregroundColor(Theme.textMuted.opacity(0.55))

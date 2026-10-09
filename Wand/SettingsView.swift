@@ -12,6 +12,12 @@ struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
     @AppStorage(WandFeedback.storageKey) private var hapticEnabled = true
+    @AppStorage("wand.trafficTimelineMode") private var trafficTimelineMode = "wifi"
+    @AppStorage(SpeechRecognitionMode.storageKey) private var speechModeRaw = SpeechRecognitionMode.local.rawValue
+    @State private var speechStatus: ServerSpeechStatus?
+    @State private var speechError: String?
+    @State private var speechChecking = false
+    @State private var speechGeneration = 0
 
     @State private var serverVersion: String?
     @State private var confirmDisconnect = false
@@ -25,6 +31,7 @@ struct SettingsView: View {
     @State private var iosUpdateChecking = false
     @State private var iosUpdateError: String?
     @State private var confirmUnsignedInstall = false
+    @State private var showModelGroups = false
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
 
@@ -36,6 +43,7 @@ struct SettingsView: View {
                 voiceSection
                 featureSection
                 serverSection
+                Section("执行配置") { Button("模型分组") { showModelGroups = true } }
                 diagnosticsSection
                 clientUpdateSection
                 aboutSection
@@ -85,6 +93,7 @@ struct SettingsView: View {
         } message: {
             Text("将从这台设备移除该服务器及认证信息，重新连接需要连接码。服务端会话和文件保留。")
         }
+        .sheet(isPresented: $showModelGroups) { ModelGroupsView(api: api) }
         .sheet(item: $logShare) { item in
             ActivityView(activityItems: [item.url])
         }
@@ -144,15 +153,15 @@ struct SettingsView: View {
                     WandBrandMark(size: 46)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("系统设置")
-                            .font(.system(size: 19, weight: .semibold))
+                            .font(.wand(size: 19, weight: .semibold))
                             .foregroundStyle(Theme.textPrimary)
                         Text("连接、设备和工作流偏好都在这里调整。")
-                            .font(.system(size: 12))
+                            .font(.wand(size: 12))
                             .foregroundStyle(Theme.textSecondary)
                     }
                     Spacer(minLength: 8)
                     Text(appVersion)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.wand(size: 11, design: .monospaced))
                         .foregroundStyle(Theme.textSecondary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
@@ -189,7 +198,7 @@ struct SettingsView: View {
                 showRenameServer = true
             } label: {
                 Label("重命名当前服务器", systemImage: "pencil")
-                    .font(.system(size: 15))
+                    .font(.wand(size: 15))
             }
             Button {
                 dismiss()
@@ -198,19 +207,19 @@ struct SettingsView: View {
                 }
             } label: {
                 Label("切换服务器", systemImage: "server.rack")
-                    .font(.system(size: 15))
+                    .font(.wand(size: 15))
             }
             Button(role: .destructive) {
                 confirmDisconnect = true
             } label: {
                 Label("返回连接页", systemImage: "rectangle.portrait.and.arrow.right")
-                    .font(.system(size: 15))
+                    .font(.wand(size: 15))
             }
             Button(role: .destructive) {
                 confirmRemoveServer = true
             } label: {
                 Label("移除当前服务器", systemImage: "trash")
-                    .font(.system(size: 15))
+                    .font(.wand(size: 15))
             }
         }
     }
@@ -220,10 +229,10 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Label("主题", systemImage: currentAppearance.icon)
-                        .font(.system(size: 15))
+                        .font(.wand(size: 15))
                     Spacer()
                     Text(currentAppearance.title)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.wand(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
                 Picker("主题", selection: $appearanceModeRaw) {
@@ -236,6 +245,10 @@ struct SettingsView: View {
             }
             .padding(.vertical, 6)
             Toggle("触感反馈", isOn: $hapticEnabled)
+            Picker("实时工具时间线", selection: $trafficTimelineMode) {
+                Text("仅 Wi-Fi 自动展开").tag("wifi")
+                Text("所有网络自动展开").tag("all")
+            }
                 .tint(Theme.brand)
         } header: {
             Text("外观与反馈")
@@ -250,13 +263,44 @@ struct SettingsView: View {
 
     private var voiceSection: some View {
         Section {
-            Label("iOS 系统语音识别", systemImage: "waveform")
-            Button("打开系统设置") { openSystemSettings() }
+            Picker("识别方式", selection: $speechModeRaw) {
+                Text("服务端识别").tag(SpeechRecognitionMode.server.rawValue)
+                Text("客户端本地识别").tag(SpeechRecognitionMode.local.rawValue)
+            }
+            if speechModeRaw == SpeechRecognitionMode.server.rawValue {
+                HStack {
+                    Label("当前 Wand 服务器", systemImage: "server.rack")
+                    Spacer()
+                    if speechChecking { ProgressView() }
+                }
+                Text(speechError ?? speechStatus?.reason ?? (speechStatus?.ready == true
+                    ? "已就绪 · Whisper \(speechStatus?.settings.model ?? "") · \(speechStatus?.runtime.backend.uppercased() ?? "")" : "尚未读取状态"))
+                    .font(.subheadline).foregroundStyle(speechError != nil || speechStatus?.ready == false ? Theme.danger : Theme.textSecondary)
+                Button("刷新语音状态") { Task { await refreshSpeechStatus() } }.disabled(speechChecking)
+                Link("管理服务端语音模型", destination: WandEndpoint.url(baseURL: serverURL, route: "/settings") ?? serverURL)
+            } else {
+                Label("iOS 系统端侧听写", systemImage: "waveform")
+                Button("打开系统设置") { openSystemSettings() }
+            }
         } header: {
             Text("语音输入")
         } footer: {
-            Text("按住输入栏麦克风说话。优先使用设备上的听写模型；设备未提供离线识别时使用 Apple 在线识别。麦克风与语音识别权限可在系统设置中管理。")
+            Text(speechModeRaw == SpeechRecognitionMode.server.rawValue
+                 ? "松手后将音频发送到当前 Wand 服务器离线识别，最长 60 秒。支持 CPU、Mac Metal 与可选 CUDA；启用和模型下载需要管理权限。"
+                 : "仅使用设备端侧听写，不上传音频，也不自动转 Apple 在线识别。当前语言的端侧模型不可用时，请下载听写模型或选择服务端识别。")
         }
+        .task(id: speechModeRaw) { if speechModeRaw == SpeechRecognitionMode.server.rawValue { await refreshSpeechStatus() } }
+    }
+
+    private func refreshSpeechStatus() async {
+        speechGeneration += 1
+        let generation = speechGeneration
+        speechChecking = true; speechError = nil
+        do {
+            let next = try await api.speechStatus()
+            if generation == speechGeneration && !Task.isCancelled { speechStatus = next }
+        } catch { if generation == speechGeneration && !Task.isCancelled { speechError = error.localizedDescription } }
+        if generation == speechGeneration { speechChecking = false }
     }
 
     private var featureSection: some View {
@@ -313,7 +357,7 @@ struct SettingsView: View {
                 exportLogs()
             } label: {
                 Label("导出最近 5 分钟日志", systemImage: "square.and.arrow.up.on.square")
-                    .font(.system(size: 15))
+                    .font(.wand(size: 15))
             }
         } header: {
             Text("诊断")
@@ -332,9 +376,9 @@ struct SettingsView: View {
                     .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.success.opacity(0.13)))
                 VStack(alignment: .leading, spacing: 3) {
                     Text(iosUpdateTitle)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.wand(size: 14, weight: .semibold))
                     Text(iosUpdateSubtitle)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.wand(size: 12, design: .monospaced))
                         .foregroundStyle(Theme.textSecondary)
                 }
                 Spacer(minLength: 0)
@@ -348,14 +392,14 @@ struct SettingsView: View {
                     requestIosInstall()
                 } label: {
                     Label(iosUpdate?.otaReadyValue == true ? "安装更新" : "打开安装页", systemImage: "arrow.down.app")
-                        .font(.system(size: 15))
+                        .font(.wand(size: 15))
                 }
             }
             Button {
                 Task { await checkIosUpdate() }
             } label: {
                 Label("检查更新", systemImage: "arrow.clockwise")
-                    .font(.system(size: 15))
+                    .font(.wand(size: 15))
             }
             .disabled(iosUpdateChecking)
         } header: {
@@ -444,7 +488,7 @@ struct SettingsView: View {
             infoRow("App 版本", appVersion, mono: true)
             Link(destination: URL(string: "https://github.com/co0ontty/wand")!) {
                 Label("GitHub 仓库", systemImage: "link")
-                    .font(.system(size: 15))
+                    .font(.wand(size: 15))
             }
         }
     }
@@ -468,7 +512,7 @@ struct SettingsView: View {
             Text(label)
                 .lineLimit(1)
         }
-        .font(.system(size: 11, weight: .medium))
+        .font(.wand(size: 11, weight: .medium))
         .foregroundStyle(Theme.textPrimary)
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -498,13 +542,13 @@ struct SettingsView: View {
     private func infoRow(_ label: String, _ value: String, mono: Bool = false) -> some View {
         LabeledContent {
             Text(value)
-                .font(.system(size: 13, design: mono ? .monospaced : .default))
+                .font(.wand(size: 13, design: mono ? .monospaced : .default))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
         } label: {
             Text(label)
-                .font(.system(size: 14))
+                .font(.wand(size: 14))
                 .foregroundStyle(.secondary)
         }
     }

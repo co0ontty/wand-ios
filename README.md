@@ -1,8 +1,22 @@
 # iOS 客户端
 
 Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权限审批全部原生实现，
-直连 wand 服务端的 REST + WebSocket 协议；仅 PTY 终端区域嵌入 WKWebView。
+直连 wand 服务端的 REST + WebSocket 协议；PTY 使用 UIKit/SwiftTerm 原生终端，不再挂载 WKWebView。
 原生化避免整页 WebView 在移动端的键盘重叠、状态栏错位等问题。
+
+## 与当前 Android 对齐的原生入口
+
+- 默认首页为 IM；底部四入口为「聊天 / 通讯录 / 工作区 / 任务」，显式旧首页偏好保留。iPad 使用原生列表—详情分栏。
+- `ConversationModels.swift` / `ConversationAPI.swift` / `ConversationStore.swift` / `ConversationViews.swift` 接入 `/api/conversations`：稳定员工私聊、独立群实例、成员邀请、任务/轮次目标、逐消息独立会话预览、置顶/解散/恢复/删除与请求核对。通讯录名字进入对话，不再自动创建旧式执行会话或直接开工。
+- 草稿、附件和提交恢复继续归 `ComposerDraftState` / `SessionDraftStore`；执行协议归 `ChatStore`。IM 与执行页通过引用计数共享协议 owner，未知请求只按 request ID 读取回执，不自动重发。请求 ledger 只存哈希与 ID，不存提交正文或凭据。
+- `SessionFiles.swift` 提供服务器目录、文件预览、文本编辑、下载/分享；保存使用 mtime + size CAS，冲突或未知回执保留草稿并阻止盲写。空白且未绑定任务、未锁定的结构化会话可以更换运行目录。
+- `SessionCapabilities.swift` 区分 Pi CLI 与 Wand Agent（SDK）；创建、切换、员工候选、工作区与任务派发使用真实 provider + engine。`PiResources.swift` 按服务端实际能力配置 Skills / MCP、锁定、自动资源与 CodeMode；`ModelGroups.swift` 在管理认证后按原配置 CAS 保存分组，不把付费模型放进免费池。
+- `TeamDispatch.swift` 先建议、再人工确认项目和名单开工，未知启动不重复执行。工作区顺序支持原生拖放、键盘/无障碍可用的上移/下移与保存重试。
+- `NativeTerminal.swift` 使用固定 SwiftTerm 1.18.0、与 Android 同源 JetBrains Mono/ANSI 调色板；回放 Render checkpoint 的有序数据/resize，消费后 ACK，重连不重发输入。原生 IME、选择/复制/粘贴、50%–200%四分之一档缩放；远端 OSC52 不能读写剪贴板。
+- `SessionActivityViews.swift` 与 WidgetKit 共用布局；灵动岛区分运行/后台收尾/等待输入/权限/失败/停止/完成与过期状态，多会话可精确链接，计时取服务端本轮锚点。完成停留12秒、失败30秒，标题/详情标记 privacySensitive，状态载荷有4KB预算保护。
+- `ChatActivityTimeline.swift` 独立持有只读工具/思考时间线：稳定身份、真实时间排序、空思考轮过滤、唯一运行标记、按需调用详情、上翻不抢阅读位置；自动展开网络偏好位于设置。主界面灰白蓝 token 对齐当前 Android，终端保留两端共同的暖深色。
+
+验证：`WandTests/CurrentAndroidParityTests.swift` 覆盖协议、竞态和原生渲染。安装服务只读验收必须显式提供私密测试输入，常规 CI 不访问用户服务；凭据不进入构建参数、环境变量值、仓库或附件。离线语音按用户要求不移植；系统语音保持本轮其他工作真实选择。未签名 IPA与无连接真机是当前验收边界，不能因此宣称已完成签名真机验收或所有平台实现完全相同。
 
 核心目标：**不充钱买 Apple Developer 账号（$99/年）也能把它装进自己的 iPhone。**
 
@@ -11,7 +25,7 @@ Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权
 - 工程代码放在 `ios/Wand/`
 - `.app` / `.ipa` 构建产物**不要提交到仓库**（已在 `.gitignore`）
 - 与 Android/macOS 客户端共享连接协议：连接码（base64 `url#token`）→ `/api/login` 拿 cookie；
-  原生界面用 cookie 调 `/api/*` 与 `/ws`，嵌入终端独立注入认证 cookie。
+  原生界面用 endpoint-scoped cookie 调 `/api/*` 与 `/ws`，终端直连同一服务器，不注入网页凭据。
 
 ## 客户端更新
 
@@ -150,12 +164,11 @@ ios/
     ├── WandAPI.swift          # REST 客户端（401 自动用 appToken 重登重试）
     ├── WandSocket.swift       # /ws 客户端：seq 间隙 resync、心跳看门狗、退避重连
     ├── WandModels.swift       # 协议 Codable 模型（SessionSnapshot / ConversationTurn / WS 消息）
-    ├── WebContainerView.swift # 嵌入式 PTY 终端：UIViewRepresentable 包 WKWebView + 覆盖层
-    ├── WebBridge.swift        # 终端 WebView 导航委托 + 自签名证书放行 + 输入桥
+    ├── NativeTerminal.swift   # UIKit/SwiftTerm PTY 回放、ACK、原生输入与选择
     ├── ServerStore.swift      # UserDefaults 持久化连接状态
     ├── WandAuth.swift         # 连接码解码 / token 登录 / 可达性探测（与 macOS 共享逻辑）
     ├── SelfSignedSession.swift# 放行 wand 自签名 HTTPS 的 URLSession（REST/WS 共用）
-    ├── Theme.swift            # Claude 珊瑚橙主题 + 复用按钮样式
+    ├── Theme.swift            # Android 同源灰白蓝主题 + 原生复用样式
     ├── Info.plist             # ATS 放行任意加载 + 本地网络权限说明
     └── Assets.xcassets/       # AppIcon / AccentColor
 ```
@@ -180,11 +193,11 @@ ios/
 
 ## 设计要点
 
-- **自签名 HTTPS 放行**：wand 默认用 `cert.ts` 生成自签名证书，`WebBridge` 和 `SelfSignedSession` 对 ServerTrust 一律放行，等价 Android 的 `trustSelfSigned()`。
+- **自签名 HTTPS 放行**：wand 默认用 `cert.ts` 生成自签名证书，REST/WS 复用 `SelfSignedSession` 的 endpoint cookie/自签名证书处理，等价 Android 的自签 HTTPS 支持。
 - **ATS**：`NSAllowsArbitraryLoads = true`，因为要连局域网 HTTP 地址和自签名 HTTPS。
 - **本地网络权限**：`NSLocalNetworkUsageDescription`；应用完成启动后主动用无数据 UDP connect 触发一次授权检查，局域网连接失败时提供 App 设置入口。
 - **切换服务器入口**：iOS 没有菜单栏，连接后在右上角放一个低调的半透明悬浮按钮，点击弹出切换面板（macOS 是用菜单 + 通知，二者共用 `.wandRequestSwitchServer` 通知）。
-- **按住说话（端侧语音输入）**：输入栏左侧麦克风按钮，按住录音 → 气泡实时转写 → 松手把文字**追加**进输入框（不覆盖草稿）→ 上滑取消，交互对齐 Web 端隐藏中的 voice-btn。识别走系统 `SFSpeechRecognizer`：设备已下载当前语言听写模型时强制 `requiresOnDeviceRecognition`（音频不出设备、无时长限制），否则降级 Apple 服务器识别（单次约 1 分钟，足够短句）。语言候选：系统语言 → zh-CN → en-US。不需要任何 entitlement，只新增了 `NSMicrophoneUsageDescription` / `NSSpeechRecognitionUsageDescription` 两条隐私描述，免费账号自签不受影响。
+- **按住说话（服务端 / 客户端本地识别）**：设置 → 语音输入选择识别方式，默认保留本地。按住录音 → 松手把文字**追加**进原草稿 → 上滑取消；修改输入、切会话或离开后迟到转写不覆盖新输入。本地模式强制系统 `SFSpeechRecognizer.requiresOnDeviceRecognition`，语言候选为系统语言 → zh-CN → en-US；缺少端侧模型时报错，不自动转 Apple 在线识别。服务端模式由 `ServerSpeechRecorder` 只请求麦克风权限，录制最多 60 秒，设备转换为 16 kHz 单声道 PCM16 WAV，松手后经当前 endpoint 的认证 URLSession 上传 Wand 服务器离线转写；服务器需要先安装 whisper.cpp、启用并下载模型，说明见主仓 `docs/server-speech.md`。识别中可取消，不写音频或转写到日志；无需额外 entitlement，免费账号自签不受影响。
 - **bundle id**：`com.wand.app`，与 macOS 端一致。免费签名时工具可能会改写它，不影响使用。
 - **entitlements**：刻意**不带**特殊 entitlements（推送 / App Groups 等），保持最干净，最大化兼容免费账号签名——带了反而可能签名失败。
 

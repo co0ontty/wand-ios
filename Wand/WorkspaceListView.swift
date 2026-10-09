@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct WorkspaceTaskSelection: Equatable {
     let workspace: Workspace
@@ -582,6 +583,9 @@ struct WorkspaceListView: View {
     private var taskGroupsList: some View {
         List {
             if !isSelecting { homeSearchAndActivity }
+            if let error = store.orderSaveError {
+                HStack { Text(error).font(.caption).foregroundStyle(Theme.danger); Spacer(); Button("重试保存顺序") { store.savePendingGroupOrder() } }.padding(8)
+            }
             if store.taskGroupsLoading && store.taskGroups.isEmpty {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -626,7 +630,7 @@ struct WorkspaceListView: View {
                         .font(.system(size: 32))
                         .foregroundColor(Theme.brand)
                     Text(searchQuery.isEmpty && !attentionOnly ? "还没有任务" : "没有匹配的会话")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.wand(size: 15, weight: .semibold))
                         .foregroundColor(Theme.textPrimary)
                     Text(searchQuery.isEmpty && !attentionOnly ? "新建任务时选目录，之后在任务里建会话无需再选目录。" : "清空搜索或取消「等你」筛选可显示其他内容。")
                         .font(.footnote)
@@ -674,7 +678,7 @@ struct WorkspaceListView: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundColor(Theme.textMuted)
                 TextField("搜索对话、员工、任务或目录", text: $searchQuery)
-                    .font(.system(size: 14))
+                    .font(.wand(size: 14))
                     .focused($searchFocused)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -698,7 +702,7 @@ struct WorkspaceListView: View {
                         Label("等你 \(counts.needsYou)", systemImage: attentionOnly ? "checkmark.circle.fill" : "hand.raised")
                             .foregroundColor(attentionOnly ? Theme.brand : Theme.textSecondary)
                     }.buttonStyle(.plain).accessibilityLabel(attentionOnly ? "取消只看等你" : "只看等你处理的会话")
-                }.font(.system(size: 12, weight: .medium))
+                }.font(.wand(size: 12, weight: .medium))
             }
         }
         .padding(.vertical, 4)
@@ -796,17 +800,17 @@ struct WorkspaceListView: View {
                 recentConversationLeading(item, secondary: secondary)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(directEmployee ? employee?.name ?? item.session.employeeName ?? "员工" : conversationTitle)
-                        .font(.system(size: 14, weight: .medium)).foregroundColor(Theme.textPrimary)
+                        .font(.wand(size: 14, weight: .medium)).foregroundColor(Theme.textPrimary)
                         .lineLimit(secondary ? 1 : 2)
                     if !secondary {
                         Text([directEmployee ? conversationTitle : nil, item.task?.name, item.session.teamStep?.teamName, item.group.isGlobal ? nil : item.group.workspaceName]
                             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
-                            .font(.system(size: 11)).foregroundColor(Theme.textMuted).lineLimit(1)
+                            .font(.wand(size: 11)).foregroundColor(Theme.textMuted).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 4)
                 Text(item.session.isJustCompleted ? "刚完成" : HomePresentation.statusLabel(item.session.activityStatus))
-                    .font(.system(size: 11)).foregroundColor(item.session.isJustCompleted ? Theme.brand : Theme.textSecondary)
+                    .font(.wand(size: 11)).foregroundColor(item.session.isJustCompleted ? Theme.brand : Theme.textSecondary)
             }.padding(.vertical, 7)
         }.buttonStyle(.plain)
         .contextMenu {
@@ -929,18 +933,18 @@ struct WorkspaceListView: View {
             .font(.system(size: 13, weight: .semibold))
             .foregroundColor(Theme.brand)
             Text(resolved.isEmpty ? "选择任务或终端" : "已选 \(resolved.count)")
-                .font(.system(size: 12))
+                .font(.wand(size: 12))
                 .foregroundColor(Theme.textMuted)
             Spacer(minLength: 8)
             Button("完成") { endManagedSelection() }
-                .font(.system(size: 13, weight: .semibold))
+                .font(.wand(size: 13, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             }
             HStack(spacing: 16) {
             Button("归档所选") {
                 requestManagedSelection()
             }
-            .font(.system(size: 13, weight: .semibold))
+            .font(.wand(size: 13, weight: .semibold))
             .foregroundColor(Theme.brand)
             .disabled(resolved.isEmpty)
             if !resolved.sessionIds.isEmpty {
@@ -1030,7 +1034,7 @@ struct WorkspaceListView: View {
         } label: {
             HStack {
                 Text("未分组会话（\(group.standaloneSessions.count)）")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.wand(size: 12, weight: .medium))
                     .foregroundColor(Theme.textMuted)
                 Spacer(minLength: 6)
                 treeDisclosureCaret(expanded: expanded)
@@ -1070,7 +1074,7 @@ struct WorkspaceListView: View {
                 )
             HStack(spacing: 7) {
                 Text(group.workspaceName.isEmpty ? "任务目录" : group.workspaceName)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.wand(size: 14, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                 if TaskListPresentation.hasLiveActivity(group) {
@@ -1110,6 +1114,10 @@ struct WorkspaceListView: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("目录 \(group.workspaceName)，\(group.tasks.count) 个任务")
         .contextMenu {
+            Button("上移工作区") { store.moveWorkspaceGroup(group.id, delta: -1) }
+                .disabled(store.taskGroups.first?.id == group.id)
+            Button("下移工作区") { store.moveWorkspaceGroup(group.id, delta: 1) }
+                .disabled(store.taskGroups.last?.id == group.id)
             // 全局（未归属）组不参与改名，合成目录与真实工作区走各自接口；删除只留给真实工作区。
             if !group.isGlobal {
                 Button {
@@ -1127,6 +1135,15 @@ struct WorkspaceListView: View {
                     Label("删除工作区", systemImage: "trash")
                 }
             }
+        }
+        .onDrag { NSItemProvider(object: group.id as NSString) }
+        .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: NSString.self) { value, _ in
+                guard let id = value as? String else { return }
+                Task { @MainActor in store.moveWorkspaceGroup(id, to: group.id) }
+            }
+            return true
         }
     }
 
@@ -1253,7 +1270,7 @@ struct WorkspaceListView: View {
 
             if summary.status == "done" {
                 Text("已完成")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.wand(size: 11, weight: .medium))
                     .foregroundColor(Theme.textMuted)
                     .padding(.trailing, 4)
             }
@@ -1302,7 +1319,7 @@ struct WorkspaceListView: View {
                     .frame(width: 14, height: 18)
             }
             Text(summary.name)
-                .font(.system(size: 15, weight: selected || (isSelecting && isSelected) ? .semibold : .medium))
+                .font(.wand(size: 15, weight: selected || (isSelecting && isSelected) ? .semibold : .medium))
                 .foregroundColor(Theme.textPrimary)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
@@ -1333,7 +1350,7 @@ struct WorkspaceListView: View {
         } label: {
             HStack(spacing: 2) {
                 Text("\(summary.listedSessionCount)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.wand(size: 11, weight: .semibold))
                     .monospacedDigit()
                     .foregroundColor(Theme.textMuted)
                 treeDisclosureCaret(expanded: expanded)
@@ -1463,12 +1480,12 @@ struct WorkspaceListView: View {
                 .frame(width: 22, height: 22)
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
-                    .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                    .font(.wand(size: 13, weight: selected ? .semibold : .medium))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                 if session.sessionKind == "pty" {
                     Text("终端")
-                        .font(.system(size: 10))
+                        .font(.wand(size: 10))
                         .foregroundColor(Theme.textMuted)
                 }
             }
@@ -1476,7 +1493,7 @@ struct WorkspaceListView: View {
             if session.isJustCompleted {
                 // 完成但还没被明确打开看过；纯展示态，不改 runner 生命周期。
                 Text("刚完成")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.wand(size: 10, weight: .medium))
                     .foregroundColor(Theme.success)
                     .help("已完成，还没查看")
                     .accessibilityLabel("刚完成，还没查看")
@@ -1687,7 +1704,7 @@ struct WorkspaceListView: View {
                 Image(systemName: "arrow.triangle.branch")
                     .font(.system(size: 10, weight: .semibold))
                 Text("\(count)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.wand(size: 11, weight: .semibold))
                     .monospacedDigit()
             }
             .foregroundColor(count > 0 ? Theme.brand : Theme.textMuted)
@@ -1733,11 +1750,11 @@ struct WorkspaceListView: View {
                     cwd: session.cwd,
                     index: 0
                 ))
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.wand(size: 14, weight: .medium))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                 Text(session.providerLabel)
-                    .font(.system(size: 10))
+                    .font(.wand(size: 10))
                     .foregroundColor(Theme.textMuted)
                     .lineLimit(1)
             }
@@ -1803,7 +1820,7 @@ struct WorkspaceListView: View {
     private var toastView: some View {
         if let toastMessage {
             Text(toastMessage)
-                .font(.system(size: 13, weight: .medium))
+                .font(.wand(size: 13, weight: .medium))
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)

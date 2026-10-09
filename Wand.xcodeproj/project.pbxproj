@@ -7,11 +7,29 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		FA3000000000000000000004 /* LiveActivityExperienceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000005 /* LiveActivityExperienceTests.swift */; };
+		FA3000000000000000000001 /* SessionActivityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000002 /* SessionActivityViews.swift */; };
+		FA3000000000000000000003 /* SessionActivityViews.swift in Widget Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000002 /* SessionActivityViews.swift */; };
+		FA2000000000000000000012 /* InstalledNativeTerminalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000013 /* InstalledNativeTerminalTests.swift */; };
+		FA2000000000000000000010 /* RemainingParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000011 /* RemainingParityTests.swift */; };
+		FA2000000000000000000006 /* JetBrainsMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000007 /* JetBrainsMono-Regular.ttf */; };
+		FA2000000000000000000008 /* OFL-JetBrainsMono.txt in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000009 /* OFL-JetBrainsMono.txt */; };
+		FA2000000000000000000001 /* NativeTerminal.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000002 /* NativeTerminal.swift */; };
+		FA2000000000000000000003 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = FA2000000000000000000005 /* SwiftTerm */; };
+		FA1000000000000000000A10 /* ChatActivityTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B10 /* ChatActivityTimeline.swift */; };
+		FA1000000000000000000A11 /* CurrentAndroidParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B11 /* CurrentAndroidParityTests.swift */; };
+		FA1000000000000000000A07 /* PiResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B07 /* PiResources.swift */; };
+		FA1000000000000000000A08 /* ModelGroups.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B08 /* ModelGroups.swift */; };
+		FA1000000000000000000A09 /* TeamDispatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B09 /* TeamDispatch.swift */; };
+		FA1000000000000000000A05 /* SessionFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B05 /* SessionFiles.swift */; };
+		FA1000000000000000000A06 /* SessionCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B06 /* SessionCapabilities.swift */; };
+		FA1000000000000000000A01 /* ConversationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B01 /* ConversationModels.swift */; };
+		FA1000000000000000000A02 /* ConversationAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B02 /* ConversationAPI.swift */; };
+		FA1000000000000000000A03 /* ConversationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B03 /* ConversationStore.swift */; };
+		FA1000000000000000000A04 /* ConversationViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1000000000000000000B04 /* ConversationViews.swift */; };
 		A100000000000000000000A1 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B1 /* App.swift */; };
 		A100000000000000000000A2 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B2 /* ContentView.swift */; };
 		A100000000000000000000A3 /* ConnectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B3 /* ConnectView.swift */; };
-		A100000000000000000000A4 /* WebContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B4 /* WebContainerView.swift */; };
-		A100000000000000000000A5 /* WebBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B5 /* WebBridge.swift */; };
 		A100000000000000000000A6 /* ServerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B6 /* ServerStore.swift */; };
 		A100000000000000000000A9 /* SelfSignedSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000B9 /* SelfSignedSession.swift */; };
 		A100000000000000000000CA /* WandRemoteImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000CB /* WandRemoteImage.swift */; };
@@ -46,6 +64,7 @@
 		B2000000000000000000AC04 /* SessionLiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC04 /* SessionLiveActivityController.swift */; };
 		B2000000000000000000AC07 /* QuickActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC07 /* QuickActions.swift */; };
 		B2000000000000000000AC08 /* SpeechRecognizerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC08 /* SpeechRecognizerService.swift */; };
+		C91053504545434800000001 /* ServerSpeechRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C91053504545434800000002 /* ServerSpeechRecorder.swift */; };
 		B2000000000000000000AC09 /* SessionNotificationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC09 /* SessionNotificationController.swift */; };
 		B2000000000000000000AC13 /* SessionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC03 /* SessionActivityAttributes.swift */; };
 		B2000000000000000000AC05 /* WandWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC05 /* WandWidgetsBundle.swift */; };
@@ -120,11 +139,27 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		FA3000000000000000000005 /* LiveActivityExperienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityExperienceTests.swift; sourceTree = "<group>"; };
+		FA3000000000000000000002 /* SessionActivityViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActivityViews.swift; sourceTree = "<group>"; };
+		FA2000000000000000000013 /* InstalledNativeTerminalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstalledNativeTerminalTests.swift; sourceTree = "<group>"; };
+		FA2000000000000000000011 /* RemainingParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemainingParityTests.swift; sourceTree = "<group>"; };
+		FA2000000000000000000007 /* JetBrainsMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fonts/JetBrainsMono-Regular.ttf"; sourceTree = "<group>"; };
+		FA2000000000000000000009 /* OFL-JetBrainsMono.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Fonts/OFL-JetBrainsMono.txt"; sourceTree = "<group>"; };
+		FA2000000000000000000002 /* NativeTerminal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTerminal.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B10 /* ChatActivityTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatActivityTimeline.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B11 /* CurrentAndroidParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentAndroidParityTests.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B07 /* PiResources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PiResources.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B08 /* ModelGroups.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelGroups.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B09 /* TeamDispatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeamDispatch.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B05 /* SessionFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionFiles.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B06 /* SessionCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCapabilities.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B01 /* ConversationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationModels.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B02 /* ConversationAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationAPI.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B03 /* ConversationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationStore.swift; sourceTree = "<group>"; };
+		FA1000000000000000000B04 /* ConversationViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationViews.swift; sourceTree = "<group>"; };
 		A100000000000000000000B1 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		A100000000000000000000B2 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A100000000000000000000B3 /* ConnectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectView.swift; sourceTree = "<group>"; };
-		A100000000000000000000B4 /* WebContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebContainerView.swift; sourceTree = "<group>"; };
-		A100000000000000000000B5 /* WebBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebBridge.swift; sourceTree = "<group>"; };
 		A100000000000000000000B6 /* ServerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerStore.swift; sourceTree = "<group>"; };
 		A100000000000000000000B9 /* SelfSignedSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfSignedSession.swift; sourceTree = "<group>"; };
 		A100000000000000000000CB /* WandRemoteImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandRemoteImage.swift; sourceTree = "<group>"; };
@@ -158,6 +193,7 @@
 		B2000000000000000000BC04 /* SessionLiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLiveActivityController.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC07 /* QuickActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActions.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC08 /* SpeechRecognizerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRecognizerService.swift; sourceTree = "<group>"; };
+		C91053504545434800000002 /* ServerSpeechRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSpeechRecorder.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC09 /* SessionNotificationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotificationController.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC0A /* LocalNetworkPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNetworkPermission.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC05 /* WandWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandWidgetsBundle.swift; sourceTree = "<group>"; };
@@ -209,6 +245,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FA2000000000000000000003 /* SwiftTerm in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -248,8 +285,6 @@
 				A100000000000000000000B1 /* App.swift */,
 				A100000000000000000000B2 /* ContentView.swift */,
 				A100000000000000000000B3 /* ConnectView.swift */,
-				A100000000000000000000B4 /* WebContainerView.swift */,
-				A100000000000000000000B5 /* WebBridge.swift */,
 				A100000000000000000000B6 /* ServerStore.swift */,
 				A100000000000000000000B9 /* SelfSignedSession.swift */,
 				A100000000000000000000CB /* WandRemoteImage.swift */,
@@ -258,6 +293,9 @@
 				A1000000000000000000BC01 /* WandModels.swift */,
 				A1000000000000000000BC02 /* WandAPI.swift */,
 				A1000000000000000000BC03 /* WandSocket.swift */,
+				FA2000000000000000000002 /* NativeTerminal.swift */,
+				FA2000000000000000000007 /* JetBrainsMono-Regular.ttf */,
+				FA2000000000000000000009 /* OFL-JetBrainsMono.txt */,
 				A1000000000000000000BC04 /* ChatStore.swift */,
 				A1000000000000000000BC0D /* SessionMessageReducer.swift */,
 				A1000000000000000000BC0E /* PtyInputProtocol.swift */,
@@ -271,6 +309,16 @@
 				A1000000000000000000BC0F /* NativeComposer.swift */,
 				A1000000000000000000BC10 /* SessionTimeFormatting.swift */,
 				A1000000000000000000BC05 /* ChatView.swift */,
+				FA1000000000000000000B10 /* ChatActivityTimeline.swift */,
+				FA1000000000000000000B07 /* PiResources.swift */,
+				FA1000000000000000000B08 /* ModelGroups.swift */,
+				FA1000000000000000000B09 /* TeamDispatch.swift */,
+				FA1000000000000000000B05 /* SessionFiles.swift */,
+				FA1000000000000000000B06 /* SessionCapabilities.swift */,
+				FA1000000000000000000B01 /* ConversationModels.swift */,
+				FA1000000000000000000B02 /* ConversationAPI.swift */,
+				FA1000000000000000000B03 /* ConversationStore.swift */,
+				FA1000000000000000000B04 /* ConversationViews.swift */,
 				A1000000000000000000BC07 /* NewSessionView.swift */,
 				A1000000000000000000BC08 /* NativeRootView.swift */,
 				A1000000000000000000BC09 /* GitQuickCommitView.swift */,
@@ -280,9 +328,11 @@
 				B2000000000000000000BC01 /* QRScannerView.swift */,
 				B2000000000000000000BC02 /* SettingsView.swift */,
 				B2000000000000000000BC03 /* SessionActivityAttributes.swift */,
+				FA3000000000000000000002 /* SessionActivityViews.swift */,
 				B2000000000000000000BC04 /* SessionLiveActivityController.swift */,
 				B2000000000000000000BC07 /* QuickActions.swift */,
 				B2000000000000000000BC08 /* SpeechRecognizerService.swift */,
+				C91053504545434800000002 /* ServerSpeechRecorder.swift */,
 				B2000000000000000000BC09 /* SessionNotificationController.swift */,
 				B2000000000000000000BC0A /* LocalNetworkPermission.swift */,
 				D4000000000000000000BC01 /* MissionsModels.swift */,
@@ -339,6 +389,10 @@
 				F1000000000000000000BC05 /* ComposerToolParityTests.swift */,
 				F1000000000000000000BC11 /* SubagentDispatchTests.swift */,
 				F1000000000000000000BC04 /* HomeParityTests.swift */,
+				FA1000000000000000000B11 /* CurrentAndroidParityTests.swift */,
+				FA2000000000000000000011 /* RemainingParityTests.swift */,
+				FA2000000000000000000013 /* InstalledNativeTerminalTests.swift */,
+				FA3000000000000000000005 /* LiveActivityExperienceTests.swift */,
 				C3000000000000000000BC01 /* WandProtocolTests.swift */,
 				C3000000000000000000BC02 /* ContactsTests.swift */,
 				F6000000000000000000BC06 /* AlignmentParityTests.swift */,
@@ -368,6 +422,7 @@
 				B2000000000000000000D101 /* PBXTargetDependency */,
 			);
 			name = Wand;
+			packageProductDependencies = (FA2000000000000000000005 /* SwiftTerm */);
 			productName = Wand;
 			productReference = A100000000000000000000F1 /* Wand.app */;
 			productType = "com.apple.product-type.application";
@@ -442,6 +497,7 @@
 			productRefGroup = A1000000000000000000F600 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
+			packageReferences = (FA2000000000000000000004 /* SwiftTerm */);
 			targets = (
 				A1000000000000000000F700 /* Wand */,
 				B2000000000000000000F701 /* WandWidgets */,
@@ -456,6 +512,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A100000000000000000000C1 /* Assets.xcassets in Resources */,
+				FA2000000000000000000006 /* JetBrainsMono-Regular.ttf in Resources */,
+				FA2000000000000000000008 /* OFL-JetBrainsMono.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -507,8 +565,6 @@
 				A100000000000000000000A1 /* App.swift in Sources */,
 				A100000000000000000000A2 /* ContentView.swift in Sources */,
 				A100000000000000000000A3 /* ConnectView.swift in Sources */,
-				A100000000000000000000A4 /* WebContainerView.swift in Sources */,
-				A100000000000000000000A5 /* WebBridge.swift in Sources */,
 				A100000000000000000000A6 /* ServerStore.swift in Sources */,
 				A100000000000000000000A9 /* SelfSignedSession.swift in Sources */,
 				A100000000000000000000CA /* WandRemoteImage.swift in Sources */,
@@ -517,6 +573,7 @@
 				A1000000000000000000AC01 /* WandModels.swift in Sources */,
 				A1000000000000000000AC02 /* WandAPI.swift in Sources */,
 				A1000000000000000000AC03 /* WandSocket.swift in Sources */,
+				FA2000000000000000000001 /* NativeTerminal.swift in Sources */,
 				A1000000000000000000AC04 /* ChatStore.swift in Sources */,
 				A1000000000000000000AC0D /* SessionMessageReducer.swift in Sources */,
 				A1000000000000000000AC0E /* PtyInputProtocol.swift in Sources */,
@@ -530,6 +587,16 @@
 				A1000000000000000000AC0F /* NativeComposer.swift in Sources */,
 				A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */,
 				A1000000000000000000AC05 /* ChatView.swift in Sources */,
+				FA1000000000000000000A10 /* ChatActivityTimeline.swift in Sources */,
+				FA1000000000000000000A07 /* PiResources.swift in Sources */,
+				FA1000000000000000000A08 /* ModelGroups.swift in Sources */,
+				FA1000000000000000000A09 /* TeamDispatch.swift in Sources */,
+				FA1000000000000000000A05 /* SessionFiles.swift in Sources */,
+				FA1000000000000000000A06 /* SessionCapabilities.swift in Sources */,
+				FA1000000000000000000A01 /* ConversationModels.swift in Sources */,
+				FA1000000000000000000A02 /* ConversationAPI.swift in Sources */,
+				FA1000000000000000000A03 /* ConversationStore.swift in Sources */,
+				FA1000000000000000000A04 /* ConversationViews.swift in Sources */,
 				A1000000000000000000AC07 /* NewSessionView.swift in Sources */,
 				A1000000000000000000AC08 /* NativeRootView.swift in Sources */,
 				A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */,
@@ -539,9 +606,11 @@
 				B2000000000000000000AC01 /* QRScannerView.swift in Sources */,
 				B2000000000000000000AC02 /* SettingsView.swift in Sources */,
 				B2000000000000000000AC03 /* SessionActivityAttributes.swift in Sources */,
+				FA3000000000000000000001 /* SessionActivityViews.swift in Sources */,
 				B2000000000000000000AC04 /* SessionLiveActivityController.swift in Sources */,
 				B2000000000000000000AC07 /* QuickActions.swift in Sources */,
 				B2000000000000000000AC08 /* SpeechRecognizerService.swift in Sources */,
+				C91053504545434800000001 /* ServerSpeechRecorder.swift in Sources */,
 				B2000000000000000000AC09 /* SessionNotificationController.swift in Sources */,
 				B2000000000000000000AC0A /* LocalNetworkPermission.swift in Sources */,
 				D4000000000000000000AC01 /* MissionsModels.swift in Sources */,
@@ -575,6 +644,7 @@
 			files = (
 				B2000000000000000000AC05 /* WandWidgetsBundle.swift in Sources */,
 				B2000000000000000000AC13 /* SessionActivityAttributes.swift in Sources */,
+				FA3000000000000000000003 /* SessionActivityViews.swift in Widget Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -585,6 +655,10 @@
 				F1000000000000000000AC05 /* ComposerToolParityTests.swift in Sources */,
 				F1000000000000000000AC11 /* SubagentDispatchTests.swift in Sources */,
 				F1000000000000000000AC04 /* HomeParityTests.swift in Sources */,
+				FA1000000000000000000A11 /* CurrentAndroidParityTests.swift in Sources */,
+				FA2000000000000000000010 /* RemainingParityTests.swift in Sources */,
+				FA2000000000000000000012 /* InstalledNativeTerminalTests.swift in Sources */,
+				FA3000000000000000000004 /* LiveActivityExperienceTests.swift in Sources */,
 				C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */,
 				C3000000000000000000AC02 /* ContactsTests.swift in Sources */,
 				F6000000000000000000AC06 /* AlignmentParityTests.swift in Sources */,
@@ -608,6 +682,21 @@
 			targetProxy = C3000000000000000000C101 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		FA2000000000000000000004 /* SwiftTerm */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
+			requirement = { kind = exactVersion; version = 1.18.0; };
+		};
+/* End XCRemoteSwiftPackageReference section */
+/* Begin XCSwiftPackageProductDependency section */
+		FA2000000000000000000005 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FA2000000000000000000004 /* SwiftTerm */;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A100000000000000000000D2 /* Debug */ = {

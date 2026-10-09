@@ -1,30 +1,20 @@
 import Foundation
 import ActivityKit
 
-/// 会话 Live Activity 的契约，主 App 与 WandWidgets 扩展共同编译。
-/// 所有活跃会话聚合进**同一条**活动（长条样式）：ContentState 携带会话条目数组，
-/// 每个条目只保留「哪个会话、缩略标题、什么状态」——灵动岛空间有限。
+/// Small, credential-free activity projection shared by app and WidgetKit.
 struct SessionActivityAttributes: ActivityAttributes {
-    /// 长条内的单个会话条目。
     struct SessionEntry: Codable, Hashable {
         var id: String
-        /// 所属服务器。旧版活动没有该字段，解码时自然回退为 nil（当前服务器）。
         var serverID: String? = nil
-        /// 缩略标题（目录名或摘要，控制器侧已截断）。
         var title: String
-        /// claude / codex / opencode，用于快速区分并发会话。
         var providerRaw: String
-        /// responding / permission / done
         var stateRaw: String
-        /// 当前任务标题（TodoWrite 派生），可空。
         var taskTitle: String?
-        /// 对话模式中等待发送的消息数。
         var queuedCount: Int
-        /// 本轮工作开始时间。系统可直接渲染计时器，无需 App 高频刷新。
         var startedAt: Date? = nil
+        var engineRaw: String? = nil
     }
-
-    public struct ContentState: Codable, Hashable {
+    struct ContentState: Codable, Hashable {
         var sessions: [SessionEntry]
         var updatedAt: Date
     }
@@ -32,31 +22,40 @@ struct SessionActivityAttributes: ActivityAttributes {
 
 extension SessionActivityAttributes.SessionEntry {
     var isResponding: Bool { stateRaw == "responding" }
+    var isBackground: Bool { stateRaw == "background" }
     var needsPermission: Bool { stateRaw == "permission" }
+    var needsInput: Bool { stateRaw == "waiting-input" }
+    var isFailed: Bool { stateRaw == "failed" }
+    var isStopped: Bool { stateRaw == "stopped" }
     var isDone: Bool { stateRaw == "done" }
-
+    var needsAttention: Bool { needsPermission || needsInput || isFailed }
+    var isFinished: Bool { isDone || isFailed || isStopped }
     var priority: Int {
-        if needsPermission { return 0 }
-        if isResponding { return 1 }
-        return 2
-    }
-
-    var statusText: String {
         switch stateRaw {
-        case "responding": return "回复中"
-        case "permission": return "等待授权"
-        case "done": return "已完成"
-        default: return stateRaw
+        case "permission": return 0
+        case "waiting-input": return 1
+        case "failed": return 2
+        case "responding": return 3
+        case "background": return 4
+        case "stopped": return 5
+        default: return 6
         }
     }
-
+    var statusText: String {
+        switch stateRaw {
+        case "responding": return "运行中"
+        case "background": return "后台收尾"
+        case "permission": return "待授权"
+        case "waiting-input": return "等你回复"
+        case "failed": return "执行失败"
+        case "stopped": return "已停止"
+        case "done": return "已完成"
+        default: return "状态待确认"
+        }
+    }
     private var normalizedProvider: String { providerRaw.lowercased() }
-
-    /// Widget target 只编译 `WandWidgetsBundle.swift` + 本文件（刻意不依赖 app 代码，
-    /// 见 Wand.xcodeproj 的 WandWidgets Sources），所以这里无法引用 `WandProvider`。
-    /// 这份别名表因此必须与 `WandModels.WandProvider.aliases` 同步：
-    /// 旧版本 default 到 Claude，Gemini 会在实时活动里被错标成 Claude。
     var providerText: String {
+        if normalizedProvider == "pi", ["core", "sdk"].contains(engineRaw ?? "") { return "Wand Agent" }
         switch normalizedProvider {
         case "claude": return "Claude"
         case "codex": return "Codex"
@@ -65,59 +64,88 @@ extension SessionActivityAttributes.SessionEntry {
         case "qoder", "qodercli": return "Qoder"
         case "pi": return "Pi"
         case "gemini", "gemini-cli", "gemini-cli-json": return "Gemini"
-        // 未知 provider 不伪装成已知的一个：错标比显示原始 id 更糟。
-        default: return normalizedProvider.isEmpty ? "Claude" : normalizedProvider
+        case "shell", "terminal", "": return "终端"
+        default: return String(normalizedProvider.prefix(40))
         }
     }
-
     var providerSymbol: String {
         switch normalizedProvider {
         case "codex": return "chevron.left.forwardslash.chevron.right"
-        case "opencode", "open-code", "open_code": return "terminal"
+        case "opencode", "open-code", "open_code", "shell", "terminal", "": return "terminal"
         case "grok": return "bolt.horizontal"
         case "qoder", "qodercli": return "curlybraces"
-        case "pi": return "pi"
+        case "pi": return ["core", "sdk"].contains(engineRaw ?? "") ? "wand.and.stars" : "pi"
         default: return "sparkles"
         }
     }
-
     var primaryDetail: String {
         if needsPermission { return "需要你的确认后继续" }
-        if let taskTitle, !taskTitle.isEmpty { return taskTitle }
-        if isDone { return "回复已完成" }
-        return "正在生成回复"
+        if needsInput { return "需要你的回复后继续" }
+        if isFailed { return "打开会话查看失败原因" }
+        if isStopped { return "本轮已停止" }
+        if isDone { return "打开会话查看结果" }
+        let detail = taskTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !detail.isEmpty && detail != title { return detail }
+        return isBackground ? "等待子任务结束" : "正在处理"
     }
-
     var statusSymbol: String {
         switch stateRaw {
-        case "responding": return "ellipsis.bubble"
         case "permission": return "lock.shield"
+        case "waiting-input": return "bubble.left.and.text.bubble.right"
+        case "failed": return "exclamationmark.circle.fill"
+        case "stopped": return "pause.circle"
         case "done": return "checkmark.circle.fill"
-        default: return "wand.and.stars"
+        case "background": return "rectangle.stack"
+        default: return "ellipsis"
         }
     }
 }
 
 extension SessionActivityAttributes.ContentState {
-    var respondingCount: Int { sessions.filter(\.isResponding).count }
+    var respondingCount: Int { sessions.filter { $0.isResponding || $0.isBackground }.count }
     var permissionCount: Int { sessions.filter(\.needsPermission).count }
+    var inputCount: Int { sessions.filter(\.needsInput).count }
+    var failedCount: Int { sessions.filter(\.isFailed).count }
+    var attentionCount: Int { sessions.filter(\.needsAttention).count }
     var needsPermission: Bool { permissionCount > 0 }
-    var primarySession: SessionActivityAttributes.SessionEntry? {
-        sessions.min { lhs, rhs in lhs.priority < rhs.priority }
+    var primarySession: SessionActivityAttributes.SessionEntry? { sessions.min { $0.priority < $1.priority } }
+    var aggregateStateRaw: String { primarySession?.stateRaw ?? "done" }
+    var aggregateSymbol: String { primarySession?.statusSymbol ?? "checkmark.circle.fill" }
+    var aggregateText: String {
+        if attentionCount > 0 { return "\(attentionCount) 项等你" }
+        if respondingCount > 0 { return "\(respondingCount) 项运行中" }
+        return primarySession?.statusText ?? "已完成"
     }
+    /// Compact island avoids an unbounded timer and still distinguishes attention from work.
+    func compactText(isStale: Bool) -> String {
+        if isStale { return "离线" }
+        if attentionCount > 0 { return attentionCount > 1 ? "等你\(attentionCount)" : "等你" }
+        if respondingCount > 1 { return "\(respondingCount)项" }
+        if let primarySession, primarySession.isStopped { return "停止" }
+        if respondingCount == 0 { return "完成" }
+        return primarySession?.isBackground == true ? "收尾" : "运行"
+    }
+    var destinationURL: URL {
+        // Multiple sessions keep an unambiguous list destination; individual expanded rows link precisely.
+        guard sessions.count == 1, let primarySession else { return URL(string: "wand://live-activity")! }
+        return primarySession.destinationURL
+    }
+}
 
-    /// 聚合状态：permission > responding > done，给紧凑视图着色 / 选图标用。
-    var aggregateStateRaw: String {
-        if needsPermission { return "permission" }
-        if respondingCount > 0 { return "responding" }
-        return "done"
+extension SessionActivityAttributes.SessionEntry {
+    var destinationURL: URL {
+        var c = URLComponents(); c.scheme = "wand"; c.host = "session"; c.path = "/" + id
+        if let serverID, !serverID.isEmpty { c.queryItems = [URLQueryItem(name: "serverId", value: serverID)] }
+        return c.url ?? URL(string: "wand://live-activity")!
     }
+}
 
-    var aggregateSymbol: String {
-        switch aggregateStateRaw {
-        case "permission": return "lock.shield"
-        case "responding": return "ellipsis.bubble"
-        default: return "checkmark.circle.fill"
-        }
+func activityBoundedText(_ text: String, maxCharacters: Int, maxBytes: Int) -> String {
+    var result = "", bytes = 0
+    for character in text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maxCharacters) {
+        let size = String(character).utf8.count
+        if bytes + size > maxBytes { break }
+        result.append(character); bytes += size
     }
+    return result
 }

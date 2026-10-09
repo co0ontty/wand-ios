@@ -1,12 +1,11 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Combine
-import Speech
+@preconcurrency import Speech
 
 /// 「按住说话」语音识别服务：AVAudioEngine 采集麦克风 + SFSpeechRecognizer 流式转写。
 ///
-/// 端侧优先：设备已下载当前语言的听写模型时（supportsOnDeviceRecognition），
-/// 强制 requiresOnDeviceRecognition —— 音频完全不出设备、无时长配额；
-/// 否则自动降级 Apple 服务器识别（需网络，单次约 1 分钟上限，按住说话短句足够）。
+/// 明确选择服务端时走 ServerSpeechRecorder；本地模式强制 requiresOnDeviceRecognition，
+/// 缺少端侧语言模型时报错，不静默转 Apple 在线识别。
 ///
 /// 转写状态始终是「当前最优完整文本」（覆盖式，非增量），
 /// 与 Web 端 updateVoiceTranscript(text) 的协议语义一致。
@@ -19,18 +18,21 @@ import Speech
 ///   3. recognizer 缓存（不再每次按下都遍历 Locale 重建）。
 ///   4. prewarm()：进入语音模式时提前构造 recognizer + setCategory（不 setActive，
 ///      避免过早 duck 用户音频）+ 触发授权，把首次冷启成本前移。
+@MainActor
 final class SpeechRecognizerService: NSObject, ObservableObject {
     /// 当前累积转写文本（覆盖式更新）。
     @Published private(set) var transcript = ""
     /// 录音进行中（音频引擎已成功启动）。
     @Published private(set) var isRecording = false
-    /// 本次会话是否走端侧模型（false = 降级服务器识别）。
     @Published private(set) var usingOnDevice = false
+    @Published private(set) var usingServer = false
+    @Published private(set) var isProcessing = false
+    private var server: ServerSpeechRecorder?
 
     private let audioEngine = AVAudioEngine()
     /// 所有 AVAudioSession / audioEngine 调用都走这条串行队列，序列化消除竞争、
     /// 且把 setActive/start 的阻塞挡在主线程之外。
-    private let audioQueue = DispatchQueue(label: "com.wand.voice.audio")
+    private let audioQueue = WandSpeechAudio.queue
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var pendingCommit: ((String) -> Void)?
@@ -46,6 +48,8 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     private lazy var cachedRecognizer: SFSpeechRecognizer? = Self.makeRecognizer()
 
     deinit {
+        let server = server
+        Task { @MainActor in server?.cancel() }
         let engine = audioEngine
         let request = request
         let task = task
@@ -71,7 +75,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         candidates.append(contentsOf: ["zh-CN", "en-US"])
         for identifier in candidates {
             if let recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier)),
-               recognizer.isAvailable || recognizer.supportsOnDeviceRecognition {
+               recognizer.supportsOnDeviceRecognition {
                 return recognizer
             }
         }
@@ -109,6 +113,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     /// 只做无副作用的轻量预热——构造 recognizer、setCategory（不 setActive，不抢硬件、不 duck）、
     /// 触发授权（已授权则 noop）。真正的 setActive/start 仍留到按下时做。
     func prewarm() {
+        if SpeechRecognitionMode.selected == .server { return }
         // 触发 recognizer 懒加载（遍历 Locale 的成本前移）。
         _ = cachedRecognizer
         // 未授权时提前弹授权框；已授权时是空操作，但会把双 hop 前移。
@@ -126,8 +131,24 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     // MARK: - 开始 / 结束
 
     /// 开始录音转写；失败时回调错误文案（主线程）。
-    func start(onError: @escaping (String) -> Void) {
+    func start(api: WandAPI? = nil, onError: @escaping (String) -> Void) {
         guard !isRecording, !startRequested else { return }
+        server?.cancel(); server = nil; isProcessing = false
+        if SpeechRecognitionMode.selected == .server {
+            guard let api else { onError("请先连接 Wand 服务器"); return }
+            cleanup(cancelTask: true)
+            usingServer = true; usingOnDevice = false; transcript = ""; startRequested = true
+            let recorder = ServerSpeechRecorder(); server = recorder
+            recorder.start(api: api, state: { [weak self, weak recorder] recording, processing in
+                guard let self, let recorder, self.server === recorder else { return }
+                self.isRecording = recording; self.isProcessing = processing
+                if recording || processing { self.startRequested = false }
+            }, onError: { [weak self] message in
+                self?.startRequested = false; self?.isRecording = false; self?.isProcessing = false; onError(message)
+            })
+            return
+        }
+        usingServer = false
         if pendingCommit != nil { finishCommitIfPending() }
         startRequested = true
 
@@ -155,6 +176,11 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     /// commit 只在文本非空时回调（主线程）。
     func stop(cancelled: Bool, commit: ((String) -> Void)? = nil) {
         startRequested = false
+        if let server {
+            if cancelled { server.cancel(); transcript = ""; isRecording = false; isProcessing = false }
+            else { server.finish(commit: commit) }
+            return
+        }
         guard isRecording || task != nil else { return }
         isRecording = false
         let activeRequest = request
@@ -188,23 +214,17 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         cleanup(cancelTask: true)
 
         // —— 主线程：廉价、纯状态 ——
-        guard let recognizer = cachedRecognizer,
-              recognizer.isAvailable || recognizer.supportsOnDeviceRecognition else {
+        guard let recognizer = cachedRecognizer, recognizer.supportsOnDeviceRecognition else {
             startRequested = false
-            onError("当前设备语音识别不可用")
+            onError("系统端侧语音模型不可用，请下载当前语言的听写模型或选择服务端识别")
             return
         }
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         runtimeErrorHandler = onError
-        if recognizer.supportsOnDeviceRecognition {
-            // 端侧模型可用：强制不走网络。
-            request.requiresOnDeviceRecognition = true
-            usingOnDevice = true
-        } else {
-            usingOnDevice = false
-        }
+        request.requiresOnDeviceRecognition = true
+        usingOnDevice = true
         request.addsPunctuation = true
         self.request = request
         audioPipelineStopped = false
@@ -289,7 +309,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     }
 
     /// 后台启动失败的统一收尾（回主线程报错 + 清理）。
-    private func failStart(generation: Int, message: String, onError: @escaping (String) -> Void) {
+    private nonisolated func failStart(generation: Int, message: String, onError: @escaping (String) -> Void) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.generation == generation else { return }
             self.cleanup(cancelTask: true)
@@ -333,7 +353,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         }
     }
 
-    private static func teardownAudioPipeline(
+    private nonisolated static func teardownAudioPipeline(
         engine: AVAudioEngine,
         request: SFSpeechAudioBufferRecognitionRequest?,
         task: SFSpeechRecognitionTask?,

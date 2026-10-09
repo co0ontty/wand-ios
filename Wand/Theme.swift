@@ -9,10 +9,9 @@ private struct TopicTitleRhythmModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .opacity(active && !reduceMotion ? (phase ? 1 : 0.64) : 1)
-            .offset(y: active && !reduceMotion && phase ? -1 : 0)
             .animation(
                 active && !reduceMotion
-                    ? .easeInOut(duration: 1.15).repeatForever(autoreverses: true)
+                    ? WandMotion.topicPulse
                     : nil,
                 value: phase
             )
@@ -31,11 +30,40 @@ extension View {
 /// Shared motion/feedback tokens; views never author per-page timings.
 enum WandMotion {
     static let stateSwap = Animation.easeInOut(duration: 0.18)
+    static let topicPulse = Animation.easeInOut(duration: 1.15).repeatForever(autoreverses: true)
     static let tabFront = Animation.easeInOut(duration: 0.22)
     static let tabRear = Animation.easeInOut(duration: 0.22).delay(0.08)
     static let submittedDwell: UInt64 = 720_000_000
     static let failedDwell: UInt64 = 1_500_000_000
     static let searchDebounce: UInt64 = 240_000_000
+    static let voiceHoldDelay: TimeInterval = 0.18
+    static var disclosure: Animation? { UIAccessibility.isReduceMotionEnabled ? nil : stateSwap }
+    static var scroll: Animation? { UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.22) }
+    static var keyboard: Animation? { UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.2) }
+    static var detail: Animation? { UIAccessibility.isReduceMotionEnabled ? nil : .smooth(duration: 0.18, extraBounce: 0) }
+    static let scan = Animation.linear(duration: 2.2).repeatForever(autoreverses: false)
+    static let activityPulse = Animation.smooth(duration: 1.2, extraBounce: 0).repeatForever(autoreverses: true)
+    static let activityTick: TimeInterval = 0.05
+    static func keyboard(duration: Double) -> Animation? { UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: max(0, duration)) }
+}
+
+/// Body text follows native Dynamic Type; fixed logo/terminal-grid dimensions stay explicit.
+extension Font {
+    static func wand(size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default) -> Font {
+        let style: Font.TextStyle
+        switch size {
+        case ...11: style = .caption2
+        case ...12: style = .caption
+        case ...13: style = .footnote
+        case ...15: style = .subheadline
+        case ...17: style = .body
+        case ...20: style = .title3
+        case ...24: style = .title2
+        case ...29: style = .title
+        default: style = .largeTitle
+        }
+        return .system(style, design: design).weight(weight)
+    }
 }
 
 enum WandFeedback {
@@ -46,13 +74,21 @@ enum WandFeedback {
     }
 
     static func impact(_ style: UIImpactFeedbackGenerator.FeedbackStyle) {
+#if targetEnvironment(simulator)
+        return
+#else
         guard isEnabled() else { return }
         UIImpactFeedbackGenerator(style: style).impactOccurred()
+#endif
     }
 
     static func success() {
+#if targetEnvironment(simulator)
+        return
+#else
         guard isEnabled() else { return }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+#endif
     }
 }
 
@@ -95,7 +131,7 @@ enum WandAppearanceMode: String, CaseIterable, Identifiable {
 }
 
 /// 品牌配色与复用样式。颜色随系统明暗自适应。
-/// 与 Android WandColors / Web CSS token 共用同一组暖珊瑚色板。
+/// 与当前 Android WandColors 共用灰白蓝色板；终端独立保留暖深色。
 enum Theme {
     private static func rgb(_ r: Double, _ g: Double, _ b: Double) -> UIColor {
         UIColor(red: r, green: g, blue: b, alpha: 1)
@@ -112,15 +148,37 @@ enum Theme {
         }
     }
 
-    // 品牌色（与 Android / macOS / Web 共用同一组暖珊瑚 token）
-    static let brand = dynamic(light: rgb(0.773, 0.396, 0.239), dark: rgb(0.831, 0.459, 0.314)) // #C5653D / #D47550
-    static let brandStrong = dynamic(light: rgb(0.627, 0.306, 0.180), dark: rgb(0.725, 0.392, 0.263))
+    private static func hex(_ value: UInt32) -> UIColor {
+        rgb(Double((value >> 16) & 255) / 255, Double((value >> 8) & 255) / 255, Double(value & 255) / 255)
+    }
+    // Android LightTokens / DarkTokens are the visual baseline, including solid-container ink.
+    static let brand = dynamic(light: hex(0x0076D6), dark: hex(0x63B4FF))
+    static let brandText = dynamic(light: textInk(0x0076D6, dark: false), dark: textInk(0x63B4FF, dark: true))
+    static let brandStrong = brandText
+    static let onBrand = dynamic(light: hex(0xFFFFFF), dark: hex(0x101114))
+    private static func textInk(_ value: UInt32, dark: Bool) -> UIColor {
+        let color = hex(value)
+        let containers = dark ? [hex(0x101114), hex(0x17181C), hex(0x1C1D21), hex(0x27282D)]
+            : [hex(0xF2F3F7), hex(0xFFFFFF), hex(0xEDEEF2)]
+        func channels(_ color: UIColor) -> [CGFloat] { var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0; color.getRed(&r, green: &g, blue: &b, alpha: &a); return [r, g, b] }
+        func luminance(_ values: [CGFloat]) -> Double {
+            let v = values.map { Double($0) <= 0.04045 ? Double($0) / 12.92 : pow((Double($0) + 0.055) / 1.055, 2.4) }
+            return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]
+        }
+        let base = channels(color), backgrounds = containers.map { luminance(channels($0)) }
+        for step in 0...48 {
+            let t = CGFloat(step) / 48, pole: CGFloat = dark ? 1 : 0
+            let candidate = base.map { $0 + (pole - $0) * t }, l = luminance(candidate)
+            if backgrounds.allSatisfy({ (max(l, $0) + 0.05) / (min(l, $0) + 0.05) >= 4.5 }) { return UIColor(red: candidate[0], green: candidate[1], blue: candidate[2], alpha: 1) }
+        }
+        return dark ? .white : .black
+    }
     /// Codex（OpenAI）标识蓝，与 Android / Web info 色对一致。
     static let codex = dynamic(light: rgb(0.290, 0.435, 0.647), dark: rgb(0.494, 0.612, 0.769)) // #4A6FA5 / #7E9CC4
     /// Gemini 官方标是蓝紫粉渐变，单色 token 取渐变里的蓝段（与 macOS 同值）。
     /// Web 用中性文字色避免假装有品牌色；这里保留可辨识的蓝，7 个 provider 不撞色。
     static let gemini = dynamic(light: rgb(0.231, 0.435, 0.831), dark: rgb(0.498, 0.651, 0.941))
-    static let info = codex
+    static let info = dynamic(light: hex(0x4A6FA5), dark: hex(0x8FB0DC))
 
     /// provider → 徽标色。与 macOS `Theme.providerColor(_:)` 同构。
     /// 认不出的 provider 落回品牌色（中性「无品牌」信号），不要伪装成某个已知 provider 的颜色。
@@ -133,33 +191,32 @@ enum Theme {
     }
 
     // 表面 / 文本（自适应）
-    static let background = dynamic(light: rgb(0.961, 0.953, 0.933), dark: rgb(0.075, 0.067, 0.059)) // #F5F3EE / #13110F
-    static let elevated = dynamic(light: rgb(0.988, 0.980, 0.965), dark: rgb(0.114, 0.102, 0.090)) // #FCFAF6 / #1D1A17
-    static let surface = dynamic(light: rgb(1.000, 0.992, 0.976), dark: rgb(0.129, 0.118, 0.102))    // #FFFDF9 / #211E1A
-    static let border = dynamic(light: rgb(0.851, 0.824, 0.788), dark: rgb(0.239, 0.216, 0.188))     // #D9D2C9 / #3D3730
-    static let textPrimary = dynamic(light: rgb(0.157, 0.137, 0.122), dark: rgb(0.953, 0.933, 0.906)) // #28231F / #F3EEE7
-    static let textSecondary = dynamic(light: rgb(0.384, 0.353, 0.325), dark: rgb(0.780, 0.745, 0.706)) // #625A53 / #C7BEB4
-    static let textMuted = dynamic(light: rgb(0.545, 0.510, 0.475), dark: rgb(0.584, 0.545, 0.506)) // #8B8279 / #958B81
-    /// 输入框占位提示色。与 macOS `Theme.textPlaceholder` 同一组字面值，两端都显式上色。
-    static let textPlaceholderUI = dynamicUI(light: rgb(0.506, 0.459, 0.416), dark: rgb(0.584, 0.545, 0.506)) // #81756A / #958B81
+    static let background = dynamic(light: hex(0xF2F3F7), dark: hex(0x101114))
+    static let elevated = dynamic(light: hex(0xFFFFFF), dark: hex(0x17181C))
+    static let surface = dynamic(light: hex(0xFFFFFF), dark: hex(0x1C1D21))
+    static let border = dynamic(light: hex(0xE3E5EB), dark: hex(0x34363D))
+    static let textPrimary = dynamic(light: hex(0x1C1D21), dark: hex(0xF4F5F7))
+    static let textSecondary = dynamic(light: hex(0x60636B), dark: hex(0xC4C7CF))
+    static let textMuted = dynamic(light: hex(0x6A6D75), dark: hex(0x989BA5))
+    static let textPlaceholderUI = dynamicUI(light: hex(0x6A6D75), dark: hex(0x989BA5))
     static let success = dynamic(light: rgb(0.310, 0.478, 0.345), dark: rgb(0.545, 0.729, 0.580)) // #4F7A58 / #8BBA94
-    static let brandSoft = brand.opacity(0.14)
+    static let brandSoft = Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? hex(0x63B4FF).withAlphaComponent(0.18) : hex(0x0076D6).withAlphaComponent(0.08) })
     static let successSoft = success.opacity(0.14)
-    static let surfaceSoft = dynamic(light: rgb(0.914, 0.867, 0.749), dark: rgb(0.165, 0.149, 0.129)) // #E9DDBF / #2A2621
+    static let surfaceSoft = dynamic(light: hex(0xEDEEF2), dark: hex(0x27282D))
     static let warning = dynamic(light: rgb(0.663, 0.416, 0.184), dark: rgb(0.851, 0.631, 0.361)) // #A96A2F / #D9A15C
-    static let danger = dynamic(light: rgb(0.698, 0.310, 0.271), dark: rgb(0.878, 0.486, 0.447)) // #B24F45 / #E07C72
-    static let permission = dynamic(light: rgb(0.761, 0.541, 0.125), dark: rgb(0.902, 0.718, 0.353)) // #C28A20 / #E6B75A
+    static let danger = dynamic(light: hex(0xB24F45), dark: hex(0xE4887E))
+    static let permission = dynamic(light: hex(0xA87317), dark: hex(0xE6B75A))
     static let thinking = dynamic(light: rgb(0.435, 0.427, 0.639), dark: rgb(0.659, 0.647, 0.831)) // #6F6DA3 / #A8A5D4
     static let teal = dynamic(light: rgb(0.227, 0.541, 0.561), dark: rgb(0.420, 0.702, 0.718)) // #3A8A8F / #6BB3B7
 
     /// PTY / 工具终端卡 / diff 共用的固定暖深色，不跟随亮暗主题。
     static let terminalBackground = Color(red: 0.090, green: 0.071, blue: 0.059) // #17120F
-    static let terminalText = Color(red: 0.851, green: 0.851, blue: 0.831) // #D9D9D4
+    static let terminalText = Color(uiColor: hex(0xF4EEE6))
     static let terminalError = Color(red: 0.949, green: 0.549, blue: 0.510) // #F28C82
 
     /// WKWebView overscroll 区域底色，避免加载前/回弹时露出白底。
     static var uiBackground: UIColor {
-        dynamicUI(light: rgb(0.961, 0.953, 0.933), dark: rgb(0.075, 0.067, 0.059))
+        dynamicUI(light: hex(0xF2F3F7), dark: hex(0x101114))
     }
 
     static var uiTerminalBackground: UIColor {
@@ -260,55 +317,18 @@ struct WandAmbientBackground: View {
     }
 }
 
-private struct WandPathWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-/// 完整路径从根目录向末级目录揭示一次，最后停在最有辨识度的尾部。
+/// Stable path label: retain its location while showing the useful root and leaf.
+/// Full content remains available to VoiceOver and explicit native copy, without a timed marquee.
 struct WandPathRevealText: View {
     let path: String
     var fontSize: CGFloat = 10
     var color: Color = Theme.textMuted
-    var initialDelay: Double = 1.8
-    var staggerWindow: Double = 1.2
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var textWidth: CGFloat = 0
-    @State private var revealed = false
-
     var body: some View {
-        GeometryReader { proxy in
-            let overflow = max(0, textWidth - proxy.size.width)
-            Text(path.replacingOccurrences(of: "\\", with: "/"))
-                .font(.system(size: fontSize, weight: .regular, design: .monospaced))
-                .foregroundColor(color)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .background(
-                    GeometryReader { textProxy in
-                        Color.clear.preference(key: WandPathWidthKey.self, value: textProxy.size.width)
-                    }
-                )
-                .offset(x: (reduceMotion || revealed) ? -overflow : 0)
-                .accessibilityLabel(path)
-                .task(id: "\(path)-\(Int(proxy.size.width))-\(Int(textWidth))") {
-                    revealed = reduceMotion
-                    guard !reduceMotion, overflow > 0 else { return }
-                    let hash = UInt64(bitPattern: Int64(path.hashValue))
-                    let stagger = staggerWindow > 0 ? Double(hash % 1_000) / 1_000 * staggerWindow : 0
-                    try? await Task.sleep(nanoseconds: UInt64((initialDelay + stagger) * 1_000_000_000))
-                    guard !Task.isCancelled else { return }
-                    withAnimation(.linear(duration: min(8, max(1.2, Double(overflow / 28))))) {
-                        revealed = true
-                    }
-                }
-        }
-        .clipped()
-        .frame(height: ceil(fontSize * 1.45))
-        .onPreferenceChange(WandPathWidthKey.self) { textWidth = $0 }
+        Text(path.replacingOccurrences(of: "\\", with: "/"))
+            .font(.wand(size: fontSize, design: .monospaced))
+            .foregroundStyle(color).lineLimit(1).truncationMode(.middle)
+            .accessibilityLabel(path)
+            .contextMenu { Button("复制完整路径") { UIPasteboard.general.string = path } }
     }
 }
 
@@ -426,7 +446,7 @@ struct WandPrimaryButtonStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(.white)
+                .foregroundColor(Theme.onBrand)
                 .padding(.vertical, 13)
                 .padding(.horizontal, 18)
                 .background(

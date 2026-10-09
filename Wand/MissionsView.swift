@@ -249,16 +249,16 @@ private struct MissionRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(mission.title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.wand(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(2)
                 Spacer()
                 Label(presentation.0, systemImage: presentation.1)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.wand(size: 11, weight: .medium))
                     .foregroundColor(presentation.2)
             }
             Text(mission.prompt)
-                .font(.system(size: 12))
+                .font(.wand(size: 12))
                 .foregroundColor(Theme.textSecondary)
                 .lineLimit(2)
             HStack(spacing: 8) {
@@ -267,7 +267,7 @@ private struct MissionRow: View {
                     Label(base, systemImage: "arrow.triangle.branch").lineLimit(1)
                 }
             }
-            .font(.system(size: 10, design: .monospaced))
+            .font(.wand(size: 10, design: .monospaced))
             .foregroundColor(Theme.textMuted)
         }
         .padding(.vertical, 6)
@@ -304,7 +304,7 @@ private struct MissionDetailView: View {
         List {
             Section("目标") {
                 Text(mission.prompt)
-                    .font(.system(size: 14))
+                    .font(.wand(size: 14))
                     .foregroundColor(Theme.textPrimary)
                     .textSelection(.enabled)
                 LabeledContent("工作目录", value: mission.cwd)
@@ -409,14 +409,14 @@ private struct MissionAttemptRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(attempt.provider.capitalized)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.wand(size: 14, weight: .semibold))
                     Spacer()
                     Label(presentation.0, systemImage: presentation.1)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.wand(size: 10, weight: .medium))
                         .foregroundColor(presentation.2)
                 }
                 Text(attempt.error ?? attempt.summary ?? attempt.branch ?? "等待 Agent 更新")
-                    .font(.system(size: 11))
+                    .font(.wand(size: 11))
                     .foregroundColor(attempt.error == nil ? Theme.textSecondary : Theme.danger)
                     .lineLimit(2)
             }
@@ -511,7 +511,7 @@ private struct MissionDiffView: View {
                 Label("\(diff.files.count) 个文件", systemImage: "doc.on.doc")
                 Spacer()
                 Text(String(diff.baseRef.prefix(12)))
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.wand(size: 10, design: .monospaced))
             }
             if diff.truncated {
                 Label("Diff 过大，当前只显示前 2 MB。", systemImage: "exclamationmark.triangle")
@@ -521,7 +521,7 @@ private struct MissionDiffView: View {
                     .foregroundColor(Theme.textSecondary)
             }
         }
-        .font(.system(size: 11))
+        .font(.wand(size: 11))
         .padding(12)
     }
 
@@ -534,7 +534,7 @@ private struct MissionDiffView: View {
                         if let target = line.target { self.target = target }
                     } label: {
                         Text(line.text.isEmpty ? " " : line.text)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.wand(size: 11, design: .monospaced))
                             .foregroundColor(diffLineTextColor(line.kind))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 2)
@@ -807,10 +807,10 @@ private struct MissionEmptyState: View {
                 .font(.system(size: 34, weight: .medium))
                 .foregroundColor(Theme.textMuted)
             Text(title)
-                .font(.system(size: 17, weight: .semibold))
+                .font(.wand(size: 17, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Text(detail)
-                .font(.system(size: 13))
+                .font(.wand(size: 13))
                 .foregroundColor(Theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 360)

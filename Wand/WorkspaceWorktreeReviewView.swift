@@ -93,15 +93,15 @@ struct WorkspaceWorktreeReviewView: View {
                 )
             VStack(alignment: .leading, spacing: 2) {
                 Text("合并目标")
-                    .font(.system(size: 10))
+                    .font(.wand(size: 10))
                     .foregroundColor(Theme.textSecondary)
                 Text(target)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.wand(size: 14, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
             }
             Spacer(minLength: 8)
             Text(repoRoot)
-                .font(.system(size: 10, design: .monospaced))
+                .font(.wand(size: 10, design: .monospaced))
                 .foregroundColor(Theme.textMuted)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -135,7 +135,7 @@ struct WorkspaceWorktreeReviewView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("选择要交给 Agent 合并的 Worktree")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.wand(size: 12, weight: .semibold))
                     .foregroundColor(Theme.textSecondary)
                 Spacer(minLength: 8)
                 if actionable.count > 1 {
@@ -146,7 +146,7 @@ struct WorkspaceWorktreeReviewView: View {
                             selectedTaskIds = Set(actionable.map(\.taskId))
                         }
                     }
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.wand(size: 12, weight: .medium))
                     .foregroundColor(Theme.brand)
                     .disabled(submitting)
                 }
@@ -175,22 +175,22 @@ struct WorkspaceWorktreeReviewView: View {
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(worktree.summary)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.wand(size: 14, weight: .semibold))
                         .foregroundColor(Theme.textPrimary)
                         .lineLimit(2)
                     Text(worktree.branch)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.wand(size: 11, design: .monospaced))
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text(worktree.details)
-                        .font(.system(size: 11))
+                        .font(.wand(size: 11))
                         .foregroundColor(Theme.textMuted)
                         .lineLimit(2)
                 }
                 Spacer(minLength: 6)
                 Text(worktree.stateLabel)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.wand(size: 10, weight: .semibold))
                     .foregroundColor(stateColor(worktree.state))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
@@ -233,7 +233,7 @@ struct WorkspaceWorktreeReviewView: View {
     private var submitBar: some View {
         VStack(spacing: 8) {
             Text(submitHint)
-                .font(.system(size: 11))
+                .font(.wand(size: 11))
                 .foregroundColor(Theme.textSecondary)
             Button {
                 Task { await submit() }
@@ -246,7 +246,7 @@ struct WorkspaceWorktreeReviewView: View {
                             .font(.system(size: 13, weight: .bold))
                     }
                     Text(submitTitle)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.wand(size: 15, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
                 .frame(height: 48)

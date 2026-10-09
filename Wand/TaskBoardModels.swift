@@ -6,16 +6,18 @@ struct WandBoardTaskAgent: Codable, Equatable {
     var thinkingEffort: String
     /// 派发时的执行模式：托管 / 全权限 / 标准。
     var mode: String
+    var engine: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case provider, model, thinkingEffort, mode
+        case provider, model, thinkingEffort, mode, engine
     }
 
-    init(provider: String, model: String, thinkingEffort: String, mode: String = "default") {
+    init(provider: String, model: String, thinkingEffort: String, mode: String = "default", engine: String? = nil) {
         self.provider = provider
         self.model = model
         self.thinkingEffort = thinkingEffort
         self.mode = wandBoardNormalizedMode(provider: provider, mode: mode)
+        self.engine = provider == "pi" ? engine : nil
     }
 
     static let `default` = WandBoardTaskAgent(provider: "claude", model: "default", thinkingEffort: "off")
@@ -29,10 +31,13 @@ struct WandBoardTaskAgent: Codable, Equatable {
             thinkingEffort: (try? container.decode(String.self, forKey: .thinkingEffort)) ?? "off",
             mode: (try? container.decode(String.self, forKey: .mode)) ?? "default"
         )
+        engine = try? container.decode(String.self, forKey: .engine)
     }
 
     func jsonObject() -> [String: Any] {
-        ["provider": provider, "model": model, "thinkingEffort": thinkingEffort, "mode": mode]
+        var body: [String: Any] = ["provider": provider, "model": model, "thinkingEffort": thinkingEffort, "mode": mode]
+        if provider == "pi", let engine { body["engine"] = engine }
+        return body
     }
 }
 
@@ -56,6 +61,8 @@ struct WandBoardTaskSession: Codable, Equatable, Identifiable {
     let cwd: String
     let model: String
     let thinkingEffort: String
+    var engine: String? = nil
+    var toolLabel: String { provider == "pi" && engine == "sdk" ? "Wand Agent" : wandBoardProviderLabel(provider) }
 
     var isStructured: Bool { sessionKind != "pty" && sessionKind != "shell" }
 
@@ -69,6 +76,7 @@ struct WandBoardTaskSession: Codable, Equatable, Identifiable {
         cwd = (try? container.decode(String.self, forKey: .cwd)) ?? ""
         model = (try? container.decode(String.self, forKey: .model)) ?? ""
         thinkingEffort = (try? container.decode(String.self, forKey: .thinkingEffort)) ?? "off"
+        engine = try? container.decode(String.self, forKey: .engine)
     }
 }
 
@@ -192,7 +200,7 @@ enum WandBoardPriority: String, CaseIterable, Identifiable {
     }
 }
 
-let wandBoardProviders = ["claude", "codex", "opencode", "grok", "qoder", "pi"]
+let wandBoardProviders = WandProvider.allCases.map(\.rawValue)
 let wandBoardEfforts = ["off", "standard", "deep", "max"]
 /// 任务派发允许的执行模式；顺序即下拉顺序。
 let wandBoardModes = ["managed", "full-access", "default"]
@@ -248,7 +256,8 @@ func wandModelDisplayName(_ provider: String, _ model: String?, _ catalog: Model
 func wandBoardAgentTitle(_ provider: String, _ agent: WandBoardTaskAgent?, _ catalog: ModelsResponse? = nil) -> String {
     guard let agent else { return wandBoardProviderLabel(provider) }
     let model = wandModelDisplayName(provider, agent.model, catalog)
-    return [wandBoardProviderLabel(provider), model, wandBoardModeLabel(agent.mode)]
+    let tool = provider == "pi" && agent.engine == "sdk" ? "Wand Agent" : wandBoardProviderLabel(provider)
+    return [tool, model, wandBoardModeLabel(agent.mode)]
         .filter { !$0.isEmpty }
         .joined(separator: " · ")
 }
@@ -284,7 +293,8 @@ func wandBoardModelOptions(from catalog: ModelsResponse?, provider: String) -> [
 }
 
 struct WandBoardAgentGroup: Identifiable, Equatable {
-    var id: String { provider }
+    var id: String { provider + ":" + (agent?.engine ?? "cli") }
+    var toolLabel: String { provider == "pi" && agent?.engine == "sdk" ? "Wand Agent" : wandBoardProviderLabel(provider) }
     let provider: String
     let agent: WandBoardTaskAgent?
     let sessions: [WandBoardTaskSession]
@@ -296,12 +306,15 @@ func wandBoardSessionGroups(
 ) -> [WandBoardAgentGroup] {
     var providers: [String] = []
     var agents: [String: WandBoardTaskAgent] = [:]
+    var rawProviders: [String: String] = [:]
     var grouped: [String: [WandBoardTaskSession]] = [:]
     /// 返回归一化后的分组键：空 provider（PTY / 老服务端会话）统一归到 "session"。
     /// 调用方必须用返回值当字典键，否则会话会被挂到空串桶里，界面看到的是「尚无关联会话」。
     @discardableResult
     func ensure(_ provider: String, _ agent: WandBoardTaskAgent?) -> String {
-        let key = provider.isEmpty ? "session" : provider
+        let raw = provider.isEmpty ? "session" : provider
+        let key = raw + ":" + (raw == "pi" ? agent?.engine ?? "cli" : "cli")
+        rawProviders[key] = raw
         if !providers.contains(key) {
             providers.append(key)
             grouped[key] = []
@@ -319,14 +332,15 @@ func wandBoardSessionGroups(
             ? WandBoardTaskAgent(
                 provider: session.provider,
                 model: session.model.isEmpty ? "default" : session.model,
-                thinkingEffort: session.thinkingEffort.isEmpty ? "off" : session.thinkingEffort
+                thinkingEffort: session.thinkingEffort.isEmpty ? "off" : session.thinkingEffort,
+                engine: session.engine
             )
             : nil
         let key = ensure(agent?.provider ?? session.provider, agent)
         grouped[key, default: []].append(session)
     }
     return providers.map { key in
-        WandBoardAgentGroup(provider: key, agent: agents[key], sessions: grouped[key] ?? [])
+        WandBoardAgentGroup(provider: rawProviders[key] ?? key, agent: agents[key], sessions: grouped[key] ?? [])
     }
 }
 
@@ -431,7 +445,7 @@ func wandBoardCardTitle(_ task: WandBoardTask) -> String {
 
 func wandBoardAgentLabels(sessions: [WandBoardTaskSession], assigned: WandBoardTaskAgent?) -> String? {
     let labels = wandBoardSessionGroups(sessions: sessions, assigned: assigned)
-        .map { wandBoardProviderLabel($0.provider) }
+        .map(\.toolLabel)
     return labels.isEmpty ? nil : labels.joined(separator: " · ")
 }
 
@@ -526,7 +540,7 @@ func wandBoardCardSessions(
 
 /// 会话标题；与工具名重复（或为空）时退回工具名，避免一行里出现两次「Claude」。
 func wandBoardSessionCardLabel(_ session: WandBoardTaskSession) -> String {
-    let provider = wandBoardProviderLabel(session.provider)
+    let provider = session.toolLabel
     let title = session.title.trimmingCharacters(in: .whitespacesAndNewlines)
     if title.isEmpty || title.caseInsensitiveCompare(provider) == .orderedSame { return provider }
     return title

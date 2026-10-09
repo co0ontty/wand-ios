@@ -29,6 +29,7 @@ final class KeyboardObserver: ObservableObject {
     /// 输入栏需要额外抬升的高度。safeAreaInset 已消费底部安全区，因此这里只
     /// 使用键盘在安全区上方的高度；浮动键盘不推动整条输入栏。
     @Published private(set) var lift: CGFloat = 0
+    @Published private(set) var isVisible = false
 
     private var tokens: [NSObjectProtocol] = []
 
@@ -46,6 +47,7 @@ final class KeyboardObserver: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] note in
+            self?.isVisible = false
             self?.apply(0, note: note)
         })
     }
@@ -64,6 +66,8 @@ final class KeyboardObserver: ObservableObject {
         // 键盘 frame 在屏幕坐标系；转换到窗口坐标后只处理贴住窗口底边的键盘。
         // 浮动键盘若按普通交集计算，会把整条输入栏异常推到页面上方。
         let frame = window.convert(endValue.cgRectValue, from: window.screen.coordinateSpace)
+        let intersection = window.bounds.intersection(frame)
+        isVisible = !intersection.isNull && intersection.height > 0
         let lift = keyboardLift(
             for: frame,
             windowBounds: window.bounds,
@@ -75,7 +79,7 @@ final class KeyboardObserver: ObservableObject {
     private func apply(_ newLift: CGFloat, note: Notification) {
         guard abs(newLift - lift) > 0.5 else { return }
         let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-        withAnimation(.easeOut(duration: max(duration, 0.2))) {
+        withAnimation(WandMotion.keyboard(duration: duration)) {
             lift = newLift
         }
     }

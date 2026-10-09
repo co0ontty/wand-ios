@@ -97,10 +97,10 @@ struct WorkspaceTargetPicker: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(target.title)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.wand(size: 15, weight: .semibold))
                         .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
                     Text(target.summary)
-                        .font(.system(size: 12))
+                        .font(.wand(size: 12))
                         .foregroundColor(Theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -131,7 +131,7 @@ struct WorkspaceTargetPicker: View {
     private var kindPicker: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("会话类型")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.wand(size: 13, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
                 .padding(.top, 8)
             HStack(spacing: 8) {
@@ -144,10 +144,10 @@ struct WorkspaceTargetPicker: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(option.title)
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.wand(size: 15, weight: .semibold))
                                 .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
                             Text(option.summary)
-                                .font(.system(size: 12))
+                                .font(.wand(size: 12))
                                 .foregroundColor(Theme.textSecondary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -182,7 +182,7 @@ struct WorkspaceTargetPicker: View {
                         .font(.system(size: 14, weight: .bold))
                 }
                 Text(store.creating ? "创建中…" : "创建 " + (employees.first { $0.id == subject?.id }?.name ?? store.selectedTarget.title))
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.wand(size: 15, weight: .semibold))
             }
             .frame(maxWidth: .infinity)
             .frame(height: 48)

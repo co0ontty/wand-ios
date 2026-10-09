@@ -20,19 +20,20 @@ func sessionListQuickActionsEnabled(
     rootIsSessions && !hasPresentedSurface
 }
 
-/// 首页模式：会话树（默认）或任务管理看板。点标题栏即可切换并持久化。
+/// Same four root modes as Android; preserve explicit old sessions/board preferences.
 enum HomeListMode: String, Equatable {
-    case sessions
-    case board
+    case im, contacts, sessions, board
 
     static let storageKey = "wand.homeListMode"
 
-    var label: String { self == .board ? "任务模式" : "会话模式" }
+    var label: String {
+        switch self { case .im: return "聊天"; case .contacts: return "通讯录"; case .sessions: return "工作区"; case .board: return "任务" }
+    }
 
     var next: HomeListMode { self == .board ? .sessions : .board }
 
     static func fromStorage(_ value: String?) -> HomeListMode {
-        value == "board" ? .board : .sessions
+        HomeListMode(rawValue: value ?? "") ?? .im
     }
 }
 
@@ -45,7 +46,7 @@ struct NativeRootView: View {
     @State private var phase: Phase = .authenticating
     @State private var showSettings = false
     @State private var showMissions = false
-    @AppStorage(HomeListMode.storageKey) private var homeListModeRaw = HomeListMode.sessions.rawValue
+    @AppStorage(HomeListMode.storageKey) private var homeListModeRaw = HomeListMode.im.rawValue
     @State private var isSelectingHome = false
     @State private var boardRefreshNonce = 0
     @State private var serverUpdate: ServerUpdateInfo?
@@ -81,6 +82,9 @@ struct NativeRootView: View {
     @State private var presentNewTask = false
     @StateObject private var workspaceStore: WorkspaceStore
     @StateObject private var contactsStore: ContactsStore
+    @StateObject private var conversations: ConversationStore
+    @State private var selectedConversationID: String?
+    @State private var selectedContactEmployeeID: String?
     @State private var showingContacts = false
     @State private var selectedContactRunID: String?
     @State private var homeEmployees: [SiliconEmployee] = []
@@ -92,12 +96,14 @@ struct NativeRootView: View {
     @State private var selectedTaskSessionId: String?
     @State private var selectedTaskShowsPicker = false
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reducedMotion
 
     init(profile: ServerProfile) {
         self.profile = profile
         let endpointAPI = WandAPI(baseURL: profile.baseURL, token: profile.token)
         _endpointAPI = State(initialValue: endpointAPI)
         _contactsStore = StateObject(wrappedValue: ContactsStore(service: endpointAPI))
+        _conversations = StateObject(wrappedValue: ConversationStore(api: endpointAPI))
         _workspaceStore = StateObject(wrappedValue: WorkspaceStore(
             api: endpointAPI,
             serverID: profile.id
@@ -143,6 +149,16 @@ struct NativeRootView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(serverURL: serverURL, token: token)
                 .environmentObject(store)
+        }
+        .sheet(isPresented: Binding(get: { selectedContactEmployeeID != nil }, set: { if !$0 { selectedContactEmployeeID = nil } })) {
+            if let employeeID = selectedContactEmployeeID {
+                NavigationStack {
+                    ScrollView {
+                        EmployeeProfilePanel(id: employeeID, api: api, directory: contactsStore) { selectedContactEmployeeID = nil }
+                            .padding(16)
+                    }
+                }.interactiveDismissDisabled(contactsStore.editorBusy || contactsStore.editorDirty)
+            }
         }
         .onAppear { authenticate() }
         .onChange(of: workspaceStore.taskGroups) { _, groups in
@@ -191,9 +207,13 @@ struct NativeRootView: View {
 
     private var navigationSelection: Binding<String?> {
         Binding(
-            get: { selectedWorkspaceTask?.task.id ?? selectedSessionID },
+            get: { selectedWorkspaceTask?.task.id ?? selectedSessionID ?? selectedConversationID.map { "wand:conversation:" + $0 } },
             set: { value in
-                guard value == nil, !homeMutationBusy else { return }
+                guard !homeMutationBusy else { return }
+                if let value, value.hasPrefix("wand:conversation:") {
+                    selectedConversationID = String(value.dropFirst("wand:conversation:".count))
+                } else if value != nil { return }
+                else if selectedSessionID == nil { selectedConversationID = nil; conversations.select(nil) }
                 selectedWorkspaceTask = nil
                 selectedSessionID = nil
                 selectedSnapshot = nil
@@ -209,10 +229,14 @@ struct NativeRootView: View {
         Binding(
             get: {
                 (showingContacts ? ["wand:contacts"] : []) + (selectedContactRunID.map { ["wand:team-run:" + $0] } ?? [])
+                    + (selectedSessionID != nil ? selectedConversationID.map { ["wand:conversation:" + $0] } ?? [] : [])
             },
             set: { markers in
                 guard !contactsStore.busy, !homeMutationBusy else { return }
                 showingContacts = markers.contains("wand:contacts")
+                if let conversation = markers.first(where: { $0.hasPrefix("wand:conversation:") }) {
+                    selectedConversationID = String(conversation.dropFirst("wand:conversation:".count))
+                }
                 let runID = markers.first(where: { $0.hasPrefix("wand:team-run:") })
                     .map { String($0.dropFirst("wand:team-run:".count)) }
                 if selectedContactRunID != runID { clearCompletionIntent() }
@@ -222,7 +246,12 @@ struct NativeRootView: View {
     }
 
     @ViewBuilder private func contactDestination(_ marker: String?) -> some View {
-        if marker == "wand:contacts" {
+        if let marker, marker.hasPrefix("wand:conversation:") {
+            ConversationDetailView(id: String(marker.dropFirst("wand:conversation:".count)), store: conversations,
+                onOpenSession: openWorkspaceStandaloneSession, onOpenConversation: openConversation,
+                onEmployee: { selectedContactEmployeeID = $0 })
+                .id(marker).toolbar(.visible, for: .navigationBar)
+        } else if marker == "wand:contacts" {
             ContactsView(api: api, store: contactsStore, onBack: {
                 guard !contactsStore.busy else { return }
                 showingContacts = false; selectedContactRunID = nil
@@ -315,6 +344,8 @@ struct NativeRootView: View {
     private func setHomeListMode(_ mode: HomeListMode) {
         guard !contactsStore.busy, !homeMutationBusy else { return }
         showingContacts = false; selectedContactRunID = nil
+        selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
+        selectedConversationID = nil; conversations.select(nil)
         homeListModeRaw = mode.rawValue
         isSelectingHome = false
     }
@@ -347,7 +378,7 @@ struct NativeRootView: View {
                     WandBrandMark(size: 52)
                     ProgressView().tint(Theme.brand)
                     Text("正在登录…")
-                        .font(.system(size: 14))
+                        .font(.wand(size: 14))
                         .foregroundColor(Theme.textSecondary)
                 }
                 .navigationTitle("Wand")
@@ -390,6 +421,7 @@ struct NativeRootView: View {
                             .padding(.top, 8)
                             .padding(.bottom, 4)
                     }
+                    if homeListMode == .sessions || showingBoard {
                     HomeOverviewBar(
                         serverDisplayName: profile.displayName,
                         mode: homeListMode,
@@ -416,7 +448,18 @@ struct NativeRootView: View {
                         }
                     )
                     .disabled(homeMutationBusy)
-                    if showingBoard {
+                    }
+                    if homeListMode == .im {
+                        ConversationListView(store: conversations, onSelect: openConversation,
+                            onEmployee: { selectedContactEmployeeID = $0 }, onSettings: { showSettings = true },
+                            onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) })
+                            .transition(.opacity)
+                    } else if homeListMode == .contacts {
+                        ContactsView(api: api, store: contactsStore, onBack: { setHomeListMode(.im) },
+                            onOpenSession: { snapshot in openWorkspaceStandaloneSession(snapshot.id) }, onOpenRun: openTeamRun,
+                            onOpenConversation: openConversation, onTeamConversation: openPresetConversation, embedded: true)
+                            .transition(.opacity)
+                    } else if showingBoard {
                         TaskBoardView(
                             api: api,
                             workspaceStore: workspaceStore,
@@ -517,13 +560,14 @@ struct NativeRootView: View {
                         )
                     }
                 }
+                .animation(reducedMotion ? nil : WandMotion.stateSwap, value: homeListMode)
                 .safeAreaInset(edge: .bottom) {
                     HStack {
                         Spacer(minLength: 8)
                         HomeMenuPill(mode: homeListMode, onMode: setHomeListMode) {
                             guard !contactsStore.busy, !homeMutationBusy else { return }
                             selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
-                            selectedContactRunID = nil; showingContacts = true
+                            selectedContactRunID = nil; setHomeListMode(.contacts)
                         }
                         .disabled(homeMutationBusy)
                         Spacer(minLength: 8)
@@ -553,7 +597,8 @@ struct NativeRootView: View {
             )
             .id(selection.task.id)
         } else if let session = selectedSnapshot {
-            SessionDestinationView(session: session, api: api, onCompletionVisible: acknowledgeCompletionIfViewed)
+            SessionDestinationView(session: session, api: api, onCompletionVisible: acknowledgeCompletionIfViewed,
+                sharedChatStore: selectedConversationID != nil ? conversations.executionStore(session.id) : nil)
                 .id(session.id)
         } else if selectedSessionID != nil {
             ProgressView().tint(Theme.brand)
@@ -566,7 +611,7 @@ struct NativeRootView: View {
         VStack(spacing: 12) {
             WandBrandMark(size: 48)
             Text("选择一个任务")
-                .font(.system(size: 14))
+                .font(.wand(size: 14))
                 .foregroundColor(Theme.textSecondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -591,10 +636,10 @@ struct NativeRootView: View {
                     )
                 VStack(alignment: .leading, spacing: 3) {
                     Text(installingUpdate ? "正在更新服务端" : "发现新版本")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.wand(size: 14, weight: .semibold))
                         .foregroundColor(Theme.textPrimary)
                     Text(updateError ?? updateBannerMessage ?? (canManageSettings ? "点击下方按钮一键更新" : "请到网页版或本机终端更新服务端"))
-                        .font(.system(size: 12))
+                        .font(.wand(size: 12))
                         .foregroundColor(updateError == nil ? Theme.textSecondary : Theme.danger)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -631,7 +676,7 @@ struct NativeRootView: View {
                             }
                             Text(installingUpdate ? "更新中" : "立即更新")
                         }
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.wand(size: 13, weight: .semibold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 9)
@@ -651,7 +696,7 @@ struct NativeRootView: View {
 
     private func versionPill(_ text: String, filled: Bool) -> some View {
         Text(text)
-            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            .font(.wand(size: 12, weight: .semibold, design: .monospaced))
             .foregroundColor(filled ? Theme.brand : Theme.textSecondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -791,7 +836,11 @@ struct NativeRootView: View {
         clearCompletionIntent()
         selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
         selectedTaskSessionId = nil; selectedTaskShowsPicker = false
-        showingContacts = true; selectedContactRunID = runId
+        showingContacts = false; selectedConversationID = nil; selectedContactRunID = runId
+        Task {
+            guard let detail = try? await api.contactRun(runId), selectedContactRunID == runId else { return }
+            if let conversationID = detail.run.conversationId, !conversationID.isEmpty { openConversation(conversationID) }
+        }
     }
 
     private func clearCompletionIntent() {
@@ -845,7 +894,19 @@ struct NativeRootView: View {
     }
 
     private var rootModalVisible: Bool {
-        showSettings || showMissions || presentNewTask || homeModalVisible
+        showSettings || showMissions || presentNewTask || homeModalVisible || selectedContactEmployeeID != nil
+    }
+
+    private func openConversation(_ id: String) {
+        selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
+        selectedContactRunID = nil; showingContacts = false
+        selectedConversationID = id; homeListModeRaw = HomeListMode.im.rawValue
+        conversations.select(id); clearCompletionIntent()
+    }
+
+    private func openPresetConversation(_ templateID: String) {
+        setHomeListMode(.im)
+        conversations.creatingPresetID = templateID
     }
 
     private func openWorkspaceStandaloneSession(_ sessionID: String) {
@@ -1003,6 +1064,7 @@ struct NativeRootView: View {
         authenticationRetryTask = nil
         authenticationRetryAttempt = 0
         phase = .ready
+        conversations.start()
         startSystemSocket(generation: generation)
         refreshServerUpdateInfo(generation: generation)
         refreshHomeContacts()
@@ -1131,6 +1193,7 @@ struct NativeRootView: View {
         installingUpdate = false
         systemSocket?.close()
         systemSocket = nil
+        conversations.shutdown()
     }
 }
 
@@ -1150,7 +1213,7 @@ private struct HomeOverviewBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Text(serverDisplayName.isEmpty ? "当前服务器" : serverDisplayName)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.wand(size: 15, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
                 .lineLimit(1)
             Spacer(minLength: 8)

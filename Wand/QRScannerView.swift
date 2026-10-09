@@ -119,7 +119,7 @@ struct QRScannerSheet: View {
                     )
 
                 Text("对准电脑端 Wand「设置 → 连接 App」的二维码")
-                    .font(.system(size: 14))
+                    .font(.wand(size: 14))
                     .foregroundColor(.white.opacity(0.85))
                     .multilineTextAlignment(.center)
                     .frame(width: min(proxy.size.width - 48, 360))
@@ -130,14 +130,14 @@ struct QRScannerSheet: View {
         .onAppear {
             scanProgress = 0
             guard !reduceMotion else { return }
-            withAnimation(.linear(duration: 2.2).repeatForever(autoreverses: false)) {
+            withAnimation(WandMotion.scan) {
                 scanProgress = 1
             }
         }
         .onChange(of: reduceMotion) { _, reduced in
             scanProgress = 0
             guard !reduced else { return }
-            withAnimation(.linear(duration: 2.2).repeatForever(autoreverses: false)) {
+            withAnimation(WandMotion.scan) {
                 scanProgress = 1
             }
         }
@@ -149,10 +149,10 @@ struct QRScannerSheet: View {
                 .font(.system(size: 34))
                 .foregroundColor(.white.opacity(0.7))
             Text("需要相机权限才能扫码")
-                .font(.system(size: 16, weight: .semibold))
+                .font(.wand(size: 16, weight: .semibold))
                 .foregroundColor(.white)
             Text("请到 设置 → Wand 里允许访问相机，\n或返回手动粘贴连接码。")
-                .font(.system(size: 13))
+                .font(.wand(size: 13))
                 .foregroundColor(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
             Button {
@@ -174,10 +174,10 @@ struct QRScannerSheet: View {
                 .font(.system(size: 34))
                 .foregroundColor(.white.opacity(0.7))
             Text("无法启动扫码相机")
-                .font(.system(size: 16, weight: .semibold))
+                .font(.wand(size: 16, weight: .semibold))
                 .foregroundColor(.white)
             Text(message)
-                .font(.system(size: 13))
+                .font(.wand(size: 13))
                 .foregroundColor(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
             Button("重试") {

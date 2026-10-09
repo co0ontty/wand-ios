@@ -249,13 +249,13 @@ struct TaskBoardView: View {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 14, weight: .semibold))
                     Text("返回")
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.wand(size: 15, weight: .medium))
                 }
                 .foregroundColor(Theme.brand)
             }
             .buttonStyle(.plain)
             Text(title)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.wand(size: 15, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
                 .lineLimit(1)
             Spacer(minLength: 0)
@@ -404,7 +404,7 @@ struct TaskBoardView: View {
                     Image(systemName: "folder")
                         .font(.system(size: 12, weight: .semibold))
                     Text(workspaces.first(where: { $0.id == filterWorkspaceId })?.name ?? "所有项目")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.wand(size: 13, weight: .medium))
                         .lineLimit(1)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .bold))
@@ -427,7 +427,7 @@ struct TaskBoardView: View {
                         statusFilter = value
                     } label: {
                         Text(label)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.wand(size: 12, weight: .semibold))
                             .foregroundColor(active ? Theme.success : Theme.textSecondary)
                             .padding(.horizontal, 11)
                             .padding(.vertical, 8)
@@ -450,10 +450,10 @@ struct TaskBoardView: View {
                 .font(.system(size: 28, weight: .medium))
                 .foregroundColor(Theme.success)
             Text(query.isEmpty && statusFilter.isEmpty ? "工作台还是空的" : "没有匹配的任务")
-                .font(.system(size: 16, weight: .semibold))
+                .font(.wand(size: 16, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Text(query.isEmpty && statusFilter.isEmpty ? "点右下角 +，把事情做完。" : "换个筛选条件，或新建一条任务。")
-                .font(.system(size: 13))
+                .font(.wand(size: 13))
                 .foregroundColor(Theme.textMuted)
             Button("新建任务", action: { openCreate("todo") })
                 .buttonStyle(WandPrimaryButtonStyle())
@@ -475,10 +475,10 @@ struct TaskBoardView: View {
                 .fill(wandBoardStatusColor(status))
                 .frame(width: 8, height: 8)
             Text(WandBoardStatus(rawValue: status)?.label ?? status)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.wand(size: 13, weight: .semibold))
                 .foregroundColor(wandBoardStatusColor(status))
             Text("\(count)")
-                .font(.system(size: 11))
+                .font(.wand(size: 11))
                 .foregroundColor(Theme.textMuted)
             Spacer(minLength: 0)
             Button {
@@ -503,9 +503,9 @@ struct TaskBoardView: View {
                 Image(systemName: "folder")
                     .font(.system(size: 12, weight: .semibold))
                 Text("归档任务")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.wand(size: 13, weight: .semibold))
                 Text("\(count)")
-                    .font(.system(size: 11))
+                    .font(.wand(size: 11))
                 Spacer(minLength: 0)
             }
             .foregroundColor(Theme.textMuted)
@@ -739,7 +739,7 @@ private struct TaskBoardSwipeCard<Content: View>: View {
                     .allowsHitTesting(revealed || draggingHorizontally)
                     .accessibilityHidden(!revealed)
             }
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: revealed)
+            .animation(reduceMotion ? nil : WandMotion.scroll, value: revealed)
             // 和列表的滚动手势并存：动作条要能拖，列表也要能滚。
             .simultaneousGesture(dragGesture)
         } else {
@@ -794,7 +794,7 @@ private struct TaskBoardSwipeCard<Content: View>: View {
                 Image(systemName: wandBoardSwipeSystemImage(action))
                     .font(.system(size: 18, weight: .semibold))
                 Text(wandBoardSwipeActionLabel(action))
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.wand(size: 13, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
@@ -830,7 +830,7 @@ private struct TaskBoardHero: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Text(projectName)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.wand(size: 13, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
@@ -838,11 +838,11 @@ private struct TaskBoardHero: View {
             }
             HStack(alignment: .bottom, spacing: 10) {
                 Text("\(stats.remaining)")
-                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                    .font(.wand(size: 40, weight: .bold, design: .rounded))
                     .foregroundColor(Theme.success)
                     .monospacedDigit()
                 Text("未完成")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.wand(size: 15, weight: .medium))
                     .foregroundColor(Theme.textMuted)
                     .padding(.bottom, 6)
             }
@@ -867,7 +867,7 @@ private struct TaskBoardHero: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(Theme.textMuted)
             TextField("搜索", text: $query)
-                .font(.system(size: 12))
+                .font(.wand(size: 12))
                 .foregroundColor(Theme.textPrimary)
                 .textInputAutocapitalization(.never)
             if !query.isEmpty {
@@ -891,10 +891,10 @@ private struct TaskBoardHero: View {
         let ratio = stats.total > 0 ? CGFloat(value) / CGFloat(stats.total) : 0
         return VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(.system(size: 11))
+                .font(.wand(size: 11))
                 .foregroundColor(Theme.textMuted)
             Text("\(value)")
-                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .font(.wand(size: 20, weight: .bold, design: .rounded))
                 .foregroundColor(color)
                 .padding(.bottom, 8)
             GeometryReader { proxy in
@@ -941,7 +941,7 @@ private struct TaskBoardRow: View {
             header
             if let summary = model.body {
                 Text(summary)
-                    .font(.system(size: 12))
+                    .font(.wand(size: 12))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -957,7 +957,7 @@ private struct TaskBoardRow: View {
                 HStack(spacing: 6) {
                     Circle().fill(Theme.success).frame(width: 7, height: 7)
                     Text(processing)
-                        .font(.system(size: 11))
+                        .font(.wand(size: 11))
                         .foregroundColor(Theme.success)
                 }
                 .padding(.top, 10)
@@ -986,7 +986,7 @@ private struct TaskBoardRow: View {
             .buttonStyle(.plain)
             .padding(.top, 2)
             Text(model.title)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.wand(size: 16, weight: .semibold))
                 .foregroundColor(done ? Theme.textMuted : Theme.textPrimary)
                 .strikethrough(done)
                 .lineLimit(2)
@@ -994,7 +994,7 @@ private struct TaskBoardRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let identifier = model.identifier {
                 Text(identifier)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(.wand(size: 10, weight: .medium, design: .monospaced))
                     .foregroundColor(Theme.textMuted)
                     .lineLimit(1)
                     .padding(.top, 3)
@@ -1026,7 +1026,7 @@ private struct TaskBoardRow: View {
             }
             if model.extraLabelCount > 0 {
                 Text("+\(model.extraLabelCount)")
-                    .font(.system(size: 11))
+                    .font(.wand(size: 11))
                     .foregroundColor(Theme.textMuted)
                     .frame(height: 22)
             }
@@ -1063,7 +1063,7 @@ private struct TaskBoardRow: View {
                             )
                             .frame(width: 12, height: 12)
                             Text(session.label)
-                                .font(.system(size: 12))
+                                .font(.wand(size: 12))
                                 .foregroundColor(session.running ? Theme.textPrimary : Theme.textSecondary)
                                 .lineLimit(1)
                             Spacer(minLength: 0)
@@ -1080,7 +1080,7 @@ private struct TaskBoardRow: View {
                 if model.extraSessionCount > 0 {
                     Button(action: onOpen) {
                         Text("+\(model.extraSessionCount) 个会话")
-                            .font(.system(size: 11))
+                            .font(.wand(size: 11))
                             .foregroundColor(Theme.textMuted)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 6)
@@ -1109,7 +1109,7 @@ private struct TaskBoardRow: View {
                     .font(.system(size: 9, weight: .semibold))
             }
             Text(label)
-                .font(.system(size: 11))
+                .font(.wand(size: 11))
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
@@ -1195,7 +1195,7 @@ private struct BoardAgentDots: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.05, paused: reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: WandMotion.activityTick, paused: reduceMotion)) { context in
             let now = context.date.timeIntervalSinceReferenceDate
             HStack(spacing: 2) {
                 ForEach(0..<3, id: \.self) { index in
@@ -1328,9 +1328,12 @@ private struct TaskBoardDetailView: View {
                 ContactExecutionSubjectPicker(subject: $subject, employees: employees, teams: teams,
                     teamAllowed: task.workspaceId != nil && task.workspaceId != "wand-global", error: contactsError, onRetry: onContactsRetry)
                 if subject == nil {
-                Picker("CLI 工具", selection: Binding(
-                    get: { agent.provider },
-                    set: { provider in
+                Picker("执行工具", selection: Binding(
+                    get: { WandAgentTool(provider: agent.provider, engine: agent.engine).rawValue },
+                    set: { id in
+                        guard let tool = WandAgentTool(rawValue: id) else { return }
+                        let provider = tool.provider.rawValue
+                        agent.engine = tool.engine
                         agent.provider = provider
                         agent.mode = wandBoardNormalizedMode(provider: provider, mode: agent.mode)
                         let options = wandBoardModelOptions(from: catalog, provider: provider)
@@ -1340,9 +1343,7 @@ private struct TaskBoardDetailView: View {
                         onRemember(agent)
                     }
                 )) {
-                    ForEach(wandBoardProviders, id: \.self) { provider in
-                        Text(wandBoardProviderLabel(provider)).tag(provider)
-                    }
+                    ForEach(WandAgentTool.allCases) { tool in Text(tool.title).tag(tool.rawValue) }
                 }
                 Picker("模型", selection: Binding(
                     get: { agent.model },

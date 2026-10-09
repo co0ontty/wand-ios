@@ -139,7 +139,7 @@ struct ConnectView: View {
     private var sheetHeader: some View {
         HStack {
             Text("切换服务器")
-                .font(.system(size: 16, weight: .semibold))
+                .font(.wand(size: 16, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Spacer()
             Button("取消") { cancelAndDismiss() }
@@ -156,10 +156,10 @@ struct ConnectView: View {
                 WandBrandMark(size: 64)
                 VStack(spacing: 6) {
                     Text("连接到 Wand")
-                        .font(.system(size: 24, weight: .bold))
+                        .font(.wand(size: 24, weight: .bold))
                         .foregroundColor(Theme.textPrimary)
                     Text("粘贴设置页的连接码，或直接输入服务器地址")
-                        .font(.system(size: 14))
+                        .font(.wand(size: 14))
                         .foregroundColor(Theme.textSecondary)
                         .multilineTextAlignment(.center)
                 }
@@ -188,7 +188,7 @@ struct ConnectView: View {
     private var inputField: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text("连接码 / 服务器地址")
-                .font(.system(size: 13, weight: .medium))
+                .font(.wand(size: 13, weight: .medium))
                 .foregroundColor(Theme.textSecondary)
 
             HStack(spacing: 8) {
@@ -197,7 +197,7 @@ struct ConnectView: View {
                     .foregroundColor(Theme.textSecondary)
                 TextField("例如 192.168.1.10:7777 或粘贴连接码", text: $input)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 15, design: .monospaced))
+                    .font(.wand(size: 15, design: .monospaced))
                     .foregroundColor(Theme.textPrimary)
                     .focused($inputFocused)
                     .keyboardType(.URL)
@@ -227,7 +227,7 @@ struct ConnectView: View {
                 .font(.system(size: 13))
                 .foregroundColor(Theme.danger)
             Text(message)
-                .font(.system(size: 13))
+                .font(.wand(size: 13))
                 .foregroundColor(Theme.danger)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -242,16 +242,16 @@ struct ConnectView: View {
     private var localNetworkHint: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("请检查「本地网络」权限", systemImage: "lock.shield")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.wand(size: 13, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Text("Wand 需要本地网络权限才能连接局域网内的服务。请在系统设置中允许 Wand 访问本地网络，然后重试。")
-                .font(.system(size: 12))
+                .font(.wand(size: 12))
                 .foregroundColor(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button("打开 Wand 设置") {
                 LocalNetworkPermission.openSettings()
             }
-            .font(.system(size: 13, weight: .medium))
+            .font(.wand(size: 13, weight: .medium))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -306,10 +306,10 @@ struct ConnectView: View {
     private var savedServersSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("已保存的服务器")
-                .font(.system(size: 13, weight: .medium))
+                .font(.wand(size: 13, weight: .medium))
                 .foregroundColor(Theme.textSecondary)
             Text("每台服务器的认证信息独立保存。")
-                .font(.system(size: 12))
+                .font(.wand(size: 12))
                 .foregroundColor(Theme.textSecondary)
             VStack(spacing: 6) {
                 ForEach(store.profiles) { profile in
@@ -319,7 +319,7 @@ struct ConnectView: View {
             Button("移除所有服务器", role: .destructive) {
                 confirmRemoveAll = true
             }
-            .font(.system(size: 13, weight: .medium))
+            .font(.wand(size: 13, weight: .medium))
             .disabled(isConnecting)
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -340,12 +340,12 @@ struct ConnectView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
                             Text(profile.displayName)
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.wand(size: 13, weight: .medium))
                                 .foregroundColor(active ? Theme.brand : Theme.textPrimary)
                                 .lineLimit(1)
                             if active {
                                 Text("当前")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(.wand(size: 10, weight: .semibold))
                                     .foregroundColor(Theme.brand)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
@@ -354,12 +354,12 @@ struct ConnectView: View {
                         }
                         HStack(spacing: 6) {
                             Text(safeDisplayURL(profile.baseURL))
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.wand(size: 11, design: .monospaced))
                                 .foregroundColor(Theme.textSecondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Text(profile.hasToken ? "已认证" : "直接连接")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.wand(size: 10, weight: .medium))
                                 .foregroundColor(profile.hasToken ? Theme.success : Theme.textSecondary)
                         }
                     }
@@ -416,7 +416,7 @@ struct ConnectView: View {
 
     private var footerHint: some View {
         Text("在电脑端 Wand 的「设置 → 连接 App」里获取连接码")
-            .font(.system(size: 12))
+            .font(.wand(size: 12))
             .foregroundColor(Theme.textSecondary)
             .multilineTextAlignment(.center)
             .padding(.top, 2)

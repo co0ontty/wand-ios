@@ -49,6 +49,7 @@ protocol WorkspaceServing: AnyObject {
         description: String?
     ) async throws -> WorkspaceTaskCreation
     func listTaskGroups() async throws -> [TaskDirectoryGroup]
+    func saveWorkspaceGroupOrder(_ ids: [String]) async throws
     func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage
     func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int
     func batchArchiveWorkspaceSessions(sessionIds: [String], archived: Bool) async throws -> [String]
@@ -63,6 +64,7 @@ protocol WorkspaceServing: AnyObject {
 }
 
 extension WorkspaceServing {
+    func saveWorkspaceGroupOrder(_ ids: [String]) async throws { throw WandAPI.APIError.network("当前服务不支持保存工作区顺序，请更新服务端") }
     func createWorkspaceEmployeeTaskWindow(employeeID: String, binding: WorkspaceBinding, prompt: String?) async throws -> SessionSnapshot {
         throw WandAPI.APIError.network("当前服务不支持硅基员工会话。")
     }
@@ -136,6 +138,9 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var taskGroupsError: String?
     @Published private(set) var taskGroupsLoading = false
     private var taskGroupsRevision: String?
+    @Published private(set) var pendingGroupOrder: [String]?
+    @Published private(set) var orderSaveError: String?
+    private var orderSaveTail: Task<Void, Never>?
     private var taskGroupsSyncTask: Task<Void, Never>?
 
     @Published private(set) var currentWorkspace: Workspace?
@@ -465,7 +470,7 @@ final class WorkspaceStore: ObservableObject {
                 taskGroupsError = nil
                 return
             }
-            taskGroups = page.groups
+            taskGroups = applyingWorkspaceGroupOrder(page.groups, order: pendingGroupOrder)
             taskGroupsRevision = page.revision
             taskGroupsError = nil
             await syncCurrentTaskMetadata()
@@ -473,6 +478,35 @@ final class WorkspaceStore: ObservableObject {
             guard generation == taskGroupsGeneration, !Task.isCancelled else { return }
             // 保留旧数据，仅记错误供 UI 提示；老服务端无该接口时静默降级。
             if taskGroups.isEmpty { taskGroupsError = error.localizedDescription }
+        }
+    }
+
+    func moveWorkspaceGroup(_ id: String, to targetID: String) {
+        guard id != targetID, let from = taskGroups.firstIndex(where: { $0.id == id }),
+              let to = taskGroups.firstIndex(where: { $0.id == targetID }) else { return }
+        var next = taskGroups
+        let moved = next.remove(at: from); next.insert(moved, at: to)
+        taskGroups = next
+        pendingGroupOrder = next.map(\.id)
+        savePendingGroupOrder()
+    }
+
+    func moveWorkspaceGroup(_ id: String, delta: Int) {
+        guard let index = taskGroups.firstIndex(where: { $0.id == id }), taskGroups.indices.contains(index + delta) else { return }
+        moveWorkspaceGroup(id, to: taskGroups[index + delta].id)
+    }
+
+    func savePendingGroupOrder() {
+        guard pendingGroupOrder != nil else { return }
+        orderSaveError = nil
+        let previous = orderSaveTail
+        orderSaveTail = Task { [weak self] in
+            await previous?.value
+            guard let self, let order = pendingGroupOrder else { return }
+            do {
+                try await api.saveWorkspaceGroupOrder(order)
+                if pendingGroupOrder == order { pendingGroupOrder = nil; orderSaveError = nil }
+            } catch { if pendingGroupOrder == order { orderSaveError = error.localizedDescription } }
         }
     }
 
@@ -908,11 +942,8 @@ final class WorkspaceStore: ObservableObject {
     func loadCreationDefaults() async {
         guard let api = api as? WandAPI, let config = try? await api.serverConfig() else { return }
         selectedKind = config.defaultSessionKind == "pty" ? .pty : .structured
-        if let raw = config.defaultProvider,
-           let target = WorkspaceSessionTarget(rawValue: raw),
-           target != .shell {
-            selectedTarget = target
-        }
+        if config.defaultProvider == "pi", config.defaultEngine == "sdk" { selectedTarget = .wandAgent; selectedKind = .structured }
+        else if let raw = config.defaultProvider, let target = WorkspaceSessionTarget(rawValue: raw), target != .shell { selectedTarget = target }
     }
 
     func rememberCreationChoice(
@@ -923,11 +954,13 @@ final class WorkspaceStore: ObservableObject {
         // 否则「空白终端」在目标选择器里永远选不中（对齐 Android 的 newTaskTarget = option）。
         if let provider { selectedTarget = provider }
         if let kind { selectedKind = kind }
+        if selectedTarget == .wandAgent { selectedKind = .structured }
         Task {
             guard let api = api as? WandAPI else { return }
             try? await api.updateCreationDefaults(
-                defaultProvider: provider.flatMap { $0 == .shell ? nil : $0.rawValue },
-                defaultSessionKind: kind?.rawValue
+                defaultProvider: provider?.provider?.rawValue,
+                defaultSessionKind: provider == .wandAgent ? "structured" : kind?.rawValue,
+                defaultEngine: provider == .wandAgent ? "sdk" : provider == .pi ? "cli" : nil
             )
         }
     }

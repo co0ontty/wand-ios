@@ -38,7 +38,9 @@ func workspaceTaskWindowRequest(
     let promptValue = (initialPrompt?.isEmpty == false) ? initialPrompt : nil
     if let provider = target.provider {
         body["provider"] = .string(provider.rawValue)
-        if kind == .structured {
+        if kind == .structured || target == .wandAgent {
+            if target == .wandAgent { body["engine"] = .string("sdk") }
+            else if target == .pi { body["engine"] = .string("cli") }
             if let promptValue { body["prompt"] = .string(promptValue) }
             body["runner"] = .string(provider.structuredRunner)
             return WorkspaceTaskWindowRequest(path: "/api/structured-sessions", body: body)
@@ -62,7 +64,7 @@ func changesTaskHierarchy(method: String, path: String) -> Bool {
     if route == "/api/wand-tasks" || route.hasPrefix("/api/wand-tasks/") { return true }
     if route == "/api/commands" || route == "/api/structured-sessions" { return true }
     if route.hasPrefix("/api/sessions/") {
-        return ["/archive", "/unarchive", "/provider", "/completion/view"].contains { route.hasSuffix($0) }
+        return ["/archive", "/unarchive", "/provider", "/directory", "/completion/view"].contains { route.hasSuffix($0) }
             || route == "/api/sessions/batch-archive" || route == "/api/sessions/batch-delete"
     }
     if route.hasPrefix("/api/ai-teams/"), route.hasSuffix("/runs") { return true }
@@ -430,6 +432,10 @@ extension WandAPI {
 
     /// 跨目录任务聚合列表（GET /api/tasks）：目录组一级容器，
     /// 未绑定任务的会话归入 standaloneSessions。
+    func saveWorkspaceGroupOrder(_ ids: [String]) async throws {
+        _ = try await requestData(method: "PUT", path: "/api/workspaces/order", body: ["ids": ids])
+    }
+
     func listTaskGroups() async throws -> [TaskDirectoryGroup] {
         try await listTaskGroupsPage(revision: nil).groups
     }

@@ -77,6 +77,7 @@ struct NewSessionView: View {
     @State private var cwd: String
     @State private var recentPaths: [RecentPath] = []
     @State private var provider = "claude"
+    @State private var selectedEngine: String?
     @State private var sessionKind = SessionKind.structured
     // 默认托管模式（Claude / OpenCode 全自动完成）；Codex 切换时 clamp 成全权限。
     @State private var mode = "managed"
@@ -280,10 +281,16 @@ struct NewSessionView: View {
                         }
                         if sessionKind != .shell && contactSubject == nil {
                             sectionHeader("Provider")
-                            Picker("Provider", selection: $provider) {
-                                ForEach(WandProvider.allCases) { Text($0.title).tag($0.rawValue) }
+                            Picker("执行工具", selection: Binding(get: { WandAgentTool(provider: provider, engine: selectedEngine).rawValue }, set: { id in
+                                if let tool = WandAgentTool(rawValue: id) {
+                                    provider = tool.provider.rawValue; selectedEngine = tool.engine
+                                    if tool.structuredOnly { sessionKind = .structured }
+                                    scheduleDefaultsSave()
+                                }
+                            })) {
+                                ForEach(WandAgentTool.allCases.filter { sessionKind == .structured || !$0.structuredOnly }) { Text($0.title).tag($0.rawValue) }
                             }
-                            .pickerStyle(.segmented)
+                            .pickerStyle(.menu)
                             .onChange(of: provider) { _, newProvider in
                                 modelSelectionRevision &+= 1
                                 mode = supportedMode(mode, provider: newProvider)
@@ -456,7 +463,7 @@ struct NewSessionView: View {
                 ProgressView()
                     .tint(Theme.brand)
                 Text("正在读取服务器配置…")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.wand(size: 14, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
             case .failed(let message):
                 Image(systemName: "wifi.exclamationmark")
@@ -471,7 +478,7 @@ struct NewSessionView: View {
                     Task { await bootstrap() }
                 } label: {
                     Label("重试连接", systemImage: "arrow.clockwise")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.wand(size: 15, weight: .semibold))
                         .padding(.horizontal, 18)
                         .padding(.vertical, 11)
                 }
@@ -521,7 +528,8 @@ struct NewSessionView: View {
             guard !Task.isCancelled, generation == bootstrapGeneration else { return }
 
             provider = WandProvider(normalizing: config.defaultProvider).rawValue
-            sessionKind = config.defaultSessionKind == SessionKind.pty.rawValue ? .pty : .structured
+            selectedEngine = provider == "pi" ? config.defaultEngine : nil
+            sessionKind = config.defaultSessionKind == SessionKind.pty.rawValue && selectedEngine != "sdk" ? .pty : .structured
             mode = supportedMode(config.resolvedDefaultMode, provider: provider)
             serverDefaultModels = ProviderDefaultModels(
                 claude: config.defaultModelId(for: WandProvider.claude.rawValue),
@@ -633,7 +641,7 @@ struct NewSessionView: View {
 
     private func sectionHeader(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 13, weight: .semibold))
+            .font(.wand(size: 13, weight: .semibold))
             .foregroundColor(Theme.textSecondary)
             .padding(.top, 16)
             .padding(.bottom, 7)
@@ -642,7 +650,7 @@ struct NewSessionView: View {
     /// 区块下方的说明文案，对应 Web 的 .field-hint。
     private func fieldHint(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 12))
+            .font(.wand(size: 12))
             .lineSpacing(3)
             .foregroundColor(Theme.textSecondary.opacity(0.85))
             .padding(.top, 6)
@@ -668,10 +676,10 @@ struct NewSessionView: View {
                 .background(Circle().fill(Theme.brand.opacity(0.1)))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.wand(size: 11, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                 Text(value)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.wand(size: 13, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
             }
@@ -819,11 +827,11 @@ struct NewSessionView: View {
         } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(option.label)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.wand(size: 14, weight: .medium))
                     .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
                     .lineLimit(1)
                 Text(option.desc)
-                    .font(.system(size: 11))
+                    .font(.wand(size: 11))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(1)
             }
@@ -842,7 +850,7 @@ struct NewSessionView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
                 TextField("/path/to/project", text: $cwd)
-                    .font(.system(size: 14, design: .monospaced))
+                    .font(.wand(size: 14, design: .monospaced))
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
                     .focused($focusedField, equals: .cwd)
@@ -875,10 +883,10 @@ struct NewSessionView: View {
                                 .foregroundColor(cwd == recent.path ? Theme.brand : Theme.textSecondary)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(recent.displayName)
-                                    .font(.system(size: 14, weight: .medium))
+                                    .font(.wand(size: 14, weight: .medium))
                                     .foregroundColor(cwd == recent.path ? Theme.brand : Theme.textPrimary)
                                 Text(recent.path)
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(.wand(size: 11, design: .monospaced))
                                     .foregroundColor(Theme.textSecondary)
                                     .lineLimit(1)
                             }
@@ -903,7 +911,7 @@ struct NewSessionView: View {
     /// 首条消息输入卡。
     private var firstMessageCard: some View {
         TextField("想让它做什么…", text: $firstMessage)
-            .font(.system(size: 15))
+            .font(.wand(size: 15))
             .focused($focusedField, equals: .firstMessage)
             .submitLabel(.send)
             .onSubmit { create() }
@@ -942,7 +950,7 @@ struct NewSessionView: View {
                     ProgressView().tint(.white)
                 }
                 Text(creating ? "创建中…" : sessionKind == .shell ? "创建空白终端" : "创建会话")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.wand(size: 15, weight: .semibold))
             }
             .frame(maxWidth: .infinity)
             .frame(height: 48)
@@ -1097,6 +1105,7 @@ struct NewSessionView: View {
         let serverID: String
         let provider: String
         let sessionKind: String?
+        let engine: String?
         let mode: String
         let modelUpdates: [String: String]
         let thinkingEffort: String
@@ -1108,6 +1117,7 @@ struct NewSessionView: View {
             serverID: selectedServerID,
             provider: normalizedProvider,
             sessionKind: sessionKind.preferenceValue,
+            engine: selectedEngine,
             mode: supportedMode(mode, provider: normalizedProvider),
             modelUpdates: pendingModelDefaults,
             thinkingEffort: thinkingEffort
@@ -1123,7 +1133,8 @@ struct NewSessionView: View {
             provider: values.provider,
             thinkingEffort: values.thinkingEffort,
             defaultProvider: values.provider,
-            defaultSessionKind: values.sessionKind
+            defaultSessionKind: values.sessionKind,
+            defaultEngine: values.engine
         )
         for provider in values.modelUpdates.keys.sorted() {
             try Task.checkCancellation()
@@ -1219,7 +1230,8 @@ struct NewSessionView: View {
                             mode: effectiveMode,
                             model: effectiveModel,
                             thinkingEffort: defaults.thinkingEffort,
-                            prompt: prompt.isEmpty ? nil : prompt
+                            prompt: prompt.isEmpty ? nil : prompt,
+                            engine: defaults.engine
                         )
                     case .pty:
                         try await persistDefaults(defaults, using: api)
@@ -1355,7 +1367,7 @@ struct DirectoryBrowserView: View {
             }
             .disabled(loading)
             Text(currentPath)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.wand(size: 12, design: .monospaced))
                 .foregroundColor(Theme.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.head)
@@ -1376,7 +1388,7 @@ struct DirectoryBrowserView: View {
                             .font(.system(size: 14))
                             .foregroundColor(Theme.brand.opacity(0.8))
                         Text(item.name)
-                            .font(.system(size: 14))
+                            .font(.wand(size: 14))
                             .foregroundColor(Theme.textPrimary)
                         Spacer()
                         Image(systemName: "chevron.right")

@@ -705,14 +705,14 @@ struct TurnUsage: Decodable {
 /// ConversationTurn.content 里的一个块。types.ts: ContentBlock 四种变体 + 容错。
 enum ContentBlock: Decodable {
     case text(text: String, subagent: SubagentMeta?)
-    case thinking(thinking: String, subagent: SubagentMeta?)
+    case thinking(thinking: String, subagent: SubagentMeta?, occurredAt: String? = nil, lastActivityAt: String? = nil)
     case toolUse(id: String, name: String, description: String?, input: [String: JSONValue], subagent: SubagentMeta?)
     case toolResult(toolUseId: String, text: String, isError: Bool, truncated: Bool, images: [String], subagent: SubagentMeta?, projection: ToolProjection? = nil)
     /// 协议升级兜底：保留类型和有界、脱敏的原始载荷，UI 可明确告知用户。
     case unknown(type: String, payload: String)
 
     private enum CodingKeys: String, CodingKey {
-        case type, text, thinking, id, name, description, input, content, semantic, preview, activity
+        case type, text, thinking, id, name, description, input, content, semantic, preview, activity, occurredAt, lastActivityAt
         case toolUseId = "tool_use_id"
         case isError = "is_error"
         case truncated = "_truncated"
@@ -732,7 +732,9 @@ enum ContentBlock: Decodable {
         case "thinking":
             self = .thinking(
                 thinking: (try? c.decode(String.self, forKey: .thinking)) ?? "",
-                subagent: subagent
+                subagent: subagent,
+                occurredAt: try? c.decode(String.self, forKey: .occurredAt),
+                lastActivityAt: try? c.decode(String.self, forKey: .lastActivityAt)
             )
         case "tool_use":
             var input = (try? c.decode([String: JSONValue].self, forKey: .input)) ?? [:]
@@ -775,31 +777,58 @@ enum ContentBlock: Decodable {
     }
 }
 
+/// Read-only per-round resource choice, never part of user input or execution authorization.
+struct ResourceSelectionNotice: Decodable, Equatable {
+    let label: String
+    let status: String?
+    private enum CodingKeys: String, CodingKey { case label, status }
+    init(label: String, status: String?) {
+        self.label = String(label.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1024))
+        self.status = status
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(label: try c.decode(String.self, forKey: .label), status: try c.decodeIfPresent(String.self, forKey: .status))
+        guard !label.isEmpty else { throw DecodingError.dataCorruptedError(forKey: .label, in: c, debugDescription: "Empty resource notice") }
+    }
+}
+
+func mergingResourceNotice(previous: ConversationTurn?, incoming: ConversationTurn) -> ResourceSelectionNotice? {
+    let same = previous?.role == incoming.role && (previous?.createdAt == nil || incoming.createdAt == nil || previous?.createdAt == incoming.createdAt)
+    let old = same ? previous?.resourceSelection : nil
+    if incoming.resourceSelection?.status == "selecting", ["selected", "fallback", "cancelled"].contains(old?.status ?? "") { return old }
+    return incoming.resourceSelection ?? old
+}
+
 struct ConversationTurn: Decodable {
     let role: String
     let content: [ContentBlock]
     let usage: TurnUsage?
     let createdAt: String?
     let completedAt: String?
+    let resourceSelection: ResourceSelectionNotice?
 
-    private enum CodingKeys: String, CodingKey { case role, content, usage, createdAt, completedAt }
+    private enum CodingKeys: String, CodingKey { case role, content, usage, createdAt, completedAt, resourceSelection }
 
     init(
         role: String,
         content: [ContentBlock],
         usage: TurnUsage? = nil,
         createdAt: String? = nil,
-        completedAt: String? = nil
+        completedAt: String? = nil,
+        resourceSelection: ResourceSelectionNotice? = nil
     ) {
         self.role = role
         self.content = content
         self.usage = usage
         self.createdAt = createdAt
         self.completedAt = completedAt
+        self.resourceSelection = resourceSelection
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        resourceSelection = try? c.decodeIfPresent(ResourceSelectionNotice.self, forKey: .resourceSelection)
         role = (try? c.decode(String.self, forKey: .role)) ?? "assistant"
         usage = try? c.decode(TurnUsage.self, forKey: .usage)
         createdAt = try? c.decodeIfPresent(String.self, forKey: .createdAt)
@@ -823,7 +852,7 @@ extension ContentBlock {
     var subagentMeta: SubagentMeta? {
         switch self {
         case .text(_, let subagent),
-             .thinking(_, let subagent),
+             .thinking(_, let subagent, _, _),
              .toolUse(_, _, _, _, let subagent),
              .toolResult(_, _, _, _, _, let subagent, _):
             return subagent
@@ -952,6 +981,10 @@ struct StructuredSessionState: Decodable {
     let model: String?
     let lastError: String?
     var inFlight: Bool?
+    var engine: String? = nil
+    var phase: String? = nil
+    var turnStartedAt: String? = nil
+    var lastActivityAt: String? = nil
     let activeRequestId: String?
 }
 
@@ -965,7 +998,7 @@ struct SessionSnapshot: Decodable, Identifiable {
     let provider: String?
     let runner: String?
     let command: String?
-    let cwd: String?
+    var cwd: String?
     let mode: String?
     var status: String?
     let exitCode: Int?
@@ -981,11 +1014,11 @@ struct SessionSnapshot: Decodable, Identifiable {
     var title: String? = nil
     var description: String? = nil
     var titleGenerating: Bool? = nil
-    let currentTaskTitle: String?
+    var currentTaskTitle: String?
     let selectedModel: String?
     let thinkingEffort: String?
     let claudeSessionId: String?
-    let workspaceId: String?
+    var workspaceId: String?
     let workspaceTaskId: String?
     let messages: [ConversationTurn]?
     /// 窗口化：messages 是完整历史的「最近一窗」，messageOffset = 首条的绝对下标，
@@ -996,7 +1029,7 @@ struct SessionSnapshot: Decodable, Identifiable {
     /// 以及 turn messageOffset 的完整块数。滚动到顶时先按块翻这条 turn 的头部，再按 turn 往前翻。
     var leadingBlockOffset: Int? = nil
     var leadingBlockTotal: Int? = nil
-    let queuedMessages: [String]?
+    var queuedMessages: [String]?
     var structuredState: StructuredSessionState?
     var pendingEscalation: EscalationRequest?
     var permissionBlocked: Bool?
@@ -1009,11 +1042,13 @@ struct SessionSnapshot: Decodable, Identifiable {
     var employeeAvatar: String? = nil
     var teamChat: HomeTeamChatIdentity? = nil
     var teamStep: HomeTeamStepIdentity? = nil
+    var directoryLocked: Bool? = nil
 
+    var agentTool: WandAgentTool { WandAgentTool(provider: provider, engine: structuredState?.engine) }
     var isStructured: Bool { (sessionKind ?? "pty") == "structured" }
     var providerLabel: String {
         guard let provider, !provider.isEmpty, provider.lowercased() != "terminal" else { return "终端" }
-        return WandProvider.title(for: provider)
+        return provider == "pi" ? agentTool.title : WandProvider.title(for: provider)
     }
 
     /// 列表标题以服务端 title 为准，不再用任务名 / 目录名自行兜底。
@@ -1169,6 +1204,7 @@ struct WsIncoming: Decodable {
     let reason: String?
     let error: String?
     let resync: Bool?
+    var ptyBytes: Int? = nil
     let data: WsData?
 }
 
@@ -1222,6 +1258,11 @@ struct WsData: Decodable {
     var employeeAvatar: String? = nil
     var teamChat: HomeTeamChatIdentity? = nil
     var teamStep: HomeTeamStepIdentity? = nil
+    var directoryLocked: Bool? = nil
+    var terminalState: PtyTerminalSnapshot? = nil
+    var output: String? = nil
+    var ptyCols: Int? = nil
+    var ptyRows: Int? = nil
     // —— output 事件增量字段 ——
     let chunk: String?
     let lastMessage: ConversationTurn?
@@ -1316,6 +1357,8 @@ struct ModelsResponse: Decodable {
     let qoderModels: [ModelInfo]
     let piModels: [ModelInfo]
     let geminiModels: [ModelInfo]
+    let freeModels: [ModelInfo]
+    let modelGroupsSupported: Bool
     let defaultModel: String?
     let defaultCodexModel: String?
     let defaultOpenCodeModel: String?
@@ -1326,7 +1369,7 @@ struct ModelsResponse: Decodable {
     let defaultModels: ProviderDefaultModels?
 
     private enum CodingKeys: String, CodingKey {
-        case models, codexModels, opencodeModels, grokModels, qoderModels, piModels, geminiModels
+        case models, codexModels, opencodeModels, grokModels, qoderModels, piModels, geminiModels, freeModels, modelGroupsSupported
         case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultGeminiModel, defaultModels
     }
 
@@ -1341,6 +1384,8 @@ struct ModelsResponse: Decodable {
         qoderModels = (try? container.decode([ModelInfo].self, forKey: .qoderModels)) ?? []
         piModels = (try? container.decode([ModelInfo].self, forKey: .piModels)) ?? []
         geminiModels = (try? container.decode([ModelInfo].self, forKey: .geminiModels)) ?? []
+        freeModels = (try? container.decode([ModelInfo].self, forKey: .freeModels)) ?? []
+        modelGroupsSupported = (try? container.decode(Bool.self, forKey: .modelGroupsSupported)) ?? false
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
         defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)
         defaultOpenCodeModel = try? container.decode(String.self, forKey: .defaultOpenCodeModel)
@@ -1422,6 +1467,7 @@ struct ServerConfigInfo: Decodable {
     let defaultProvider: String?
     let defaultSessionKind: String?
     let defaultTaskWorktree: Bool?
+    var defaultEngine: String? = nil
     let defaultMode: String?
     let defaultModel: String?
     let defaultCodexModel: String?
@@ -1440,7 +1486,7 @@ struct ServerConfigInfo: Decodable {
     let canManageSettings: Bool?
 
     private enum CodingKeys: String, CodingKey {
-        case defaultCwd, defaultProvider, defaultSessionKind, defaultTaskWorktree, defaultMode
+        case defaultCwd, defaultProvider, defaultSessionKind, defaultTaskWorktree, defaultMode, defaultEngine
         case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultGeminiModel, defaultModels
         case defaultThinkingEffort, cardDefaults
         case currentVersion, latestVersion, updateAvailable, updateChannel, canManageSettings
@@ -1452,6 +1498,7 @@ struct ServerConfigInfo: Decodable {
         defaultProvider = try? container.decode(String.self, forKey: .defaultProvider)
         defaultSessionKind = try? container.decode(String.self, forKey: .defaultSessionKind)
         defaultTaskWorktree = try? container.decode(Bool.self, forKey: .defaultTaskWorktree)
+        defaultEngine = try? container.decode(String.self, forKey: .defaultEngine)
         defaultMode = try? container.decode(String.self, forKey: .defaultMode)
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
         defaultCodexModel = try? container.decode(String.self, forKey: .defaultCodexModel)

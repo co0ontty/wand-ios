@@ -9,6 +9,7 @@ enum ComposerMetrics {
     static let actionSpacing: CGFloat = 0
     /// 与 Android 展开态输入框保持同一行数/高度预算。
     static let expandedInputMaxHeight: CGFloat = 132
+    static let voiceCancelDistance: CGFloat = 60
 }
 
 enum ComposerSendPhase: Equatable {
@@ -97,6 +98,82 @@ struct NativeComposerActionButton: View {
     }
 }
 
+/// Shared hold-to-talk control. Keyboard/speech callbacks remain bound to the starting draft revision.
+struct ComposerVoiceControl: View {
+    @ObservedObject var draft: ComposerDraftState
+    @ObservedObject var speech: SpeechRecognizerService
+    var inputSurface = false
+    var onTap: (() -> Void)? = nil
+    var onPressChanged: (Bool, Bool) -> Void = { _, _ in }
+    let notice: (String) -> Void
+    @State private var work: DispatchWorkItem?
+    @State private var pressed = false
+    @State private var canceling = false
+    @State private var pointerMoved = false
+    @State private var attempted = false
+    @State private var revision = 0
+    @State private var lifecycle = 0
+    @Environment(\.accessibilityReduceMotion) private var reduced
+    var body: some View {
+        Group {
+            if inputSurface { Color.clear }
+            else {
+                ZStack {
+                    Image(systemName: "mic").opacity(pressed || speech.isRecording || speech.isProcessing ? 0 : 1)
+                    Image(systemName: "stop.circle").opacity(pressed || speech.isRecording || speech.isProcessing ? 1 : 0)
+                }.font(.body).frame(width: 44, height: 44)
+            }
+        }.contentShape(Rectangle())
+            .animation(reduced ? nil : WandMotion.stateSwap, value: pressed || speech.isRecording || speech.isProcessing)
+            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                if work == nil && !pressed && !pointerMoved && !attempted {
+                    let pending = DispatchWorkItem { work = nil; attempted = true; begin() }; work = pending
+                    DispatchQueue.main.asyncAfter(deadline: .now() + WandMotion.voiceHoldDelay, execute: pending)
+                }
+                if !pressed && abs(value.translation.width) + abs(value.translation.height) > 12 {
+                    work?.cancel(); work = nil; pointerMoved = true
+                }
+                if pressed {
+                    canceling = value.translation.height < -ComposerMetrics.voiceCancelDistance
+                    onPressChanged(true, canceling)
+                }
+            }.onEnded { _ in
+                attempted = false
+                if pointerMoved && !pressed { pointerMoved = false; return }
+                pointerMoved = false
+                if let work {
+                    work.cancel(); self.work = nil
+                    if let onTap { onTap() } else { notice("按住说话，上滑取消") }
+                    return
+                }
+                if pressed { finish(cancelled: canceling) }
+            })
+            .accessibilityElement().accessibilityAddTraits(.isButton).accessibilityLabel(inputSurface ? "发消息或按住说话" : "语音输入")
+            .accessibilityValue(canceling ? "松开取消" : speech.isProcessing ? "识别中" : speech.isRecording ? "正在录音" : "轻点打字，长按说话")
+            .accessibilityAction { if let onTap { onTap() } else if speech.isProcessing { finish(cancelled: true) } else if speech.isRecording { finish(cancelled: false) } else { begin() } }
+            .accessibilityAction(named: "语音输入") { if speech.isRecording { finish(cancelled: false) } else { begin() } }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                work?.cancel(); work = nil; pointerMoved = false; attempted = false
+                if pressed || speech.isRecording || speech.isProcessing { finish(cancelled: true) }
+            }
+            .onDisappear {
+                work?.cancel(); work = nil; pointerMoved = false; attempted = false
+                if pressed { speech.stop(cancelled: true) }
+                pressed = false; canceling = false; onPressChanged(false, false)
+            }
+    }
+    private func begin() {
+        revision = draft.textRevision; lifecycle = draft.lifecycleRevision; pressed = true; canceling = false
+        onPressChanged(true, false)
+        speech.start(api: draft.speechAPI) { notice($0); pressed = false; canceling = false; onPressChanged(false, false) }
+    }
+    private func finish(cancelled: Bool) {
+        pressed = false; canceling = false; onPressChanged(false, false)
+        let capturedRevision = revision, capturedLifecycle = lifecycle
+        speech.stop(cancelled: cancelled) { draft.appendVoice($0, ifUnchangedSince: capturedRevision, lifecycle: capturedLifecycle) }
+    }
+}
+
 struct ComposerInputHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
@@ -175,7 +252,12 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
 }
 
 func composerShouldExpand(focused: Bool, voiceMode: Bool, contentNeedsSpace: Bool = false) -> Bool {
-    focused || voiceMode || contentNeedsSpace
+    // Holding the idle input must not move the trigger by revealing a keyboard toolbar.
+    focused || contentNeedsSpace
+}
+
+func composerHoldToTalkEligible(text: String, focused: Bool, keyboardVisible: Bool) -> Bool {
+    text.isEmpty && !focused && !keyboardVisible
 }
 
 func appendingVoiceTranscript(_ transcript: String, to draft: String) -> String {
@@ -206,6 +288,9 @@ final class ComposerDraftState: ObservableObject {
     private(set) var active = true
     private(set) var retired = false
     private(set) var lifecycleRevision = 0
+    private var consumers = Set<UUID>()
+    func acquire(_ consumer: UUID) { consumers.insert(consumer); activate() }
+    func release(_ consumer: UUID) { consumers.remove(consumer); if consumers.isEmpty { deactivate() } }
     private var unconfirmedTextRevision: Int?
     private var unconfirmedAttachments: [String: Set<Int>] = [:]
     private var unconfirmedInputs = Set<String>()
@@ -213,6 +298,10 @@ final class ComposerDraftState: ObservableObject {
         didSet { if let unconfirmedInput { unconfirmedInputs.insert(unconfirmedInput) } }
     }
     func isUnconfirmed(_ input: String) -> Bool { unconfirmedInputs.contains(input) }
+    func resolveUnconfirmedInput() {
+        if let unconfirmedInput { unconfirmedInputs.remove(unconfirmedInput) }
+        unconfirmedInput = nil
+    }
     @Published private(set) var sendPhase = ComposerSendPhase.idle
     @Published private(set) var sendFeedback: String?
     private var sendFeedbackTask: Task<Void, Never>?
@@ -248,9 +337,12 @@ final class ComposerDraftState: ObservableObject {
     }
     private(set) var textRevision = 0
     let attachments: ComposerAttachmentController
+    private(set) var speechAPI: WandAPI
+    func bind(api: WandAPI) { speechAPI = api; attachments.bind(api: api) }
 
     init(sessionId: String, api: WandAPI, defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.speechAPI = api
         storageKey = "wand.composer.v1." + ServerProfiles.stableID(for: api.baseURL) + "." + sessionId
         attachments = ComposerAttachmentController(sessionId: sessionId, api: api)
         if let saved = defaults.data(forKey: storageKey),
@@ -396,6 +488,8 @@ final class ComposerAttachmentController: ObservableObject {
     }
 
     private let sessionId: String
+    /// IM attachment uploads prepare a real execution channel without changing the draft's stable identity.
+    var prepareUpload: (() async throws -> String)?
     private var api: WandAPI
     func bind(api: WandAPI) { self.api = api }
     private var showToast: (String) -> Void = { _ in }
@@ -466,6 +560,7 @@ final class ComposerAttachmentController: ObservableObject {
         }
         let selected = Array(urls.prefix(remaining))
         let uploadAPI = api
+        let prepare = prepareUpload
         generation += 1
         let requestGeneration = generation
         let pasteHandler = preferPtyPaste ? pasteIntoPty : nil
@@ -480,7 +575,9 @@ final class ComposerAttachmentController: ObservableObject {
                 }
             }
             do {
-                let uploaded = try await uploadAPI.uploadAttachments(id: sessionId, urls: selected)
+                let uploadSessionID = try await prepare?() ?? sessionId
+                guard active, generation == requestGeneration, !Task.isCancelled else { return }
+                let uploaded = try await uploadAPI.uploadAttachments(id: uploadSessionID, urls: selected)
                 guard active, generation == requestGeneration, !Task.isCancelled else { return }
                 if let pasteIntoPty = pasteHandler {
                     let imageCount = uploaded.filter { isClipboardImageMimeType($0.mimeType) }.count
@@ -515,7 +612,7 @@ final class SessionDraftStore {
         accessOrder.removeAll { $0 == key }
         accessOrder.append(key)
         if let draft = drafts[key] {
-            draft.attachments.bind(api: api)
+            draft.bind(api: api)
             return draft
         }
         let draft = ComposerDraftState(sessionId: sessionId, api: api)
@@ -671,7 +768,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         textView.backgroundColor = .clear
         textView.textColor = UIColor.label
         textView.tintColor = UIColor(Theme.brand)
-        textView.font = .systemFont(ofSize: 16)
+        textView.font = .preferredFont(forTextStyle: .body)
         textView.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
         textView.textContainer.lineFragmentPadding = 0
         textView.isScrollEnabled = false
@@ -889,7 +986,8 @@ final class ComposerUITextView: UITextView {
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
-        placeholderLabel.font = .systemFont(ofSize: 16)
+        placeholderLabel.font = .preferredFont(forTextStyle: .body)
+        placeholderLabel.adjustsFontForContentSizeCategory = true
         placeholderLabel.textColor = Theme.textPlaceholderUI
         placeholderLabel.numberOfLines = 1
         placeholderLabel.translatesAutoresizingMaskIntoConstraints = false

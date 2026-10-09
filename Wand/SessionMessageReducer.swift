@@ -21,7 +21,7 @@ private func jsonValueVolume(_ value: JSONValue) -> Int {
 private func contentBlockVolume(_ block: ContentBlock) -> Int {
     switch block {
     case .text(let text, _): return text.count
-    case .thinking(let thinking, _): return thinking.count
+    case .thinking(let thinking, _, _, _): return thinking.count
     case .toolUse(_, _, let description, let input, _):
         return (description?.count ?? 0)
             + input.reduce(0) { $0 + $1.key.count + jsonValueVolume($1.value) }
@@ -65,6 +65,9 @@ private func mergeToolMetadata(local: ContentBlock, incoming: ContentBlock, pref
                            images: incomingImages.isEmpty ? images : incomingImages,
                            subagent: incomingSubagent ?? subagent,
                            projection: mergingToolProjection(local: projection, incoming: incomingProjection))
+    case let (.thinking(text, subagent, occurredAt, lastActivityAt), .thinking(incomingText, incomingSubagent, incomingAt, incomingLast)):
+        return .thinking(thinking: preferIncomingBody ? incomingText : text, subagent: incomingSubagent ?? subagent,
+            occurredAt: occurredAt ?? incomingAt, lastActivityAt: [lastActivityAt, incomingLast].compactMap { $0 }.max())
     default: return preferIncomingBody ? incoming : local
     }
 }
@@ -78,7 +81,8 @@ private func mergeOverlappingTurns(
             content: incoming.content.enumerated().map { index, block in
                 guard local.content.indices.contains(index) else { return block }
                 return mergeToolMetadata(local: local.content[index], incoming: block, preferIncomingBody: true)
-            }, usage: incoming.usage, createdAt: incoming.createdAt, completedAt: incoming.completedAt)
+            }, usage: incoming.usage, createdAt: incoming.createdAt, completedAt: incoming.completedAt,
+            resourceSelection: mergingResourceNotice(previous: local, incoming: incoming))
         return mergeConversationTurnTimes(previous: local, incoming: enriched)
     }
     return ConversationTurn(
@@ -89,7 +93,8 @@ private func mergeOverlappingTurns(
         },
         usage: incoming.usage ?? local.usage,
         createdAt: incoming.createdAt ?? local.createdAt,
-        completedAt: incoming.completedAt ?? local.completedAt
+        completedAt: incoming.completedAt ?? local.completedAt,
+        resourceSelection: mergingResourceNotice(previous: local, incoming: incoming)
     )
 }
 
@@ -145,7 +150,8 @@ private func mergeLeadingAssistantTurn(
             content: blocks,
             usage: incoming.usage ?? local.usage,
             createdAt: incoming.createdAt ?? local.createdAt,
-            completedAt: incoming.completedAt ?? local.completedAt
+            completedAt: incoming.completedAt ?? local.completedAt,
+            resourceSelection: mergingResourceNotice(previous: local, incoming: incoming)
         ),
         blockOffset: mergedStart,
         blockTotal: max(localTotal, incomingTotal, mergedEnd)
@@ -158,13 +164,15 @@ func mergeConversationTurnTimes(
 ) -> ConversationTurn {
     let createdAt = incoming.createdAt ?? previous?.createdAt
     let completedAt = incoming.completedAt ?? previous?.completedAt
-    if createdAt == incoming.createdAt && completedAt == incoming.completedAt { return incoming }
+    let notice = mergingResourceNotice(previous: previous, incoming: incoming)
+    if createdAt == incoming.createdAt && completedAt == incoming.completedAt && notice == incoming.resourceSelection { return incoming }
     return ConversationTurn(
         role: incoming.role,
         content: incoming.content,
         usage: incoming.usage,
         createdAt: createdAt,
-        completedAt: completedAt
+        completedAt: completedAt,
+        resourceSelection: notice
     )
 }
 
@@ -175,7 +183,8 @@ func stampLiveTurnTime(_ turn: ConversationTurn, now: String = SessionTimeFormat
         content: turn.content,
         usage: turn.usage,
         createdAt: now,
-        completedAt: turn.completedAt
+        completedAt: turn.completedAt,
+        resourceSelection: turn.resourceSelection
     )
 }
 
@@ -207,7 +216,8 @@ func enrichConversationTimes(
             if completedAt == nil || completedAt?.isEmpty == true { completedAt = now }
             if createdAt == nil || createdAt?.isEmpty == true { createdAt = now }
         }
-        if createdAt == turn.createdAt && completedAt == turn.completedAt {
+        let notice = mergingResourceNotice(previous: prev, incoming: turn)
+        if createdAt == turn.createdAt && completedAt == turn.completedAt && notice == turn.resourceSelection {
             return turn
         }
         changed = true
@@ -216,7 +226,8 @@ func enrichConversationTimes(
             content: turn.content,
             usage: turn.usage,
             createdAt: createdAt,
-            completedAt: completedAt
+            completedAt: completedAt,
+            resourceSelection: notice
         )
     }
     return changed ? out : incoming
@@ -404,6 +415,7 @@ func toolPairedDisplayTurns(_ turns: [ConversationTurn]) -> [ConversationTurn] {
             return false
         }
         return ConversationTurn(role: resultOnlyUser ? "assistant" : turn.role, content: content,
-                                usage: turn.usage, createdAt: turn.createdAt, completedAt: turn.completedAt)
+                                usage: turn.usage, createdAt: turn.createdAt, completedAt: turn.completedAt,
+            resourceSelection: turn.resourceSelection)
     }
 }

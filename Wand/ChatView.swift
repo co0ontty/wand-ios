@@ -50,7 +50,7 @@ private struct ChatSessionIDEnvironmentKey: EnvironmentKey {
     static let defaultValue = ""
 }
 
-private extension EnvironmentValues {
+extension EnvironmentValues {
     var chatAPI: WandAPI? {
         get { self[ChatAPIEnvironmentKey.self] }
         set { self[ChatAPIEnvironmentKey.self] = newValue }
@@ -85,6 +85,9 @@ struct ChatView: View {
     @State private var voiceDraftLifecycle = 0
     private var draft: String { composerDraft.text }
     @State private var showQuickCommit = false
+    @State private var showDirectoryPicker = false
+    @State private var showPiResources = false
+    @StateObject private var sessionFiles: SessionFilesStore
     @State private var scrollMode: ChatScrollMode = .stickToBottom
     @State private var voicePressed = false
     @State private var voiceCanceling = false
@@ -126,13 +129,14 @@ struct ChatView: View {
     @State private var sawResponding = false
 
     init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true,
-         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil) {
+         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil, sharedStore: ChatStore? = nil) {
         self.sessionId = sessionId
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
         self.onCompletionVisible = onCompletionVisible
-        let chatStore = ChatStore(sessionId: sessionId, api: api)
+        let chatStore = sharedStore ?? ChatStore(sessionId: sessionId, api: api)
         _store = StateObject(wrappedValue: chatStore)
+        _sessionFiles = StateObject(wrappedValue: SessionFilesStore(service: api))
         _composerDraft = StateObject(wrappedValue: chatStore.composerDraft)
         _attachments = StateObject(wrappedValue: chatStore.composerDraft.attachments)
     }
@@ -155,7 +159,7 @@ struct ChatView: View {
                             isResponding: store.isResponding,
                             completedClock: completedClock,
                             baseURL: store.api.baseURL,
-                            askSelections: store.askUserSelections,
+                            askSelections: store.displayedAskSelections,
                             onAskToggle: { toolUseId, qIdx, optIdx, multi in
                                 store.toggleAskOption(
                                     toolUseId: toolUseId, questionIndex: qIdx,
@@ -173,7 +177,7 @@ struct ChatView: View {
 
                     bottomBar
                         .padding(.bottom, root.safeAreaInsets.bottom)
-                        .animation(.easeOut(duration: 0.2), value: keyboard.lift)
+                        .animation(WandMotion.scroll, value: keyboard.lift)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -193,6 +197,16 @@ struct ChatView: View {
                     navigationStatus
                 }
                 .sharedBackgroundVisibility(.hidden)
+            }
+            if store.snapshot?.provider == "pi", store.isStructured {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { showPiResources = true } label: { Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44) }.accessibilityLabel("工具与资源")
+                }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { sessionFiles.show(cwd: store.snapshot?.cwd ?? "") } label: {
+                    Image(systemName: "folder").frame(width: 44, height: 44)
+                }.disabled(store.snapshot?.cwd?.isEmpty != false).accessibilityLabel("会话文件")
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 GitChangesToolbarButton(status: gitStatus, phase: quickCommitFeedback.phase) {
@@ -215,6 +229,13 @@ struct ChatView: View {
                 .presentationDetents([.height(620), .large])
                 .presentationDragIndicator(.visible)
         }
+        .sheet(isPresented: Binding(get: { sessionFiles.open }, set: { if !$0 { sessionFiles.requestClose() } })) {
+            SessionFilesView(store: sessionFiles, api: api)
+        }
+        .sheet(isPresented: $showDirectoryPicker) {
+            BlankSessionDirectoryPicker(store: store) { showDirectoryPicker = false }
+        }
+        .sheet(isPresented: $showPiResources) { PiResourcesView(sessionID: sessionId, api: api) }
         .fileImporter(
             isPresented: $attachments.showFileImporter,
             allowedContentTypes: [.item],
@@ -233,11 +254,13 @@ struct ChatView: View {
             ServerFilePreviewView(item: item)
         }
         .sheet(isPresented: $showProviderPicker) {
-            SearchableChoiceSheet(title: "切换 CLI 工具", sections: [
-                SearchableChoiceSection(id: "provider", items: WandProvider.allCases.map {
+            SearchableChoiceSheet(title: "切换执行工具", sections: [
+                SearchableChoiceSection(id: "provider", items: WandAgentTool.allCases.map {
                     SearchableChoiceItem(id: $0.rawValue, label: $0.title)
-                }, selectedId: store.snapshot?.provider ?? "")
-            ]) { _, provider in store.switchProvider(provider) }
+                }, selectedId: store.snapshot?.agentTool.rawValue ?? "")
+            ]) { _, id in
+                if let tool = WandAgentTool(rawValue: id) { store.switchProvider(tool.provider.rawValue, engine: tool.engine) }
+            }
             .presentationDetents([.medium, .large])
         }
         .sheet(item: $modelPicker) { picker in
@@ -269,24 +292,23 @@ struct ChatView: View {
         }
         .onChange(of: completionVisibilityToken) { _, _ in publishCompletionVisibility() }
         .onAppear {
+            if !viewVisible { store.attachView() }
             viewVisible = true
-            composerDraft.activate()
-            attachments.setToastHandler { [weak store] in store?.toast = $0 }
-            store.start()
+            let activeStore = store
+            attachments.setToastHandler { [weak activeStore] in activeStore?.toast = $0 }
             refreshGitStatus()
         }
         .onChange(of: showQuickCommit) { _, showing in
             if !showing { refreshGitStatus() }
         }
         .onDisappear {
+            if viewVisible { store.detachView() }
             viewVisible = false
             voiceHoldWork?.cancel()
             voiceHoldWork = nil
             speech.stop(cancelled: true)
-            composerDraft.deactivate()
             voicePressed = false
             voiceCanceling = false
-            store.shutdown()
             serverFileLinks.cancel()
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -295,18 +317,18 @@ struct ChatView: View {
             else if newPhase == .background { store.handleEnterBackground() }
         }
         .overlay(alignment: .top) { connectionBanner }
-        .animation(.easeInOut(duration: 0.2), value: store.connected)
+        .animation(WandMotion.disclosure, value: store.connected)
         .overlay {
             if serverFileLinks.isDownloading {
                 HStack(spacing: 10) {
                     Label("正在从服务器下载…", systemImage: "arrow.down.circle")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.wand(size: 13, weight: .medium))
                         .foregroundColor(Theme.textPrimary)
                     Button {
                         serverFileLinks.cancel()
                     } label: {
                         Text("取消")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.wand(size: 13, weight: .semibold))
                             .foregroundColor(Theme.brand)
                     }
                     .accessibilityLabel("取消下载")
@@ -438,7 +460,7 @@ struct ChatView: View {
                 Image(systemName: "wifi.slash")
                     .font(.system(size: 12, weight: .semibold))
                 Text("连接已断开，正在重连…")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.wand(size: 13, weight: .medium))
             }
             .foregroundColor(.white)
             .frame(maxWidth: .infinity)
@@ -462,7 +484,7 @@ struct ChatView: View {
                                 if store.loadingEarlier {
                                     ProgressView().controlSize(.small).tint(Theme.brand)
                                     Text("正在加载更早消息…")
-                                        .font(.system(size: 12, weight: .medium))
+                                        .font(.wand(size: 12, weight: .medium))
                                         .foregroundColor(Theme.textSecondary)
                                 }
                                 Spacer()
@@ -529,7 +551,7 @@ struct ChatView: View {
                             scrollMode = .manual
                             let targetID = scrubberScrollID(for: index)
                             if animate {
-                                withAnimation(.easeOut(duration: 0.18)) {
+                                withAnimation(WandMotion.scroll) {
                                     proxy.scrollTo(targetID, anchor: .top)
                                 }
                             } else {
@@ -628,17 +650,7 @@ struct ChatView: View {
             let collapsed = collapsedAssistantTurns.contains(absoluteTurn)
             VStack(alignment: .leading, spacing: 4) {
                 if store.messages.indices.contains(turnIndex) {
-                    HStack(spacing: 6) {
-                        if let id = store.snapshot?.employeeId {
-                            ContactAvatar(id: id, avatar: store.displayEmployeeAvatar ?? "",
-                                          provider: store.snapshot?.provider, size: 24)
-                        }
-                        Text(store.displayEmployeeName ?? store.snapshot?.providerLabel ?? "助手")
-                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.textSecondary)
-                        Spacer(minLength: 0)
-                        ChatMessageTime(clock: SessionTimeFormatting.conversationTurnClock(store.messages[turnIndex]),
-                                        alignEnd: false)
-                    }
+                    ChatMessageTime(clock: SessionTimeFormatting.conversationTurnClock(store.messages[turnIndex]), alignEnd: false)
                 }
                 AssistantReplyDisclosure(
                     preview: preview,
@@ -659,7 +671,7 @@ struct ChatView: View {
                 isLastTurn: index == store.messages.count - 1,
                 isResponding: store.isResponding,
                 compactUser: false,
-                askSelections: store.askUserSelections,
+                askSelections: store.displayedAskSelections,
                 onAskToggle: { toolUseId, qIdx, optIdx, multi in
                     store.toggleAskOption(
                         toolUseId: toolUseId, questionIndex: qIdx,
@@ -679,7 +691,7 @@ struct ChatView: View {
                 baseURL: store.api.baseURL,
                 isLastTurn: turnIndex == store.messages.count - 1,
                 isResponding: store.isResponding,
-                askSelections: store.askUserSelections,
+                askSelections: store.displayedAskSelections,
                 onAskToggle: { toolUseId, qIdx, optIdx, multi in
                     store.toggleAskOption(
                         toolUseId: toolUseId, questionIndex: qIdx,
@@ -707,7 +719,7 @@ struct ChatView: View {
                 baseURL: store.api.baseURL,
                 isLastTurn: turnIndex == store.messages.count - 1,
                 isResponding: store.isResponding,
-                askSelections: store.askUserSelections,
+                askSelections: store.displayedAskSelections,
                 onAskToggle: { toolUseId, qIdx, optIdx, multi in
                     store.toggleAskOption(
                         toolUseId: toolUseId, questionIndex: qIdx,
@@ -720,6 +732,8 @@ struct ChatView: View {
                     store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
                 }
             )
+        case .resourceSelection(_, let notice):
+            ResourceSelectionNoticeView(notice: notice)
         case .usageSummary(_, let usage, let isLive):
             UsageSummaryRow(usage: usage, isLive: isLive)
         case .historySummary(let stats, let boundary):
@@ -794,7 +808,8 @@ struct ChatView: View {
                 groupExplorationTurns(toolPairedDisplayTurns(store.messages)),
                 liveTurnIndex: store.isResponding ? latestAssistantTurnIndex : nil
             ),
-            latestTurnIndex: latestAssistantTurnIndex ?? -1
+            latestTurnIndex: latestAssistantTurnIndex ?? -1,
+            running: store.isResponding
         )
         return base
     }
@@ -855,7 +870,7 @@ struct ChatView: View {
                 // 等新一轮 LazyVStack 布局提交，不用固定延时和慢设备/分页竞争。
                 await Task.yield()
                 guard expandedHistoryBoundaryAbsolute == absoluteBoundary else { return }
-                withAnimation(.easeOut(duration: 0.22)) {
+                withAnimation(WandMotion.scroll) {
                     proxy.scrollTo(anchorID, anchor: .top)
                 }
             }
@@ -880,7 +895,7 @@ struct ChatView: View {
         }
         let performScroll = {
             if animated && !reduceMotion {
-                withAnimation(.easeOut(duration: 0.22)) { scroll() }
+                withAnimation(WandMotion.scroll) { scroll() }
             } else {
                 scroll()
             }
@@ -909,25 +924,19 @@ struct ChatView: View {
             Spacer(minLength: 12)
             Button { showProviderPicker = true } label: {
                 ZStack {
-                    if let employeeId = store.snapshot?.employeeId {
-                        ContactAvatar(id: employeeId, avatar: store.displayEmployeeAvatar ?? "",
-                                      provider: store.snapshot?.provider, size: 36)
-                            .opacity(store.providerSwitching ? 0 : 1)
-                    } else {
-                        BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
-                            .opacity(store.providerSwitching ? 0 : 1)
-                    }
+                    BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
+                        .opacity(store.providerSwitching ? 0 : 1)
                     ProgressView().tint(tint).opacity(store.providerSwitching ? 1 : 0)
                 }.frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
             .disabled(!store.canSwitchProvider)
             .accessibilityLabel("切换 CLI 工具")
-            Text("开始与 \(store.displayEmployeeName ?? store.snapshot?.providerLabel ?? provider.title) 的对话")
-                .font(.system(size: 17, weight: .semibold))
+            Text("开始与 \(store.snapshot?.providerLabel ?? provider.title) 的对话")
+                .font(.wand(size: 17, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
             Text("输入消息，让它帮你完成任务")
-                .font(.system(size: 13))
+                .font(.wand(size: 13))
                 .foregroundColor(Theme.textSecondary)
             launchContextControls
             Spacer(minLength: 12)
@@ -949,6 +958,12 @@ struct ChatView: View {
                 }
             }
             .frame(maxWidth: 340)
+            if store.canChangeDirectory {
+                Button { showDirectoryPicker = true } label: {
+                    Label(store.snapshot?.cwd ?? "选择运行目录", systemImage: "folder")
+                        .font(.subheadline).lineLimit(1).truncationMode(.middle).frame(minHeight: 44)
+                }.accessibilityLabel("切换运行目录")
+            }
         }
     }
 
@@ -1005,10 +1020,10 @@ struct ChatView: View {
                 .foregroundColor(Theme.brand)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.wand(size: 9, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
                 Text(value)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.wand(size: 12, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
             }
@@ -1107,14 +1122,9 @@ struct ChatView: View {
     /// 顶栏身份：logo 放在标题左侧，不要再塞进 navigationBarLeading。
     /// iOS 26 圆形返回键会占掉 leading 区域，badge / 路径叠在返回键下面会变成浅色残影。
     @ViewBuilder private var providerBadge: some View {
-        if let id = store.snapshot?.employeeId {
-            ContactAvatar(id: id, avatar: store.displayEmployeeAvatar ?? "",
-                          provider: store.snapshot?.provider, size: 26)
-        } else {
-            BrandLogo(provider: store.snapshot?.provider, color: providerTint.opacity(0.94))
-                .frame(width: 18, height: 18).frame(width: 26, height: 26)
-                .accessibilityLabel(store.snapshot?.providerLabel ?? "CLI")
-        }
+        BrandLogo(provider: store.snapshot?.provider, color: providerTint.opacity(0.94))
+            .frame(width: 18, height: 18).frame(width: 26, height: 26)
+            .accessibilityLabel(store.snapshot?.providerLabel ?? "执行工具")
     }
 
     private var navigationStatus: some View {
@@ -1122,13 +1132,13 @@ struct ChatView: View {
             providerBadge
             VStack(alignment: .leading, spacing: 1) {
                 Text(navigationStatusTitle)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.wand(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .topicTitleRhythm(store.titleGenerating)
                 if let cwd = store.snapshot?.cwd, !cwd.isEmpty {
-                    WandPathRevealText(path: cwd, fontSize: 10, color: Theme.textSecondary, staggerWindow: 0)
+                    WandPathRevealText(path: cwd, fontSize: 10, color: Theme.textSecondary)
                 }
             }
             .frame(maxWidth: 220, alignment: .leading)
@@ -1177,7 +1187,7 @@ struct ChatView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 0) {
-            if voicePressed || speech.isRecording {
+            if voicePressed || speech.isRecording || speech.isProcessing {
                 voiceBubble
                     .padding(.horizontal, 12)
                     .padding(.bottom, 6)
@@ -1215,7 +1225,7 @@ struct ChatView: View {
         }
         // 手动键盘避让：观察器只返回键盘在底部安全区上方的高度。
         .padding(.bottom, keyboard.lift)
-        .animation(.easeInOut(duration: 0.2), value: store.pendingEscalation)
+        .animation(WandMotion.disclosure, value: store.pendingEscalation)
     }
 
     /// 聚焦或正在按住语音时展开；失焦后草稿和附件保留。
@@ -1473,7 +1483,7 @@ struct ChatView: View {
                 .font(.system(size: 11, weight: .semibold))
             if showsText {
                 Text(text)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.wand(size: 12, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: maxTextWidth)
@@ -1570,6 +1580,12 @@ struct ChatView: View {
                 draftNeedsExpanded = !draft.isEmpty && height > 36
             }
         )
+        .overlay {
+            if composerHoldToTalkEligible(text: draft, focused: inputFocused, keyboardVisible: keyboard.isVisible) {
+                ComposerVoiceControl(draft: composerDraft, speech: speech, inputSurface: true, onTap: { inputFocused = true },
+                    onPressChanged: { voicePressed = $0; voiceCanceling = $1 }) { store.toast = $0 }
+            }
+        }
         .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
     }
 
@@ -1577,6 +1593,7 @@ struct ChatView: View {
         if voicePressed {
             return voiceCanceling ? "松开手指，取消输入" : "松开结束 · 上滑取消"
         }
+        if composerHoldToTalkEligible(text: draft, focused: inputFocused, keyboardVisible: keyboard.isVisible) { return "发消息或按住说话" }
         return "输入消息"
     }
 
@@ -1662,7 +1679,7 @@ struct ChatView: View {
         voiceDraftLifecycle = composerDraft.lifecycleRevision
         voicePressed = true
         voiceCanceling = false
-        speech.start { message in
+        speech.start(api: api) { message in
             store.toast = message
             voicePressed = false
             voiceCanceling = false
@@ -1678,8 +1695,8 @@ struct ChatView: View {
                     .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
                 Text(voiceCanceling
                      ? "松开手指，取消输入"
-                     : (speech.transcript.isEmpty ? "正在聆听…" : speech.transcript))
-                    .font(.system(size: 14))
+                     : (speech.isProcessing ? "服务端识别中…" : speech.transcript.isEmpty ? "正在聆听…" : speech.transcript))
+                    .font(.wand(size: 14))
                     .foregroundColor(
                         voiceCanceling
                             ? Theme.danger
@@ -1690,7 +1707,7 @@ struct ChatView: View {
             }
             if !voiceCanceling {
                 HStack(spacing: 6) {
-                    Text(speech.usingOnDevice ? "端侧识别" : "在线识别")
+                    Text(speech.usingServer ? "服务端识别" : "端侧识别")
                         .padding(.horizontal, 6)
                         .padding(.vertical, 1)
                         .background(Capsule().fill(Theme.brand.opacity(0.12)))
@@ -1698,7 +1715,7 @@ struct ChatView: View {
                     Text("松开填入输入框 · 上滑取消")
                         .foregroundColor(Theme.textSecondary)
                 }
-                .font(.system(size: 11, weight: .medium))
+                .font(.wand(size: 11, weight: .medium))
             }
         }
         .padding(12)
@@ -1719,7 +1736,7 @@ struct ChatView: View {
     @ViewBuilder private var toastView: some View {
         if let toast = store.toast {
             Text(toast)
-                .font(.system(size: 13, weight: .medium))
+                .font(.wand(size: 13, weight: .medium))
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
@@ -1800,7 +1817,7 @@ private struct DismissKeyboardOnDrag: ViewModifier {
 // MARK: - 单条消息
 
 /// 工具调用与结果在渲染层配成一张卡片（对齐 Web 端 buildToolResultMap / Android pairToolBlocks）。
-private enum DisplayItem {
+enum DisplayItem {
     case plain(ContentBlock)
     case tool(
         id: String, name: String, description: String?,
@@ -1819,6 +1836,7 @@ private enum MessageDisplayItem {
     case activityGroup(turnIndex: Int, group: ActivityGroup, id: String)
     /// 当前 assistant turn 的 token / cost 摘要。
     case usageSummary(turnIndex: Int, usage: TurnUsage?, isLive: Bool)
+    case resourceSelection(turnIndex: Int, notice: ResourceSelectionNotice)
     /// 历史折叠摘要卡：折叠"最后一条用户消息"之前的全部历史，boundary = 该用户消息下标。
     case historySummary(stats: HistoryStats, boundary: Int)
 }
@@ -1885,10 +1903,12 @@ private func messageDisplayIdentity(_ item: MessageDisplayItem, turnOffset: Int)
     case .assistantItem(_, let displayItem):
         return "assistant:\(absoluteTurn):\(displayItemIdentity(displayItem))"
     case .explorationGroup(let tools, _):
-        let keys = tools.map { !$0.id.isEmpty ? $0.id : ($0.result?.toolUseId ?? $0.name) }
-        return "exploration:\(keys.joined(separator: "|"))"
+        let first = tools.first.map { !$0.id.isEmpty ? $0.id : ($0.result?.toolUseId ?? $0.name) } ?? "empty"
+        return "exploration:\(first)"
     case .activityGroup(_, let group, _):
-        return "activity:\(absoluteTurn):\(group.items.map(displayItemIdentity).joined(separator: "|"))"
+        return "activity:\(absoluteTurn):\(group.items.first.map(displayItemIdentity) ?? "empty")"
+    case .resourceSelection:
+        return "resources:\(absoluteTurn)"
     case .usageSummary:
         return "usage:\(absoluteTurn)"
     case .historySummary:
@@ -1904,7 +1924,7 @@ func historySummaryAnchorID(localBoundary: Int, loadedOffset: Int) -> String {
     "history-summary-\(absoluteTurnIndex(localIndex: localBoundary, loadedOffset: loadedOffset))"
 }
 
-private func displayItemIdentity(_ item: DisplayItem) -> String {
+func displayItemIdentity(_ item: DisplayItem) -> String {
     switch item {
     case .tool(let id, let name, _, _, _, let result):
         let key = !id.isEmpty ? id : (result?.toolUseId ?? "")
@@ -1915,17 +1935,17 @@ private func displayItemIdentity(_ item: DisplayItem) -> String {
             return id.isEmpty ? "tool-use:\(name)" : "tool-use:\(id)"
         case .toolResult(let id, _, _, _, _, _, _):
             return id.isEmpty ? "tool-result" : "tool-result:\(id)"
-        case .text(let text, _):
-            return "text:\(text.hashValue)"
-        case .thinking(let text, _):
-            return "thinking:\(text.hashValue)"
-        case .unknown(let type, let payload):
-            return "unknown:\(type):\(payload.hashValue)"
+        case .text:
+            return "text"
+        case .thinking:
+            return "thinking"
+        case .unknown(let type, _):
+            return "unknown:\(type)"
         }
     }
 }
 
-private struct ActivityGroup {
+struct ActivityGroup {
     let latest: String
     let meta: String
     let count: Int
@@ -1961,6 +1981,7 @@ private func itemTurnIndex(_ item: MessageDisplayItem) -> Int {
     case .assistantItem(let i, _): return i
     case .explorationGroup(_, let i): return i
     case .activityGroup(let i, _, _): return i
+    case .resourceSelection(let i, _): return i
     case .usageSummary(let i, _, _): return i
     case .historySummary(_, let b): return b
     }
@@ -1988,7 +2009,7 @@ func computeHistoryStats(turns: [ConversationTurn], boundary: Int) -> HistorySta
             case .toolResult(_, _, let isError, _, _, let subagent, _):
                 if isError { errors += 1 }
                 if let tid = subagent?.taskId, !tid.isEmpty { agentIds.insert(tid) }
-            case .text(_, let subagent), .thinking(_, let subagent):
+            case .text(_, let subagent), .thinking(_, let subagent, _, _):
                 if let tid = subagent?.taskId, !tid.isEmpty { agentIds.insert(tid) }
             case .unknown:
                 break
@@ -2022,7 +2043,7 @@ private func groupExplorationTurns(_ turns: [ConversationTurn]) -> [MessageDispl
     }
 
     for (index, turn) in turns.enumerated() {
-        if let tools = explorationToolsOnly(in: turn) {
+        if turn.resourceSelection == nil, let tools = explorationToolsOnly(in: turn) {
             pendingTools.append(contentsOf: tools)
             pendingLastIndex = index
         } else {
@@ -2046,6 +2067,7 @@ private func flattenAssistantTurns(
     var out: [MessageDisplayItem] = []
     for item in items {
         if case .turn(let index, let turn) = item, turn.role == "assistant" {
+            if let notice = turn.resourceSelection { out.append(.resourceSelection(turnIndex: index, notice: notice)) }
             let parentBlocks = parentTranscriptBlocks(turn.content)
             if !parentBlocks.isEmpty {
                 out.append(.assistantHeader(
@@ -2071,7 +2093,8 @@ private func flattenAssistantTurns(
 
 private func collapseActivityItems(
     _ items: [MessageDisplayItem],
-    latestTurnIndex: Int
+    latestTurnIndex: Int,
+    running: Bool = false
 ) -> [MessageDisplayItem] {
     var out: [MessageDisplayItem] = []
     var pending: [(turnIndex: Int, item: DisplayItem)] = []
@@ -2082,7 +2105,7 @@ private func collapseActivityItems(
         let turnIndex = pending.last?.turnIndex ?? -1
         let displayItems = pending.map(\.item)
         let summary = summarizeActivityItems(displayItems)
-        if summary.count > 0 {
+        if summary.count > 0 || (running && turnIndex == latestTurnIndex) {
             out.append(.activityGroup(
                 turnIndex: turnIndex,
                 group: ActivityGroup(
@@ -2098,9 +2121,12 @@ private func collapseActivityItems(
         pending.removeAll(keepingCapacity: true)
     }
 
-    for item in items {
+    for (position, item) in items.enumerated() {
         if case .assistantItem(let turnIndex, let displayItem) = item {
-            if shouldSkipActivityItem(displayItem) {
+            let keepLiveThinking = running && turnIndex == latestTurnIndex && position == items.count - 1 && {
+                if case .plain(.thinking) = displayItem { return true }; return false
+            }()
+            if shouldSkipActivityItem(displayItem) && !keepLiveThinking {
                 continue
             }
             if isCollapsibleActivityItem(displayItem) {
@@ -2137,7 +2163,7 @@ private func collapseActivityItems(
 }
 
 private func shouldSkipActivityItem(_ item: DisplayItem) -> Bool {
-    if case .plain(.thinking(let text, _)) = item {
+    if case .plain(.thinking(let text, _, _, _)) = item {
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     guard case .tool(let id, _, _, _, let subagent, _) = item else { return false }
@@ -2215,7 +2241,7 @@ private func summarizeActivityItems(_ items: [DisplayItem]) -> ActivityRunSummar
 
     for item in items {
         switch item {
-        case .plain(.thinking(let thinking, _)):
+        case .plain(.thinking(let thinking, _, _, _)):
             let trimmed = thinking.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             counts["thinking", default: 0] += 1
@@ -2267,7 +2293,7 @@ private func activityThinkingLabel(_ thinking: String) -> String {
     return text.isEmpty ? "深度思考" : text
 }
 
-private func activityToolLabel(name: String, input: [String: JSONValue]) -> String {
+func activityToolLabel(name: String, input: [String: JSONValue]) -> String {
     let command = input["command"]?.stringValue ?? input["cmd"]?.stringValue ?? ""
     let path = input["file_path"]?.stringValue ?? input["path"]?.stringValue ?? ""
     let query = input["pattern"]?.stringValue ?? input["query"]?.stringValue ?? ""
@@ -2394,7 +2420,7 @@ private func activityKind(_ name: String) -> String {
     return "other"
 }
 
-private func activityToolSummary(description: String?, input: [String: JSONValue]) -> String {
+func activityToolSummary(description: String?, input: [String: JSONValue]) -> String {
     if let description, !description.isEmpty { return description }
     for key in ["command", "file_path", "path", "pattern", "query", "url", "prompt", "description"] {
         if let value = input[key] {
@@ -2605,6 +2631,56 @@ private func assistantReplyPreview(_ blocks: [ContentBlock]) -> String {
     return toolCount > 0 ? "\(toolCount) 个工具调用" : "助手回复"
 }
 
+/// Shared renderer for IM and execution pages. Execution protocol and permission state remain in ChatStore.
+struct ResourceSelectionNoticeView: View {
+    let notice: ResourceSelectionNotice
+    var body: some View {
+        Text(notice.label).font(.footnote).foregroundStyle(Theme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("chat.resource-selection-notice")
+            .accessibilityValue(notice.status ?? "")
+    }
+}
+
+struct SessionMessageBody: View {
+    let turn: ConversationTurn
+    let api: WandAPI
+    let sessionID: String
+    var store: ChatStore? = nil
+    var body: some View {
+        TurnView(turn: turn, baseURL: api.baseURL,
+            askSelections: store?.displayedAskSelections ?? [:],
+            onAskToggle: { store?.toggleAskOption(toolUseId: $0, questionIndex: $1, optionIndex: $2, multiSelect: $3) },
+            onAskSubmit: { store?.submitAskUser(toolUseId: $0, answerText: $1) })
+            .environment(\.chatAPI, api)
+            .environment(\.chatSessionID, sessionID)
+            .environment(\.chatToolContentDidLoad, { store?.applyLoadedToolContent($0) })
+    }
+}
+
+struct SessionProtocolPanel: View {
+    @ObservedObject var store: ChatStore
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if store.pendingEscalation != nil || store.legacyPermissionPrompt != nil {
+                PermissionCard(escalation: store.pendingEscalation, legacy: store.legacyPermissionPrompt,
+                    onResolve: store.resolvePermission)
+            }
+            ForEach(identifiedDisplayItems(pairToolBlocks(store.messages.flatMap(\.content)))) { row in
+                if case .tool(let id, _, _, let input, _, let result) = row.item {
+                    let questions = AskUserQuestion.parse(input: input)
+                    if !questions.isEmpty && result == nil {
+                        AskUserQuestionCard(toolUseId: id, questions: questions, result: nil,
+                            selection: store.displayedAskSelections[id] ?? AskUserSelectionState(),
+                            onToggle: { store.toggleAskOption(toolUseId: id, questionIndex: $0, optionIndex: $1, multiSelect: $2) },
+                            onSubmit: { store.submitAskUser(toolUseId: id, answerText: $0) })
+                    }
+                }
+            }
+        }
+    }
+}
+
 private struct TurnView: View {
     let turn: ConversationTurn
     var baseURL: URL? = nil
@@ -2621,7 +2697,10 @@ private struct TurnView: View {
         if turn.role == "user" {
             userBubble
         } else {
-            assistantBlocks
+            VStack(alignment: .leading, spacing: 8) {
+                if let notice = turn.resourceSelection { ResourceSelectionNoticeView(notice: notice) }
+                assistantBlocks
+            }
         }
     }
 
@@ -2655,20 +2734,20 @@ private struct TurnView: View {
                     Spacer(minLength: 48)
                     VStack(alignment: .trailing, spacing: 5) {
                         Text(parsed.body)
-                            .font(.system(size: 16))
-                            .foregroundColor(.white)
+                            .font(.body)
+                            .foregroundColor(Theme.onBrand)
                             .lineLimit(collapsed ? 2 : nil)
                             .truncationMode(.tail)
                             .textSelection(.enabled)
                         if canCompact {
                             Button {
-                                withAnimation(.easeInOut(duration: 0.16)) {
+                                withAnimation(WandMotion.disclosure) {
                                     userExpanded.toggle()
                                 }
                             } label: {
                                 Text(collapsed ? "展开" : "收起")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.86))
+                                    .font(.wand(size: 12, weight: .semibold))
+                                    .foregroundColor(Theme.onBrand.opacity(0.86))
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(collapsed ? "展开用户消息" : "收起用户消息")
@@ -2753,7 +2832,7 @@ private struct UsageSummaryRow: View {
                     .foregroundColor(Theme.textSecondary)
                 if chips.isEmpty {
                     Text("正在统计用量…")
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.wand(size: 11, design: .monospaced))
                         .foregroundColor(Theme.textSecondary)
                 } else {
                     ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
@@ -2762,7 +2841,7 @@ private struct UsageSummaryRow: View {
                             Text(chip.1)
                                 .fontWeight(.semibold)
                         }
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.wand(size: 11, design: .monospaced))
                         .foregroundColor(Theme.textSecondary)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 4)
@@ -2820,7 +2899,7 @@ private struct LiveTurnStatusRow: View {
                 Image(systemName: "chart.bar.xaxis")
                     .font(.system(size: 11, weight: .semibold))
                 Text(usageText)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.wand(size: 11, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -2832,7 +2911,7 @@ private struct LiveTurnStatusRow: View {
                     .controlSize(.small)
                     .tint(Theme.brand)
                 Text(activityText)
-                    .font(.system(size: 13))
+                    .font(.wand(size: 13))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -2871,286 +2950,23 @@ private struct ActivityFoldCompactKey: EnvironmentKey {
     static let defaultValue = false
 }
 
-private struct ActivityWindowTailKey: EnvironmentKey {
-    static let defaultValue: Int? = nil
-}
-
-private extension EnvironmentValues {
+extension EnvironmentValues {
     var activityFoldCompact: Bool {
         get { self[ActivityFoldCompactKey.self] }
         set { self[ActivityFoldCompactKey.self] = newValue }
     }
-
-    /// 活动滚动窗口里「最新一条」在 group.items 里的下标；不在窗口里时为 nil。
-    /// 窗口按「只有最新一条展开」呈现：新活动一到，更早的思考 / 工具调用都退化成
-    /// 一行摘要，窗口始终停在最新那一条的真实内容上（对齐 Web 端 activityTailIndex）。
-    var activityWindowTail: Int? {
-        get { self[ActivityWindowTailKey.self] }
-        set { self[ActivityWindowTailKey.self] = newValue }
-    }
 }
 
 /// 活动滚动窗口的固定高度：活动再多也不撑爆对话流，内部自己滚。
-private let activityWindowHeight: CGFloat = 220
+let activityWindowHeight: CGFloat = 240
 
 /// 离底超过这个距离就算「在读历史」：新的活动不再把用户拽回尾部。
-private let activityTailPin: CGFloat = 24
+let activityTailPin: CGFloat = 24
 
 /// 活动窗口展开 / 收起：240ms 强调曲线（对齐 WandMotion.tweenNormal / Web 端）；
 /// 减弱动效时瞬切。
-private func activityWindowAnimation(_ reduceMotion: Bool) -> Animation? {
-    reduceMotion ? nil : .timingCurve(0.16, 1, 0.3, 1, duration: 0.24)
-}
-
-private struct ActivityScrollMetrics: Equatable {
-    var contentHeight: CGFloat = 0
-    var viewportHeight: CGFloat = 0
-    var offset: CGFloat = 0
-}
-
-private struct ActivityFoldCard: View {
-    let group: ActivityGroup
-    var baseURL: URL? = nil
-    var isLastTurn = false
-    var isResponding = false
-    var askSelections: [String: AskUserSelectionState] = [:]
-    var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
-    var onAskSubmit: (String, String) -> Void = { _, _ in }
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// 滚动窗口只开最新的一段：新的活动一出现，这一段就收回状态条。
-    @State private var expanded: Bool
-    /// 用户手动收放过就不再被自动状态覆盖。
-    @State private var userToggled = false
-    @State private var pinned = true
-    @State private var canScrollUp = false
-    @State private var canScrollDown = false
-    @State private var userDrivenScroll = false
-    private let tailAnchorID = "activity-fold-tail"
-    private var refreshToken: String { "\(group.count):\(group.latest)" }
-
-    init(
-        group: ActivityGroup,
-        baseURL: URL? = nil,
-        isLastTurn: Bool = false,
-        isResponding: Bool = false,
-        askSelections: [String: AskUserSelectionState] = [:],
-        onAskToggle: @escaping (String, Int, Int, Bool) -> Void = { _, _, _, _ in },
-        onAskSubmit: @escaping (String, String) -> Void = { _, _ in }
-    ) {
-        self.group = group
-        self.baseURL = baseURL
-        self.isLastTurn = isLastTurn
-        self.isResponding = isResponding
-        self.askSelections = askSelections
-        self.onAskToggle = onAskToggle
-        self.onAskSubmit = onAskSubmit
-        _expanded = State(initialValue: group.newest)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Button {
-                userToggled = true
-                withAnimation(activityWindowAnimation(reduceMotion)) {
-                    expanded.toggle()
-                }
-                if expanded { pinned = true }
-            } label: {
-                header
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(expanded ? "收起活动" : "展开活动")
-            .accessibilityValue(expanded ? "已展开" : "已收起")
-
-            if expanded {
-                Divider().overlay(Theme.border.opacity(0.6))
-                window
-            }
-        }
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.surfaceSoft)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(
-                    expanded ? Theme.brand.opacity(0.28) : Theme.border,
-                    lineWidth: 1
-                )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .animation(activityWindowAnimation(reduceMotion), value: expanded)
-        .onChange(of: group.newest) { _, newest in
-            guard !userToggled else { return }
-            expanded = newest
-            if newest { pinned = true }
-        }
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                ZStack {
-                    Circle().fill(isResponding && group.newest ? Theme.brand : Theme.success)
-                        .frame(width: 6, height: 6)
-                }.frame(width: 12, height: 12)
-                if !group.meta.isEmpty {
-                    Text(group.meta)
-                        .font(.system(size: 10))
-                        .foregroundColor(Theme.textMuted.opacity(0.85))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Spacer(minLength: 0)
-                }
-                Text("\(group.count)")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(Theme.brand)
-                    .padding(.horizontal, 5)
-                    .frame(minWidth: 18, minHeight: 18)
-                    .background(Capsule().fill(Theme.brand.opacity(0.12)))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(Theme.textMuted)
-                    .rotationEffect(.degrees(expanded ? 180 : 0))
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .contentShape(Rectangle())
-    }
-
-    private var window: some View {
-        ScrollViewReader { proxy in
-            ZStack(alignment: .bottomTrailing) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(identifiedDisplayItems(group.items).enumerated()), id: \.element.id) { index, identified in
-                            AssistantItemView(
-                                item: identified.item,
-                                baseURL: baseURL,
-                                isLastTurn: isLastTurn,
-                                isResponding: isResponding,
-                                askSelections: askSelections,
-                                onAskToggle: onAskToggle,
-                                onAskSubmit: onAskSubmit,
-                                activityTailIndex: group.items.count - 1,
-                                itemIndex: index
-                            )
-                        }
-                        Color.clear.frame(height: 1).id(tailAnchorID)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                }
-                .frame(height: activityWindowHeight)
-                .environment(\.activityFoldCompact, true)
-                .onScrollGeometryChange(for: ActivityScrollMetrics.self) { geometry in
-                    ActivityScrollMetrics(
-                        contentHeight: geometry.contentSize.height,
-                        viewportHeight: geometry.containerSize.height,
-                        offset: geometry.contentOffset.y
-                    )
-                } action: { _, metrics in
-                    let maxOffset = max(0, metrics.contentHeight - metrics.viewportHeight)
-                    let distance = maxOffset - metrics.offset
-                    if userDrivenScroll {
-                        // 只有用户自己的拖动改贴尾状态：程序滚动到底仍然算贴尾。
-                        pinned = distance <= activityTailPin
-                    }
-                    canScrollUp = metrics.offset > 2
-                    canScrollDown = distance > 2
-                }
-                .onScrollPhaseChange { _, phase in
-                    userDrivenScroll = (phase == .interacting || phase == .decelerating)
-                }
-                .onAppear {
-                    scrollToTail(proxy, animated: false)
-                }
-                .onChange(of: refreshToken) { _, _ in
-                    guard pinned else { return }
-                    scrollToTail(proxy, animated: false)
-                }
-                .overlay(alignment: .top) {
-                    if canScrollUp {
-                        windowFade(
-                            colors: [Theme.surfaceSoft, Theme.surfaceSoft.opacity(0)],
-                            height: 14
-                        )
-                    }
-                }
-                .overlay(alignment: .bottom) {
-                    if canScrollDown {
-                        windowFade(
-                            colors: [Theme.surfaceSoft.opacity(0), Theme.surfaceSoft],
-                            height: 18
-                        )
-                    }
-                }
-
-                if !pinned {
-                    Button {
-                        pinned = true
-                        scrollToTail(proxy, animated: !reduceMotion)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 9, weight: .bold))
-                            Text("回到最新")
-                                .font(.system(size: 10, weight: .semibold))
-                        }
-                        .foregroundColor(Theme.textSecondary)
-                        .padding(.leading, 7)
-                        .padding(.trailing, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(Theme.surfaceSoft))
-                        .overlay(Capsule().stroke(Theme.brand.opacity(0.24), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 12)
-                    .padding(.bottom, 12)
-                    .transition(.opacity)
-                }
-            }
-        }
-    }
-
-    private func windowFade(colors: [Color], height: CGFloat) -> some View {
-        LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
-            .frame(height: height)
-            .allowsHitTesting(false)
-    }
-
-    private func scrollToTail(_ proxy: ScrollViewProxy, animated: Bool) {
-        if animated {
-            withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo(tailAnchorID, anchor: .bottom)
-            }
-        } else {
-            proxy.scrollTo(tailAnchorID, anchor: .bottom)
-        }
-    }
-}
-
-private func activityIconName(_ items: [DisplayItem]) -> String {
-    if let firstTool = activityTools(items).first {
-        let kind = activityKind(firstTool.name)
-        switch kind {
-        case "read": return "doc.text.magnifyingglass"
-        case "command": return "terminal"
-        case "search": return "magnifyingglass"
-        case "edit": return "pencil"
-        case "web": return "globe"
-        case "todo": return "checklist"
-        default: return "wrench.and.screwdriver"
-        }
-    }
-    if let first = items.first, case .plain(.thinking) = first {
-        return "brain"
-    }
-    return "wrench.and.screwdriver"
+func activityWindowAnimation(_ reduceMotion: Bool) -> Animation? {
+    reduceMotion ? nil : WandMotion.stateSwap
 }
 
 private struct ChatMessageTime: View {
@@ -3160,7 +2976,7 @@ private struct ChatMessageTime: View {
     var body: some View {
         if !clock.isEmpty {
             Text(clock)
-                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .font(.wand(size: 12, weight: .medium, design: .monospaced))
                 .foregroundColor(Theme.textSecondary)
                 .frame(maxWidth: .infinity, alignment: alignEnd ? .trailing : .leading)
                 .padding(.horizontal, 8)
@@ -3258,7 +3074,7 @@ private struct SubagentActivityShelf: View {
                 .stroke(Theme.border.opacity(0.85), lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.045), radius: 8, y: 2)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isExpanded)
+        .animation(reduceMotion ? nil : WandMotion.disclosure, value: isExpanded)
         .onAppear { reconcileSelection() }
         .onChange(of: activities.map(\.id)) { _, _ in reconcileSelection() }
         .accessibilityElement(children: .contain)
@@ -3308,7 +3124,7 @@ private struct SubagentActivityShelf: View {
         if reduceMotion {
             isExpanded = expanded
         } else {
-            withAnimation(.easeInOut(duration: 0.18)) { isExpanded = expanded }
+            withAnimation(WandMotion.disclosure) { isExpanded = expanded }
         }
     }
 
@@ -3500,7 +3316,7 @@ private func subagentStateText(_ state: SubagentActivity.State) -> String {
 /// 抽成独立视图，让主列表能把一条 assistant turn 的每个块摊平成顶层 LazyVStack
 /// 的独立行——单条 turn 携带上百个块时，避免整条 turn 一次性构建数百个嵌套视图
 /// （会卡死/白屏），改由 LazyVStack 仅实例化进入视口的块。
-private struct AssistantItemView: View {
+struct AssistantItemView: View {
     @Environment(\.cardExpandDefaults) private var cardDefaults
 
     let item: DisplayItem
@@ -3511,14 +3327,8 @@ private struct AssistantItemView: View {
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
     var onAskSubmit: (String, String) -> Void = { _, _ in }
     var showSubagentTags = true
-    /// 活动窗口中的单条先显示输入/结果摘录；用户点击后才打开完整详情。
-    /// 窗口外为 nil，沿用用户的卡片默认。
-    var activityTailIndex: Int? = nil
-    var itemIndex: Int = -1
-
-    private func expandDefault(_ configured: Bool) -> Bool {
-        activityTailIndex == nil ? configured : false
-    }
+    var forceExpanded = false
+    private func expandDefault(_ configured: Bool) -> Bool { forceExpanded || configured }
 
     var body: some View {
         switch item {
@@ -3527,16 +3337,7 @@ private struct AssistantItemView: View {
         case .tool(let id, let name, let description, let input, let subagent, let result):
             VStack(alignment: .leading, spacing: 4) {
                 if showSubagentTags { subagentTag(subagent) }
-                if activityTailIndex != nil,
-                   isCollapsibleActivityTool(name: name, input: input,
-                        resultImages: result?.images ?? [], projection: result?.projection) {
-                    ActivityToolEntry(name: name, input: input, result: result,
-                                      running: result == nil && isLastTurn && isResponding) {
-                        toolView(id: id, name: name, description: description, input: input, result: result, openedFromActivity: true)
-                    }
-                } else {
-                    toolView(id: id, name: name, description: description, input: input, result: result)
-                }
+                toolView(id: id, name: name, description: description, input: input, result: result, openedFromActivity: forceExpanded)
             }
         }
     }
@@ -3588,7 +3389,7 @@ private struct AssistantItemView: View {
             HStack(spacing: 4) {
                 Image(systemName: "person.2").font(.system(size: 10))
                 Text(meta.taskDescription ?? meta.agentType ?? "子任务")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.wand(size: 11, weight: .medium))
                     .lineLimit(1)
             }
             .foregroundColor(Theme.brandStrong)
@@ -3619,51 +3420,10 @@ private struct ToolPreviewText: View {
     var color = Theme.textSecondary
     var body: some View {
         if !text.isEmpty {
-            Text(text).font(.system(size: 11, design: .monospaced))
+            Text(text).font(.wand(size: 11, design: .monospaced))
                 .foregroundStyle(color).lineLimit(2).truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-}
-
-private struct ActivityToolEntry<Details: View>: View {
-    let name: String
-    let input: [String: JSONValue]
-    let result: ToolResultInfo?
-    let running: Bool
-    @ViewBuilder let details: () -> Details
-    @State private var expanded = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private var tint: Color { result?.isError == true ? Theme.danger : (running ? Theme.brand : Theme.success) }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { expanded.toggle() }
-            } label: {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        ZStack {
-                            Circle().fill(tint).frame(width: 5, height: 5).opacity(running ? 0 : 1)
-                            ProgressView().controlSize(.mini).tint(tint).opacity(running ? 1 : 0)
-                        }.frame(width: 14, height: 14)
-                        Text(toolLabel(name)).font(.system(size: 12, weight: .semibold))
-                        Spacer(minLength: 4)
-                        Text(result?.isError == true ? "失败" : (running ? "运行中" : "完成"))
-                            .font(.system(size: 10)).foregroundStyle(tint)
-                        Image(systemName: "chevron.down").rotationEffect(.degrees(expanded ? 180 : 0))
-                    }
-                    ToolPreviewText(text: toolInputPreview(input))
-                    if let result {
-                        ToolPreviewText(text: toolResultPreview(text: result.text, projection: result.projection), color: tint)
-                    }
-                }.foregroundStyle(Theme.textPrimary).contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel("\(expanded ? "收起" : "展开")\(toolLabel(name))")
-            if expanded { details() }
-        }
-        .padding(8)
-        .background(Theme.surface.opacity(expanded || running || result?.isError == true ? 1 : 0.4),
-                    in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(tint.opacity(expanded || running || result?.isError == true ? 0.3 : 0.08)))
     }
 }
 
@@ -3699,7 +3459,7 @@ private struct DecisionToolCardContent: View {
                     else {
                         let details = toolInputDetail(input)
                         if !details.isEmpty {
-                            Text(details).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                            Text(details).font(.wand(size: 12, design: .monospaced)).textSelection(.enabled)
                         }
                     }
                 }.padding(12).transition(.opacity)
@@ -3712,10 +3472,10 @@ private struct DecisionToolCardContent: View {
                     Image(systemName: "brain").foregroundStyle(Theme.brand)
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
-                            Text("本地决策").font(.system(size: 13, weight: .semibold))
-                            Text("实验性").font(.system(size: 9)).foregroundStyle(Theme.textSecondary)
+                            Text("本地决策").font(.wand(size: 13, weight: .semibold))
+                            Text("实验性").font(.wand(size: 9)).foregroundStyle(Theme.textSecondary)
                         }
-                        if let label, !label.isEmpty { Text(label).font(.system(size: 12)).lineLimit(2) }
+                        if let label, !label.isEmpty { Text(label).font(.wand(size: 12)).lineLimit(2) }
                     }
                     Spacer(minLength: 0)
                     ZStack {
@@ -3752,7 +3512,7 @@ private struct BlockView: View {
                     MarkdownText(text: text)
                 }
             }
-        case .thinking(let thinking, _):
+        case .thinking(let thinking, _, _, _):
             if !thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 CollapsibleSection(
                     icon: "brain",
@@ -3761,7 +3521,7 @@ private struct BlockView: View {
                     initiallyExpanded: cardDefaults.thinking
                 ) {
                     Text(thinking)
-                        .font(.system(size: compact ? 11 : 13))
+                        .font(.wand(size: compact ? 11 : 13))
                         .italic()
                         .foregroundColor(compact ? Theme.textMuted : Theme.textSecondary)
                         .textSelection(.enabled)
@@ -3821,7 +3581,7 @@ private struct BlockView: View {
             HStack(spacing: 4) {
                 Image(systemName: "person.2").font(.system(size: 10))
                 Text(meta.taskDescription ?? meta.agentType ?? "子任务")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.wand(size: 11, weight: .medium))
                     .lineLimit(1)
             }
             .foregroundColor(Theme.brandStrong)
@@ -3848,10 +3608,10 @@ private struct UnknownBlockCard: View {
         ) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("类型  \(displayType)")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(.wand(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundColor(Theme.textSecondary)
                 Text(payload.isEmpty ? "无可显示载荷" : payload)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.wand(size: 11, design: .monospaced))
                     .foregroundColor(Theme.textPrimary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -3910,7 +3670,7 @@ private struct MarkdownText: View {
         case .listItem(let marker, let content, let indent, let checked):
             HStack(alignment: .top, spacing: 7) {
                 Text(checked.map { $0 ? "☑" : "☐" } ?? marker)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.wand(size: 13, weight: .semibold))
                     .foregroundColor(checked == true ? Theme.success : Theme.brand)
                     .padding(.top, 2)
                 inlineText(content, size: compact ? 12 : 16, color: compact ? Theme.textMuted : Theme.textPrimary)
@@ -3930,14 +3690,14 @@ private struct MarkdownText: View {
             VStack(alignment: .leading, spacing: 2) {
                 if let language, !language.isEmpty {
                     Text(language)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.wand(size: 10, weight: .semibold))
                         .foregroundColor(Theme.textSecondary)
                         .padding(.leading, 10)
                         .padding(.top, 6)
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(content)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.wand(size: 13, design: .monospaced))
                         .foregroundColor(Theme.textPrimary)
                         .textSelection(.enabled)
                         .padding(.horizontal, 10)
@@ -3974,7 +3734,7 @@ private struct MarkdownText: View {
         HStack(alignment: .top, spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.offset) { index, cell in
                 Text(attributed(cell))
-                    .font(.system(size: header ? 13 : 12, weight: header ? .semibold : .regular))
+                    .font(.wand(size: header ? 13 : 12, weight: header ? .semibold : .regular))
                     .foregroundColor(header ? Theme.textPrimary : Theme.textSecondary)
                     .tint(Theme.brand)
                     .textSelection(.enabled)
@@ -4004,7 +3764,7 @@ private struct MarkdownText: View {
         color: Color = Theme.textPrimary
     ) -> some View {
         Text(attributed(content))
-            .font(.system(size: size, weight: weight))
+            .font(.wand(size: size, weight: weight))
             .foregroundColor(color)
             .tint(Theme.brand)
             .textSelection(.enabled)
@@ -4360,7 +4120,7 @@ private struct ToolUseCard: View {
         }
         .onChange(of: result != nil) {
             if initiallyExpanded && hasBody {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded = true }
+                withAnimation(WandMotion.disclosure) { expanded = true }
             }
         }
     }
@@ -4368,7 +4128,7 @@ private struct ToolUseCard: View {
     private var header: some View {
         Button {
             guard hasBody else { return }
-            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            withAnimation(WandMotion.disclosure) { expanded.toggle() }
         } label: {
             HStack(spacing: 11) {
                 if running {
@@ -4393,12 +4153,12 @@ private struct ToolUseCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(toolLabel(name))
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.wand(size: 13, weight: .semibold))
                             .foregroundColor(isError ? Theme.danger : Theme.textPrimary)
                             .lineLimit(1)
                         if let source = toolSourceLabel(name) {
                             Text(source)
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.wand(size: 9, weight: .semibold))
                                 .foregroundColor(Theme.codex)
                                 .lineLimit(1)
                                 .padding(.horizontal, 5)
@@ -4408,7 +4168,7 @@ private struct ToolUseCard: View {
                     }
                     if !summary.isEmpty {
                         Text(summary)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.wand(size: 11, design: .monospaced))
                             .foregroundColor(Theme.textSecondary)
                             .lineLimit(2)
                             .truncationMode(.tail)
@@ -4416,7 +4176,7 @@ private struct ToolUseCard: View {
                 }
                 Spacer(minLength: 0)
                 Text(statusText)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.wand(size: 10, weight: .semibold))
                     .foregroundColor(statusColor)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
@@ -4523,13 +4283,13 @@ private struct ToolResultBody: View {
                 let details = toolInputDetail(fullInput)
                 if !details.isEmpty {
                     Text(String(details.prefix(displayLimit)))
-                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                        .font(.wand(size: 12, design: .monospaced)).textSelection(.enabled)
                 }
             }
             if !displayText.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     Text(displayText)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.wand(size: 12, design: .monospaced))
                         .foregroundColor(fullIsError ? Theme.danger : Theme.textPrimary)
                         .textSelection(.enabled)
                         .padding(10)
@@ -4543,7 +4303,7 @@ private struct ToolResultBody: View {
                 fullContentRow
             } else if displayText.isEmpty {
                 Text(fullIsError ? "工具执行失败，未返回错误详情" : "工具已完成，没有文本输出")
-                    .font(.system(size: 11))
+                    .font(.wand(size: 11))
                     .foregroundColor(fullIsError ? Theme.danger : Theme.textSecondary)
             }
             if !fullText.isEmpty {
@@ -4551,7 +4311,7 @@ private struct ToolResultBody: View {
                     UIPasteboard.general.string = fullText
                 } label: {
                     Label("复制", systemImage: "doc.on.doc")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.wand(size: 10, weight: .semibold))
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(Theme.textSecondary)
@@ -4583,7 +4343,7 @@ private struct ToolResultBody: View {
     private var fullContentRow: some View {
         HStack(alignment: .center, spacing: 8) {
             Text(loadError ?? "服务端为保证传输速度省略了部分内容")
-                .font(.system(size: 11))
+                .font(.wand(size: 11))
                 .foregroundColor(loadError == nil ? Theme.textSecondary : Theme.danger)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: loadFullContent) {
@@ -4591,7 +4351,7 @@ private struct ToolResultBody: View {
                     ProgressView().controlSize(.small).tint(Theme.brand)
                 } else {
                     Text(loadError == nil ? "加载完整内容" : "重试")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.wand(size: 11, weight: .semibold))
                 }
             }
             .buttonStyle(.plain)
@@ -4693,11 +4453,11 @@ private struct CollapsibleSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                withAnimation(WandMotion.disclosure) { expanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: icon).font(.system(size: 12))
-                    Text(title).font(.system(size: 12, weight: .medium))
+                    Text(title).font(.wand(size: 12, weight: .medium))
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.system(size: 9, weight: .semibold))
                 }
@@ -4735,20 +4495,20 @@ private struct PermissionCard: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(Theme.permission)
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.wand(size: 14, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                 Spacer()
             }
             if !detail.isEmpty {
                 Text(detail)
-                    .font(.system(size: 13))
+                    .font(.wand(size: 13))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let target, !target.isEmpty {
                 Text(target)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.wand(size: 12, design: .monospaced))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(2)
                     .padding(.horizontal, 8)
@@ -4812,19 +4572,15 @@ private struct AssistantReplyDisclosure: View {
     var body: some View {
         Button(action: onToggle) {
             HStack(spacing: 8) {
-                WandBrandMark(size: 28)
-                Text("Wand")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
                 if collapsed {
                     Text(preview)
-                        .font(.system(size: 12))
+                        .font(.wand(size: 12))
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
                 Text(collapsed ? "展开" : "收起")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.wand(size: 11, weight: .semibold))
                     .foregroundColor(Theme.textSecondary)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 11, weight: .bold))
@@ -4870,10 +4626,10 @@ private struct HistorySummaryCard: View {
                     .foregroundColor(Theme.textSecondary)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(expanded ? "收起历史对话" : "展开历史对话")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.wand(size: 12, weight: .semibold))
                         .foregroundColor(Theme.textPrimary)
                     Text(metaText)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .font(.wand(size: 10, weight: .medium, design: .monospaced))
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -4961,7 +4717,7 @@ private struct AskUserQuestionCard: View {
         .onChange(of: isAnswered) { _, answered in
             // 回答送达后自动折叠（对齐 Web 已答默认折叠）；最新一轮保持完整内容。
             if answered && !expandAll {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded = false }
+                withAnimation(WandMotion.disclosure) { expanded = false }
             }
         }
         .onChange(of: expandAll) { _, shouldExpand in
@@ -4971,7 +4727,7 @@ private struct AskUserQuestionCard: View {
 
     private var headerView: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            withAnimation(WandMotion.disclosure) { expanded.toggle() }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: isAnswered ? "checkmark.circle.fill" : "questionmark.circle.fill")
@@ -4979,17 +4735,17 @@ private struct AskUserQuestionCard: View {
                     .foregroundColor(isAnswered ? chatSuccess : Theme.brand)
                     .frame(width: 22)
                 Text("提问")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.wand(size: 13, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                 if let headerLabel {
                     Text(headerLabel)
-                        .font(.system(size: 12))
+                        .font(.wand(size: 12))
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(1)
                 }
                 if isAnswered {
                     Text(answerLines.joined(separator: ", "))
-                        .font(.system(size: 12))
+                        .font(.wand(size: 12))
                         .foregroundColor(chatSuccess)
                         .lineLimit(1)
                 }
@@ -5009,7 +4765,7 @@ private struct AskUserQuestionCard: View {
         VStack(alignment: .leading, spacing: 8) {
             if !question.question.isEmpty {
                 Text(question.question)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.wand(size: 14, weight: .medium))
                     .foregroundColor(Theme.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -5043,12 +4799,12 @@ private struct AskUserQuestionCard: View {
                 indicator(chosen: chosen, multiSelect: multiSelect)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(option.label)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.wand(size: 13, weight: .medium))
                         .foregroundColor(Theme.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let desc = option.description, !desc.isEmpty {
                         Text(desc)
-                            .font(.system(size: 12))
+                            .font(.wand(size: 12))
                             .foregroundColor(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -5124,8 +4880,8 @@ private struct AskUserQuestionCard: View {
                 }
                 onSubmit(lines.joined(separator: "\n"))
             } label: {
-                Text(selection.submitted ? "已提交…" : "确认提交")
-                    .font(.system(size: 13, weight: .semibold))
+                Text(selection.unavailableReason ?? (selection.submissionUnconfirmed ? "送达未确认" : selection.submitted ? "已提交…" : "确认提交"))
+                    .font(.wand(size: 13, weight: .semibold))
                     .foregroundColor(.white)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 7)
@@ -5218,7 +4974,7 @@ private struct DiffCard: View {
                     ForEach(Array(multiEdits.enumerated()), id: \.offset) { index, edit in
                         VStack(alignment: .leading, spacing: 5) {
                             Text("第 \(index + 1) 处修改")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.wand(size: 10, weight: .semibold))
                                 .foregroundColor(Theme.textSecondary)
                             if !edit.old.isEmpty {
                                 diffColumn(label: "旧", text: edit.old, prefix: "- ", tint: Theme.danger)
@@ -5234,10 +4990,10 @@ private struct DiffCard: View {
                     if !movePath.isEmpty {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("移动到")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.wand(size: 10, weight: .semibold))
                                 .foregroundColor(Theme.textSecondary)
                             Text(movePath)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.wand(size: 11, design: .monospaced))
                                 .foregroundColor(Theme.codex)
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -5250,13 +5006,13 @@ private struct DiffCard: View {
                     }
                     if !hasDiffBody, let result, !result.isError {
                         Text(diffUnavailableReason ?? "Codex 已返回文件变更状态，但本次事件未包含差异正文。")
-                            .font(.system(size: 11))
+                            .font(.wand(size: 11))
                             .foregroundColor(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if let result, result.isError, !result.text.isEmpty {
                         Text(result.text.count > 600 ? String(result.text.prefix(600)) + "…" : result.text)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.wand(size: 11, design: .monospaced))
                             .foregroundColor(Theme.danger)
                             .textSelection(.enabled)
                     }
@@ -5285,7 +5041,7 @@ private struct DiffCard: View {
 
     private var header: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            withAnimation(WandMotion.disclosure) { expanded.toggle() }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "doc.text")
@@ -5293,17 +5049,17 @@ private struct DiffCard: View {
                     .foregroundColor(Theme.brand)
                     .frame(width: 22)
                 Text(fileName)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.wand(size: 13, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                 Text(path)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.wand(size: 11, design: .monospaced))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.head)
                 Spacer(minLength: 0)
                 Text(statusText)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.wand(size: 11, weight: .medium))
                     .foregroundColor(statusColor)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
@@ -5323,12 +5079,12 @@ private struct DiffCard: View {
         VStack(alignment: .leading, spacing: 3) {
             if !label.isEmpty {
                 Text(label)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.wand(size: 10, weight: .semibold))
                     .foregroundColor(Theme.textSecondary)
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(prefix + (text.count > 2000 ? String(text.prefix(2000)) + "\n…（已截断）" : text))
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.wand(size: 12, design: .monospaced))
                     .foregroundColor(tint)
                     .textSelection(.enabled)
                     .padding(8)
@@ -5347,11 +5103,11 @@ private struct DiffCard: View {
             : diff
         return VStack(alignment: .leading, spacing: 3) {
             Text("统一差异")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.wand(size: 10, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(coloredUnifiedDiff(clipped))
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.wand(size: 11, design: .monospaced))
                     .textSelection(.enabled)
                     .padding(8)
             }
@@ -5444,7 +5200,7 @@ private struct TerminalCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text("$ " + command)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(.wand(size: 12, design: .monospaced))
                             .foregroundColor(termText)
                             .textSelection(.enabled)
                     }
@@ -5453,7 +5209,7 @@ private struct TerminalCard: View {
                             Text(outputText.count > 12_000
                                  ? String(outputText.prefix(12_000)) + "\n…（本页仅展示前 12000 字）"
                                  : outputText)
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(.wand(size: 12, design: .monospaced))
                                 .foregroundColor(result.isError ? Theme.terminalError : termText.opacity(0.85))
                                 .textSelection(.enabled)
                         }
@@ -5466,7 +5222,7 @@ private struct TerminalCard: View {
                             UIPasteboard.general.string = outputText
                         } label: {
                             Label("复制输出", systemImage: "doc.on.doc")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.wand(size: 10, weight: .semibold))
                         }
                         .buttonStyle(.plain)
                         .foregroundColor(termText.opacity(0.65))
@@ -5490,7 +5246,7 @@ private struct TerminalCard: View {
         }
         .onChange(of: result != nil) {
             if initiallyExpanded {
-                withAnimation(.easeInOut(duration: 0.15)) { expanded = true }
+                withAnimation(WandMotion.disclosure) { expanded = true }
             }
         }
         .onChange(of: expanded) { _, open in
@@ -5519,7 +5275,7 @@ private struct TerminalCard: View {
     private var fullOutputRow: some View {
         HStack(alignment: .center, spacing: 8) {
             Text(outputLoadError ?? "输出过长，服务端已省略部分内容")
-                .font(.system(size: 10))
+                .font(.wand(size: 10))
                 .foregroundColor(outputLoadError == nil
                     ? termText.opacity(0.60)
                     : Theme.terminalError)
@@ -5529,7 +5285,7 @@ private struct TerminalCard: View {
                     ProgressView().controlSize(.small).tint(termText)
                 } else {
                     Text(outputLoadError == nil ? "加载完整输出" : "重试")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.wand(size: 10, weight: .semibold))
                 }
             }
             .buttonStyle(.plain)
@@ -5592,7 +5348,7 @@ private struct TerminalCard: View {
 
     private var header: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            withAnimation(WandMotion.disclosure) { expanded.toggle() }
         } label: {
             HStack(spacing: 8) {
                 if running {
@@ -5601,7 +5357,7 @@ private struct TerminalCard: View {
                     Circle().fill(statusColor).frame(width: 8, height: 8)
                 }
                 Text("$ " + (command.count > 80 ? String(command.prefix(77)) + "…" : command))
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.wand(size: 12, design: .monospaced))
                     .foregroundColor(termText)
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -5641,17 +5397,17 @@ struct TodoProgressBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
-                withAnimation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0)) {
+                withAnimation(reduceMotion ? nil : WandMotion.detail) {
                     expanded.toggle()
                 }
             } label: {
                 HStack(spacing: 8) {
                     TodoRunningLabel()
                     Text("· 第 \(currentStep)/\(todos.count) 步")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .font(.wand(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundColor(Theme.brand)
                     Text(activeTask)
-                        .font(.system(size: 12))
+                        .font(.wand(size: 12))
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -5711,7 +5467,7 @@ struct TodoProgressBar: View {
             }
             .frame(width: 14, height: 17)
             Text(todo.content)
-                .font(.system(size: 12))
+                .font(.wand(size: 12))
                 .foregroundColor(isActive ? Theme.textPrimary : Theme.textSecondary)
                 .strikethrough(todo.status == "completed", color: Theme.textSecondary.opacity(0.6))
                 .fixedSize(horizontal: false, vertical: true)
@@ -5724,8 +5480,8 @@ struct TodoProgressBar: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(isActive ? Theme.brand.opacity(0.1) : Color.clear)
         )
-        .animation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0), value: isActive)
-        .animation(reduceMotion ? nil : .smooth(duration: 0.18, extraBounce: 0), value: todo.status)
+        .animation(reduceMotion ? nil : WandMotion.detail, value: isActive)
+        .animation(reduceMotion ? nil : WandMotion.detail, value: todo.status)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(todoStatusLabel(todo.status, isActive: isActive))：\(todo.content)")
     }
@@ -5746,7 +5502,7 @@ private struct TodoRunningLabel: View {
             PhaseAnimator([false, true]) { dimmed in
                 label(opacity: dimmed ? 0.72 : 1)
             } animation: { _ in
-                .smooth(duration: 1.2, extraBounce: 0)
+                WandMotion.activityPulse
             }
         }
     }
@@ -5757,7 +5513,7 @@ private struct TodoRunningLabel: View {
                 .fill(Theme.brand)
                 .frame(width: 7, height: 7)
             Text("执行中")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.wand(size: 12, weight: .semibold))
                 .foregroundColor(Theme.brand)
         }
         .opacity(opacity)
@@ -5770,7 +5526,7 @@ private struct PermissionButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 13, weight: .semibold))
+            .font(.wand(size: 13, weight: .semibold))
             .foregroundColor(kind == .primary ? .white : (kind == .destructive ? Theme.danger : Theme.textPrimary))
             .padding(.vertical, 9)
             .background(
@@ -5939,8 +5695,8 @@ private struct QueueBar: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Theme.border, lineWidth: 1)
         )
-        .animation(.easeInOut(duration: 0.18), value: expanded)
-        .animation(.easeInOut(duration: 0.18), value: items.count)
+        .animation(WandMotion.disclosure, value: expanded)
+        .animation(WandMotion.disclosure, value: items.count)
         .alert("编辑排队消息", isPresented: Binding(
             get: { editingIndex != nil }, set: { if !$0 { editingIndex = nil } }
         )) {
@@ -5961,10 +5717,10 @@ private struct QueueBar: View {
                 Image(systemName: "tray.full")
                     .font(.system(size: 11))
                 Text("已排队 \(items.count) 条消息")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.wand(size: 12, weight: .medium))
                 if inFlight {
                     Text("· 中断后立即发送")
-                        .font(.system(size: 10))
+                        .font(.wand(size: 10))
                         .foregroundColor(Theme.brand)
                 }
                 Spacer()
@@ -5981,7 +5737,7 @@ private struct QueueBar: View {
     private func row(index: Int, text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text(text)
-                .font(.system(size: 13))
+                .font(.wand(size: 13))
                 .foregroundColor(Theme.textPrimary)
                 .lineLimit(3)
                 .truncationMode(.tail)
@@ -6035,7 +5791,7 @@ private struct QueueBar: View {
                 Image(systemName: "trash")
                     .font(.system(size: 10, weight: .semibold))
                 Text("清空全部")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.wand(size: 11, weight: .semibold))
             }
             .foregroundColor(Theme.danger)
             .padding(.horizontal, 10)
@@ -6069,7 +5825,7 @@ private struct ConversationTurnScrubber: View {
             .overlay(alignment: .trailing) {
                 if dragging && !currentPreview.isEmpty {
                     Text(currentPreview)
-                        .font(.system(size: 13))
+                        .font(.wand(size: 13))
                         .foregroundColor(Theme.textPrimary)
                         .lineLimit(2)
                         .padding(.horizontal, 14)
@@ -6114,8 +5870,8 @@ private struct ConversationTurnScrubber: View {
             }
         }
         .scaleEffect(dragging ? 1.18 : 1, anchor: .trailing)
-        .animation(.easeOut(duration: 0.12), value: dragging)
-        .animation(.easeOut(duration: 0.12), value: displayedItem)
+        .animation(WandMotion.scroll, value: dragging)
+        .animation(WandMotion.scroll, value: displayedItem)
         .frame(width: 40, height: railHeight)
         .contentShape(Rectangle())
         .gesture(

@@ -17,13 +17,18 @@ final class SessionLiveActivityController {
     enum SessionState: String {
         case responding
         case permission
+        case waitingInput = "waiting-input"
+        case background
+        case failed
+        case stopped
         case done
     }
 
     private init() {}
 
     /// 「已完成」会话在长条里保留的时长，超时自动移除。
-    private static let doneLingerSeconds: UInt64 = 20
+    private static let doneLingerSeconds: UInt64 = 12
+    private static let failureLingerSeconds: UInt64 = 30
     /// 条内最多保留的会话数（Live Activity 状态有 4KB 上限）。
     private static let maxEntries = 8
     /// 缩略标题最大长度。
@@ -58,7 +63,9 @@ final class SessionLiveActivityController {
         provider: String?,
         state: SessionState = .responding,
         taskTitle: String?,
-        queuedCount: Int = 0
+        queuedCount: Int = 0,
+        startedAt: Date? = nil,
+        engine: String? = nil
     ) {
         guard enabled else { return }
         let serverID = serverID ?? ServerStore.shared.activeServerID
@@ -67,7 +74,7 @@ final class SessionLiveActivityController {
         cancelDoneRemoval(sessionId, serverID: serverID)
         upsert(
             sessionId: sessionId, serverID: serverID, title: title, provider: provider, state: state,
-            taskTitle: taskTitle, queuedCount: queuedCount
+            taskTitle: taskTitle, queuedCount: queuedCount, startedAt: startedAt, engine: engine
         )
         sync(allowCreate: true)
     }
@@ -76,26 +83,25 @@ final class SessionLiveActivityController {
     func sync(snapshot: SessionSnapshot, serverID: String? = nil) {
         let serverID = serverID ?? ServerStore.shared.activeServerID
         guard serverID == ServerStore.shared.activeServerID else { return }
-        if snapshot.hasPendingPermission {
-            start(
-                sessionId: snapshot.id, serverID: serverID,
-                title: snapshot.displayTitle, provider: snapshot.provider,
-                state: .permission, taskTitle: snapshot.currentTaskTitle,
-                queuedCount: snapshot.queuedMessages?.count ?? 0
-            )
-        } else if snapshot.isResponding {
-            start(
-                sessionId: snapshot.id, serverID: serverID,
-                title: snapshot.displayTitle, provider: snapshot.provider,
-                taskTitle: snapshot.currentTaskTitle, queuedCount: snapshot.queuedMessages?.count ?? 0
-            )
-        } else if snapshot.isEnded {
-            end(sessionId: snapshot.id, serverID: serverID, immediately: true)
-        } else if let entry = ActivityStore.entries.first(where: {
-            $0.id == snapshot.id && $0.serverID == serverID
-        }),
-                  !entry.isDone {
-            end(sessionId: snapshot.id, serverID: serverID)
+        let previous = ActivityStore.entries.first { $0.id == snapshot.id && $0.serverID == serverID }
+        let next: SessionState?
+        if snapshot.hasPendingPermission { next = .permission }
+        else if snapshot.activityStatus == "waiting-input" { next = .waitingInput }
+        else if snapshot.isResponding { next = snapshot.structuredState?.phase == "background" ? .background : .responding }
+        else if snapshot.status == "failed" && previous != nil { next = .failed }
+        else if snapshot.status == "stopped" && previous != nil { next = .stopped }
+        else { next = nil }
+        if let next {
+            // Do not renew a finished entry on every poll, otherwise it never leaves the island.
+            if previous?.stateRaw == next.rawValue && previous?.isFinished == true { return }
+            start(sessionId: snapshot.id, serverID: serverID, title: snapshot.displayTitle, provider: snapshot.provider,
+                state: next, taskTitle: snapshot.currentTaskTitle, queuedCount: snapshot.queuedMessages?.count ?? 0,
+                startedAt: SessionTimeFormatting.date(from: snapshot.structuredState?.turnStartedAt), engine: snapshot.structuredState?.engine)
+            if next == .failed || next == .stopped { scheduleDoneRemoval(snapshot.id, serverID: serverID) }
+        } else if let previous, !previous.isFinished {
+            if snapshot.isEnded { end(sessionId: snapshot.id, serverID: serverID, immediately: true) }
+            else if previous.isResponding || previous.isBackground { end(sessionId: snapshot.id, serverID: serverID) }
+            else { end(sessionId: snapshot.id, serverID: serverID, immediately: true) }
         }
     }
 
@@ -333,14 +339,14 @@ final class SessionLiveActivityController {
 
     private func upsert(
         sessionId: String, serverID: String?, title: String, provider: String?, state: SessionState,
-        taskTitle: String?, queuedCount: Int
+        taskTitle: String?, queuedCount: Int, startedAt requestedStartedAt: Date? = nil, engine: String? = nil
     ) {
         let key = scopedKey(sessionId, serverID: serverID)
-        let shortTitle = String(title.prefix(Self.maxTitleLength))
-        let shortTaskTitle = taskTitle.map { String($0.prefix(Self.maxTaskTitleLength)) }
+        let shortTitle = activityBoundedText(title, maxCharacters: Self.maxTitleLength, maxBytes: 96)
+        let shortTaskTitle = taskTitle.map { activityBoundedText($0, maxCharacters: Self.maxTaskTitleLength, maxBytes: 120) }
         let startedAt: Date?
-        if state == .responding {
-            startedAt = ActivityStore.startedAtBySession[key] ?? Date()
+        if state == .responding || state == .background {
+            startedAt = requestedStartedAt ?? ActivityStore.startedAtBySession[key]
             ActivityStore.startedAtBySession[key] = startedAt
         } else {
             startedAt = nil
@@ -355,12 +361,13 @@ final class SessionLiveActivityController {
             ActivityStore.entries[index].taskTitle = shortTaskTitle
             ActivityStore.entries[index].queuedCount = queuedCount
             ActivityStore.entries[index].startedAt = startedAt
+            ActivityStore.entries[index].engineRaw = engine
         } else {
             ActivityStore.entries.append(SessionActivityAttributes.SessionEntry(
                 id: sessionId, serverID: serverID,
                 title: shortTitle, providerRaw: provider ?? "claude",
                 stateRaw: state.rawValue, taskTitle: shortTaskTitle, queuedCount: queuedCount,
-                startedAt: startedAt
+                startedAt: startedAt, engineRaw: engine
             ))
             trimEntriesIfNeeded()
         }
@@ -369,7 +376,7 @@ final class SessionLiveActivityController {
     /// 超出上限时优先挤掉最早的「已完成」，否则挤掉最早进条的会话。
     private func trimEntriesIfNeeded() {
         while ActivityStore.entries.count > Self.maxEntries {
-            let victim = ActivityStore.entries.firstIndex { $0.isDone } ?? 0
+            let victim = ActivityStore.entries.indices.max { ActivityStore.entries[$0].priority < ActivityStore.entries[$1].priority } ?? 0
             let victimEntry = ActivityStore.entries[victim]
             let victimId = victimEntry.id
             cancelDoneRemoval(victimId, serverID: victimEntry.serverID)
@@ -380,12 +387,14 @@ final class SessionLiveActivityController {
 
     private func scheduleDoneRemoval(_ sessionId: String, serverID: String?) {
         let key = scopedKey(sessionId, serverID: serverID)
+        cancelDoneRemoval(sessionId, serverID: serverID)
+        let linger = ActivityStore.entries.first { $0.id == sessionId && $0.serverID == serverID }?.isFailed == true ? Self.failureLingerSeconds : Self.doneLingerSeconds
         ActivityStore.doneRemovalTasks[key] = Task {
-            try? await Task.sleep(nanoseconds: Self.doneLingerSeconds * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: linger * 1_000_000_000)
             guard !Task.isCancelled else { return }
             ActivityStore.doneRemovalTasks[key] = nil
             ActivityStore.entries.removeAll {
-                $0.id == sessionId && $0.serverID == serverID && $0.isDone
+                $0.id == sessionId && $0.serverID == serverID && $0.isFinished
             }
             ActivityStore.startedAtBySession[key] = nil
             sync(allowCreate: false)
@@ -402,10 +411,12 @@ final class SessionLiveActivityController {
 
     /// 把当前条目集合同步到系统：空 → 收掉活动；非空 → 更新或（允许时）创建。
     private func sync(allowCreate: Bool, refresh: Bool = false) {
-        let entries = ActivityStore.entries.sorted { lhs, rhs in
+        var entries = ActivityStore.entries.sorted { lhs, rhs in
             lhs.priority == rhs.priority ? lhs.id < rhs.id : lhs.priority < rhs.priority
         }
 
+        // ActivityKit rejects payloads above 4KB; keep a reserve for attributes/metadata.
+        while entries.count > 1, let size = try? JSONEncoder().encode(SessionActivityAttributes.ContentState(sessions: entries, updatedAt: Date())).count, size > 3500 { entries.removeLast() }
         if entries.isEmpty {
             guard let activity = ActivityStore.activity else { return }
             ActivityStore.operationRevision &+= 1

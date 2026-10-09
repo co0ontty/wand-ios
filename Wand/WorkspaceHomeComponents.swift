@@ -10,7 +10,7 @@ struct HomeSectionHeader: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Text(title).font(.system(size: 13, weight: .semibold)).foregroundColor(Theme.textSecondary)
+            Text(title).font(.wand(size: 13, weight: .semibold)).foregroundColor(Theme.textSecondary)
             Spacer(minLength: 4)
             Picker("\(title)显示方式", selection: $foldRaw) {
                 ForEach(HomeFoldMode.allCases) { mode in Text(mode.title).tag(mode.rawValue) }
@@ -66,7 +66,7 @@ struct HomeRecentGroupHeader: View {
     private func headerContent(showsDisclosure: Bool) -> some View {
         HStack(spacing: 10) {
             avatar
-            Text(group.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+            Text(group.title).font(.wand(size: 14, weight: .semibold)).lineLimit(1)
             Text("\(group.conversations.count)").font(.caption).foregroundColor(Theme.textMuted)
             Spacer(minLength: 2)
             if showsDisclosure {

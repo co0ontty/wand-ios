@@ -69,7 +69,7 @@ struct GitChangesToolbarButton: View {
                         }
                     }
                 }
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .font(.wand(size: 9, weight: .semibold, design: .monospaced))
                 .foregroundColor(phase == .done ? Theme.success : (phase == .idle ? Theme.textSecondary : Theme.brand))
                 .frame(minWidth: 44, minHeight: 32)
                 .contentShape(Rectangle())
@@ -77,7 +77,7 @@ struct GitChangesToolbarButton: View {
                 .id(phase)
             }
             .disabled(phase != .idle)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: phase)
+            .animation(reduceMotion ? nil : WandMotion.disclosure, value: phase)
             .accessibilityLabel(accessibilityLabel)
         }
     }
@@ -296,7 +296,7 @@ struct GitQuickCommitView: View {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
                 Text("读取 git 状态…")
-                    .font(.system(size: 13))
+                    .font(.wand(size: 13))
                     .foregroundColor(Theme.textSecondary)
             }
         } else if let statusError {
@@ -306,7 +306,7 @@ struct GitQuickCommitView: View {
         } else if let s = status {
             if !s.isGit {
                 Text("当前会话目录不是 git 仓库")
-                    .font(.system(size: 13))
+                    .font(.wand(size: 13))
                     .foregroundColor(Theme.textSecondary)
             } else {
                 let count = s.modifiedCount ?? 0
@@ -317,7 +317,7 @@ struct GitQuickCommitView: View {
                 + ((s.ahead ?? 0) > 0 ? ["↑\(s.ahead ?? 0)"] : [])
                 + ((s.behind ?? 0) > 0 ? ["↓\(s.behind ?? 0)"] : [])
                 Text(parts.joined(separator: " · "))
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.wand(size: 12, design: .monospaced))
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(1)
             }
@@ -331,7 +331,7 @@ struct GitQuickCommitView: View {
                     ForEach(files.prefix(30)) { file in
                         HStack(spacing: 8) {
                             Text(file.shortStatus)
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .font(.wand(size: 11, weight: .semibold, design: .monospaced))
                                 .foregroundColor(.white)
                                 .frame(width: 18, height: 18)
                                 .background(
@@ -339,7 +339,7 @@ struct GitQuickCommitView: View {
                                         .fill(file.shortStatus == "?" ? Theme.textSecondary : Theme.brand)
                                 )
                             Text(file.path)
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(.wand(size: 12, design: .monospaced))
                                 .foregroundColor(Theme.textPrimary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -350,14 +350,14 @@ struct GitQuickCommitView: View {
                     }
                     if files.count > 30 {
                         Text("…还有 \(files.count - 30) 个文件")
-                            .font(.system(size: 12))
+                            .font(.wand(size: 12))
                             .foregroundColor(Theme.textSecondary)
                     }
                 }
                 .padding(.top, 6)
             } label: {
                 Text("改动 \(s.modifiedCount ?? files.count) 个文件")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.wand(size: 13, weight: .medium))
                     .foregroundColor(Theme.textPrimary)
             }
             .tint(Theme.textSecondary)
@@ -374,7 +374,7 @@ struct GitQuickCommitView: View {
         // 提交信息 + AI 预生成按钮
         HStack {
             Text("提交信息")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.wand(size: 12, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
             Spacer()
             Button(action: generateAI) {
@@ -382,9 +382,9 @@ struct GitQuickCommitView: View {
                     if generating {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text("✦").font(.system(size: 12))
+                        Text("✦").font(.wand(size: 12))
                     }
-                    Text(generating ? "生成中…" : "AI").font(.system(size: 12, weight: .medium))
+                    Text(generating ? "生成中…" : "AI").font(.wand(size: 12, weight: .medium))
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
@@ -398,10 +398,10 @@ struct GitQuickCommitView: View {
         VStack(alignment: .leading, spacing: 6) {
             pairOldLine(label: "Commit", old: oldCommitLine)
             Text("新的 Commit 信息")
-                .font(.system(size: 12, weight: .medium))
+                .font(.wand(size: 12, weight: .medium))
                 .foregroundColor(Theme.textSecondary)
             TextField("留空由 AI 根据改动生成", text: $message)
-                .font(.system(size: 15))
+                .font(.wand(size: 15))
                 .textFieldStyle(.plain)
                 .foregroundColor(Theme.textPrimary)
                 .tint(Theme.brand)
@@ -416,10 +416,10 @@ struct GitQuickCommitView: View {
         VStack(alignment: .leading, spacing: 6) {
             pairOldLine(label: "Tag", old: status?.latestTag ?? "无 tag")
             Text("Tag（可选）")
-                .font(.system(size: 12, weight: .medium))
+                .font(.wand(size: 12, weight: .medium))
                 .foregroundColor(Theme.textSecondary)
             TextField("留空则 AI 生成（拖入 Tag 球时生效）", text: $tagName)
-                .font(.system(size: 14, design: .monospaced))
+                .font(.wand(size: 14, design: .monospaced))
                 .textFieldStyle(.plain)
                 .autocapitalization(.none)
                 .disableAutocorrection(true)
@@ -444,7 +444,7 @@ struct GitQuickCommitView: View {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
                 Text(busyLabel)
-                    .font(.system(size: 13))
+                    .font(.wand(size: 13))
                     .foregroundColor(Theme.textSecondary)
                 Spacer()
             }
@@ -456,9 +456,9 @@ struct GitQuickCommitView: View {
             Toggle(isOn: $archiveRelatedTasks) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("归档当前任务")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.wand(size: 13, weight: .medium))
                     Text("提交成功后把这个会话的任务移出列表。其它进行中的任务不动。")
-                        .font(.system(size: 11))
+                        .font(.wand(size: 11))
                         .foregroundColor(Theme.textSecondary)
                 }
             }
@@ -477,7 +477,7 @@ struct GitQuickCommitView: View {
                     + (archiveRelatedTasks ? "\n本次会归档当前任务" : "")
                     + (status?.hasSubmodule == true ? "\nSub 球可选，纳入后递归处理 submodule" : "")
                 : "工作区干净，无可提交")
-                .font(.system(size: 11))
+                .font(.wand(size: 11))
                 .foregroundColor(Theme.textSecondary.opacity(0.8))
         }
 
@@ -487,7 +487,7 @@ struct GitQuickCommitView: View {
                 HStack(spacing: 8) {
                     if pushing { ProgressView().controlSize(.small) }
                     Text(pushing ? "推送中…" : "推送 ↑\(ahead) 个待推 commit")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.wand(size: 13, weight: .medium))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
@@ -527,18 +527,18 @@ struct GitQuickCommitView: View {
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tone.opacity(0.13)))
             VStack(alignment: .leading, spacing: 2) {
                 Text(status?.branch ?? "未识别分支")
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .font(.wand(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(stateText)
-                    .font(.system(size: 12))
+                    .font(.wand(size: 12))
                     .foregroundColor(Theme.textSecondary)
             }
             Spacer(minLength: 0)
             if ahead > 0 && hasPendingChanges {
                 Text("↑\(ahead)")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(.wand(size: 12, weight: .medium, design: .monospaced))
                     .foregroundColor(Theme.success)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
@@ -559,22 +559,22 @@ struct GitQuickCommitView: View {
     private func pairOldLine(label: String, old: String) -> some View {
         HStack(spacing: 8) {
             Text(label)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.wand(size: 11, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
             Text(old)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.wand(size: 12, design: .monospaced))
                 .foregroundColor(Theme.textSecondary.opacity(0.75))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Text("→")
-                .font(.system(size: 12))
+                .font(.wand(size: 12))
                 .foregroundColor(Theme.textSecondary.opacity(0.75))
         }
     }
 
     private func tinyChip(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            .font(.wand(size: 11, weight: .semibold, design: .monospaced))
             .foregroundColor(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -598,7 +598,7 @@ struct GitQuickCommitView: View {
                 )
                 if r.submoduleCount > 0 {
                     Text("已先提交 \(r.submoduleCount) 个 submodule")
-                        .font(.system(size: 12))
+                        .font(.wand(size: 12))
                         .foregroundColor(Theme.textSecondary)
                 }
                 if let err = pushError ?? r.pushError, !err.isEmpty {
@@ -608,20 +608,20 @@ struct GitQuickCommitView: View {
                 }
                 HStack {
                     Button("关闭") { dismiss() }
-                        .font(.system(size: 13))
+                        .font(.wand(size: 13))
                         .foregroundColor(Theme.textSecondary)
                         .disabled(pushing)
                     Spacer()
                     if r.pushed {
                         Label("已推送", systemImage: "icloud.and.arrow.up")
-                            .font(.system(size: 13))
+                            .font(.wand(size: 13))
                             .foregroundColor(Theme.textSecondary)
                     } else {
                         Button(action: pushAfterCommit) {
                             HStack(spacing: 6) {
                                 if pushing { ProgressView().controlSize(.small).tint(.white) }
                                 Text(pushing ? "推送中…" : "Push & Close")
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(.wand(size: 13, weight: .semibold))
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
@@ -638,19 +638,19 @@ struct GitQuickCommitView: View {
     private func resultPair(label: String, old: String, new: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.wand(size: 11, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
             HStack(alignment: .top, spacing: 8) {
                 Text(old)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.wand(size: 12, design: .monospaced))
                     .foregroundColor(Theme.textSecondary.opacity(0.75))
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text("→")
-                    .font(.system(size: 12))
+                    .font(.wand(size: 12))
                     .foregroundColor(Theme.textSecondary.opacity(0.75))
                 Text(new)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.wand(size: 12, design: .monospaced))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -936,7 +936,7 @@ private struct MagneticDockView: View {
         return HStack(spacing: 7) {
             Circle().fill(color).frame(width: 8, height: 8)
             Text(Self.chipLabels[id] ?? id)
-                .font(.system(size: 13, weight: .medium))
+                .font(.wand(size: 13, weight: .medium))
                 .foregroundColor(Theme.textPrimary)
         }
         .padding(.horizontal, 14)
@@ -964,7 +964,7 @@ private struct MagneticDockView: View {
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundColor(launchTone)
             Text(hot ? "松手执行" : "提交")
-                .font(.system(size: 12, weight: .medium))
+                .font(.wand(size: 12, weight: .medium))
                 .foregroundColor(hot ? launchTone : Theme.textSecondary)
         }
         .frame(width: 76)
@@ -1020,7 +1020,7 @@ private struct MagneticDockView: View {
         let homes = homePositions()
         guard !homes.isEmpty, allIds.allSatisfy({ chipSizes[$0] != nil }) else { return }
         if animated {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.62)) { chipPos = homes }
+            withAnimation(WandMotion.disclosure) { chipPos = homes }
         } else {
             chipPos = homes
         }

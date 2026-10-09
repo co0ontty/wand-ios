@@ -231,7 +231,7 @@ struct WorkspaceNewTaskSheet: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.wand(size: 12, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
             content()
         }
@@ -248,7 +248,7 @@ struct WorkspaceNewTaskSheet: View {
             TextField("留空按提示词自动命名", text: $name)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .font(.system(size: 15))
+                .font(.wand(size: 15))
         }
     }
 
@@ -259,7 +259,7 @@ struct WorkspaceNewTaskSheet: View {
                     TextField("点击浏览或输入路径", text: $cwd)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .font(.system(size: 15, design: .monospaced))
+                        .font(.wand(size: 15, design: .monospaced))
                         .focused($cwdFocused)
                         .onChange(of: cwd) { _, _ in
                             reconcileSelectedWorkspace()
@@ -286,10 +286,10 @@ struct WorkspaceNewTaskSheet: View {
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(suggestion.name)
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(.wand(size: 13, weight: .semibold))
                                     .foregroundColor(Theme.textPrimary)
                                 Text(suggestion.path)
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(.wand(size: 11, design: .monospaced))
                                     .foregroundColor(Theme.textMuted)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
@@ -313,7 +313,7 @@ struct WorkspaceNewTaskSheet: View {
                                 updateTaskCwd(recent.path)
                             } label: {
                                 Text(recent.name.isEmpty ? recent.path : recent.name)
-                                    .font(.system(size: 11, design: .monospaced))
+                                    .font(.wand(size: 11, design: .monospaced))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                     .padding(.horizontal, 10)
@@ -382,7 +382,7 @@ struct WorkspaceNewTaskSheet: View {
                                         Text(item.name)
                                             .foregroundColor(Theme.textPrimary)
                                         Text(item.path)
-                                            .font(.system(size: 11, design: .monospaced))
+                                            .font(.wand(size: 11, design: .monospaced))
                                             .foregroundColor(Theme.textMuted)
                                             .lineLimit(1)
                                             .truncationMode(.middle)
@@ -455,7 +455,7 @@ struct WorkspaceNewTaskSheet: View {
     private var cliCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("CLI 工具")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.wand(size: 12, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -463,10 +463,11 @@ struct WorkspaceNewTaskSheet: View {
                         let selected = target == option
                         Button {
                             target = option
+                            if option == .wandAgent { sessionKind = .structured }
                             store.rememberCreationChoice(provider: option)
                         } label: {
                             Text(option.title)
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(.wand(size: 13, weight: .semibold))
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
                                 .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
@@ -480,17 +481,17 @@ struct WorkspaceNewTaskSheet: View {
             }
             if target != .shell {
                 Text("会话类型")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.wand(size: 12, weight: .semibold))
                     .foregroundColor(Theme.textSecondary)
                 HStack(spacing: 8) {
-                    ForEach(WorkspaceSessionKind.allCases) { option in
+                    ForEach(WorkspaceSessionKind.allCases.filter { target != .wandAgent || $0 == .structured }) { option in
                         let selected = sessionKind == option
                         Button {
                             sessionKind = option
                             store.rememberCreationChoice(kind: option)
                         } label: {
                             Text(option.title)
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(.wand(size: 13, weight: .semibold))
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 10)
                                 .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
@@ -515,7 +516,7 @@ struct WorkspaceNewTaskSheet: View {
     private var createModeCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("创建后")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.wand(size: 12, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
             HStack(spacing: 8) {
                 modeChoice("启动会话", selected: startFirstSession) { startFirstSession = true }
@@ -524,13 +525,13 @@ struct WorkspaceNewTaskSheet: View {
             if startFirstSession, target != .shell {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("首个会话的提示词（可选）")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.wand(size: 12, weight: .semibold))
                         .foregroundColor(Theme.textSecondary)
                     TextField("希望 CLI 帮你完成什么？", text: $prompt, axis: .vertical)
                         .lineLimit(2...4)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .font(.system(size: 15))
+                        .font(.wand(size: 15))
                         .disabled(creating)
                     Text("任务名称留空时按此提示词自动命名，仍可随时改名。")
                         .font(.footnote)
@@ -553,7 +554,7 @@ struct WorkspaceNewTaskSheet: View {
     ) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.wand(size: 13, weight: .semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .foregroundColor(selected ? Theme.brand : Theme.textPrimary)
@@ -576,7 +577,7 @@ struct WorkspaceNewTaskSheet: View {
                 Image(systemName: showingAdvanced ? "chevron.down" : "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
                 Text(showingAdvanced ? "收起高级选项" : "高级：独立工作树")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.wand(size: 13, weight: .semibold))
                 Spacer()
             }
             .foregroundColor(Theme.textSecondary)

@@ -946,12 +946,14 @@ final class AlignmentParityTests: XCTestCase {
     }
 
     func testHomeListModePersistsBoardAsTaskMode() {
-        XCTAssertEqual(HomeListMode.fromStorage(nil), .sessions)
+        XCTAssertEqual(HomeListMode.fromStorage(nil), .im)
         XCTAssertEqual(HomeListMode.fromStorage("sessions"), .sessions)
-        XCTAssertEqual(HomeListMode.fromStorage("tasks"), .sessions)
+        XCTAssertEqual(HomeListMode.fromStorage("tasks"), .im)
+        XCTAssertEqual(HomeListMode.fromStorage("im"), .im)
+        XCTAssertEqual(HomeListMode.fromStorage("contacts"), .contacts)
         XCTAssertEqual(HomeListMode.fromStorage("board"), .board)
-        XCTAssertEqual(HomeListMode.sessions.label, "会话模式")
-        XCTAssertEqual(HomeListMode.board.label, "任务模式")
+        XCTAssertEqual(HomeListMode.sessions.label, "工作区")
+        XCTAssertEqual(HomeListMode.board.label, "任务")
         XCTAssertEqual(HomeListMode.sessions.next, .board)
         XCTAssertEqual(HomeListMode.board.next, .sessions)
         XCTAssertEqual(HomeListMode.board.rawValue, "board")

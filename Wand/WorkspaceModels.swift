@@ -29,16 +29,17 @@ enum WorkspaceSessionTarget: String, CaseIterable, Codable, Identifiable {
     case qoder
     case pi
     case gemini
+    case wandAgent = "wand-agent"
     case shell
 
     var id: String { rawValue }
 
     var provider: WandProvider? {
-        self == .shell ? nil : WandProvider(rawValue: rawValue)
+        self == .shell ? nil : self == .wandAgent ? .pi : WandProvider(rawValue: rawValue)
     }
 
     var title: String {
-        provider?.title ?? "空白终端"
+        self == .wandAgent ? "Wand Agent" : provider?.title ?? "空白终端"
     }
 
     var summary: String {
@@ -48,7 +49,8 @@ enum WorkspaceSessionTarget: String, CaseIterable, Codable, Identifiable {
         case .opencode: return "OpenCode CLI"
         case .grok: return "Grok Build CLI"
         case .qoder: return "Qoder CLI"
-        case .pi: return "Pi coding agent"
+        case .pi: return "Pi CLI"
+        case .wandAgent: return "Wand 进程内 Agent"
         case .gemini: return "Gemini CLI"
         case .shell: return "不启动 Agent 的交互式 Shell"
         }
@@ -562,6 +564,16 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
             standaloneSessions: standaloneSessions ?? self.standaloneSessions
         )
     }
+}
+
+func applyingWorkspaceGroupOrder(_ groups: [TaskDirectoryGroup], order: [String]?) -> [TaskDirectoryGroup] {
+    guard let order else { return groups }
+    var remaining = groups
+    var result: [TaskDirectoryGroup] = []
+    for id in order {
+        if let index = remaining.firstIndex(where: { $0.id == id }) { result.append(remaining.remove(at: index)) }
+    }
+    return result + remaining
 }
 
 enum TaskListExpansionStorage {

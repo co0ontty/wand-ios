@@ -6,9 +6,10 @@ struct ContactCandidate: Codable, Equatable {
     var thinkingEffort = "off"
     var mode = "default"
     var kind = "structured"
+    var engine: String? = nil
 
     init() {}
-    private enum CodingKeys: String, CodingKey { case provider, model, thinkingEffort, mode, kind }
+    private enum CodingKeys: String, CodingKey { case provider, model, thinkingEffort, mode, kind, engine }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? "claude"
@@ -16,11 +17,14 @@ struct ContactCandidate: Codable, Equatable {
         thinkingEffort = try c.decodeIfPresent(String.self, forKey: .thinkingEffort) ?? "off"
         mode = wandBoardNormalizedMode(provider: provider, mode: try c.decodeIfPresent(String.self, forKey: .mode) ?? "default")
         kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? "structured"
+        engine = try c.decodeIfPresent(String.self, forKey: .engine)
     }
-    var identity: String { [provider, model.trimmingCharacters(in: .whitespacesAndNewlines), thinkingEffort, wandBoardNormalizedMode(provider: provider, mode: mode), kind].joined(separator: "\u{0}") }
+    var identity: String { [provider, model.trimmingCharacters(in: .whitespacesAndNewlines), thinkingEffort, wandBoardNormalizedMode(provider: provider, mode: mode), kind, provider == "pi" ? engine ?? "cli" : ""].joined(separator: "\u{0}") }
     func body() -> [String: Any] {
-        ["provider": provider, "model": model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "default" : model.trimmingCharacters(in: .whitespacesAndNewlines), "thinkingEffort": thinkingEffort,
+        var body: [String: Any] = ["provider": provider, "model": model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "default" : model.trimmingCharacters(in: .whitespacesAndNewlines), "thinkingEffort": thinkingEffort,
          "mode": wandBoardNormalizedMode(provider: provider, mode: mode), "kind": kind]
+        if provider == "pi", let engine { body["engine"] = engine }
+        return body
     }
 }
 
@@ -102,10 +106,11 @@ struct EmployeeDraft: Equatable {
 
 func contactCandidateError(_ agents: [ContactCandidate]) -> String? {
     if agents.isEmpty || agents.count > 4 { return "请保留1到4个执行候选。" }
+    if agents.contains(where: { $0.engine != nil && (!["cli", "sdk"].contains($0.engine!) || ($0.engine == "sdk" && $0.provider != "pi")) }) { return "执行引擎无效，Wand Agent 只支持 Pi。" }
     if agents.contains(where: { $0.kind != "structured" || WandProvider(rawValue: $0.provider) == nil }) { return "员工只能使用已支持的结构化CLI。" }
     if agents.contains(where: { $0.model.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count > 128 || !["managed", "full-access", "default"].contains($0.mode) }) { return "候选模型过长或执行模式无效。" }
     if agents.contains(where: { !["off", "standard", "deep", "max"].contains($0.thinkingEffort) &&
-        $0.thinkingEffort.range(of: #"^(?:claude|codex|opencode|grok|qoder|pi):[a-z0-9][a-z0-9_-]{0,31}$"#, options: .regularExpression) == nil }) { return "思考深度无效。" }
+        $0.thinkingEffort.range(of: #"^(?:claude|codex|opencode|grok|qoder|pi|gemini):[a-z0-9][a-z0-9_-]{0,31}$"#, options: .regularExpression) == nil }) { return "思考深度无效。" }
     if Set(agents.map(\.identity)).count != agents.count { return "执行候选重复，请调整模型或深度。" }
     return nil
 }
@@ -268,6 +273,8 @@ struct ContactTeamRun: Decodable, Identifiable {
     let stepsUsed: Int?
     let stepLimit: Int?
     let taskTitle: String?
+    var roundNumber: Int? = nil
+    var conversationId: String? = nil
 }
 struct ContactTeamInfo: Decodable {
     let team: ContactTeam
@@ -344,7 +351,7 @@ struct ContactRunDetail: Decodable {
 }
 
 func contactNavigationPath(parents: [String], selection: String?) -> [String] {
-    parents + (selection.map { [$0] } ?? [])
+    parents + (selection.flatMap { parents.last == $0 ? nil : [$0] } ?? [])
 }
 
 func contactRunStatus(_ status: String) -> String {

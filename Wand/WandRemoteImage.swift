@@ -335,7 +335,7 @@ struct WandFileChip: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(Theme.textSecondary)
             Text(fileName)
-                .font(.system(size: 12))
+                .font(.wand(size: 12))
                 .foregroundColor(Theme.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -431,7 +431,7 @@ struct WandImageViewer: View {
                     .onEnded { _ in
                         lastScale = scale
                         if scale <= 1 {
-                            withAnimation(.spring()) {
+                            withAnimation(WandMotion.disclosure) {
                                 scale = 1
                                 lastScale = 1
                                 offset = .zero
@@ -454,7 +454,7 @@ struct WandImageViewer: View {
                         if scale <= 1,
                            translation.height > 90,
                            abs(translation.height) > abs(translation.width) {
-                            withAnimation(.easeOut(duration: 0.18)) {
+                            withAnimation(WandMotion.scroll) {
                                 offset.height += 80
                             }
                             isPresented = false
@@ -464,7 +464,7 @@ struct WandImageViewer: View {
                     }
             )
             .onTapGesture(count: 2) {
-                withAnimation(.spring()) {
+                withAnimation(WandMotion.disclosure) {
                     if scale > 1 {
                         scale = 1; lastScale = 1; offset = .zero; lastOffset = .zero
                     } else {

@@ -6,6 +6,8 @@ struct AskUserSelectionState {
     /// questionIndex → 已选 optionIndex 集合。
     var selected: [Int: Set<Int>] = [:]
     var submitted = false
+    var submissionUnconfirmed = false
+    var unavailableReason: String?
 }
 
 enum ChatRealtimeStartKind: Equatable {
@@ -62,6 +64,9 @@ final class ChatStore: ObservableObject {
     private var employeeDefinitionRevision = 0
     private var employeeDefinitionID: String?
     @Published private(set) var providerSwitching = false
+    @Published private(set) var directoryChanging = false
+    @Published private(set) var directoryChangeError: String?
+    @Published private(set) var pendingSettingsMutations = 0
     let decisionCards = DecisionCardExpansionState()
     @Published var askUserSelections: [String: AskUserSelectionState] = [:]
 
@@ -126,11 +131,11 @@ final class ChatStore: ObservableObject {
         sessionId: String,
         api: WandAPI,
         inputTransport: (any SessionInputTransport)? = nil,
-        drafts: SessionDraftStore = .shared
+        drafts: SessionDraftStore? = nil
     ) {
         self.sessionId = sessionId
         self.api = api
-        self.composerDraft = drafts.draft(sessionId: sessionId, api: api)
+        self.composerDraft = (drafts ?? .shared).draft(sessionId: sessionId, api: api)
         self.inputTransport = inputTransport ?? api
         self.serverID = ServerProfiles.stableID(for: api.baseURL)
         self.socket = WandSocket(baseURL: api.baseURL)
@@ -148,6 +153,20 @@ final class ChatStore: ObservableObject {
     }
 
     // MARK: - 生命周期
+
+    private var viewConsumers = 0
+    private let draftConsumer = UUID()
+    var canEvict: Bool { viewConsumers == 0 && !inputSending && unconfirmedInput == nil }
+    func attachView() {
+        if viewConsumers == 0 { composerDraft.acquire(draftConsumer) }
+        viewConsumers += 1
+        start()
+    }
+    func detachView() {
+        guard viewConsumers > 0 else { return }
+        viewConsumers -= 1
+        if viewConsumers == 0 { composerDraft.release(draftConsumer); shutdown() }
+    }
 
     func start() {
         shutdownTask?.cancel()
@@ -394,34 +413,14 @@ final class ChatStore: ObservableObject {
 
     private func publishPresence() {
         guard let snapshot else { return }
-        if sessionEnded {
-            SessionPresenceController.shared.end(
-                sessionId: sessionId,
-                serverID: serverID,
-                immediately: true
-            )
-        } else if pendingEscalation != nil || permissionBlocked || legacyPermissionPrompt != nil {
-            SessionPresenceController.shared.start(
-                sessionId: sessionId,
-                serverID: serverID,
-                title: snapshot.displayTitle,
-                provider: snapshot.provider,
-                state: .permission,
-                taskTitle: currentTaskTitle,
-                queuedCount: queuedMessages.count
-            )
-        } else if isResponding {
-            SessionPresenceController.shared.start(
-                sessionId: sessionId,
-                serverID: serverID,
-                title: snapshot.displayTitle,
-                provider: snapshot.provider,
-                taskTitle: currentTaskTitle,
-                queuedCount: queuedMessages.count
-            )
-        } else {
-            SessionPresenceController.shared.end(sessionId: sessionId, serverID: serverID)
-        }
+        var current = snapshot
+        current.status = status
+        current.permissionBlocked = permissionBlocked || legacyPermissionPrompt != nil
+        current.pendingEscalation = pendingEscalation
+        current.queuedMessages = queuedMessages
+        current.currentTaskTitle = currentTaskTitle
+        current.structuredState?.inFlight = isResponding
+        SessionPresenceController.shared.sync(snapshot: current, serverID: serverID)
     }
 
     func handle(_ event: WsIncoming) {
@@ -575,6 +574,9 @@ final class ChatStore: ObservableObject {
         if let value = data.teamStep { snapshot?.teamStep = value }
         if let title = data.title { snapshot?.title = title }
         if let description = data.description { snapshot?.description = description }
+        if let cwd = data.cwd { snapshot?.cwd = cwd }
+        if let workspaceID = data.workspaceId { snapshot?.workspaceId = workspaceID }
+        if let locked = data.directoryLocked { snapshot?.directoryLocked = locked }
         if let summary = data.summary, snapshot?.summary != summary {
             snapshot = snapshot.map { current in
                 var updated = current
@@ -642,7 +644,7 @@ final class ChatStore: ObservableObject {
                 }
             }
             return ConversationTurn(role: turn.role, content: content, usage: turn.usage,
-                                    createdAt: turn.createdAt, completedAt: turn.completedAt)
+                                    createdAt: turn.createdAt, completedAt: turn.completedAt, resourceSelection: turn.resourceSelection)
         }
     }
 
@@ -658,7 +660,7 @@ final class ChatStore: ObservableObject {
         onFailure: (() -> Void)? = nil
     ) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !inputSending, !providerSwitching, !composerDraft.retired else { return false }
+        guard !trimmed.isEmpty, !inputSending, !providerSwitching, !directoryChanging, !composerDraft.retired else { return false }
         guard !composerDraft.isUnconfirmed(trimmed) else {
             finishInputFeedback(accepted: false, message: "上一条消息送达结果未知，请先核对会话，不要重复发送。")
             return false
@@ -895,7 +897,7 @@ final class ChatStore: ObservableObject {
     }
 
     func setModel(_ model: String?) {
-        guard !providerSwitching else { return }
+        guard !providerSwitching, !directoryChanging else { return }
         let previousModel = selectedModel
         let previousThinkingEffort = thinkingEffort
         let previouslyNeededThinkingSync = thinkingEffortNeedsSync
@@ -957,7 +959,7 @@ final class ChatStore: ObservableObject {
     }
 
     func setThinkingEffort(_ effort: String) {
-        guard !providerSwitching else { return }
+        guard !providerSwitching, !directoryChanging else { return }
         let previous = thinkingEffort
         let previouslyNeededSync = thinkingEffortNeedsSync
 
@@ -984,7 +986,9 @@ final class ChatStore: ObservableObject {
         _ mutation: @escaping @MainActor () async -> Void
     ) {
         let previous = settingsMutationTail
+        pendingSettingsMutations += 1
         settingsMutationTail = Task { @MainActor in
+            defer { pendingSettingsMutations -= 1 }
             _ = await previous?.result
             await mutation()
         }
@@ -1015,7 +1019,7 @@ final class ChatStore: ObservableObject {
 
     /// 中途切换执行模式（乐观更新，失败回滚）。codex 会话固定 full-access，调用方负责拦。
     func setMode(_ newMode: String) {
-        guard !providerSwitching else { return }
+        guard !providerSwitching, !directoryChanging else { return }
         let previous = mode
         modeUpdateRevision &+= 1
         let revision = modeUpdateRevision
@@ -1069,13 +1073,39 @@ final class ChatStore: ObservableObject {
     }
 
     var canSwitchProvider: Bool {
-        !loading && !providerSwitching && !inputSending && isStructured && !isResponding
-            && snapshot?.archived != true && status == "idle" && messages.isEmpty
-            && queuedMessages.isEmpty && (snapshot?.claudeSessionId?.isEmpty ?? true)
+        !loading && !providerSwitching && !directoryChanging && pendingSettingsMutations == 0
+            && !inputSending && isStructured && !isResponding
+            && snapshot?.archived != true && status == "idle" && messages.isEmpty && messageTotal == 0
+            && (snapshot?.messageTotal ?? 0) == 0 && queuedMessages.isEmpty && (snapshot?.claudeSessionId?.isEmpty ?? true)
     }
 
-    func switchProvider(_ provider: String) {
-        guard canSwitchProvider, snapshot?.provider != provider else { return }
+    var canChangeDirectory: Bool { canSwitchProvider && canChangeBlankSessionDirectory(snapshot, messageTotal: messageTotal) }
+
+    func changeDirectory(_ cwd: String, onChanged: @escaping () -> Void = {}) {
+        guard canChangeDirectory, !cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if snapshot?.cwd == cwd { onChanged(); return }
+        directoryChanging = true; directoryChangeError = nil
+        let employeeID = snapshot?.employeeId
+        let requestRevision = realtimeRevision
+        Task {
+            defer { directoryChanging = false }
+            do {
+                if let settingsMutationTail { await settingsMutationTail.value }
+                let updated = try await api.setSessionDirectory(id: sessionId, cwd: cwd)
+                guard updated.id == sessionId, updated.isStructured, updated.employeeId == employeeID else {
+                    throw WandAPI.APIError.network("运行目录切换回执身份不一致")
+                }
+                guard active else { return }
+                if realtimeRevision == requestRevision { apply(snapshot: updated) }
+                else { snapshot?.cwd = updated.cwd; snapshot?.workspaceId = updated.workspaceId }
+                socket.requestResync(); onChanged()
+            } catch { if active { directoryChangeError = error.localizedDescription } }
+        }
+    }
+
+    func switchProvider(_ provider: String, engine: String? = nil) {
+        let tool = WandAgentTool(provider: provider, engine: engine)
+        guard canSwitchProvider, snapshot?.agentTool != tool else { return }
         providerSwitching = true
         let requestRevision = realtimeRevision
         modelCatalogRevision += 1
@@ -1084,7 +1114,7 @@ final class ChatStore: ObservableObject {
             defer { providerSwitching = false }
             do {
                 if let settingsMutationTail { await settingsMutationTail.value }
-                let updated = try await api.setSessionProvider(id: sessionId, provider: provider)
+                let updated = try await api.setSessionProvider(id: sessionId, provider: provider, engine: tool.engine)
                 if realtimeRevision == requestRevision { apply(snapshot: updated) }
                 else {
                     let previousCompletion = snapshot?.completionRevision ?? 0
@@ -1105,9 +1135,31 @@ final class ChatStore: ObservableObject {
     // MARK: - AskUserQuestion 交互（对齐 Web 端 __askSelect / __askSubmit）
 
     /// 点选一个选项：单选点同一项取消、换选项替换；多选逐项 toggle。已提交后不可改。
+    var activeQuestionIDs: Set<String> {
+        let blocks = messages.flatMap(\.content)
+        let results = Set(blocks.compactMap { block -> String? in if case .toolResult(let id, _, _, _, _, _, _) = block { return id }; return nil })
+        let boundary = messages.lastIndex { $0.role == "user" } ?? -1
+        return Set(messages.dropFirst(boundary + 1).flatMap(\.content).compactMap { block -> String? in
+            if case .toolUse(let id, let name, _, let input, _) = block,
+               (name == "AskUserQuestion" || !AskUserQuestion.parse(input: input).isEmpty), !results.contains(id) { return id }
+            return nil
+        })
+    }
+    var displayedAskSelections: [String: AskUserSelectionState] {
+        var states = askUserSelections
+        let active = activeQuestionIDs
+        for block in messages.flatMap(\.content) {
+            if case .toolUse(let id, let name, _, let input, _) = block,
+               name == "AskUserQuestion" || !AskUserQuestion.parse(input: input).isEmpty, !active.contains(id) {
+                var state = states[id] ?? AskUserSelectionState(); state.submitted = true; state.unavailableReason = "历史提问，不能向当前轮次提交"; states[id] = state
+            }
+        }
+        return states
+    }
+
     func toggleAskOption(toolUseId: String, questionIndex: Int, optionIndex: Int, multiSelect: Bool) {
         var sel = askUserSelections[toolUseId] ?? AskUserSelectionState()
-        guard !sel.submitted else { return }
+        guard !sel.submitted, activeQuestionIDs.contains(toolUseId) else { return }
         var current = sel.selected[questionIndex] ?? []
         if multiSelect {
             if current.contains(optionIndex) { current.remove(optionIndex) } else { current.insert(optionIndex) }
@@ -1122,7 +1174,7 @@ final class ChatStore: ObservableObject {
     /// 答案不乐观插入用户气泡——服务端会把它作为 tool_result 回推、卡片转只读态。
     func submitAskUser(toolUseId: String, answerText: String) {
         var sel = askUserSelections[toolUseId] ?? AskUserSelectionState()
-        guard !sel.submitted, !inputSending else { return }
+        guard !sel.submitted, !inputSending, activeQuestionIDs.contains(toolUseId) else { return }
         let requestRevision = realtimeRevision
         let wasResponding = isResponding
         let structured = isStructured
@@ -1151,6 +1203,7 @@ final class ChatStore: ObservableObject {
                     if structured, realtimeRevision == requestRevision { isResponding = wasResponding }
                 } else {
                     unconfirmedInput = answerText
+                    var unknown = askUserSelections[toolUseId] ?? AskUserSelectionState(); unknown.submissionUnconfirmed = true; askUserSelections[toolUseId] = unknown
                     finishInputFeedback(accepted: false, message: "答案送达结果未知，请先核对会话，勿重复提交。")
                     if structured { socket.requestResync() }
                 }
@@ -1362,7 +1415,8 @@ final class ChatStore: ObservableObject {
                         content: page.blocks + head.content,
                         usage: head.usage,
                         createdAt: head.createdAt,
-                        completedAt: head.completedAt
+                        completedAt: head.completedAt,
+                        resourceSelection: head.resourceSelection
                     )
                     leadingBlockOffset = page.blockOffset
                     leadingBlockTotal = max(leadingBlockTotal, page.blockTotal)

@@ -159,7 +159,7 @@ struct UnifiedSessionListView: View {
         if isSelecting {
             ToolbarItem(placement: .principal) {
                 Text("已选择 \(selectedKeys.count) 项")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.wand(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
             }
         }
@@ -208,7 +208,7 @@ struct UnifiedSessionListView: View {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("正在加载更多会话…")
-                            .font(.system(size: 12))
+                            .font(.wand(size: 12))
                             .foregroundColor(Theme.textSecondary)
                     }
                     .frame(maxWidth: .infinity)
@@ -331,19 +331,19 @@ struct UnifiedSessionListView: View {
                 .foregroundColor(node.containsSession(selection) ? Theme.brand : Theme.textSecondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(node.displayName)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.wand(size: 14, weight: .medium))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
                 if let caption = TaskListPresentation.directoryPathCaption(name: node.displayName, cwd: node.path) {
                     Text(caption)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.wand(size: 10, design: .monospaced))
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(1)
                 }
             }
             Spacer(minLength: 4)
             Text("\(node.totalCount)")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.wand(size: 11, weight: .semibold))
                 .foregroundColor(Theme.textSecondary)
             if !node.synthetic && !node.path.isEmpty {
                 Menu {
@@ -390,7 +390,7 @@ struct UnifiedSessionListView: View {
             Spacer()
             Button("完成") { endSelection() }
         }
-        .font(.system(size: 14, weight: .semibold))
+        .font(.wand(size: 14, weight: .semibold))
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(.ultraThinMaterial)
@@ -609,7 +609,7 @@ struct UnifiedSessionListView: View {
             } else {
                 WandBrandMark(size: 48)
             }
-            Text(title).font(.system(size: 15, weight: .medium)).foregroundColor(Theme.textPrimary)
+            Text(title).font(.wand(size: 15, weight: .medium)).foregroundColor(Theme.textPrimary)
             Text(subtitle).font(.footnote).foregroundColor(Theme.textSecondary)
             Button("新建会话", action: action).buttonStyle(WandPrimaryButtonStyle())
         }

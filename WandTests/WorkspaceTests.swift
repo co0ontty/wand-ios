@@ -559,6 +559,14 @@ final class WorkspaceTests: XCTestCase {
 
         for target in WorkspaceSessionTarget.allCases {
             let pty = workspaceTaskWindowRequest(target: target, binding: binding, kind: .pty)
+            if target == .wandAgent {
+                XCTAssertEqual(pty.path, "/api/structured-sessions")
+                XCTAssertEqual(pty.body["provider"], .string("pi"))
+                XCTAssertEqual(pty.body["engine"], .string("sdk"))
+                XCTAssertEqual(pty.body["workspaceTaskId"], .string("task-id"))
+                XCTAssertNil(pty.body["command"])
+                continue
+            }
             XCTAssertEqual(pty.path, "/api/commands")
             XCTAssertEqual(pty.body["cwd"], .string("/task/worktree"))
             XCTAssertEqual(pty.body["workspaceId"], .string("workspace-id"))
