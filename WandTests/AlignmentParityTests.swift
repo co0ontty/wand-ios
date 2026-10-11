@@ -2,6 +2,128 @@ import Foundation
 import XCTest
 @testable import Wand
 
+final class ThinkingEffortParityTests: XCTestCase {
+    private func model(_ id: String, _ efforts: String...) -> ModelInfo {
+        ModelInfo(id: id, label: id, alias: nil,
+            reasoningEfforts: efforts.map { ReasoningEffortInfo(effort: $0, description: nil) },
+            defaultReasoningEffort: nil)
+    }
+
+    private func choices(_ provider: String, _ efforts: [String]) -> [ThinkingEffortOption] {
+        let chosen = ModelInfo(id: "chosen", label: "Chosen", alias: nil,
+            reasoningEfforts: efforts.map { ReasoningEffortInfo(effort: $0, description: nil) },
+            defaultReasoningEffort: nil)
+        return thinkingEffortOptions(provider: provider, selectedModel: "chosen", defaultModel: nil, models: [chosen])
+    }
+
+    func testPiUsesEveryReportedNativeDepthAndWebProtocolIDs() {
+        let options = choices("pi", ["off", "minimal", "low", "medium", "high", "xhigh"])
+        XCTAssertEqual(options.map(\.id), ["off", "pi:minimal", "standard", "pi:medium", "deep", "pi:xhigh"])
+        XCTAssertEqual(options.map(\.label), ["自动", "最低", "低", "中", "高", "超高"])
+        XCTAssertEqual(options.first { $0.id == "pi:medium" }?.menuLabel, "中（medium）")
+    }
+
+    func testPiMaxDoesNotCollideWithXhighOrRenameLegacyMax() {
+        let options = choices("pi", ["high", "xhigh", "max"])
+        XCTAssertEqual(options.map(\.id), ["off", "deep", "pi:xhigh", "max"])
+        XCTAssertEqual(options.map(\.label), ["自动", "高", "超高", "极高"])
+    }
+
+    func testNonReasoningModelsOnlyOfferAutomaticAcrossProviders() {
+        for provider in ["pi", "codex", "opencode", "gemini"] {
+            XCTAssertEqual(choices(provider, ["off"]).map(\.id), ["off"])
+        }
+    }
+
+    func testSelectedModelCapabilitiesBeatDefaultUnion() {
+        let models = [model("default", "off", "low", "high", "xhigh"),
+            model("reasoning", "off", "low", "medium", "high", "xhigh"), model("plain", "off")]
+        XCTAssertEqual(thinkingEffortOptions(provider: "pi", selectedModel: "reasoning", defaultModel: "plain", models: models).map(\.id),
+            ["off", "standard", "pi:medium", "deep", "pi:xhigh"])
+        XCTAssertEqual(thinkingEffortOptions(provider: "pi", selectedModel: "plain", defaultModel: "reasoning", models: models).map(\.id), ["off"])
+    }
+
+    func testAutomaticModelResolvesConcreteDefaultBeforeAlias() {
+        let models = [model("default", "off", "low", "high", "xhigh"), model("plain", "off")]
+        for selected: String? in [nil, "", "default"] {
+            XCTAssertEqual(thinkingEffortOptions(provider: "pi", selectedModel: selected, defaultModel: "plain", models: models).map(\.id), ["off"])
+        }
+        XCTAssertEqual(thinkingEffortOptions(provider: "pi", selectedModel: nil, defaultModel: nil, models: models).map(\.id),
+            ["off", "standard", "deep", "pi:xhigh"])
+    }
+
+    func testMissingModelUsesAliasRatherThanUnrelatedModel() {
+        let models = [model("another", "off", "xhigh"), model("default", "off", "low", "high")]
+        XCTAssertEqual(thinkingEffortOptions(provider: "pi", selectedModel: "missing", defaultModel: nil, models: models).map(\.id),
+            ["off", "standard", "deep"])
+    }
+
+    func testGroupOnlyUsesReportedIntersection() {
+        let models = [model("default", "off", "low", "medium", "high", "xhigh"),
+            model("wand-model-group/pi/coding", "off", "low", "high")]
+        XCTAssertEqual(thinkingEffortOptions(provider: "pi", selectedModel: "wand-model-group/pi/coding", defaultModel: nil, models: models).map(\.id),
+            ["off", "standard", "deep"])
+    }
+
+    func testCodexDynamicIDsRemainCompatible() {
+        let options = choices("codex", ["low", "medium", "high", "xhigh", "max", "ultra"])
+        XCTAssertEqual(options.map(\.id), ["off", "standard", "deep", "codex:high", "max", "codex:max", "codex:ultra"])
+        XCTAssertEqual(options.map(\.label), ["自动", "低", "中", "高", "超高", "极高", "极限"])
+    }
+
+    func testOtherProvidersKeepTheirOwnNativeSemantics() {
+        XCTAssertEqual(choices("claude", ["low", "medium", "high", "max"]).map(\.id), ["off", "standard", "deep", "claude:high", "max"])
+        for provider in ["opencode", "qoder"] {
+            XCTAssertEqual(choices(provider, ["low", "medium", "high", "max", "ultracode"]).map(\.id),
+                ["off", "standard", "\(provider):medium", "deep", "max", "\(provider):ultracode"])
+        }
+        XCTAssertEqual(choices("grok", ["low", "high", "xhigh"]).map(\.id), ["off", "standard", "deep", "max"])
+    }
+
+    func testLevelsAreNormalizedValidatedAndDeduplicated() {
+        XCTAssertEqual(choices("pi", [" OFF ", " Low ", "low", " MEDIUM ", "high", "custom-depth", "", "bad value",
+            "pi:xhigh", "../high", String(repeating: "h", count: 33)]).map(\.id),
+            ["off", "standard", "pi:medium", "deep", "pi:custom-depth"])
+    }
+
+    func testUnknownCapabilitiesStayUnknownRatherThanResettingNativeChoice() {
+        XCTAssertNil(dynamicThinkingEffortOptions(provider: "pi", selectedModel: "chosen", defaultModel: nil, models: []))
+        XCTAssertNil(dynamicThinkingEffortOptions(provider: "pi", selectedModel: "chosen", defaultModel: nil, models: [model("chosen")]))
+        XCTAssertNil(dynamicThinkingEffortOptions(provider: "pi", selectedModel: "chosen", defaultModel: nil, models: [model("chosen", "bad value")]))
+        XCTAssertEqual(dynamicThinkingEffortOptions(provider: "pi", selectedModel: "chosen", defaultModel: nil, models: [model("chosen", "off")])?.map(\.id), ["off"])
+    }
+
+    func testProviderCatalogOnlyFillsMissingModelMetadata() {
+        let reported = ["off", "minimal", "low", "medium", "high", "xhigh"].map { ReasoningEffortInfo(effort: $0, description: nil) }
+        XCTAssertEqual(thinkingEffortOptions(provider: "pi", selectedModel: "chosen", defaultModel: nil,
+            models: [model("chosen")], providerEfforts: reported).map(\.id),
+            ["off", "pi:minimal", "standard", "pi:medium", "deep", "pi:xhigh"])
+        XCTAssertEqual(thinkingEffortOptions(provider: "pi", selectedModel: "chosen", defaultModel: nil,
+            models: [model("chosen", "off")], providerEfforts: reported).map(\.id), ["off"])
+        XCTAssertEqual(thinkingEffortOptions(provider: "pi", selectedModel: "chosen", defaultModel: nil,
+            models: [model("chosen", "medium")], providerEfforts: reported).map(\.id), ["off", "pi:medium"])
+    }
+
+    func testModelsResponsePreservesProviderMetadataAndIsolatesMalformedProvider() throws {
+        let text = #"{"piModels":[{"id":"chosen","label":"Chosen","reasoningEfforts":[{"effort":"medium","description":"模型中档"}]}],"thinkingEfforts":{"pi":[{"effort":"off"},{"effort":"xhigh","description":"最高可用档"}],"codex":{}}}"#
+        let response = try JSONDecoder().decode(ModelsResponse.self, from: Data(text.utf8))
+        XCTAssertEqual(response.thinkingEfforts(for: "pi").map(\.effort), ["off", "xhigh"])
+        XCTAssertEqual(response.thinkingEfforts(for: "pi").last?.description, "最高可用档")
+        XCTAssertTrue(response.thinkingEfforts(for: "codex").isEmpty)
+        XCTAssertTrue(response.thinkingEfforts(for: "claude").isEmpty)
+        XCTAssertEqual(response.piModels.first?.reasoningEfforts?.first?.description, "模型中档")
+        let old = try JSONDecoder().decode(ModelsResponse.self, from: Data("{}".utf8))
+        XCTAssertTrue(old.thinkingEfforts(for: "pi").isEmpty)
+    }
+
+    func testOldServerAndInvalidCatalogKeepLegacyDisplayFallback() {
+        for provider in ["pi", "codex", "claude", "opencode"] {
+            XCTAssertEqual(choices(provider, []).map(\.id), ["off", "standard", "deep", "max"])
+            XCTAssertEqual(choices(provider, ["", "bad value"]).map(\.id), ["off", "standard", "deep", "max"])
+        }
+    }
+}
+
 private actor AlignmentAsyncGate {
     private var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -127,6 +249,65 @@ final class AlignmentParityTests: XCTestCase {
             )
             XCTAssertNotNil(ServerProfiles.decode(defaults.data(forKey: "wand.serverProfiles.v2")))
         }
+    }
+
+    func testCancelledLoginAttemptCancelsNetworkAndRejectsLateCookieCommit() throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: try XCTUnwrap(URL(string: "https://login.example.test")))
+        let attempt = WandAuth.ConnectionAttempt()
+        var cleanedUp = false
+        var committed = false
+        attempt.setTask(task)
+        attempt.setCleanup { cleanedUp = true }
+
+        attempt.cancel()
+
+        XCTAssertTrue(attempt.isCancelled())
+        XCTAssertTrue(cleanedUp)
+        XCTAssertTrue(task.state == .canceling || task.state == .completed)
+        XCTAssertFalse(attempt.finish { committed = true })
+        XCTAssertFalse(committed)
+    }
+
+    func testCancelledLoginAttemptRejectsTaskRegisteredAfterCancellation() throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: try XCTUnwrap(URL(string: "https://login.example.test")))
+        let attempt = WandAuth.ConnectionAttempt()
+        attempt.cancel()
+        attempt.setTask(task)
+        var cleanedUp = false
+        attempt.setCleanup { cleanedUp = true }
+
+        XCTAssertTrue(cleanedUp)
+        XCTAssertTrue(task.state == .canceling || task.state == .completed)
+        XCTAssertFalse(attempt.finish())
+    }
+
+    func testSwitchingBeforeLoginPreservesProfilesAcrossRelaunchAndCanSelectAnotherServer() throws {
+        let suiteName = "AlignmentParityTests.login-switch.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ServerStore(defaults: defaults)
+        let old = try XCTUnwrap(store.saveProfile(
+            serverURL: try XCTUnwrap(URL(string: "https://old.example.test")),
+            token: "old-test-token"
+        ))
+        let next = try XCTUnwrap(store.saveProfile(
+            serverURL: try XCTUnwrap(URL(string: "https://next.example.test")),
+            token: "next-test-token",
+            activate: false
+        ))
+
+        store.disconnect()
+        let restored = ServerStore(defaults: defaults)
+        XCTAssertNil(restored.activeProfile)
+        XCTAssertEqual(restored.profile(id: old.id)?.token, old.token)
+        XCTAssertEqual(restored.profile(id: next.id)?.token, next.token)
+        XCTAssertTrue(restored.activateProfile(id: next.id))
+        XCTAssertEqual(restored.activeProfile?.connectionIdentity, next.connectionIdentity)
+        XCTAssertEqual(restored.profile(id: old.id)?.token, old.token)
     }
 
     func testDisconnectClearsLegacyActiveCredentialButKeepsCanonicalRecentMirror() throws {

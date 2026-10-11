@@ -68,6 +68,7 @@ struct NewSessionView: View {
     let api: WandAPI
     let hostServerID: String
     let initialCwd: String?
+    var voiceCallOnly = false
     let onCreated: (SessionSnapshot, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -88,6 +89,7 @@ struct NewSessionView: View {
     @State private var qoderModels: [ModelInfo] = []
     @State private var piModels: [ModelInfo] = []
     @State private var geminiModels: [ModelInfo] = []
+    @State private var providerThinkingEfforts: [String: [ReasoningEffortInfo]] = [:]
     @State private var serverDefaultModels = ProviderDefaultModels(
         claude: nil,
         codex: nil,
@@ -127,11 +129,13 @@ struct NewSessionView: View {
         api: WandAPI,
         hostServerID: String,
         initialCwd: String? = nil,
+        voiceCallOnly: Bool = false,
         onCreated: @escaping (SessionSnapshot, String) -> Void
     ) {
         self.api = api
         self.hostServerID = hostServerID
         self.initialCwd = initialCwd
+        self.voiceCallOnly = voiceCallOnly
         self.onCreated = onCreated
         _selectedServerID = State(initialValue: hostServerID)
         _cwd = State(initialValue: initialCwd ?? "")
@@ -221,7 +225,8 @@ struct NewSessionView: View {
             provider: provider,
             selectedModel: selectedModel,
             defaultModel: serverDefaultModel(for: provider),
-            models: providerModels
+            models: providerModels,
+            providerEfforts: providerThinkingEfforts[provider] ?? []
         )
     }
 
@@ -236,7 +241,7 @@ struct NewSessionView: View {
                 WandAmbientBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        if serverStore.profiles.count > 1 {
+                        if serverStore.profiles.count > 1 && !voiceCallOnly {
                             sectionHeader("服务器")
                             Picker("服务器", selection: $selectedServerID) {
                                 ForEach(serverStore.profiles) { profile in
@@ -259,17 +264,19 @@ struct NewSessionView: View {
                             fieldHint("配置、目录和会话都会从所选服务器读取，认证信息彼此隔离。")
                         }
 
-                        sectionHeader("会话类型")
-                        Picker("会话类型", selection: $sessionKind) {
-                            ForEach(SessionKind.allCases) { kind in
-                                Text(kind.title).tag(kind)
+                        if !voiceCallOnly {
+                            sectionHeader("会话类型")
+                            Picker("会话类型", selection: $sessionKind) {
+                                ForEach(SessionKind.allCases) { kind in
+                                    Text(kind.title).tag(kind)
+                                }
                             }
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: sessionKind) { _, newKind in
-                            if newKind != .structured { contactSubject = nil }
-                            if newKind.preferenceValue != nil {
-                                scheduleDefaultsSave()
+                            .pickerStyle(.segmented)
+                            .onChange(of: sessionKind) { _, newKind in
+                                if newKind != .structured { contactSubject = nil }
+                                if newKind.preferenceValue != nil {
+                                    scheduleDefaultsSave()
+                                }
                             }
                         }
                         fieldHint(Self.sessionKindHint(provider: provider, kind: sessionKind))
@@ -343,8 +350,7 @@ struct NewSessionView: View {
                         if sessionKind == .shell {
                             fieldHint("创建后会直接进入可输入命令的空白终端，不启动任何 AI CLI。")
                         } else {
-                            sectionHeader("首条消息（可选）")
-                            firstMessageCard
+                            if !voiceCallOnly { sectionHeader("首条消息（可选）"); firstMessageCard }
                         }
 
                         if let errorMessage { errorBanner(errorMessage) }
@@ -379,7 +385,7 @@ struct NewSessionView: View {
                 }
             }
             .dismissKeyboardOnTap()
-            .navigationTitle("新建会话")
+            .navigationTitle(voiceCallOnly ? "选择通话员工与目录" : "新建会话")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -504,6 +510,7 @@ struct NewSessionView: View {
         defaultsSaveTask = nil
         pendingModelDefaults.removeAll()
         bootstrapGeneration &+= 1
+        modelCatalogRevision &+= 1
         let generation = bootstrapGeneration
         bootstrapState = .loading
         didLoadDefaults = false
@@ -516,6 +523,7 @@ struct NewSessionView: View {
         qoderModels = []
         piModels = []
         geminiModels = []
+        providerThinkingEfforts = [:]
         recentPaths = []
 
         do {
@@ -529,7 +537,7 @@ struct NewSessionView: View {
 
             provider = WandProvider(normalizing: config.defaultProvider).rawValue
             selectedEngine = provider == "pi" ? config.defaultEngine : nil
-            sessionKind = config.defaultSessionKind == SessionKind.pty.rawValue && selectedEngine != "sdk" ? .pty : .structured
+            sessionKind = !voiceCallOnly && config.defaultSessionKind == SessionKind.pty.rawValue && selectedEngine != "sdk" ? .pty : .structured
             mode = supportedMode(config.resolvedDefaultMode, provider: provider)
             serverDefaultModels = ProviderDefaultModels(
                 claude: config.defaultModelId(for: WandProvider.claude.rawValue),
@@ -789,6 +797,7 @@ struct NewSessionView: View {
         qoderModels = response.models(for: WandProvider.qoder.rawValue)
         piModels = response.models(for: WandProvider.pi.rawValue)
         geminiModels = response.models(for: WandProvider.gemini.rawValue)
+        providerThinkingEfforts = response.thinkingEfforts
         serverDefaultModels = ProviderDefaultModels(
             claude: response.defaultModelId(for: WandProvider.claude.rawValue),
             codex: response.defaultModelId(for: WandProvider.codex.rawValue),
@@ -811,9 +820,12 @@ struct NewSessionView: View {
     /// 收敛为协议的 off（自动），不能只让标签看起来回落到第一个选项。
     @discardableResult
     private func normalizeThinkingEffortIfNeeded() -> Bool {
-        // Codex 动态档位必须等模型目录成功返回，否则 legacy 回退会误伤有效值。
-        if selectedProvider == .codex && !didLoadModels { return false }
-        guard !thinkingLevels.contains(where: { $0.id == thinkingEffort }) else { return false }
+        // 未拿到真实能力时保留选择，不能用旧三档把 Pi 的 medium/xhigh 等清掉。
+        guard didLoadModels, let options = dynamicThinkingEffortOptions(
+            provider: provider, selectedModel: selectedModel, defaultModel: serverDefaultModel(for: provider),
+            models: providerModels, providerEfforts: providerThinkingEfforts[provider] ?? []
+        ) else { return false }
+        guard !options.contains(where: { $0.id == thinkingEffort }) else { return false }
         thinkingEffort = "off"
         return true
     }
@@ -1065,6 +1077,7 @@ struct NewSessionView: View {
 
     private var canCreate: Bool {
         bootstrapReady && !cwd.trimmingCharacters(in: .whitespaces).isEmpty && !creating &&
+        (!voiceCallOnly || (contactSubject?.type == "employee" && sessionKind == .structured)) &&
         !unconfirmedCreations.contains(selectedServerID) &&
         (contactSubject == nil || (sessionKind == .structured && contactEmployees.contains {
             $0.id == contactSubject?.id && !$0.archived && !$0.agents.isEmpty

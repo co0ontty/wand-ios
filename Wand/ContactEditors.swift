@@ -34,7 +34,27 @@ struct ContactAvatar: View {
     var provider: String? = nil
     var team = false
     var size: CGFloat = 44
+    var name: String = ""
+    var floating = false
     var body: some View {
+        Group {
+            if !team, let asset = PlushAvatarIdentity.asset(id: id, name: name, avatar: avatar) {
+                PlushAvatarView(asset: asset, size: size, floating: floating)
+            } else { legacyFace }
+        }
+        .frame(width: size, height: size)
+        .overlay(alignment: .bottomTrailing) {
+            if !team, let known = WandProvider.normalizedID(provider) {
+                let badge = min(20, max(13, size * 0.5))
+                let shape = RoundedRectangle(cornerRadius: badge * 0.35)
+                BrandLogo(provider: known).frame(width: (badge - 3) * 0.75, height: (badge - 3) * 0.75)
+                    .frame(width: badge, height: badge).background(Theme.elevated, in: shape)
+                    .overlay(shape.stroke(Theme.background, lineWidth: 1.5)).offset(x: 2, y: 2)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+    private var legacyFace: some View {
         ZStack {
             RoundedRectangle(cornerRadius: size * 0.3).fill(Theme.surfaceSoft)
             if avatar.hasPrefix("data:image/"), let comma = avatar.firstIndex(of: ","),
@@ -62,16 +82,50 @@ struct ContactAvatar: View {
                 }
             }
         }.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.3))
-            .overlay(alignment: .bottomTrailing) {
-                if !team, let known = WandProvider.normalizedID(provider) {
-                    let badge = min(20, max(13, size * 0.5))
-                    let shape = RoundedRectangle(cornerRadius: badge * 0.35)
-                    BrandLogo(provider: known).frame(width: (badge - 3) * 0.75, height: (badge - 3) * 0.75)
-                        .frame(width: badge, height: badge).background(Theme.elevated, in: shape)
-                        .overlay(shape.stroke(Theme.background, lineWidth: 1.5)).offset(x: 2, y: 2)
-                }
-            }
-            .accessibilityHidden(true)
+    }
+}
+
+/// Mirrors src/plush-avatar.ts: strict v1 fields, stable UTF-16 seed, no persistence.
+enum PlushAvatarIdentity {
+    static let shapes = ["heart", "triangle", "diamond", "round", "square", "capsule"]
+    static let colors = ["coral", "sage", "lavender", "cream", "blue", "ochre"]
+    static let glasses = ["none", "gold", "ink"]
+    static let hats = ["none", "beanie", "beret"]
+    private static func hash(_ seed: String) -> UInt32 {
+        var value: UInt32 = 0x811c9dc5
+        for unit in seed.utf16 { value = (value ^ UInt32(unit)) &* 0x01000193 }
+        value = (value ^ (value >> 16)) &* 0x85ebca6b
+        value = (value ^ (value >> 13)) &* 0xc2b2ae35
+        return value ^ (value >> 16)
+    }
+    static func asset(id: String, name: String = "", avatar: String) -> String? {
+        if avatar.hasPrefix("data:image/") || avatar.range(of: "^cat:[0-9]+$", options: .regularExpression) != nil { return nil }
+        if avatar == "plush-cat:v1:silver" { return "plush_cat_silver" }
+        if avatar == "plush-cat:v1:orange" { return "plush_cat_orange" }
+        let fields = avatar.components(separatedBy: ":")
+        let options = [shapes, colors, glasses, hats]
+        if fields.count == 6, fields[0] == "plush", fields[1] == "v1",
+           options.indices.allSatisfy({ options[$0].contains(fields[$0 + 2]) }) {
+            return "plush_" + fields.dropFirst(2).joined(separator: "_")
+        }
+        let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identity = !trimmedID.isEmpty ? trimmedID : !trimmedName.isEmpty ? trimmedName : "member"
+        let keys = ["shape", "color", "glasses", "hat"]
+        return "plush_" + options.enumerated().map { index, choices in
+            choices[Int(hash("plush:v1:\(identity):\(keys[index])") % UInt32(choices.count))]
+        }.joined(separator: "_")
+    }
+}
+
+/// Transparent static portraits exported from the shared scene. Animation uses WorkingAvatar.
+struct PlushAvatarView: View {
+    let asset: String
+    let size: CGFloat
+    let floating: Bool
+    var body: some View {
+        Image(asset).resizable().scaledToFit().frame(width: size, height: size)
+            .shadow(color: Theme.textPrimary.opacity(floating ? 0.16 : 0), radius: 4, x: 0, y: 3)
     }
 }
 
@@ -156,7 +210,8 @@ struct ContactCandidateEditor: View {
                         Picker("思考深度", selection: $agents[index].thinkingEffort) {
                             let options = thinkingEffortOptions(provider: agents[index].provider,
                                 selectedModel: agents[index].model, defaultModel: catalog?.defaultModelId(for: agents[index].provider),
-                                models: catalog?.models(for: agents[index].provider) ?? [])
+                                models: catalog?.models(for: agents[index].provider) ?? [],
+                                providerEfforts: catalog?.thinkingEfforts(for: agents[index].provider) ?? [])
                             ForEach(options) { Text($0.label).tag($0.id) }
                             if !options.contains(where: { $0.id == agents[index].thinkingEffort }) {
                                 Text(agents[index].thinkingEffort).tag(agents[index].thinkingEffort)

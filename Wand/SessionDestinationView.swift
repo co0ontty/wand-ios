@@ -877,7 +877,7 @@ private struct PtySessionView: View {
             // 与 Android 一致：透明底，只展示品牌 logo。
             if let employeeId = store.snapshot?.employeeId ?? session.employeeId {
                 ContactAvatar(id: employeeId, avatar: store.displayEmployeeAvatar ?? session.employeeAvatar ?? "",
-                              provider: provider, size: 26)
+                              provider: provider, size: 40, name: store.displayEmployeeName ?? "", floating: true)
             } else {
                 BrandLogo(provider: provider, color: Color.white.opacity(0.9), onDark: true)
                 .frame(width: 18, height: 18)

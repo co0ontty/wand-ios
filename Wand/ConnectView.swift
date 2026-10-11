@@ -123,9 +123,11 @@ struct ConnectView: View {
                 title: "取消",
                 key: .escape,
                 modifiers: [],
-                isEnabled: inputFocused || isPresentedAsSheet
+                isEnabled: isConnecting || inputFocused || isPresentedAsSheet
             ) {
-                if inputFocused {
+                if isConnecting {
+                    cancelConnection()
+                } else if inputFocused {
                     inputFocused = false
                 } else {
                     cancelAndDismiss()
@@ -267,19 +269,21 @@ struct ConnectView: View {
 
     private var connectButton: some View {
         HStack(spacing: 10) {
-            Button(action: connect) {
+            Button {
+                if isConnecting { cancelConnection() } else { connect() }
+            } label: {
                 HStack(spacing: 8) {
                     if isConnecting {
                         ProgressView()
                             .controlSize(.small)
                             .tint(.white)
                     }
-                    Text(isConnecting ? "连接中…" : "连接")
+                    Text(isConnecting ? "取消连接" : "连接")
                 }
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(WandPrimaryButtonStyle())
-            .disabled(isConnecting || trimmedInput.isEmpty)
+            .disabled(!isConnecting && trimmedInput.isEmpty)
 
             Button {
                 inputFocused = false
@@ -563,6 +567,12 @@ struct ConnectView: View {
             guard !Task.isCancelled, generation == connectionGeneration else { return }
             startSavedProfileConnectAttempt(profile: profile, generation: generation)
         }
+    }
+
+    private func cancelConnection() {
+        invalidateConnectionAttempt()
+        error = nil
+        showLocalNetworkHint = false
     }
 
     private func cancelAndDismiss() {

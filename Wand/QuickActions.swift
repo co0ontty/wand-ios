@@ -102,6 +102,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+#if DEBUG
+        // Offline UI review must not request notification/audio permissions or start application services.
+        if ProcessInfo.processInfo.environment["WAND_DEBUG_CHAT_DESIGN"] == "1" { return true }
+#endif
         WandServerFileLink.cleanupStaleTemporaryFiles()
         let isLiveActivityMock: Bool
         let skipPermissionPrompts: Bool

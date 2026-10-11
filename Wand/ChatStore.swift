@@ -50,6 +50,7 @@ final class ChatStore: ObservableObject {
         set { composerDraft.unconfirmedInput = newValue }
     }
     @Published var availableModels: [ModelInfo] = []
+    @Published var availableThinkingEfforts: [ReasoningEffortInfo] = []
     @Published var defaultModel: String?
     @Published var selectedModel: String?
     @Published var thinkingEffort = "off"
@@ -1007,14 +1008,16 @@ final class ChatStore: ObservableObject {
 
     private func supportsThinkingEffort(_ effort: String, model: String?) -> Bool {
         let provider = WandProvider(normalizing: snapshot?.provider).rawValue
-        // Codex 档位依赖模型目录；目录还没回来时不能拿 legacy 回退误判动态档位。
-        if provider == WandProvider.codex.rawValue && !modelsLoaded { return true }
-        return thinkingEffortOptions(
+        // 所有 provider 都必须等真实能力；未知能力不能用 legacy 回退误伤 Pi 原生档位。
+        if !modelsLoaded { return true }
+        guard let options = dynamicThinkingEffortOptions(
             provider: provider,
             selectedModel: model,
             defaultModel: defaultModel,
-            models: availableModels
-        ).contains { $0.id == effort }
+            models: availableModels,
+            providerEfforts: availableThinkingEfforts
+        ) else { return true }
+        return options.contains { $0.id == effort }
     }
 
     /// 中途切换执行模式（乐观更新，失败回滚）。codex 会话固定 full-access，调用方负责拦。
@@ -1055,6 +1058,7 @@ final class ChatStore: ObservableObject {
         guard !Task.isCancelled, revision == modelCatalogRevision else { return }
         let provider = WandProvider(normalizing: snapshot?.provider).rawValue
         availableModels = response.models(for: provider)
+        availableThinkingEfforts = response.thinkingEfforts(for: provider)
         defaultModel = response.defaultModelId(for: provider)
         modelsLoaded = true
         // 刷新过程中用户若已手动调整思考档位，不能让旧请求回包替他重置选择。
@@ -1123,6 +1127,10 @@ final class ChatStore: ObservableObject {
                     snapshot?.completionRevision = max(previousCompletion, updated.completionRevision ?? 0)
                     snapshot?.viewedCompletionRevision = max(previousViewed, updated.viewedCompletionRevision ?? 0)
                 }
+                availableModels = []
+                availableThinkingEfforts = []
+                defaultModel = nil
+                modelsLoaded = false
                 await loadModels()
                 socket.requestResync()
             } catch {

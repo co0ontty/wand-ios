@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		FB4100000000000000000020 /* VoiceCallTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000021 /* VoiceCallTests.swift */; };
+		FB4100000000000000000010 /* PlushScene in Resources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000011 /* PlushScene */; };
+		FB4100000000000000000005 /* ChatDesignPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000006 /* ChatDesignPreview.swift */; };
+		FB4100000000000000000003 /* VoiceCall.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000004 /* VoiceCall.swift */; };
+		FB4100000000000000000001 /* SharedPlushScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000002 /* SharedPlushScene.swift */; };
 		FA3000000000000000000004 /* LiveActivityExperienceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000005 /* LiveActivityExperienceTests.swift */; };
 		FA3000000000000000000001 /* SessionActivityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000002 /* SessionActivityViews.swift */; };
 		FA3000000000000000000003 /* SessionActivityViews.swift in Widget Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000002 /* SessionActivityViews.swift */; };
@@ -139,6 +144,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		FB4100000000000000000021 /* VoiceCallTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCallTests.swift; sourceTree = "<group>"; };
+		FB4100000000000000000011 /* PlushScene */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PlushScene; sourceTree = "<group>"; };
+		FB4100000000000000000006 /* ChatDesignPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDesignPreview.swift; sourceTree = "<group>"; };
+		FB4100000000000000000004 /* VoiceCall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCall.swift; sourceTree = "<group>"; };
+		FB4100000000000000000002 /* SharedPlushScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedPlushScene.swift; sourceTree = "<group>"; };
 		FA3000000000000000000005 /* LiveActivityExperienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityExperienceTests.swift; sourceTree = "<group>"; };
 		FA3000000000000000000002 /* SessionActivityViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActivityViews.swift; sourceTree = "<group>"; };
 		FA2000000000000000000013 /* InstalledNativeTerminalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstalledNativeTerminalTests.swift; sourceTree = "<group>"; };
@@ -309,6 +319,10 @@
 				A1000000000000000000BC0F /* NativeComposer.swift */,
 				A1000000000000000000BC10 /* SessionTimeFormatting.swift */,
 				A1000000000000000000BC05 /* ChatView.swift */,
+				FB4100000000000000000011 /* PlushScene */,
+				FB4100000000000000000006 /* ChatDesignPreview.swift */,
+				FB4100000000000000000004 /* VoiceCall.swift */,
+				FB4100000000000000000002 /* SharedPlushScene.swift */,
 				FA1000000000000000000B10 /* ChatActivityTimeline.swift */,
 				FA1000000000000000000B07 /* PiResources.swift */,
 				FA1000000000000000000B08 /* ModelGroups.swift */,
@@ -390,6 +404,7 @@
 				F1000000000000000000BC11 /* SubagentDispatchTests.swift */,
 				F1000000000000000000BC04 /* HomeParityTests.swift */,
 				FA1000000000000000000B11 /* CurrentAndroidParityTests.swift */,
+				FB4100000000000000000021 /* VoiceCallTests.swift */,
 				FA2000000000000000000011 /* RemainingParityTests.swift */,
 				FA2000000000000000000013 /* InstalledNativeTerminalTests.swift */,
 				FA3000000000000000000005 /* LiveActivityExperienceTests.swift */,
@@ -512,6 +527,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A100000000000000000000C1 /* Assets.xcassets in Resources */,
+				FB4100000000000000000010 /* PlushScene in Resources */,
 				FA2000000000000000000006 /* JetBrainsMono-Regular.ttf in Resources */,
 				FA2000000000000000000008 /* OFL-JetBrainsMono.txt in Resources */,
 			);
@@ -587,6 +603,9 @@
 				A1000000000000000000AC0F /* NativeComposer.swift in Sources */,
 				A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */,
 				A1000000000000000000AC05 /* ChatView.swift in Sources */,
+				FB4100000000000000000005 /* ChatDesignPreview.swift in Sources */,
+				FB4100000000000000000003 /* VoiceCall.swift in Sources */,
+				FB4100000000000000000001 /* SharedPlushScene.swift in Sources */,
 				FA1000000000000000000A10 /* ChatActivityTimeline.swift in Sources */,
 				FA1000000000000000000A07 /* PiResources.swift in Sources */,
 				FA1000000000000000000A08 /* ModelGroups.swift in Sources */,
@@ -656,6 +675,7 @@
 				F1000000000000000000AC11 /* SubagentDispatchTests.swift in Sources */,
 				F1000000000000000000AC04 /* HomeParityTests.swift in Sources */,
 				FA1000000000000000000A11 /* CurrentAndroidParityTests.swift in Sources */,
+				FB4100000000000000000020 /* VoiceCallTests.swift in Sources */,
 				FA2000000000000000000010 /* RemainingParityTests.swift in Sources */,
 				FA2000000000000000000012 /* InstalledNativeTerminalTests.swift in Sources */,
 				FA3000000000000000000004 /* LiveActivityExperienceTests.swift in Sources */,

@@ -24,6 +24,7 @@ private enum ModelPickerPresentation: String, Identifiable {
 private enum ComposerChoicePresentation: String, Identifiable {
     case mode
     case attachments
+    case context
     var id: String { rawValue }
 }
 
@@ -73,6 +74,7 @@ struct ChatView: View {
     /// 工作区任务页已经有系统返回键和任务标题。嵌套时再往导航栏塞 badge / 路径，
     /// 会和 iOS 26 圆形返回键叠在一起，浅色背景下看起来像残影。
     private let showsNavigationChrome: Bool
+    private let offersInitialCall: Bool
     private let onCompletionVisible: ((SessionSnapshot) -> Void)?
     @State private var viewVisible = false
     @State private var showProviderPicker = false
@@ -80,6 +82,12 @@ struct ChatView: View {
     @StateObject private var store: ChatStore
     @StateObject private var keyboard = KeyboardObserver()
     @StateObject private var speech = SpeechRecognizerService()
+    @StateObject private var call = VoiceCallController()
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.dismiss) private var dismiss
+    @State private var showCallTarget = false
+    @State private var showDraftEditor = false
+    @State private var offeredInitialCall = false
     @StateObject private var composerDraft: ComposerDraftState
     @State private var voiceDraftRevision = 0
     @State private var voiceDraftLifecycle = 0
@@ -99,7 +107,6 @@ struct ChatView: View {
     @State private var gitStatus: GitStatusResult?
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
     /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
-    @State private var voiceHoldWork: DispatchWorkItem?
     /// 停止任务二次确认弹窗开关：点停止按钮先弹确认，避免误触中断正在跑的任务。
     @State private var showStopConfirm = false
     /// 排队消息气泡条是否展开成列表（默认折叠成「已排队 N 条」徽章）。
@@ -122,6 +129,11 @@ struct ChatView: View {
     /// 不用 @FocusState：输入框是 UIKit UITextView，没有挂 .focused()。
     /// FocusState 在没有绑定视图时会把 true 立刻打回 false，updateUIView 再 resign，键盘就弹不出来。
     @State private var inputFocused = false
+    @State private var composerAcknowledged = false
+    @State private var composerEditing = false
+    @State private var voiceNotice = ""
+    @AppStorage(CatComposerSide.preferenceKey) private var catSideRaw = CatComposerSide.left.rawValue
+    @State private var catDragOffset: CGFloat = 0
     @State private var modelPicker: ModelPickerPresentation?
     @State private var composerChoice: ComposerChoicePresentation?
     @State private var visibleTurnIndex = 0
@@ -129,10 +141,11 @@ struct ChatView: View {
     @State private var sawResponding = false
 
     init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true,
-         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil, sharedStore: ChatStore? = nil) {
+         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil, sharedStore: ChatStore? = nil, offersInitialCall: Bool = false) {
         self.sessionId = sessionId
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
+        self.offersInitialCall = offersInitialCall
         self.onCompletionVisible = onCompletionVisible
         let chatStore = sharedStore ?? ChatStore(sessionId: sessionId, api: api)
         _store = StateObject(wrappedValue: chatStore)
@@ -141,7 +154,7 @@ struct ChatView: View {
         _attachments = StateObject(wrappedValue: chatStore.composerDraft.attachments)
     }
 
-    var body: some View {
+    private var chatLayout: some View {
         GeometryReader { root in
             ZStack(alignment: .bottom) {
                 if showsNavigationChrome {
@@ -149,6 +162,7 @@ struct ChatView: View {
                 }
                 VStack(spacing: 0) {
                     mainContent
+                        .padding(.top, showsNavigationChrome ? 56 : 0)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .dismissKeyboardOnTap()
                         .overlay(alignment: .bottom) { toastView }
@@ -186,38 +200,91 @@ struct ChatView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(showsNavigationChrome ? Theme.background : Color.clear)
         .onChange(of: composerDraft.text) { _, value in
+            if !value.isEmpty { composerAcknowledged = false }
             if value.isEmpty { draftNeedsExpanded = false; composerInputHeight = 34 }
+            if call.ownsInput { call.pause("已切换到文字输入，点继续恢复通话") }
         }
         // 点消息区任意空白处收起键盘；输入栏在 VStack 底部，不受 dismiss 手势误伤。
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if showsNavigationChrome {
-                ToolbarItem(placement: .principal) {
-                    navigationStatus
-                }
-                .sharedBackgroundVisibility(.hidden)
-            }
-            if store.snapshot?.provider == "pi", store.isStructured {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { showPiResources = true } label: { Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44) }.accessibilityLabel("工具与资源")
-                }
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button { sessionFiles.show(cwd: store.snapshot?.cwd ?? "") } label: {
-                    Image(systemName: "folder").frame(width: 44, height: 44)
-                }.disabled(store.snapshot?.cwd?.isEmpty != false).accessibilityLabel("会话文件")
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                GitChangesToolbarButton(status: gitStatus, phase: quickCommitFeedback.phase) {
-                    showQuickCommit = true
-                }
-            }
+        .toolbar(showsNavigationChrome ? .hidden : .automatic, for: .navigationBar)
+        .overlay(alignment: .top) {
+            if showsNavigationChrome { floatingChatControls }
         }
-        .wandToolbarSurface(enabled: showsNavigationChrome)
         // 关掉系统键盘避让，统一交给 KeyboardObserver 手动抬升（见 bottomBar），
         // 避免「系统抬一次 + 手动抬一次」叠加或两边都不抬的不确定行为。
         .ignoresSafeArea(.keyboard, edges: .bottom)
+    }
+
+    private var floatingChatControls: some View {
+        FloatingChatControls(onBack: { dismiss() }) {
+            if store.isStructured {
+                Button { showCallTarget = true } label: { FloatingChatIcon(symbol: "phone") }
+                    .buttonStyle(.plain).accessibilityLabel("持续语音通话")
+                    .disabled(store.snapshot?.employeeId == nil || store.snapshot?.cwd?.isEmpty != false)
+            }
+            Button { sessionFiles.show(cwd: store.snapshot?.cwd ?? "") } label: { FloatingChatIcon(symbol: "folder") }
+                .buttonStyle(.plain).disabled(store.snapshot?.cwd?.isEmpty != false).accessibilityLabel("会话文件")
+            Menu {
+                Section("当前会话") {
+                    Text(store.displayEmployeeName ?? store.snapshot?.providerLabel ?? "当前会话")
+                    Text(store.snapshot?.cwd ?? "未选择目录")
+                    Button("模型、目录与执行设置") { composerChoice = .context }
+                    Button("返回选择其他员工或会话") { dismiss() }
+                }
+                if store.snapshot?.provider == "pi", store.isStructured {
+                    Button("工具与资源") { showPiResources = true }
+                }
+                if store.isResponding { Button("停止当前任务", role: .destructive) { showStopConfirm = true } }
+                if call.phase == .speaking { Button("暂停朗读声音") { call.pause("朗读已暂停，点继续恢复") } }
+                Button("Git 变更与提交") { showQuickCommit = true }
+            } label: { FloatingChatIcon(symbol: "ellipsis") }
+                .accessibilityLabel("更多会话功能")
+                .accessibilityValue("\(store.displayEmployeeName ?? "当前会话")，\(store.snapshot?.cwd ?? "未选择目录")")
+        }
+    }
+
+    private var callContent: some View {
+        chatLayout
+        .confirmationDialog("开始语音通话", isPresented: $showCallTarget, titleVisibility: .visible) {
+            Button("开始通话") {
+                speech.stop(cancelled: true)
+                inputFocused = false
+                call.start(store: store)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("\(store.displayEmployeeName ?? "员工")\n\(store.snapshot?.cwd ?? "")\n说完后发送给当前会话；回复由系统语音播报。")
+        }
+        .onChange(of: store.isResponding) { _, _ in call.update() }
+        .onChange(of: store.inputFeedback) { _, value in
+            if value == .failed { composerAcknowledged = false }
+            call.update()
+        }
+        .onChange(of: store.unconfirmedInput) { _, value in
+            if value != nil { composerAcknowledged = false }
+        }
+        .onChange(of: store.pendingEscalation?.requestId) { _, _ in call.update() }
+        .onChange(of: store.permissionBlocked) { _, _ in call.update() }
+        .onChange(of: store.connected) { _, _ in call.update() }
+        .onChange(of: store.messages.count) { _, _ in call.update() }
+        .onChange(of: store.messages.last?.completedAt) { _, _ in call.update() }
+        .onChange(of: store.snapshot?.cwd) { _, _ in call.pause("工作目录已变化，请核对目标后继续") }
+        .onChange(of: store.snapshot?.employeeId) { _, _ in call.pause("员工已变化，请核对目标后继续") }
+        .onChange(of: store.providerSwitching) { _, switching in if switching { call.pause("执行工具正在切换，请核对目标后继续") } }
+        .onChange(of: store.loading) { _, loading in
+            if !loading, offersInitialCall, !offeredInitialCall, store.loadError == nil {
+                offeredInitialCall = true; showCallTarget = true
+            }
+        }
+        .onChange(of: scenePhase) { _, value in
+            if value != .active { call.pause("应用已离开前台，点继续恢复通话") }
+        }
+        .onDisappear { call.end() }
+    }
+
+    private var modalContent: some View {
+        callContent
         .sheet(isPresented: $showQuickCommit) {
             GitQuickCommitView(
                 sessionId: sessionId,
@@ -234,6 +301,10 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showDirectoryPicker) {
             BlankSessionDirectoryPicker(store: store) { showDirectoryPicker = false }
+        }
+        .sheet(isPresented: $showDraftEditor, onDismiss: { composerIsComposing = false; focusComposer() }) {
+            ComposerDraftEditor(text: $composerDraft.text, onCompositionChange: { composerIsComposing = $0 },
+                onPasteImages: { attachments.handlePastedImageData($0) })
         }
         .sheet(isPresented: $showPiResources) { PiResourcesView(sessionID: sessionId, api: api) }
         .fileImporter(
@@ -290,6 +361,10 @@ struct ChatView: View {
                 dismissButton: .default(Text("好"))
             )
         }
+    }
+
+    var body: some View {
+        modalContent
         .onChange(of: completionVisibilityToken) { _, _ in publishCompletionVisibility() }
         .onAppear {
             if !viewVisible { store.attachView() }
@@ -304,8 +379,6 @@ struct ChatView: View {
         .onDisappear {
             if viewVisible { store.detachView() }
             viewVisible = false
-            voiceHoldWork?.cancel()
-            voiceHoldWork = nil
             speech.stop(cancelled: true)
             voicePressed = false
             voiceCanceling = false
@@ -409,7 +482,9 @@ struct ChatView: View {
     }
 
     private var keyboardShortcutsActive: Bool {
-        !showQuickCommit
+        if call.active { return false }
+        return !showQuickCommit
+            && !showDraftEditor
             && !attachments.showFileImporter
             && !attachments.showPhotoPicker
             && !showStopConfirm
@@ -510,14 +585,6 @@ struct ChatView: View {
                                         visibleTurnIndex = index
                                     }
                                 }
-                        }
-                        if store.isResponding {
-                            LiveTurnStatusRow(
-                                usage: store.messages.last?.role == "assistant"
-                                    ? store.messages.last?.usage
-                                    : nil,
-                                taskTitle: store.currentTaskTitle
-                            )
                         }
                         Color.clear.frame(height: 1).id("chat-bottom")
                     }
@@ -648,7 +715,11 @@ struct ChatView: View {
                 loadedOffset: store.loadedOffset
             )
             let collapsed = collapsedAssistantTurns.contains(absoluteTurn)
-            VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if let employeeId = store.snapshot?.employeeId {
+                    ContactAvatar(id: employeeId, avatar: store.displayEmployeeAvatar ?? "", size: 28, name: store.displayEmployeeName ?? "")
+                    Text(store.displayEmployeeName ?? "员工").font(.caption.weight(.semibold)).lineLimit(1)
+                }
                 if store.messages.indices.contains(turnIndex) {
                     ChatMessageTime(clock: SessionTimeFormatting.conversationTurnClock(store.messages[turnIndex]), alignEnd: false)
                 }
@@ -734,8 +805,8 @@ struct ChatView: View {
             )
         case .resourceSelection(_, let notice):
             ResourceSelectionNoticeView(notice: notice)
-        case .usageSummary(_, let usage, let isLive):
-            UsageSummaryRow(usage: usage, isLive: isLive)
+        case .usageSummary:
+            EmptyView()
         case .historySummary(let stats, let boundary):
             HistorySummaryCard(
                 stats: stats,
@@ -1103,7 +1174,8 @@ struct ChatView: View {
             provider: store.snapshot?.provider ?? "claude",
             selectedModel: store.selectedModel,
             defaultModel: store.defaultModel,
-            models: store.availableModels
+            models: store.availableModels,
+            providerEfforts: store.availableThinkingEfforts
         )
     }
 
@@ -1122,9 +1194,9 @@ struct ChatView: View {
     /// 顶栏身份：logo 放在标题左侧，不要再塞进 navigationBarLeading。
     /// iOS 26 圆形返回键会占掉 leading 区域，badge / 路径叠在返回键下面会变成浅色残影。
     @ViewBuilder private var providerBadge: some View {
-        BrandLogo(provider: store.snapshot?.provider, color: providerTint.opacity(0.94))
-            .frame(width: 18, height: 18).frame(width: 26, height: 26)
-            .accessibilityLabel(store.snapshot?.providerLabel ?? "执行工具")
+            BrandLogo(provider: store.snapshot?.provider, color: providerTint.opacity(0.94))
+                .frame(width: 18, height: 18).frame(width: 26, height: 26)
+                .accessibilityLabel(store.snapshot?.providerLabel ?? "执行工具")
     }
 
     private var navigationStatus: some View {
@@ -1187,11 +1259,11 @@ struct ChatView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 0) {
-            if voicePressed || speech.isRecording || speech.isProcessing {
-                voiceBubble
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 6)
-                    .transition(.opacity)
+            if call.active {
+                VoiceCallPanel(call: call, onStopTask: {
+                    call.pause("请确认是否停止当前任务")
+                    showStopConfirm = true
+                }).padding(.horizontal, 12).padding(.bottom, 6)
             }
             if !visibleTodos.isEmpty {
                 TodoProgressBar(todos: visibleTodos)
@@ -1228,34 +1300,76 @@ struct ChatView: View {
         .animation(WandMotion.disclosure, value: store.pendingEscalation)
     }
 
-    /// 聚焦或正在按住语音时展开；失焦后草稿和附件保留。
-    /// 对齐 Codex App：默认是一条胶囊，点进去（聚焦）才长出底部控制行。
-    private var inputExpanded: Bool {
-        composerShouldExpand(
-            focused: inputFocused,
-            voiceMode: voicePressed,
-            contentNeedsSpace: draftNeedsExpanded || !attachments.attachments.isEmpty
-        )
+    private var composerStatus: some View {
+        Text(voiceCanceling ? "松开取消" : speech.isProcessing ? "转写中…" : voicePressed && !speech.isRecording ? "等待麦克风授权…" : speech.isRecording ? "正在听 · 上滑取消" : !voiceNotice.isEmpty ? voiceNotice : store.permissionBlocked ? "等待确认" : call.phase == .speaking ? "正在朗读" : store.inputSending ? "发送中…" : store.isResponding ? "处理中" : "正在输入")
+            .font(.caption).foregroundStyle(voiceCanceling ? Theme.danger : Theme.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel("\(store.displayEmployeeName ?? "员工")的会话状态")
     }
 
+    private var catInputExpanded: Bool {
+        catComposerExpanded(editing: composerEditing, focused: inputFocused, keyboard: keyboard.isVisible,
+            failed: composerDraft.submissionFailed, unconfirmed: store.unconfirmedInput != nil)
+    }
+    private var composerMaximumHeight: CGFloat {
+        composerMaximumInputHeight(compact: verticalSizeClass == .compact, keyboardVisible: keyboard.isVisible)
+    }
+    private var catStatusVisible: Bool {
+        store.isResponding || store.inputSending || store.permissionBlocked || call.phase == .speaking ||
+            voicePressed || speech.isRecording || speech.isProcessing || !voiceNotice.isEmpty
+    }
     private var inputBar: some View {
-        NativeComposerShell(
-            expanded: inputExpanded,
-            focused: inputFocused,
-            onFocusInput: { inputFocused = true },
-            collapsedLeading: { composerActionsMenu },
-            inputContent: { composerInputContent },
-            collapsedTrailing: { trailingButtons },
-            expandedControls: { controlRow }
-        )
-        .confirmationDialog(
-            "确定要停止当前正在运行的任务吗？",
-            isPresented: $showStopConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("停止", role: .destructive) { store.stopResponding() }
+        CatComposerSurface(expanded: catInputExpanded, hasDraft: !draft.isEmpty || !attachments.attachments.isEmpty,
+            statusVisible: catStatusVisible, side: catSide, dragOffset: catDragOffset, face: { size in
+                WorkingAvatar(id: store.snapshot?.employeeId ?? sessionId, name: store.displayEmployeeName ?? "员工",
+                    avatar: store.displayEmployeeAvatar ?? "",
+                    activity: avatarFileActivity(messages: store.messages,
+                        executing: store.isResponding && store.status == "running" && !store.permissionBlocked && store.pendingEscalation == nil),
+                    thinking: avatarThinking, speaking: call.isSpeaking, size: size)
+                    .overlay { Color.clear.modifier(catVoiceGesture) }
+            }, status: { composerStatus }, editor: { composerInputContent }, tools: { controlRow }, actions: { catPrimaryActions })
+        .onChange(of: keyboard.isVisible) { _, visible in
+            if !visible && !inputFocused && !showDraftEditor && !voicePressed && !speech.isProcessing { composerEditing = false }
+        }
+        .confirmationDialog("确定要停止当前正在运行的任务吗？", isPresented: $showStopConfirm, titleVisibility: .visible) {
+            Button("停止", role: .destructive) { call.pause("任务已停止，点继续恢复通话"); store.stopResponding() }
             Button("取消", role: .cancel) {}
         }
+    }
+    private var catSide: CatComposerSide { CatComposerSide(rawValue: catSideRaw) ?? .left }
+    private var avatarThinking: Bool {
+        !store.permissionBlocked && store.pendingEscalation == nil &&
+            avatarIsThinking(messages: store.messages, executing: store.isResponding && store.status == "running")
+    }
+    private var catPrimaryActions: some View {
+        HStack(spacing: 0) {
+            composerVoiceButton
+            Button(action: focusComposer) { Image(systemName: "keyboard").font(.system(size: 20)).frame(width: 48, height: 48) }
+                .buttonStyle(.plain).accessibilityLabel("展开文字输入")
+            if catCapsuleShowsThirdAction(text: draft) {
+                Divider().frame(height: 24).padding(.horizontal, 2)
+                if store.isResponding { stopButtonSecondary }
+                else { sendButton }
+            }
+        }
+    }
+    private var catVoiceGesture: CatInputGesture {
+        CatInputGesture(onTap: focusComposer, onHold: startVoiceRecording,
+            onMove: { voiceCanceling = $0 }, onRelease: finishVoiceRecording,
+            onDrag: { catDragOffset = $0 }, onDrop: { x in
+                catSideRaw = catSide.dropped(translation: x).rawValue
+                catDragOffset = 0
+            })
+    }
+
+    private var inputExpanded: Bool { catInputExpanded }
+
+    private func focusComposer() {
+        if call.ownsInput { call.pause("已切换到文字输入，点继续恢复通话") }
+        composerAcknowledged = false
+        composerEditing = true
+        voiceNotice = ""
+        inputFocused = true
     }
 
     /// 文本框只处理系统文本编辑；语音手势由外侧独立按钮承载。
@@ -1267,13 +1381,21 @@ struct ChatView: View {
                     attachments: attachments.attachments,
                     onRemove: attachments.remove
                 )
+                if !catCapsuleShowsThirdAction(text: draft) {
+                    Button("发送附件", action: sendDraft).disabled(!canSend)
+                        .frame(maxWidth: .infinity, minHeight: 48, alignment: .trailing).accessibilityLabel("发送附件")
+                }
             }
             if let message = composerDraft.optimizationMessage {
                 Text(message).font(.caption).foregroundStyle(Theme.textSecondary)
                     .accessibilityAddTraits(.updatesFrequently)
             }
+            if composerDraft.submissionFailed || store.unconfirmedInput != nil {
+                Label(store.unconfirmedInput != nil ? "送达状态未确认，请核对会话后再发送。草稿已保留。" : (store.inputFeedbackMessage ?? "发送失败，草稿已保留。"), systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(Theme.danger).fixedSize(horizontal: false, vertical: true)
+            }
             growingTextField
-                .frame(height: max(inputExpanded ? 32 : 34, composerInputHeight))
+                .frame(height: min(composerMaximumHeight, max(inputExpanded ? 32 : 34, composerInputHeight)))
                 .padding(.leading, inputExpanded ? 6 : 2)
                 .padding(.trailing, inputExpanded ? 4 : 0)
                 .padding(.vertical, inputExpanded ? 4 : 2)
@@ -1291,7 +1413,8 @@ struct ChatView: View {
             .overlay(Circle().stroke(Theme.border.opacity(0.5), lineWidth: 0.8))
             .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
             .contentShape(Circle())
-            .gesture(voiceTapOrHoldGesture(onTap: { inputFocused = true }))
+            .modifier(CatInputGesture(onTap: focusComposer, onHold: startVoiceRecording,
+                onMove: { voiceCanceling = $0 }, onRelease: finishVoiceRecording))
             .accessibilityLabel("语音输入")
             .accessibilityValue(voicePressed ? "正在录音" : "长按录音")
     }
@@ -1299,38 +1422,25 @@ struct ChatView: View {
     /// 展开态底部控制行：+ / 模式徽标 / 模型·思考徽标 / 发送·停止。
     /// 把原本散落在右上角的会话设置（模型 + 思考深度）+ 模式开关全部收拢到这里。
     private var controlRow: some View {
-        HStack(spacing: ComposerMetrics.actionSpacing) {
-            ViewThatFits(in: .horizontal) {
-                controlChipGroup(compact: false)
-                controlChipGroup(compact: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .clipped()
-
-            trailingButtons
-        }
-    }
-
-    private func controlChipGroup(compact: Bool) -> some View {
-        HStack(spacing: ComposerMetrics.actionSpacing) {
+        HStack(spacing: 0) {
             composerActionsMenu
-            optimizeButton
-            if store.isStructured {
-                modeChip(compact: compact)
-                modelThinkingChip(compact: compact)
+            Button { composerChoice = .context; inputFocused = false } label: {
+                ComposerContextLabel()
+            }.buttonStyle(.plain).accessibilityLabel("模型、目录与执行设置")
+            if composerOffersExpandedEditor(text: draft, measuredHeight: composerInputHeight, maximumHeight: composerMaximumHeight) {
+                Button {
+                    inputFocused = false
+                    if call.ownsInput { call.pause("已切换到文字输入，点继续恢复通话") }
+                    showDraftEditor = true
+                } label: { Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 48, height: 48) }
+                    .buttonStyle(.plain).foregroundStyle(Theme.textSecondary).accessibilityLabel("展开编辑长消息")
+                    .disabled(composerIsComposing)
             }
+            Spacer(minLength: 0)
+            composerVoiceButton
+            Button { composerChoice = .context; inputFocused = false } label: { Image(systemName: "ellipsis").frame(width: 48, height: 48) }
+                .accessibilityLabel("更多输入设置")
         }
-    }
-
-    /// 发送 / 停止按钮组：
-    /// - 运行中且无草稿 → 唯一按钮是白底停止（对齐 Codex 的白圆黑方块）；
-    /// - 有草稿 → 发送按钮（运行中时左侧追加一个红色停止，可一边排队一边停）。
-    @ViewBuilder private var trailingButtons: some View {
-        if store.isResponding && canSend {
-            stopButtonSecondary
-        }
-        composerVoiceButton
-        sendButton
     }
 
     private var stopButtonSecondary: some View {
@@ -1348,13 +1458,14 @@ struct ChatView: View {
 
     private var sendButton: some View {
         NativeComposerActionButton(
-            phase: store.inputFeedback,
+            phase: store.inputSending ? .sending : .idle,
             turnRunning: store.isResponding,
             hasDraft: composerIsComposing || composerDraftIsSendable(
                 draft, hasAttachments: !attachments.attachments.isEmpty, isComposing: false
             ),
             canSubmit: canSend,
-            message: store.inputFeedbackMessage,
+            // The expanded editor owns the full failure message; keep the capsule icon-only.
+            message: nil,
             onSend: sendDraft,
             onStop: { showStopConfirm = true }
         )
@@ -1569,10 +1680,15 @@ struct ChatView: View {
             text: $composerDraft.text,
             placeholder: composerPlaceholder,
             isFocused: inputFocused,
+            maximumHeight: composerMaximumHeight,
+            submitOnReturn: false,
             onPasteImages: { items in
                 attachments.handlePastedImageData(items)
             },
-            onFocusChange: { inputFocused = $0 },
+            onFocusChange: {
+                inputFocused = $0
+                if $0 && call.ownsInput { call.pause("已切换到文字输入，点继续恢复通话") }
+            },
             onCompositionChange: { composerIsComposing = $0 },
             onSubmit: sendDraft,
             onHeightChange: { height in
@@ -1580,12 +1696,6 @@ struct ChatView: View {
                 draftNeedsExpanded = !draft.isEmpty && height > 36
             }
         )
-        .overlay {
-            if composerHoldToTalkEligible(text: draft, focused: inputFocused, keyboardVisible: keyboard.isVisible) {
-                ComposerVoiceControl(draft: composerDraft, speech: speech, inputSurface: true, onTap: { inputFocused = true },
-                    onPressChanged: { voicePressed = $0; voiceCanceling = $1 }) { store.toast = $0 }
-            }
-        }
         .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
     }
 
@@ -1593,15 +1703,14 @@ struct ChatView: View {
         if voicePressed {
             return voiceCanceling ? "松开手指，取消输入" : "松开结束 · 上滑取消"
         }
-        if composerHoldToTalkEligible(text: draft, focused: inputFocused, keyboardVisible: keyboard.isVisible) { return "发消息或按住说话" }
-        return "输入消息"
+        return "输入消息，回车换行"
     }
 
     private var canSend: Bool {
         // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
         // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
         // 组字未确认时不能发，否则会把拼音半成品送出去，或把候选确认键当成发送。
-        !store.inputSending && !store.providerSwitching && !composerDraft.isOptimizing && !attachments.isUploading && composerDraftIsSendable(
+        !voicePressed && !speech.isRecording && !speech.isProcessing && !store.inputSending && !store.providerSwitching && !composerDraft.isOptimizing && !attachments.isUploading && composerDraftIsSendable(
             draft,
             hasAttachments: !attachments.attachments.isEmpty,
             isComposing: composerIsComposing
@@ -1613,8 +1722,15 @@ struct ChatView: View {
         let submission = composerDraft.submission()
         let started = store.send(text: submission.prompt, onAccepted: {
             composerDraft.accepted(submission)
+            if draft.isEmpty && attachments.attachments.isEmpty && !composerIsComposing {
+                composerAcknowledged = true
+                composerEditing = false
+                inputFocused = false
+            }
         }, onFailure: {
             composerDraft.rejected(submission)
+            composerAcknowledged = false
+            composerEditing = true
         })
         guard started else { return }
         composerDraft.submitted(submission)
@@ -1626,109 +1742,38 @@ struct ChatView: View {
 
     // MARK: - 按住说话（端侧语音识别）
 
-    /// 上滑超过该距离进入「松开取消」态（对齐 Web 端 VOICE_CANCEL_THRESHOLD）。
-    private static let voiceCancelThreshold: CGFloat = 60
-
-    /// 轻点 vs 按住的分界：按住超过该时长进入录音，否则按轻点处理。
-    /// 0.18s 仍足以区分轻点/长按，但比 0.3s 让识别框出现快 ~40%，减少「按下去没反应」的感知延迟。
-    private static let voiceHoldThreshold: TimeInterval = 0.18
-
-    /// 轻点 / 按住二分手势：按满阈值 → 开始录音（移动驱动上滑取消、松手提交）；
-    /// 阈值内松手 → onTap()。
-    private func voiceTapOrHoldGesture(onTap: @escaping () -> Void) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                if voiceHoldWork == nil && !voicePressed {
-                    // 手指刚按下：起计时，按满阈值才真正开始录音。
-                    let work = DispatchWorkItem {
-                        voiceHoldWork = nil
-                        startVoiceRecording()
-                    }
-                    voiceHoldWork = work
-                    DispatchQueue.main.asyncAfter(
-                        deadline: .now() + Self.voiceHoldThreshold, execute: work
-                    )
-                }
-                if voicePressed {
-                    voiceCanceling = value.translation.height < -Self.voiceCancelThreshold
-                }
+    private func finishVoiceRecording(cancelled: Bool) {
+        let revision = voiceDraftRevision, lifecycle = voiceDraftLifecycle
+        voicePressed = false; voiceCanceling = false
+        if !keyboard.isVisible { composerEditing = false }
+        speech.stop(cancelled: cancelled) { text in
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if composerDraft.textRevision == revision && composerDraft.lifecycleRevision == lifecycle { voiceNotice = "没有听到声音，请再试一次" }
+                return
             }
-            .onEnded { _ in
-                if let work = voiceHoldWork {
-                    // 阈值内松手 → 轻点。
-                    work.cancel()
-                    voiceHoldWork = nil
-                    onTap()
-                    return
-                }
-                let cancelled = voiceCanceling
-                voicePressed = false
-                voiceCanceling = false
-                let revision = voiceDraftRevision
-                let lifecycle = voiceDraftLifecycle
-                speech.stop(cancelled: cancelled) { text in
-                    composerDraft.appendVoice(text, ifUnchangedSince: revision, lifecycle: lifecycle)
-                }
-            }
+            let before = composerDraft.textRevision
+            composerDraft.appendVoice(text, ifUnchangedSince: revision, lifecycle: lifecycle)
+            if composerDraft.textRevision != before { focusComposer() }
+        }
+        if cancelled { voiceNotice = "已取消，草稿保留" }
     }
 
     /// 按满阈值进入录音态（原「按下立即录音」交互的主体）。
     private func startVoiceRecording() {
-        guard !voicePressed else { return }
+        guard !voicePressed, !speech.isProcessing, !store.inputSending, !store.providerSwitching, !composerDraft.isOptimizing, !attachments.isUploading else { return }
+        if call.ownsInput { call.pause("已切换到按住说话，点继续恢复通话") }
         voiceDraftRevision = composerDraft.textRevision
         voiceDraftLifecycle = composerDraft.lifecycleRevision
         voicePressed = true
         voiceCanceling = false
+        voiceNotice = ""
+        inputFocused = false
         speech.start(api: api) { message in
+            voiceNotice = message
             store.toast = message
             voicePressed = false
             voiceCanceling = false
         }
-    }
-
-    /// 输入栏上方的实时转写气泡。
-    private var voiceBubble: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: voiceCanceling ? "xmark.circle.fill" : "waveform.circle.fill")
-                    .font(.system(size: 16))
-                    .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
-                Text(voiceCanceling
-                     ? "松开手指，取消输入"
-                     : (speech.isProcessing ? "服务端识别中…" : speech.transcript.isEmpty ? "正在聆听…" : speech.transcript))
-                    .font(.wand(size: 14))
-                    .foregroundColor(
-                        voiceCanceling
-                            ? Theme.danger
-                            : (speech.transcript.isEmpty ? Theme.textSecondary : Theme.textPrimary)
-                    )
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-            }
-            if !voiceCanceling {
-                HStack(spacing: 6) {
-                    Text(speech.usingServer ? "服务端识别" : "端侧识别")
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(Theme.brand.opacity(0.12)))
-                        .foregroundColor(Theme.brand)
-                    Text("松开填入输入框 · 上滑取消")
-                        .foregroundColor(Theme.textSecondary)
-                }
-                .font(.wand(size: 11, weight: .medium))
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Theme.surface)
-                .shadow(color: Color.black.opacity(0.1), radius: 6, y: 2)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(voiceCanceling ? Theme.danger.opacity(0.55) : Theme.border, lineWidth: 1)
-        )
     }
 
     // MARK: - Toast
@@ -1768,6 +1813,36 @@ struct ChatView: View {
                 ]
             ) { _, itemId in
                 store.setMode(itemId)
+            }
+        case .context:
+            SearchableChoiceSheet(title: "会话上下文", sections: [
+                SearchableChoiceSection(id: "context", items: [
+                    SearchableChoiceItem(id: "model", label: "模型与思考 · \(modelThinkingText)"),
+                    SearchableChoiceItem(id: "mode", label: "执行模式 · \(Self.modeLabel(store.mode))"),
+                    SearchableChoiceItem(id: "directory", label: "目录 · \(store.snapshot?.cwd ?? "未选择")"),
+                    SearchableChoiceItem(id: "optimize", label: "优化提示词"),
+                    SearchableChoiceItem(id: "call", label: "持续语音通话（自动发送与播报）")
+                ], selectedId: "")
+            ]) { _, itemId in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    switch itemId {
+                    case "model": modelPicker = .session
+                    case "mode":
+                        if currentProvider == .codex { store.toast = "Codex 会话的执行模式固定" }
+                        else { composerChoice = .mode }
+                    case "directory":
+                        if store.canChangeDirectory { showDirectoryPicker = true }
+                        else { store.toast = "当前会话目录固定；更换目录请创建新会话" }
+                    case "optimize":
+                        guard !composerDraft.isOptimizing, !store.inputSending, !attachments.isUploading,
+                              !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                            store.toast = "请输入提示词，等待当前上传或发送完成后再优化"; return
+                        }
+                        composerDraft.optimize { text in try await api.optimizePrompt(id: sessionId, prompt: text) }
+                    case "call": showCallTarget = true
+                    default: break
+                    }
+                }
             }
         case .attachments:
             SearchableChoiceSheet(

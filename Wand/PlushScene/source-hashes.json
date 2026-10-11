@@ -1,0 +1,25 @@
+{
+  "sources": [
+    {
+      "path": "src/web-ui/react/avatars/renderer.ts",
+      "sha256": "c3f7891f2e6a9e2e44eb371ff6788e6c76365f13e9d1c77f6a21ab01823190cb"
+    },
+    {
+      "path": "src/web-ui/react/avatars/file-props.ts",
+      "sha256": "f554e46e254fc74c51793da75d7baa68733773575caa14479f9e84a84dddea0d"
+    },
+    {
+      "path": "src/plush-cat-appearance.ts",
+      "sha256": "d18e02388dcbd14f76b6b5a2fb3271431e1e4577443c5ad2961ea58ab3119b43"
+    },
+    {
+      "path": "src/plush-cat-whiskers.ts",
+      "sha256": "46b0b5918204f9ecc936c2dc0282a0a201f957fad0a588086b2b0447be34b60c"
+    },
+    {
+      "path": "src/plush-avatar.ts",
+      "sha256": "3f74f98d0e8bc7db5b50f6613eec6be3a80c4d917265f6e692fc29d4858db159"
+    }
+  ],
+  "bytes": 608516
+}

@@ -1318,35 +1318,64 @@ struct ThinkingEffortOption: Identifiable {
     let menuLabel: String
 }
 
-func thinkingEffortOptions(provider: String, selectedModel: String?, defaultModel: String?, models: [ModelInfo]) -> [ThinkingEffortOption] {
-    let legacy = [
-        ThinkingEffortOption(id: "off", label: "自动", shortLabel: "自", menuLabel: "自动（模型默认）"),
-        ThinkingEffortOption(id: "standard", label: "低", shortLabel: "低", menuLabel: "低（low）"),
-        ThinkingEffortOption(id: "deep", label: "中", shortLabel: "中", menuLabel: "中（medium）"),
-        ThinkingEffortOption(id: "max", label: "高", shortLabel: "高", menuLabel: "高（max）"),
-    ]
-    guard provider == "codex" else { return legacy }
-    let modelID = selectedModel.flatMap { !$0.isEmpty && $0 != "default" ? $0 : nil }
-        ?? defaultModel.flatMap { !$0.isEmpty && $0 != "default" ? $0 : nil }
+private let legacyThinkingEfforts = [
+    ThinkingEffortOption(id: "off", label: "自动", shortLabel: "自", menuLabel: "自动（模型默认）"),
+    ThinkingEffortOption(id: "standard", label: "低", shortLabel: "低", menuLabel: "低（low）"),
+    ThinkingEffortOption(id: "deep", label: "中", shortLabel: "中", menuLabel: "中（medium）"),
+    ThinkingEffortOption(id: "max", label: "高", shortLabel: "高", menuLabel: "高（max）"),
+]
+
+// 与 Web/Android 同语义；旧 ID 不改各 provider 的实际执行档位。
+private let legacyNativeThinkingEfforts: [String: (standard: String, deep: String, max: String)] = [
+    "claude": ("low", "medium", "max"),
+    "codex": ("low", "medium", "xhigh"),
+    "opencode": ("low", "high", "max"),
+    "grok": ("low", "high", "xhigh"),
+    "qoder": ("low", "high", "max"),
+    "pi": ("low", "high", "max"),
+]
+private let compactThinkingLabels = [
+    "auto": "自动", "none": "关闭", "minimal": "最低", "low": "低", "medium": "中",
+    "high": "高", "xhigh": "超高", "max": "极高", "ultra": "极限", "ultracode": "极限代码",
+]
+
+func thinkingEffortOptions(
+    provider: String, selectedModel: String?, defaultModel: String?, models: [ModelInfo],
+    providerEfforts: [ReasoningEffortInfo] = []
+) -> [ThinkingEffortOption] {
+    dynamicThinkingEffortOptions(provider: provider, selectedModel: selectedModel, defaultModel: defaultModel,
+        models: models, providerEfforts: providerEfforts) ?? legacyThinkingEfforts
+}
+
+/// nil 表示未知能力；显示可以回退旧档位，但不能据此改写会话的已选原生档位。
+func dynamicThinkingEffortOptions(
+    provider: String, selectedModel: String?, defaultModel: String?, models: [ModelInfo],
+    providerEfforts: [ReasoningEffortInfo] = []
+) -> [ThinkingEffortOption]? {
+    let modelID = selectedModel.flatMap { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0 != "default" ? $0 : nil }
+        ?? defaultModel.flatMap { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0 != "default" ? $0 : nil }
         ?? "default"
-    guard let levels = (models.first { $0.id == modelID } ?? models.first { $0.id == "default" })?.reasoningEfforts,
-          !levels.isEmpty else { return legacy }
-    let dynamic = levels.map { level -> ThinkingEffortOption in
-        let effort = level.effort.lowercased()
-        let id = effort == "low" ? "standard" : effort == "medium" ? "deep" : effort == "xhigh" ? "max" : "codex:\(effort)"
-        let label: String
+    let modelEfforts = (models.first { $0.id == modelID } ?? models.first { $0.id == "default" })?.reasoningEfforts ?? []
+    let levels = modelEfforts.isEmpty ? providerEfforts : modelEfforts
+    let native = levels.map { $0.effort.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        .filter { $0.range(of: #"^[a-z][a-z0-9_-]{0,31}$"#, options: .regularExpression) != nil }
+    guard !native.isEmpty else { return nil }
+    let legacy = legacyNativeThinkingEfforts[provider]
+    var choices = [legacyThinkingEfforts[0]]
+    var seen: Set<String> = ["off"]
+    for effort in native where effort != "off" {
+        let id: String
         switch effort {
-        case "low": label = "低"
-        case "medium": label = "中"
-        case "high": label = "高"
-        case "xhigh": label = "超高"
-        case "max": label = "极高"
-        case "ultra": label = "极限"
-        default: label = effort
+        case legacy?.standard: id = "standard"
+        case legacy?.deep: id = "deep"
+        case legacy?.max: id = "max"
+        default: id = "\(provider):\(effort)"
         }
-        return ThinkingEffortOption(id: id, label: label, shortLabel: label, menuLabel: "\(label)（\(effort)）")
+        guard seen.insert(id).inserted else { continue }
+        let label = compactThinkingLabels[effort] ?? effort
+        choices.append(ThinkingEffortOption(id: id, label: label, shortLabel: label, menuLabel: "\(label)（\(effort)）"))
     }
-    return [ThinkingEffortOption(id: "off", label: "自动", shortLabel: "自", menuLabel: "自动（模型默认）")] + dynamic
+    return choices
 }
 
 struct ModelsResponse: Decodable {
@@ -1367,10 +1396,18 @@ struct ModelsResponse: Decodable {
     let defaultPiModel: String?
     let defaultGeminiModel: String?
     let defaultModels: ProviderDefaultModels?
+    let thinkingEfforts: [String: [ReasoningEffortInfo]]
 
     private enum CodingKeys: String, CodingKey {
         case models, codexModels, opencodeModels, grokModels, qoderModels, piModels, geminiModels, freeModels, modelGroupsSupported
         case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultGeminiModel, defaultModels
+        case thinkingEfforts
+    }
+    private struct EffortProviderKey: CodingKey {
+        let stringValue: String
+        let intValue: Int? = nil
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
     }
 
     init(from decoder: Decoder) throws {
@@ -1394,6 +1431,19 @@ struct ModelsResponse: Decodable {
         defaultPiModel = try? container.decode(String.self, forKey: .defaultPiModel)
         defaultGeminiModel = try? container.decode(String.self, forKey: .defaultGeminiModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
+        if let efforts = try? container.nestedContainer(keyedBy: EffortProviderKey.self, forKey: .thinkingEfforts) {
+            var catalog: [String: [ReasoningEffortInfo]] = [:]
+            for key in efforts.allKeys {
+                catalog[key.stringValue] = (try? efforts.decode([ReasoningEffortInfo].self, forKey: key)) ?? []
+            }
+            thinkingEfforts = catalog
+        } else {
+            thinkingEfforts = [:]
+        }
+    }
+
+    func thinkingEfforts(for provider: String) -> [ReasoningEffortInfo] {
+        thinkingEfforts[provider] ?? []
     }
 
     func models(for provider: String) -> [ModelInfo] {

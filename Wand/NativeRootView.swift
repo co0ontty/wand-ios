@@ -58,6 +58,7 @@ struct NativeRootView: View {
     @State private var systemSocket: WandSocket?
     @State private var lifecycleGeneration = 0
     @State private var authenticationTask: Task<Void, Never>?
+    @State private var authenticationAttempt: WandAuth.ConnectionAttempt?
     @State private var authenticationRetryTask: Task<Void, Never>?
     @State private var authenticationRetryAttempt = 0
     @State private var updateRefreshTask: Task<Void, Never>?
@@ -80,6 +81,7 @@ struct NativeRootView: View {
     @State private var openingSessionID: String?
     @State private var selectedWorkspaceTask: WorkspaceTaskSelection?
     @State private var presentNewTask = false
+    @State private var presentVoiceCall = false
     @StateObject private var workspaceStore: WorkspaceStore
     @StateObject private var contactsStore: ContactsStore
     @StateObject private var conversations: ConversationStore
@@ -148,6 +150,10 @@ struct NativeRootView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(serverURL: serverURL, token: token)
+                .environmentObject(store)
+        }
+        .fullScreenCover(isPresented: $presentVoiceCall) {
+            VoiceCallLaunchView(api: api, serverID: serverID)
                 .environmentObject(store)
         }
         .sheet(isPresented: Binding(get: { selectedContactEmployeeID != nil }, set: { if !$0 { selectedContactEmployeeID = nil } })) {
@@ -380,7 +386,13 @@ struct NativeRootView: View {
                     Text("正在登录…")
                         .font(.wand(size: 14))
                         .foregroundColor(Theme.textSecondary)
+                    Button(action: switchServerBeforeAuthentication) {
+                        Label("切换服务器", systemImage: "server.rack")
+                    }
+                    .buttonStyle(WandSecondaryButtonStyle())
+                    .accessibilityIdentifier("login-switch-server")
                 }
+                .padding(24)
                 .navigationTitle("Wand")
             case .failed(let message):
                 VStack(spacing: 14) {
@@ -403,8 +415,8 @@ struct NativeRootView: View {
                         }
                         .buttonStyle(WandSecondaryButtonStyle())
                     }
-                    Button { store.disconnect() } label: {
-                        Text("重新连接").frame(maxWidth: .infinity)
+                    Button(action: switchServerBeforeAuthentication) {
+                        Text("切换服务器").frame(maxWidth: .infinity)
                     }
                         .buttonStyle(WandSecondaryButtonStyle())
                 }
@@ -563,6 +575,9 @@ struct NativeRootView: View {
                 .animation(reducedMotion ? nil : WandMotion.stateSwap, value: homeListMode)
                 .safeAreaInset(edge: .bottom) {
                     HStack {
+                        Button { presentVoiceCall = true } label: {
+                            Image(systemName: "phone").frame(width: 48, height: 48)
+                        }.accessibilityLabel("语音通话，选择员工与工作目录")
                         Spacer(minLength: 8)
                         HomeMenuPill(mode: homeListMode, onMode: setHomeListMode) {
                             guard !contactsStore.busy, !homeMutationBusy else { return }
@@ -959,6 +974,13 @@ struct NativeRootView: View {
     }
 #endif
 
+    private func switchServerBeforeAuthentication() {
+        // 先使旧回调/重试失效，再退回现有连接页；保留所有已保存服务器及凭据。
+        invalidateLifecycle()
+        workspaceStore.stopTaskGroupsSync()
+        store.disconnect()
+    }
+
     private func authenticate() {
         invalidateLifecycle()
         let generation = lifecycleGeneration
@@ -992,26 +1014,23 @@ struct NativeRootView: View {
         }
 
         let endpointURL = serverURL
-        authenticationTask = Task { @MainActor in
-            let result: Result<Void, WandAuth.Failure> = await withCheckedContinuation { continuation in
-                WandAuth.loginWithToken(
-                    serverURL: endpointURL,
-                    appToken: token,
-                    endpointSession: endpointAPI.endpointSession
-                ) {
-                    continuation.resume(returning: $0.map { _ in () })
-                }
-            }
-            guard !Task.isCancelled, isCurrentLifecycle(generation) else { return }
-            switch result {
-            case .success:
-                finishAuthentication(generation: generation)
-            case .failure(let error):
-                authenticationTask = nil
-                if shouldRetryAuthentication(error) {
-                    scheduleAuthenticationRetry(generation: generation)
-                } else {
-                    phase = .failed(error.userMessage)
+        authenticationAttempt = WandAuth.authenticate(
+            serverURL: endpointURL,
+            appToken: token,
+            targetEndpointSession: endpointAPI.endpointSession
+        ) { result in
+            DispatchQueue.main.async {
+                guard isCurrentLifecycle(generation) else { return }
+                authenticationAttempt = nil
+                switch result {
+                case .success:
+                    finishAuthentication(generation: generation)
+                case .failure(let error):
+                    if shouldRetryAuthentication(error) {
+                        scheduleAuthenticationRetry(generation: generation)
+                    } else {
+                        phase = .failed(error.userMessage)
+                    }
                 }
             }
         }
@@ -1183,6 +1202,8 @@ struct NativeRootView: View {
         lifecycleGeneration &+= 1
         authenticationTask?.cancel()
         authenticationTask = nil
+        authenticationAttempt?.cancel()
+        authenticationAttempt = nil
         authenticationRetryTask?.cancel()
         authenticationRetryTask = nil
         authenticationRetryAttempt = 0

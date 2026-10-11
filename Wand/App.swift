@@ -26,6 +26,21 @@ struct WandApp: App {
 
     var body: some Scene {
         WindowGroup {
+            Group {
+#if DEBUG
+            if ProcessInfo.processInfo.environment["WAND_DEBUG_CHAT_DESIGN"] == "1" {
+                ChatDesignPreview()
+            } else {
+                appContent
+            }
+#else
+            appContent
+#endif
+            }
+        }
+    }
+
+    private var appContent: some View {
             ContentView()
                 .environmentObject(store)
                 .wandPreferredAppearance()
@@ -37,7 +52,6 @@ struct WandApp: App {
                     await installMockLiveActivityIfRequested()
                 }
 #endif
-        }
     }
 
     private func handleAppURL(_ url: URL) {

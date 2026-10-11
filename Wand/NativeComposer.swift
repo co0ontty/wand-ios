@@ -5,15 +5,168 @@ import UniformTypeIdentifiers
 
 enum ComposerMetrics {
     static let actionVisualSize: CGFloat = 34
-    static let actionTouchSize: CGFloat = 44
+    static let actionTouchSize: CGFloat = 48
     static let actionSpacing: CGFloat = 0
-    /// 与 Android 展开态输入框保持同一行数/高度预算。
-    static let expandedInputMaxHeight: CGFloat = 132
+    /// Chat expands naturally; the full draft editor handles longer documents.
+    static let expandedInputMaxHeight: CGFloat = 180
     static let voiceCancelDistance: CGFloat = 60
 }
 
 enum ComposerSendPhase: Equatable {
     case idle, sending, sent, failed
+}
+
+/// UI visibility only; submission ownership remains in ComposerDraftState/ChatStore.
+func catComposerExpanded(editing: Bool, focused: Bool, keyboard: Bool, failed: Bool, unconfirmed: Bool) -> Bool {
+    editing || focused || keyboard || failed || unconfirmed
+}
+
+struct CatInputPressState {
+    static let holdDelay: TimeInterval = 0.3
+    private(set) var holding = false
+    private(set) var moved = false
+    private(set) var attempted = false
+    private(set) var cancelling = false
+    private(set) var dragX: CGFloat = 0
+    private(set) var dragging = false
+    mutating func move(x: CGFloat, y: CGFloat) {
+        if holding { cancelling = y < -ComposerMetrics.voiceCancelDistance }
+        else if abs(x) + abs(y) > 12 {
+            moved = true; dragging = abs(x) > abs(y); dragX = x
+        }
+    }
+    mutating func beginHold() -> Bool {
+        guard !moved, !attempted else { return false }
+        attempted = true; holding = true
+        return true
+    }
+    enum End: Equatable { case tap, voice(cancelled: Bool), drag(CGFloat), none }
+    mutating func end() -> End {
+        let result: End = holding ? .voice(cancelled: cancelling) : dragging ? .drag(dragX) : moved || attempted ? .none : .tap
+        self = Self()
+        return result
+    }
+}
+
+/// One recognizer arbitrates short press and hold. Permission callbacks never own the pointer.
+struct CatInputGesture: ViewModifier {
+    let onTap: () -> Void
+    let onHold: () -> Void
+    let onMove: (Bool) -> Void
+    let onRelease: (Bool) -> Void
+    var onDrag: (CGFloat) -> Void = { _ in }
+    var onDrop: (CGFloat) -> Void = { _ in }
+    @State private var pointer = CatInputPressState()
+    @State private var work: DispatchWorkItem?
+    func body(content: Content) -> some View {
+        content.contentShape(Rectangle()).gesture(DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                pointer.move(x: value.translation.width, y: value.translation.height)
+                if pointer.moved { work?.cancel(); work = nil }
+                if work == nil && !pointer.holding && !pointer.moved && !pointer.attempted {
+                    let pending = DispatchWorkItem {
+                        work = nil
+                        if pointer.beginHold() { onHold() }
+                    }
+                    work = pending
+                    DispatchQueue.main.asyncAfter(deadline: .now() + CatInputPressState.holdDelay, execute: pending)
+                }
+                if pointer.holding { onMove(pointer.cancelling) }
+                else if pointer.dragging { onDrag(pointer.dragX) }
+            }.onEnded { _ in
+                work?.cancel(); work = nil
+                switch pointer.end() {
+                case .tap: onTap()
+                case .voice(let cancelled): onRelease(cancelled)
+                case .drag(let x): onDrop(x)
+                case .none: break
+                }
+            })
+            .accessibilityElement().accessibilityAddTraits(.isButton)
+            .accessibilityLabel("发消息，或按住说话")
+            .accessibilityHint("轻点打字；按住300毫秒说话，上滑取消，松手后编辑草稿")
+            .accessibilityAction { onTap() }
+            .accessibilityAction(named: "开始语音输入") { onHold() }
+            .accessibilityAction(named: "结束语音，填入草稿") { onRelease(false) }
+            .accessibilityAction(named: "取消语音输入") { onRelease(true) }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in cancel() }
+            .onDisappear { cancel() }
+    }
+    private func cancel() {
+        work?.cancel(); work = nil
+        if pointer.holding { onRelease(true) }
+        pointer = CatInputPressState()
+        onDrag(0)
+    }
+}
+
+enum CatComposerSide: String {
+    case left, right
+    static let preferenceKey = "wand.catComposer.side.v1"
+    static func load(_ defaults: UserDefaults = .standard) -> Self {
+        Self(rawValue: defaults.string(forKey: preferenceKey) ?? "") ?? .left
+    }
+    func save(_ defaults: UserDefaults = .standard) { defaults.set(rawValue, forKey: Self.preferenceKey) }
+    func dropped(translation: CGFloat) -> Self {
+        translation > 48 ? .right : translation < -48 ? .left : self
+    }
+}
+
+/// The capsule rule deliberately keys off text, never attachment count or execution alone.
+func catCapsuleShowsThirdAction(text: String) -> Bool {
+    !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+}
+
+/// Independent character and opposite function capsule. One scene, fixed status geometry.
+struct CatComposerSurface<Face: View, Status: View, Editor: View, Tools: View, Actions: View>: View {
+    let expanded: Bool
+    let hasDraft: Bool
+    let statusVisible: Bool
+    var side: CatComposerSide = .left
+    var dragOffset: CGFloat = 0
+    @ViewBuilder let face: (CGFloat) -> Face
+    @ViewBuilder let status: () -> Status
+    @ViewBuilder let editor: () -> Editor
+    @ViewBuilder let tools: () -> Tools
+    @ViewBuilder let actions: () -> Actions
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.accessibilityReduceMotion) private var reduced
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            GeometryReader { row in
+                let travel = max(0, row.size.width - 96)
+                let offset = side == .left ? min(travel, max(0, dragOffset)) : max(-travel, min(0, dragOffset))
+                ZStack {
+                    VStack(spacing: 2) {
+                        face(96)
+                            .overlay(alignment: .topTrailing) {
+                                if !expanded && hasDraft {
+                                    Circle().fill(Theme.brand).frame(width: 7, height: 7)
+                                        .overlay(Circle().stroke(Theme.background, lineWidth: 2)).accessibilityHidden(true)
+                                }
+                            }
+                        status().lineLimit(2).frame(height: typeSize.isAccessibilitySize ? 64 : 34, alignment: .top)
+                            .opacity(expanded || statusVisible ? 1 : 0)
+                    }.frame(width: 96).offset(x: offset)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: side == .left ? .leading : .trailing)
+                    actions().padding(.horizontal, 6).padding(.vertical, 4)
+                        .background(Theme.surface, in: Capsule())
+                        .overlay(Capsule().stroke(Theme.border.opacity(0.65), lineWidth: 0.8))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: side == .left ? .trailing : .leading)
+                }
+            }.frame(height: typeSize.isAccessibilitySize ? 182 : 152)
+                .animation(reduced ? nil : WandMotion.disclosure, value: side)
+            if expanded {
+                VStack(spacing: 6) {
+                    editor()
+                    Divider().overlay(Theme.border.opacity(0.5))
+                    tools()
+                }.padding(10)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 20))
+                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(Theme.border.opacity(0.65), lineWidth: 0.8))
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 6)
+    }
 }
 
 func composerPrimaryActionStops(phase: ComposerSendPhase, turnRunning: Bool, hasDraft: Bool) -> Bool {
@@ -188,6 +341,7 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
 
     let expanded: Bool
     let focused: Bool
+    var avatarLaneInset: CGFloat = 0
     let onFocusInput: () -> Void
     @ViewBuilder let collapsedLeading: () -> CollapsedLeading
     @ViewBuilder let inputContent: () -> InputContent
@@ -216,17 +370,15 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
                     collapsedTrailing()
                 }
             }
+            .padding(.leading, expanded ? 0 : avatarLaneInset)
+            .padding(.top, expanded && avatarLaneInset > 0 ? 14 : 0)
             if expanded {
                 expandedControls()
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(reduceTransparency ? AnyShapeStyle(Theme.surface) : AnyShapeStyle(.ultraThinMaterial), in: shape)
-        .background {
-            shape
-                .fill(Theme.surface.opacity(0.56))
-        }
+        .background(Theme.surface, in: shape)
         .overlay {
             shape
                 .stroke(
@@ -234,21 +386,86 @@ struct NativeComposerShell<CollapsedLeading: View, InputContent: View, Collapsed
                     lineWidth: contrast == .increased ? 2 : (focused ? 1.25 : 0.8)
                 )
         }
-        .overlay(alignment: .top) {
-            shape
-                .stroke(Color.white.opacity(0.32), lineWidth: 0.7)
-                .blendMode(.screen)
-        }
-        .compositingGroup()
-        .shadow(
-            color: focused ? Theme.brand.opacity(0.12) : Color.black.opacity(0.05),
-            radius: 8,
-            x: 0,
-            y: 3
-        )
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
     }
+}
+
+struct ComposerContextLabel: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
+    var body: some View {
+        Group {
+            if typeSize.isAccessibilitySize {
+                Image(systemName: "slider.horizontal.3").font(.system(size: 17))
+            } else {
+                Label("上下文", systemImage: "slider.horizontal.3").font(.caption)
+            }
+        }.foregroundStyle(Theme.textSecondary).frame(minWidth: 48, minHeight: 48)
+    }
+}
+
+/// Small visual islands with native 48pt targets, without a full-width navigation surface.
+struct FloatingChatIcon: View {
+    let symbol: String
+    var body: some View {
+        Image(systemName: symbol).font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(Theme.textPrimary)
+            .frame(width: 36, height: 36)
+            .background(Theme.surface, in: Circle())
+            .overlay(Circle().stroke(Theme.border.opacity(0.55), lineWidth: 0.8))
+            .frame(width: 48, height: 48).contentShape(Rectangle())
+    }
+}
+
+struct FloatingChatControls<Actions: View>: View {
+    let onBack: () -> Void
+    @ViewBuilder let actions: () -> Actions
+    var body: some View {
+        HStack(spacing: 4) {
+            Button(action: onBack) { FloatingChatIcon(symbol: "chevron.left") }
+                .buttonStyle(.plain).accessibilityLabel("返回会话列表")
+            Spacer(minLength: 0)
+            actions()
+        }.padding(.horizontal, 12).padding(.top, 4)
+    }
+}
+
+/// Full-height editing uses the same draft binding: dismissing never commits, sends or clears it.
+struct ComposerDraftEditor: View {
+    @Binding var text: String
+    let onCompositionChange: (Bool) -> Void
+    var onPasteImages: (([(data: Data, name: String?, mimeType: String?)]) -> Void)? = nil
+    @Environment(\.dismiss) private var dismiss
+    @State private var focused = true
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geometry in
+                IMEAwareComposerTextView(text: $text, placeholder: "输入消息", isFocused: focused,
+                    maximumHeight: max(100, geometry.size.height - 32), submitOnReturn: false,
+                    onPasteImages: onPasteImages, onFocusChange: { focused = $0 },
+                    onCompositionChange: onCompositionChange, onSubmit: {}, onHeightChange: { _ in })
+                    .padding(16)
+            }
+            .background(Theme.surface).navigationTitle("编辑消息").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { focused = false; dismiss() } } }
+        }
+    }
+}
+
+func composerMaximumInputHeight(compact: Bool, keyboardVisible: Bool) -> CGFloat {
+    compact ? (keyboardVisible ? 64 : 132) : ComposerMetrics.expandedInputMaxHeight
+}
+
+func composerOffersExpandedEditor(text: String, measuredHeight: CGFloat,
+                                 maximumHeight: CGFloat = ComposerMetrics.expandedInputMaxHeight) -> Bool {
+    text.count >= 240 || text.filter { $0 == "\n" }.count >= 5 || measuredHeight >= maximumHeight - 2
+}
+
+func composerUsesRestingSurface(acknowledged: Bool, focused: Bool, hasDraft: Bool,
+                               hasAttachments: Bool, composing: Bool,
+                               phase: ComposerSendPhase, unconfirmed: Bool) -> Bool {
+    acknowledged && !focused && !hasDraft && !hasAttachments && !composing &&
+        phase != .failed && phase != .sending && !unconfirmed
 }
 
 func composerShouldExpand(focused: Bool, voiceMode: Bool, contentNeedsSpace: Bool = false) -> Bool {
@@ -304,10 +521,12 @@ final class ComposerDraftState: ObservableObject {
     }
     @Published private(set) var sendPhase = ComposerSendPhase.idle
     @Published private(set) var sendFeedback: String?
+    @Published private(set) var submissionFailed = false
     private var sendFeedbackTask: Task<Void, Never>?
 
     func beginSending() {
         guard !retired else { return }
+        submissionFailed = false
         sendFeedbackTask?.cancel()
         sendFeedback = nil
         sendPhase = .sending
@@ -315,6 +534,7 @@ final class ComposerDraftState: ObservableObject {
 
     func finishSending(accepted: Bool, message: String?) {
         sendFeedbackTask?.cancel()
+        submissionFailed = !accepted
         let phase: ComposerSendPhase = accepted ? .sent : .failed
         sendFeedback = message
         sendPhase = phase

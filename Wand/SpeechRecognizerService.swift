@@ -27,6 +27,9 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     @Published private(set) var usingOnDevice = false
     @Published private(set) var usingServer = false
     @Published private(set) var isProcessing = false
+    /// Continuous calls must never execute an unfinished partial transcript.
+    var requiresFinalResult = false
+    private var receivedFinalResult = false
     private var server: ServerSpeechRecorder?
 
     private let audioEngine = AVAudioEngine()
@@ -173,7 +176,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     }
 
     /// 松手结束。cancelled 时直接丢弃；否则限时等 final 结果，把最终文本交给 commit。
-    /// commit 只在文本非空时回调（主线程）。
+    /// 草稿识别的空结果也回调供界面提示；continuous final-only 仍拒绝不完整结果。
     func stop(cancelled: Bool, commit: ((String) -> Void)? = nil) {
         startRequested = false
         if let server {
@@ -187,6 +190,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         let activeTask = task
 
         if cancelled {
+            isProcessing = false
             commitFallback?.cancel()
             commitFallback = nil
             pendingCommit = nil
@@ -202,6 +206,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         )
         audioPipelineStopped = true
         pendingCommit = commit
+        isProcessing = commit != nil
         let work = DispatchWorkItem { [weak self] in self?.finishCommitIfPending() }
         commitFallback = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.finalResultGrace, execute: work)
@@ -232,13 +237,16 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         generation += 1
         let myGeneration = generation
         transcript = ""
+        receivedFinalResult = false
+        let sessionOptions: AVAudioSession.CategoryOptions = requiresFinalResult
+            ? [.defaultToSpeaker, .allowBluetoothHFP] : [.duckOthers, .defaultToSpeaker]
 
         // —— 后台串行队列：setActive + engine.start 的阻塞重活，挡在主线程之外 ——
         audioQueue.async { [weak self] in
             guard let self else { return }
             do {
                 let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
+                try session.setCategory(.playAndRecord, mode: .measurement, options: sessionOptions)
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
                 let input = self.audioEngine.inputNode
                 let format = input.outputFormat(forBus: 0)
@@ -275,6 +283,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
                         if let result {
                             self.transcript = result.bestTranscription.formattedString
                             if result.isFinal {
+                                self.receivedFinalResult = true
                                 if self.pendingCommit != nil {
                                     self.finishCommitIfPending()
                                 } else {
@@ -321,6 +330,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
 
     /// 提交当前文本（final 到达或限时兜底触发，二者只生效一次）。
     private func finishCommitIfPending() {
+        isProcessing = false
         commitFallback?.cancel()
         commitFallback = nil
         guard let commit = pendingCommit else {
@@ -328,11 +338,15 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
             return
         }
         pendingCommit = nil
+        let handler = runtimeErrorHandler
         runtimeErrorHandler = nil
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canCommit = !requiresFinalResult || receivedFinalResult
         cleanup(cancelTask: true)
         transcript = ""
-        if !text.isEmpty { commit(text) }
+        if canCommit, !text.isEmpty { commit(text) }
+        else if !requiresFinalResult { commit("") }
+        else if requiresFinalResult { handler?("未获得完整语音识别结果，未发送；请继续重试") }
     }
 
     /// 停止硬件、结束 request、取消 task、释放音频会话全部在同一串行队列执行。

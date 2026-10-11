@@ -276,8 +276,22 @@ struct ConversationDetailView: View {
             }
         }
         .background(Theme.background)
-        .navigationTitle(detail?.title ?? "聊天").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("").navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                Button {
+                    if let employee = detail?.peerEmployeeId { onEmployee(employee) }
+                    else if detail?.kind == "group" { members.toggle(); inviting = false }
+                } label: {
+                    HStack(spacing: 8) {
+                        if let employee = store.employees.first(where: { $0.id == detail?.peerEmployeeId }) {
+                            ContactAvatar(id: employee.id, avatar: employee.avatar, size: 40, name: employee.name, floating: true)
+                        }
+                        Text(detail?.title ?? "聊天").font(.headline).lineLimit(1).truncationMode(.tail)
+                    }.frame(minHeight: 44)
+                }.buttonStyle(.plain)
+                .accessibilityLabel(detail?.title ?? "聊天")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     if let employee = detail?.peerEmployeeId { Button("员工资料") { onEmployee(employee) } }

@@ -1,11 +1,36 @@
 import Foundation
 import Combine
 import SwiftUI
+import UIKit
 import XCTest
 @testable import Wand
 
 @MainActor
 final class ContactsTests: XCTestCase {
+    func testPlushIdentityMatchesWebAndPreservesExplicitLegacyAvatars() {
+        XCTAssertEqual(PlushAvatarIdentity.asset(id: "e1", name: "测试", avatar: ""), "plush_round_lavender_ink_beret")
+        XCTAssertEqual(PlushAvatarIdentity.asset(id: "😀员工", name: "测试", avatar: ""), "plush_round_blue_none_beret")
+        XCTAssertEqual(PlushAvatarIdentity.asset(id: "  stable-id  ", name: "测试", avatar: ""), "plush_square_blue_ink_none")
+        XCTAssertEqual(PlushAvatarIdentity.asset(id: "", name: "测试", avatar: ""), "plush_capsule_cream_ink_none")
+        XCTAssertNil(PlushAvatarIdentity.asset(id: "e1", avatar: "cat:7"))
+        XCTAssertNil(PlushAvatarIdentity.asset(id: "e1", avatar: "data:image/png;base64,eA=="))
+        XCTAssertEqual(PlushAvatarIdentity.asset(id: "e1", avatar: "plush-cat:v1:silver"), "plush_cat_silver")
+        XCTAssertEqual(PlushAvatarIdentity.asset(id: "e1", avatar: "plush-cat:v1:orange"), "plush_cat_orange")
+        for invalid in ["plush:v2:round:blue:none:none", "plush:v1:wrong:blue:none:none", "plush-cat:v1:unknown"] {
+            XCTAssertEqual(PlushAvatarIdentity.asset(id: "e1", avatar: invalid), PlushAvatarIdentity.asset(id: "e1", avatar: ""))
+        }
+    }
+    func testAllPlushPortraitsAreBundledForOfflineDisplay() {
+        for shape in PlushAvatarIdentity.shapes { for color in PlushAvatarIdentity.colors {
+            for glasses in PlushAvatarIdentity.glasses { for hat in PlushAvatarIdentity.hats {
+                let key = "plush_\(shape)_\(color)_\(glasses)_\(hat)"
+                XCTAssertEqual(PlushAvatarIdentity.asset(id: "", avatar: "plush:v1:\(shape):\(color):\(glasses):\(hat)"), key)
+                XCTAssertNotNil(UIImage(named: key), key)
+            } }
+        } }
+        XCTAssertNotNil(UIImage(named: "plush_cat_silver"))
+        XCTAssertNotNil(UIImage(named: "plush_cat_orange"))
+    }
     private func decode<T: Decodable>(_ type: T.Type, _ text: String) throws -> T {
         try JSONDecoder().decode(type, from: Data(text.utf8))
     }
