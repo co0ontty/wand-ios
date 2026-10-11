@@ -238,6 +238,14 @@ struct ConversationDetailView: View {
     let onOpenSession: (String) -> Void
     let onOpenConversation: (String) -> Void
     let onEmployee: (String) -> Void
+    @StateObject private var composerFocus = ComposerFocusController()
+    @StateObject private var voice = DraftVoiceController()
+    @StateObject private var keyboard = KeyboardObserver()
+    @AppStorage(CatComposerSide.preferenceKey) private var sideRaw = CatComposerSide.left.rawValue
+    @State private var dragOffset: CGFloat = 0
+    @State private var files = false
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var members = false
     @State private var tasks = false
     @State private var inviting = false
@@ -265,9 +273,10 @@ struct ConversationDetailView: View {
                         Spacer(); Button("查看全部") { store.filters[id] = nil }
                     }.padding(10).background(Theme.surface)
                 }
-                messageList(detail)
-                ConversationComposerView(id: id, store: store, detail: detail, target: store.targets[id], onEmployee: onEmployee)
+                messageList(detail).onTapGesture { composerFocus.collapse() }
+                ConversationComposerView(id: id, store: store, detail: detail, target: store.targets[id], focus: composerFocus, voice: voice, onEmployee: onEmployee)
                     .id(store.draftKey(id, target: store.targets[id]))
+                    .padding(.bottom, keyboard.lift)
             } else {
                 Spacer()
                 if let error = store.error { Text(error).foregroundStyle(Theme.danger); Button("重试") { Task { await store.load(id) } } }
@@ -275,39 +284,60 @@ struct ConversationDetailView: View {
                 Spacer()
             }
         }
+        .padding(.top, verticalSizeClass == .compact ? 56 : 100)
         .background(Theme.background)
         .navigationTitle("").navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Button {
-                    if let employee = detail?.peerEmployeeId { onEmployee(employee) }
-                    else if detail?.kind == "group" { members.toggle(); inviting = false }
-                } label: {
-                    HStack(spacing: 8) {
-                        if let employee = store.employees.first(where: { $0.id == detail?.peerEmployeeId }) {
-                            ContactAvatar(id: employee.id, avatar: employee.avatar, size: 40, name: employee.name, floating: true)
-                        }
-                        Text(detail?.title ?? "聊天").font(.headline).lineLimit(1).truncationMode(.tail)
-                    }.frame(minHeight: 44)
-                }.buttonStyle(.plain)
-                .accessibilityLabel(detail?.title ?? "聊天")
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    if let employee = detail?.peerEmployeeId { Button("员工资料") { onEmployee(employee) } }
-                    if detail?.kind == "group" {
-                        Button(members ? "收起成员" : "成员") { members.toggle(); inviting = false }
-                        Button("邀请成员") { inviting.toggle(); members = false }
-                        Button(tasks ? "收起任务" : "任务与执行") { tasks.toggle() }
+        .toolbar(.hidden, for: .navigationBar)
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .overlay(alignment: .top) { navigation }
+        .sheet(isPresented: $files, onDismiss: { composerFocus.resume("files") }) {
+            NavigationStack {
+                List {
+                    ForEach(detail?.messages.compactMap(\.reportFile) ?? [], id: \.path) { file in
+                        ConversationReportCard(file: file, api: store.api)
                     }
-                } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("对话菜单")
+                    if detail?.messages.compactMap(\.reportFile).isEmpty != false {
+                        Text("暂无已交付文件；执行会话中的文件可从回复详情打开。")
+                    }
+                }.navigationTitle("对话文件").toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { files = false } } }
             }
         }
         .task(id: id) { store.select(id); await store.load(id) }
-        .onDisappear { inviting = false }
+        .onDisappear { inviting = false; voice.finish(cancelled: true); composerFocus.collapse() }
         .animation(reduced ? nil : WandMotion.stateSwap, value: members)
         .animation(reduced ? nil : WandMotion.stateSwap, value: tasks)
         .animation(reduced ? nil : WandMotion.stateSwap, value: inviting)
+    }
+    private var navigation: some View {
+        ZStack(alignment: .top) {
+            TopChatCompanion(side: CatComposerSide(rawValue: sideRaw) ?? .left, dragOffset: dragOffset) { size in
+                if let detail {
+                    let employee = store.employees.first { $0.id == detail.peerEmployeeId }
+                    let session = detail.messages.last(where: { $0.sessionPreview?.active == true })?.sessionLink?.sessionId ?? detail.communicationSessionId
+                    ConversationCompanionFace(employee: employee, detail: detail, execution: session.map { store.executionStore($0) }, size: size)
+                        .overlay { Color.clear.modifier(voice.gesture(draft: store.composer(id, target: store.targets[id]), focus: composerFocus,
+                            onDrag: { dragOffset = $0 }, onDrop: { offset in
+                                sideRaw = (CatComposerSide(rawValue: sideRaw) ?? .left).dropped(translation: offset).rawValue; dragOffset = 0
+                            })) }
+                }
+            }
+            FloatingChatControls(onBack: { dismiss() }) {
+                Button { composerFocus.borrow("files"); files = true } label: { FloatingChatIcon(symbol: "folder") }.accessibilityLabel("对话文件")
+                Menu {
+                    Text(detail?.title ?? "聊天")
+                    if let employee = detail?.peerEmployeeId { Button("员工资料与执行配置") { onEmployee(employee) } }
+                    if detail?.kind == "group" {
+                        Button(members ? "收起成员" : "成员") { composerFocus.collapse(); members.toggle(); inviting = false }
+                        Button("邀请成员") { composerFocus.collapse(); inviting.toggle(); members = false }
+                        Button(tasks ? "收起任务" : "任务与执行") { composerFocus.collapse(); tasks.toggle() }
+                    }
+                    Menu("猫头位置") {
+                        Button("控件间居中") { sideRaw = CatComposerSide.left.rawValue }
+                        Button("向右微移") { sideRaw = CatComposerSide.right.rawValue }
+                    }
+                } label: { FloatingChatIcon(symbol: "ellipsis") }.accessibilityLabel("对话菜单")
+            }.padding(.top, verticalSizeClass == .compact ? 0 : 18)
+        }
     }
     private func messageList(_ detail: ConversationInstance) -> some View {
         ScrollViewReader { proxy in
@@ -332,7 +362,17 @@ struct ConversationDetailView: View {
             }
         }
     }
-    @ViewBuilder private func messageView(_ message: ConversationMessage, detail: ConversationInstance) -> some View {
+    private func messageView(_ message: ConversationMessage, detail: ConversationInstance) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if detail.kind == "group", message.turn.role != "user", let author = message.author {
+                Button(author.name ?? "成员") {
+                    if let employee = detail.team?.members.first(where: { $0.id == author.id })?.employeeId { onEmployee(employee) }
+                }.font(.caption.weight(.semibold)).frame(minHeight: 32)
+            }
+            messageContent(message, detail: detail)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+    @ViewBuilder private func messageContent(_ message: ConversationMessage, detail: ConversationInstance) -> some View {
         if message.notice == true {
             Text(conversationTurnPreview(message.turn)).font(.caption).foregroundStyle(Theme.textSecondary).frame(maxWidth: .infinity)
         } else if let link = message.sessionLink {
@@ -348,11 +388,6 @@ struct ConversationDetailView: View {
             ConversationReportCard(file: file, api: store.api)
         } else {
             VStack(alignment: .leading, spacing: 4) {
-                if detail.kind == "group", message.turn.role != "user", let author = message.author {
-                    Button(author.name ?? "成员") {
-                        if let employee = detail.team?.members.first(where: { $0.id == author.id })?.employeeId { onEmployee(employee) }
-                    }.font(.caption.weight(.semibold)).frame(minHeight: 32)
-                }
                 SessionMessageBody(turn: message.turn, api: store.api, sessionID: message.author?.sessionId ?? detail.communicationSessionId ?? detail.sessionId ?? "", store: message.author?.sessionId.map { store.executionStore($0) })
             }
         }
@@ -396,30 +431,19 @@ private struct ConversationReplyCard: View {
     let api: WandAPI
     @ObservedObject var execution: ChatStore
     let onOpen: () -> Void
-    @State private var pinned = true
-    @State private var userScrolling = false
     private var text: String { message.sessionPreview?.text ?? "" }
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(text.isEmpty ? "等待会话输出" : text).font(.body)
+                .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
             HStack {
-                Text(message.sessionLink?.title ?? "会话").font(.subheadline.weight(.semibold)).lineLimit(1)
-                Spacer()
                 Text(message.sessionPreview?.label ?? "准备中").font(.caption).foregroundStyle(Theme.textSecondary)
+                Spacer(minLength: 8)
+                Button("继续此工作", action: onOpen).font(.caption).frame(minHeight: 44)
+                    .disabled(message.sessionPreview?.status == "unavailable")
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading) {
-                        Text(text.isEmpty ? "等待会话输出" : text).font(.subheadline).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                        Color.clear.frame(height: 1).id("preview-tail")
-                    }
-                }
-                .onScrollPhaseChange { _, phase in userScrolling = phase == .interacting || phase == .decelerating }
-                .onScrollGeometryChange(for: Bool.self) { $0.contentSize.height <= $0.containerSize.height || $0.contentSize.height - $0.visibleRect.maxY < 24 } action: { _, value in if userScrolling || value { pinned = value } }
-                .onChange(of: text) { _, _ in if pinned { proxy.scrollTo("preview-tail", anchor: .bottom) } }
-            }.frame(maxHeight: .infinity).clipped()
-            Button("查看会话", action: onOpen).frame(minHeight: 44).disabled(message.sessionPreview?.status == "unavailable")
-        }.padding(12).frame(maxWidth: 420).frame(height: 232).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
-        SessionProtocolPanel(store: execution)
+            SessionProtocolPanel(store: execution)
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -439,6 +463,30 @@ private struct ConversationReportCard: View {
     }
 }
 
+private struct ConversationCompanionFace: View {
+    let employee: SiliconEmployee?
+    let detail: ConversationInstance
+    let execution: ChatStore?
+    let size: CGFloat
+    var body: some View {
+        if let execution { ConversationExecutingCompanion(employee: employee, execution: execution, size: size) }
+        else if let employee { WorkingAvatar(id: employee.id, name: employee.name, avatar: employee.avatar, size: size) }
+        else { ContactAvatar(id: detail.id, avatar: "", size: size, name: detail.title) }
+    }
+}
+private struct ConversationExecutingCompanion: View {
+    let employee: SiliconEmployee?
+    @ObservedObject var execution: ChatStore
+    let size: CGFloat
+    private var executing: Bool { execution.isResponding && execution.status == "running" && !execution.permissionBlocked }
+    var body: some View {
+        WorkingAvatar(id: employee?.id ?? execution.snapshot?.employeeId ?? "", name: employee?.name ?? execution.displayEmployeeName ?? "",
+            avatar: employee?.avatar ?? execution.displayEmployeeAvatar ?? "",
+            activity: avatarFileActivity(messages: execution.messages, executing: executing),
+            thinking: avatarIsThinking(messages: execution.messages, executing: executing), size: size)
+    }
+}
+
 private struct ConversationComposerView: View {
     let id: String
     @ObservedObject var store: ConversationStore
@@ -449,7 +497,13 @@ private struct ConversationComposerView: View {
     @ObservedObject private var attachments: ComposerAttachmentController
     @ObservedObject private var action: ConversationOperation
     @State private var menu = false
-    @State private var focused = false
+    @ObservedObject var focus: ComposerFocusController
+    @ObservedObject var voice: DraftVoiceController
+    @StateObject private var links = ServerFileLinkController()
+    @State private var settingsInfo = false
+    @State private var pendingAttachment: String?
+    @State private var pendingStop = false
+    @State private var stopConfirm = false
     @State private var composing = false
     @State private var height: CGFloat = 36
     @State private var workspaceID = ""
@@ -457,13 +511,10 @@ private struct ConversationComposerView: View {
     @State private var notice: String?
     @State private var draftConsumer = UUID()
     @State private var visible = false
-    @StateObject private var speech = SpeechRecognizerService()
     @StateObject private var keyboard = KeyboardObserver()
-    @State private var voiceHolding = false
-    @State private var voiceCanceling = false
     @Environment(\.accessibilityReduceMotion) private var reduced
-    init(id: String, store: ConversationStore, detail: ConversationInstance, target: ConversationTarget?, onEmployee: @escaping (String) -> Void) {
-        self.id = id; self.store = store; self.detail = detail; self.target = target; self.onEmployee = onEmployee
+    init(id: String, store: ConversationStore, detail: ConversationInstance, target: ConversationTarget?, focus: ComposerFocusController, voice: DraftVoiceController, onEmployee: @escaping (String) -> Void) {
+        self.id = id; self.store = store; self.detail = detail; self.target = target; self.focus = focus; self.voice = voice; self.onEmployee = onEmployee
         let draft = store.composer(id, target: target)
         _draft = ObservedObject(wrappedValue: draft); _attachments = ObservedObject(wrappedValue: draft.attachments)
         _action = ObservedObject(wrappedValue: store.operation("action:" + id + ":" + (target?.runId ?? "talk")))
@@ -486,23 +537,109 @@ private struct ConversationComposerView: View {
             if store.hasUnknown(id, target: target) { Button("核对送达状态") { store.reconcileComposer(id, target: target) } }
             if action.unknownRequest != nil { Button("核对运行操作") { action.reconcile(service: store.service, accepted: { _ in Task { await store.load(id) } }) } }
             if let notice { Text(notice).font(.caption).foregroundStyle(Theme.textSecondary) }
-            if voiceHolding || speech.isRecording || speech.isProcessing {
-                Text(voiceCanceling ? "松开取消" : speech.isProcessing ? "服务端识别中…" : speech.transcript.isEmpty ? "正在聆听…松开完成，上滑取消" : speech.transcript)
-                    .font(.subheadline).frame(maxWidth: .infinity, alignment: .leading)
+            if voice.holding || voice.speech.isProcessing || voice.notice != nil {
+                Text(voice.cancelling ? "松开取消" : voice.speech.isProcessing ? "转写中…" : voice.notice ?? "正在听 · 上滑取消").font(.caption)
             }
-            if !attachments.attachments.isEmpty {
-                ScrollView(.horizontal) {
-                    HStack { ForEach(attachments.attachments, id: \.savedPath) { file in Button { attachments.remove(file) } label: { Label(file.originalName, systemImage: "xmark.circle").font(.caption) } } }
-                }
+            FocusComposerSurface(expanded: expanded, hasDraft: !draft.text.isEmpty || !attachments.attachments.isEmpty,
+                onFocus: { focus.focus() }, editor: {
+                    VStack(spacing: 4) {
+                        PendingAttachmentsPreview(baseURL: store.api.baseURL, attachments: attachments.attachments, onRemove: attachments.remove,
+                            onPreview: { file in focus.borrow("preview", open: true); links.open(serverPath: file.savedPath, api: store.api) })
+                        if draft.submissionFailed, let feedback = draft.sendFeedback { Text(feedback).font(.caption).foregroundStyle(Theme.danger) }
+                        IMEAwareComposerTextView(text: $draft.text, placeholder: dispatch ? "任务说明" : "输入消息，回车换行", isFocused: focus.focused,
+                            maximumHeight: maximumHeight, submitOnReturn: false, onPasteImages: attachments.handlePastedImageData,
+                            onFocusChange: { focus.focused = $0 }, onCompositionChange: { composing = $0 }, onSubmit: send, onHeightChange: { height = $0 })
+                            .frame(height: min(maximumHeight, max(34, height)))
+                    }
+                }, add: {
+                    Button { focus.borrow("menu", open: true); menu = true } label: { Image(systemName: "plus").frame(width: 48, height: 48) }.accessibilityLabel("添加附件与对话操作")
+                }, voice: {
+                    Image(systemName: voice.holding ? "waveform" : "mic").frame(width: 48, height: 48)
+                        .modifier(voice.gesture(draft: draft, focus: focus)).accessibilityLabel("语音输入")
+                }, send: {
+                    if running && !dispatch && catCapsuleShowsThirdAction(text: draft.text) && draft.sendPhase != .sending {
+                        ComposerStopAction { stopConfirm = true }.disabled(!action.canSubmit)
+                    } else if !draft.text.isEmpty || !attachments.attachments.isEmpty || draft.sendPhase == .sending {
+                        NativeComposerActionButton(phase: action.phase == .idle ? draft.sendPhase : action.phase, turnRunning: running,
+                            hasDraft: !draft.text.isEmpty || !attachments.attachments.isEmpty,
+                            canSubmit: !voice.holding && !voice.speech.isProcessing && composerDraftIsSendable(draft.text, hasAttachments: !attachments.attachments.isEmpty, isComposing: composing)
+                                && !attachments.isUploading && !store.hasUnknown(id, target: target) && detail.dissolvedAt == nil && !detail.deleting,
+                            message: action.message ?? draft.sendFeedback, onSend: send, onStop: { stopConfirm = true })
+                    }
+                }, settings: {
+                    if let execution, !dispatch, target != nil || detail.kind == "group" { SessionComposerSettings(store: execution, focus: focus) }
+                    else {
+                        Button { focus.borrow("settings", open: true); settingsInfo = true } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                if let candidate = store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) })?.agents.first {
+                                    Text("员工默认配置 · \(candidate.model == "default" ? "跟随服务端模型" : candidate.model)").lineLimit(1)
+                                    Text("权限：\(composerModeName(candidate.mode)) · 思考：\(composerThinkingName(candidate.thinkingEffort)) · 后续新工作").lineLimit(2)
+                                } else { Text("员工默认配置不可用：未取得首选候选") }
+                            }.font(.caption).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        }.buttonStyle(.plain).accessibilityHint("查看真实配置与生效范围")
+                    }
+                })
+        }
+        .onAppear { if !visible { draft.acquire(draftConsumer) }; visible = true; attachments.setToastHandler { notice = $0 } }
+        .onDisappear { menu = false; voice.finish(cancelled: true); if visible { draft.release(draftConsumer) }; visible = false }
+        .onChange(of: keyboard.isVisible) { old, value in if old && !value { focus.keyboardHidden() } }
+        .onChange(of: draft.sendPhase) { _, phase in
+            if phase == .sent && draft.text.isEmpty && attachments.attachments.isEmpty && !composing { focus.collapse() }
+        }
+        .fileImporter(isPresented: $attachments.showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            attachments.handleFileSelection(result); focus.resume("attachment")
+        }
+        .sheet(isPresented: $attachments.showPhotoPicker, onDismiss: { focus.resume("attachment") }) { PhotoLibraryPicker { attachments.showPhotoPicker = false; attachments.handlePhotoSelection($0) } }
+        .sheet(item: $links.previewItem, onDismiss: { links.dismissPreview(); focus.resume("preview") }) { ServerFilePreviewView(item: $0) }
+        .alert("附件预览失败", isPresented: Binding(get: { links.failure != nil }, set: { if !$0 { links.failure = nil; focus.resume("preview") } })) {
+            Button("完成") { links.failure = nil; focus.resume("preview") }
+        } message: { Text(links.failure?.message ?? "") }
+        .sheet(isPresented: $menu, onDismiss: {
+            focus.resume("menu")
+            if pendingStop { pendingStop = false; stopConfirm = true }
+            if let pendingAttachment {
+                self.pendingAttachment = nil
+                if pendingAttachment == "file" { attachments.showFileImporter = true }
+                else { attachments.showPhotoPicker = true }
             }
-            if menu {
+        }) { menuSheet }
+        .sheet(isPresented: $settingsInfo, onDismiss: { focus.resume("settings") }) {
+            NavigationStack {
+                List {
+                    Text("这里展示员工默认配置，影响后续新工作。私聊每条消息按员工候选新建会话，尚不支持只覆盖本条消息的模型、权限或思考深度；不会修改历史会话。")
+                    if let employee = store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) }) {
+                        ForEach(Array(employee.agents.enumerated()), id: \.offset) { index, candidate in
+                            VStack(alignment: .leading) {
+                                Text("候选 \(index + 1) · \(candidate.provider) · \(candidate.model)")
+                                Text("权限：\(composerModeName(candidate.mode)) · 思考：\(composerThinkingName(candidate.thinkingEffort))").font(.caption)
+                            }
+                        }
+                        Button("查看员工执行配置（影响后续消息）") { settingsInfo = false; focus.collapse(); onEmployee(employee.id) }
+                    }
+                }.navigationTitle("当前输入的执行设置").toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { settingsInfo = false } } }
+            }
+        }
+        .confirmationDialog("停止当前任务？", isPresented: $stopConfirm, titleVisibility: .visible) {
+            Button("停止", role: .destructive) { if target != nil { perform("stop") } else { execution?.stopResponding() } }
+        }
+    }
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.dynamicTypeSize) private var typeSize
+    private var maximumHeight: CGFloat { max(typeSize.isAccessibilitySize ? 80 : 0, composerMaximumInputHeight(compact: verticalSizeClass == .compact, keyboardVisible: keyboard.isVisible)) }
+    private var expanded: Bool { focus.editing || focus.focused || draft.submissionFailed || store.hasUnknown(id, target: target) }
+    private var menuSheet: some View {
+        NavigationStack {
                 VStack(alignment: .leading, spacing: 8) {
+                    if running {
+                        Button("停止当前任务", role: .destructive) { pendingStop = true; menu = false }
+                            .disabled(!action.canSubmit || draft.sendPhase == .sending)
+                    }
                     HStack {
-                        Button("附件") { attachments.showFileImporter = true; menu = false }
-                        Button("照片") { attachments.showPhotoPicker = true; menu = false }
+                        Button("附件") { focus.borrow("attachment", open: true); pendingAttachment = "file"; menu = false }
+                        Button("照片") { focus.borrow("attachment", open: true); pendingAttachment = "photo"; menu = false }
                         Button(dispatch ? "取消派发" : "派发任务") { if dispatch { store.dispatchIntent.remove(id); menu = false } else { store.dispatchIntent.insert(id) } }
                     }
-                    if detail.kind == "group", let leader = detail.leader { Button("@" + leader.name) { draft.text += "@" + leader.name + " "; menu = false; focused = true } }
+                    if detail.kind == "group", let leader = detail.leader { Button("@" + leader.name) { draft.text += "@" + leader.name + " "; menu = false; focus.focus() } }
                     if dispatch {
                         Picker("项目", selection: $workspaceID) {
                             Text("选择项目").tag("")
@@ -512,32 +649,9 @@ private struct ConversationComposerView: View {
                     TextField("工作目录（可选）", text: $cwd).textInputAutocapitalization(.never).autocorrectionDisabled()
                     if let employee = detail.peerEmployeeId { Button("员工执行配置") { menu = false; onEmployee(employee) } }
                 }.padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-            }
-            HStack(alignment: .bottom, spacing: 4) {
-                ContactMorphButton(expanded: menu, symbol: "plus", label: menu ? "关闭操作" : "更多操作") { menu.toggle() }
-                ComposerVoiceControl(draft: draft, speech: speech) { notice = $0 }
-                IMEAwareComposerTextView(text: $draft.text, placeholder: composerHoldToTalkEligible(text: draft.text, focused: focused, keyboardVisible: keyboard.isVisible) ? "发消息或按住说话" : dispatch ? "任务说明" : "消息", isFocused: focused,
-                    onPasteImages: attachments.handlePastedImageData, onFocusChange: { focused = $0 }, onCompositionChange: { composing = $0 },
-                    onSubmit: send, onHeightChange: { height = $0 })
-                    .frame(height: min(max(height, 36), ComposerMetrics.expandedInputMaxHeight))
-                    .overlay {
-                        if composerHoldToTalkEligible(text: draft.text, focused: focused, keyboardVisible: keyboard.isVisible) {
-                            ComposerVoiceControl(draft: draft, speech: speech, inputSurface: true, onTap: { focused = true },
-                                onPressChanged: { voiceHolding = $0; voiceCanceling = $1 }) { notice = $0 }
-                        }
-                    }
-                NativeComposerActionButton(phase: action.phase == .idle ? draft.sendPhase : action.phase, turnRunning: running,
-                    hasDraft: !draft.text.isEmpty || !attachments.attachments.isEmpty,
-                    canSubmit: composerDraftIsSendable(draft.text, hasAttachments: !attachments.attachments.isEmpty, isComposing: composing)
-                        && !attachments.isUploading && !store.hasUnknown(id, target: target) && detail.dissolvedAt == nil && !detail.deleting,
-                    message: action.message ?? draft.sendFeedback, onSend: send, onStop: { if target != nil { perform("stop") } else { execution?.stopResponding() } })
-            }
-        }.padding(10).background(Theme.elevated)
-        .animation(reduced ? nil : WandMotion.stateSwap, value: menu)
-        .onAppear { if !visible { draft.acquire(draftConsumer) }; visible = true; attachments.setToastHandler { notice = $0 } }
-        .onDisappear { menu = false; speech.stop(cancelled: true); if visible { draft.release(draftConsumer) }; visible = false }
-        .fileImporter(isPresented: $attachments.showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: true, onCompletion: attachments.handleFileSelection)
-        .sheet(isPresented: $attachments.showPhotoPicker) { PhotoLibraryPicker { attachments.showPhotoPicker = false; attachments.handlePhotoSelection($0) } }
+                .navigationTitle("附件与对话操作")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { menu = false } } }
+        }.presentationDetents([.medium, .large])
     }
     private func send() {
         guard !composing else { return }

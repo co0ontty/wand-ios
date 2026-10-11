@@ -109,6 +109,7 @@ struct ChatView: View {
     /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
     /// 停止任务二次确认弹窗开关：点停止按钮先弹确认，避免误触中断正在跑的任务。
     @State private var showStopConfirm = false
+    @State private var showActivityPanel = false
     /// 排队消息气泡条是否展开成列表（默认折叠成「已排队 N 条」徽章）。
     @State private var queueBarExpanded = false
     /// 历史折叠记录绝对 turn 下标。prepend 更早页会同时改变 loadedOffset 和局部下标，
@@ -128,9 +129,10 @@ struct ChatView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// 不用 @FocusState：输入框是 UIKit UITextView，没有挂 .focused()。
     /// FocusState 在没有绑定视图时会把 true 立刻打回 false，updateUIView 再 resign，键盘就弹不出来。
-    @State private var inputFocused = false
+    @StateObject private var composerFocus = ComposerFocusController()
+    private var inputFocused: Bool { get { composerFocus.focused } nonmutating set { composerFocus.focused = newValue } }
     @State private var composerAcknowledged = false
-    @State private var composerEditing = false
+    private var composerEditing: Bool { get { composerFocus.editing } nonmutating set { composerFocus.editing = newValue } }
     @State private var voiceNotice = ""
     @AppStorage(CatComposerSide.preferenceKey) private var catSideRaw = CatComposerSide.left.rawValue
     @State private var catDragOffset: CGFloat = 0
@@ -162,32 +164,10 @@ struct ChatView: View {
                 }
                 VStack(spacing: 0) {
                     mainContent
-                        .padding(.top, showsNavigationChrome ? 56 : 0)
+                        .padding(.top, showsNavigationChrome ? (verticalSizeClass == .compact ? 56 : 100) : 0)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .dismissKeyboardOnTap()
+                        .onTapGesture { composerFocus.collapse() }
                         .overlay(alignment: .bottom) { toastView }
-
-                    if shouldShowSubagentShelf {
-                        SubagentActivityShelf(
-                            activities: subagentActivities,
-                            isResponding: store.isResponding,
-                            completedClock: completedClock,
-                            baseURL: store.api.baseURL,
-                            askSelections: store.displayedAskSelections,
-                            onAskToggle: { toolUseId, qIdx, optIdx, multi in
-                                store.toggleAskOption(
-                                    toolUseId: toolUseId, questionIndex: qIdx,
-                                    optionIndex: optIdx, multiSelect: multi
-                                )
-                            },
-                            onAskSubmit: { toolUseId, answerText in
-                                scrollMode = .stickToBottom
-                                store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
-                            }
-                        )
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 6)
-                    }
 
                     bottomBar
                         .padding(.bottom, root.safeAreaInsets.bottom)
@@ -199,6 +179,11 @@ struct ChatView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(showsNavigationChrome ? Theme.background : Color.clear)
+        .onChange(of: sessionFiles.open) { _, open in if !open { composerFocus.resume("files") } }
+        .onChange(of: serverFileLinks.failure?.id) { _, failure in if failure != nil { composerFocus.resume("preview") } }
+        .onChange(of: speech.isProcessing) { _, processing in
+            if !processing && !voicePressed { composerFocus.resume("voice") }
+        }
         .onChange(of: composerDraft.text) { _, value in
             if !value.isEmpty { composerAcknowledged = false }
             if value.isEmpty { draftNeedsExpanded = false; composerInputHeight = 34 }
@@ -209,7 +194,12 @@ struct ChatView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(showsNavigationChrome ? .hidden : .automatic, for: .navigationBar)
         .overlay(alignment: .top) {
-            if showsNavigationChrome { floatingChatControls }
+            if showsNavigationChrome {
+                ZStack(alignment: .top) {
+                    TopChatCompanion(side: catSide, dragOffset: catDragOffset) { size in companionFace(size: size) }
+                    floatingChatControls.padding(.top, verticalSizeClass == .compact ? 0 : 18)
+                }
+            }
         }
         // 关掉系统键盘避让，统一交给 KeyboardObserver 手动抬升（见 bottomBar），
         // 避免「系统抬一次 + 手动抬一次」叠加或两边都不抬的不确定行为。
@@ -218,12 +208,7 @@ struct ChatView: View {
 
     private var floatingChatControls: some View {
         FloatingChatControls(onBack: { dismiss() }) {
-            if store.isStructured {
-                Button { showCallTarget = true } label: { FloatingChatIcon(symbol: "phone") }
-                    .buttonStyle(.plain).accessibilityLabel("持续语音通话")
-                    .disabled(store.snapshot?.employeeId == nil || store.snapshot?.cwd?.isEmpty != false)
-            }
-            Button { sessionFiles.show(cwd: store.snapshot?.cwd ?? "") } label: { FloatingChatIcon(symbol: "folder") }
+            Button { composerFocus.borrow("files"); sessionFiles.show(cwd: store.snapshot?.cwd ?? "") } label: { FloatingChatIcon(symbol: "folder") }
                 .buttonStyle(.plain).disabled(store.snapshot?.cwd?.isEmpty != false).accessibilityLabel("会话文件")
             Menu {
                 Section("当前会话") {
@@ -234,6 +219,14 @@ struct ChatView: View {
                 }
                 if store.snapshot?.provider == "pi", store.isStructured {
                     Button("工具与资源") { showPiResources = true }
+                }
+                if store.isStructured {
+                    Button("持续语音通话") { showCallTarget = true }
+                        .disabled(store.snapshot?.employeeId == nil || store.snapshot?.cwd?.isEmpty != false)
+                }
+                Menu("猫头位置") {
+                    Button("控件间居中") { catSideRaw = CatComposerSide.left.rawValue }
+                    Button("向右微移") { catSideRaw = CatComposerSide.right.rawValue }
                 }
                 if store.isResponding { Button("停止当前任务", role: .destructive) { showStopConfirm = true } }
                 if call.phase == .speaking { Button("暂停朗读声音") { call.pause("朗读已暂停，点继续恢复") } }
@@ -285,6 +278,7 @@ struct ChatView: View {
 
     private var modalContent: some View {
         callContent
+        .sheet(isPresented: $showActivityPanel, onDismiss: { composerFocus.resume("activity") }) { activityPanel }
         .sheet(isPresented: $showQuickCommit) {
             GitQuickCommitView(
                 sessionId: sessionId,
@@ -321,6 +315,7 @@ struct ChatView: View {
         }
         .sheet(item: $serverFileLinks.previewItem, onDismiss: {
             serverFileLinks.dismissPreview()
+            composerFocus.resume("preview")
         }) { item in
             ServerFilePreviewView(item: item)
         }
@@ -399,6 +394,7 @@ struct ChatView: View {
                         .foregroundColor(Theme.textPrimary)
                     Button {
                         serverFileLinks.cancel()
+                        composerFocus.resume("preview")
                     } label: {
                         Text("取消")
                             .font(.wand(size: 13, weight: .semibold))
@@ -716,10 +712,6 @@ struct ChatView: View {
             )
             let collapsed = collapsedAssistantTurns.contains(absoluteTurn)
             HStack(spacing: 6) {
-                if let employeeId = store.snapshot?.employeeId {
-                    ContactAvatar(id: employeeId, avatar: store.displayEmployeeAvatar ?? "", size: 28, name: store.displayEmployeeName ?? "")
-                    Text(store.displayEmployeeName ?? "员工").font(.caption.weight(.semibold)).lineLimit(1)
-                }
                 if store.messages.indices.contains(turnIndex) {
                     ChatMessageTime(clock: SessionTimeFormatting.conversationTurnClock(store.messages[turnIndex]), alignEnd: false)
                 }
@@ -1265,39 +1257,87 @@ struct ChatView: View {
                     showStopConfirm = true
                 }).padding(.horizontal, 12).padding(.bottom, 6)
             }
-            if !visibleTodos.isEmpty {
-                TodoProgressBar(todos: visibleTodos)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 6)
-            }
-            if store.pendingEscalation != nil || store.legacyPermissionPrompt != nil {
-                PermissionCard(
-                    escalation: store.pendingEscalation,
-                    legacy: store.legacyPermissionPrompt,
-                    onResolve: { store.resolvePermission($0) }
-                )
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-            if !store.queuedMessages.isEmpty {
-                QueueBar(
-                    items: store.queuedMessages,
-                    expanded: $queueBarExpanded,
-                    inFlight: store.queueInFlight,
-                    onPromote: { store.promoteQueued(index: $0) },
-                    onDelete: { store.deleteQueued(index: $0) },
-                    onEdit: { store.editQueued(index: $0, text: $1) },
-                    onClearAll: { store.clearQueued() }
-                )
-                .padding(.horizontal, 12)
-                .padding(.bottom, 6)
+            if hasActivityPanel {
+                Button {
+                    composerFocus.borrow("activity", open: composerEditing)
+                    showActivityPanel = true
+                } label: {
+                    HStack {
+                        Label(store.pendingEscalation != nil || store.legacyPermissionPrompt != nil ? "等待权限确认" : "查看执行进度", systemImage: "list.bullet.rectangle")
+                        Spacer()
+                        if !store.queuedMessages.isEmpty { Text("待发 \(store.queuedMessages.count)") }
+                        Image(systemName: "chevron.up")
+                    }.font(.caption).frame(minHeight: 44).padding(.horizontal, 16)
+                }.buttonStyle(.plain)
             }
             inputBar
         }
         // 手动键盘避让：观察器只返回键盘在底部安全区上方的高度。
         .padding(.bottom, keyboard.lift)
         .animation(WandMotion.disclosure, value: store.pendingEscalation)
+    }
+
+    private var hasActivityPanel: Bool {
+        !visibleTodos.isEmpty || store.pendingEscalation != nil || store.legacyPermissionPrompt != nil ||
+            !store.queuedMessages.isEmpty || shouldShowSubagentShelf
+    }
+    private var activityPanel: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 12) {
+                    if !visibleTodos.isEmpty {
+                        TodoProgressBar(todos: visibleTodos)
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 6)
+                    }
+                    if store.pendingEscalation != nil || store.legacyPermissionPrompt != nil {
+                        PermissionCard(
+                            escalation: store.pendingEscalation,
+                            legacy: store.legacyPermissionPrompt,
+                            onResolve: { store.resolvePermission($0) }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                    if !store.queuedMessages.isEmpty {
+                        QueueBar(
+                            items: store.queuedMessages,
+                            expanded: $queueBarExpanded,
+                            inFlight: store.queueInFlight,
+                            onPromote: { store.promoteQueued(index: $0) },
+                            onDelete: { store.deleteQueued(index: $0) },
+                            onEdit: { store.editQueued(index: $0, text: $1) },
+                            onClearAll: { store.clearQueued() }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 6)
+                    }
+                    if shouldShowSubagentShelf {
+                        SubagentActivityShelf(
+                            activities: subagentActivities,
+                            isResponding: store.isResponding,
+                            completedClock: completedClock,
+                            baseURL: store.api.baseURL,
+                            askSelections: store.displayedAskSelections,
+                            onAskToggle: { toolUseId, qIdx, optIdx, multi in
+                                store.toggleAskOption(
+                                    toolUseId: toolUseId, questionIndex: qIdx,
+                                    optionIndex: optIdx, multiSelect: multi
+                                )
+                            },
+                            onAskSubmit: { toolUseId, answerText in
+                                scrollMode = .stickToBottom
+                                store.submitAskUser(toolUseId: toolUseId, answerText: answerText)
+                            }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 6)
+                    }
+                }.padding(.vertical, 12)
+            }.background(Theme.background).navigationTitle("执行进度与待办")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showActivityPanel = false } } }
+        }.presentationDetents([.medium, .large])
     }
 
     private var composerStatus: some View {
@@ -1311,47 +1351,52 @@ struct ChatView: View {
         catComposerExpanded(editing: composerEditing, focused: inputFocused, keyboard: keyboard.isVisible,
             failed: composerDraft.submissionFailed, unconfirmed: store.unconfirmedInput != nil)
     }
+    @Environment(\.dynamicTypeSize) private var composerTypeSize
     private var composerMaximumHeight: CGFloat {
-        composerMaximumInputHeight(compact: verticalSizeClass == .compact, keyboardVisible: keyboard.isVisible)
+        max(composerTypeSize.isAccessibilitySize ? 80 : 0, composerMaximumInputHeight(compact: verticalSizeClass == .compact, keyboardVisible: keyboard.isVisible))
     }
     private var catStatusVisible: Bool {
         store.isResponding || store.inputSending || store.permissionBlocked || call.phase == .speaking ||
             voicePressed || speech.isRecording || speech.isProcessing || !voiceNotice.isEmpty
     }
     private var inputBar: some View {
-        CatComposerSurface(expanded: catInputExpanded, hasDraft: !draft.isEmpty || !attachments.attachments.isEmpty,
-            statusVisible: catStatusVisible, side: catSide, dragOffset: catDragOffset, face: { size in
-                WorkingAvatar(id: store.snapshot?.employeeId ?? sessionId, name: store.displayEmployeeName ?? "员工",
-                    avatar: store.displayEmployeeAvatar ?? "",
-                    activity: avatarFileActivity(messages: store.messages,
-                        executing: store.isResponding && store.status == "running" && !store.permissionBlocked && store.pendingEscalation == nil),
-                    thinking: avatarThinking, speaking: call.isSpeaking, size: size)
-                    .overlay { Color.clear.modifier(catVoiceGesture) }
-            }, status: { composerStatus }, editor: { composerInputContent }, tools: { controlRow }, actions: { catPrimaryActions })
-        .onChange(of: keyboard.isVisible) { _, visible in
-            if !visible && !inputFocused && !showDraftEditor && !voicePressed && !speech.isProcessing { composerEditing = false }
+        VStack(spacing: 4) {
+            if catStatusVisible { composerStatus.padding(.horizontal, 16) }
+            FocusComposerSurface(expanded: catInputExpanded, hasDraft: !draft.isEmpty || !attachments.attachments.isEmpty,
+                onFocus: focusComposer, editor: { composerInputContent }, add: { composerActionsMenu },
+                voice: { composerVoiceButton }, send: {
+                    if store.isResponding && !store.inputSending && catCapsuleShowsThirdAction(text: draft) {
+                        ComposerStopAction { showStopConfirm = true }
+                    } else if !draft.isEmpty || !attachments.attachments.isEmpty || store.inputSending { sendButton }
+                }, settings: { SessionComposerSettings(store: store, focus: composerFocus) })
+        }
+        .onChange(of: keyboard.isVisible) { old, visible in
+            if old && !visible { composerFocus.keyboardHidden() }
+        }
+        .onChange(of: composerModalActive) { _, active in
+            if active { composerFocus.borrow("modal", open: composerEditing) }
+            else { composerFocus.resume("modal") }
         }
         .confirmationDialog("确定要停止当前正在运行的任务吗？", isPresented: $showStopConfirm, titleVisibility: .visible) {
             Button("停止", role: .destructive) { call.pause("任务已停止，点继续恢复通话"); store.stopResponding() }
             Button("取消", role: .cancel) {}
         }
     }
+    private var composerModalActive: Bool {
+        composerChoice != nil || modelPicker != nil || showDraftEditor || showDirectoryPicker ||
+            attachments.showFileImporter || attachments.showPhotoPicker || serverFileLinks.previewItem != nil
+    }
+    private func companionFace(size: CGFloat) -> some View {
+        WorkingAvatar(id: store.snapshot?.employeeId ?? sessionId, name: store.displayEmployeeName ?? "员工",
+            avatar: store.displayEmployeeAvatar ?? "", activity: avatarFileActivity(messages: store.messages,
+                executing: store.isResponding && store.status == "running" && !store.permissionBlocked && store.pendingEscalation == nil),
+            thinking: avatarThinking, speaking: call.isSpeaking, size: size)
+            .overlay { Color.clear.modifier(catVoiceGesture) }
+    }
     private var catSide: CatComposerSide { CatComposerSide(rawValue: catSideRaw) ?? .left }
     private var avatarThinking: Bool {
         !store.permissionBlocked && store.pendingEscalation == nil &&
             avatarIsThinking(messages: store.messages, executing: store.isResponding && store.status == "running")
-    }
-    private var catPrimaryActions: some View {
-        HStack(spacing: 0) {
-            composerVoiceButton
-            Button(action: focusComposer) { Image(systemName: "keyboard").font(.system(size: 20)).frame(width: 48, height: 48) }
-                .buttonStyle(.plain).accessibilityLabel("展开文字输入")
-            if catCapsuleShowsThirdAction(text: draft) {
-                Divider().frame(height: 24).padding(.horizontal, 2)
-                if store.isResponding { stopButtonSecondary }
-                else { sendButton }
-            }
-        }
     }
     private var catVoiceGesture: CatInputGesture {
         CatInputGesture(onTap: focusComposer, onHold: startVoiceRecording,
@@ -1367,9 +1412,8 @@ struct ChatView: View {
     private func focusComposer() {
         if call.ownsInput { call.pause("已切换到文字输入，点继续恢复通话") }
         composerAcknowledged = false
-        composerEditing = true
         voiceNotice = ""
-        inputFocused = true
+        composerFocus.focus()
     }
 
     /// 文本框只处理系统文本编辑；语音手势由外侧独立按钮承载。
@@ -1379,12 +1423,9 @@ struct ChatView: View {
                 PendingAttachmentsPreview(
                     baseURL: api.baseURL,
                     attachments: attachments.attachments,
-                    onRemove: attachments.remove
+                    onRemove: attachments.remove,
+                    onPreview: { file in composerFocus.borrow("preview", open: true); serverFileLinks.open(serverPath: file.savedPath, api: api) }
                 )
-                if !catCapsuleShowsThirdAction(text: draft) {
-                    Button("发送附件", action: sendDraft).disabled(!canSend)
-                        .frame(maxWidth: .infinity, minHeight: 48, alignment: .trailing).accessibilityLabel("发送附件")
-                }
             }
             if let message = composerDraft.optimizationMessage {
                 Text(message).font(.caption).foregroundStyle(Theme.textSecondary)
@@ -1419,43 +1460,6 @@ struct ChatView: View {
             .accessibilityValue(voicePressed ? "正在录音" : "长按录音")
     }
 
-    /// 展开态底部控制行：+ / 模式徽标 / 模型·思考徽标 / 发送·停止。
-    /// 把原本散落在右上角的会话设置（模型 + 思考深度）+ 模式开关全部收拢到这里。
-    private var controlRow: some View {
-        HStack(spacing: 0) {
-            composerActionsMenu
-            Button { composerChoice = .context; inputFocused = false } label: {
-                ComposerContextLabel()
-            }.buttonStyle(.plain).accessibilityLabel("模型、目录与执行设置")
-            if composerOffersExpandedEditor(text: draft, measuredHeight: composerInputHeight, maximumHeight: composerMaximumHeight) {
-                Button {
-                    inputFocused = false
-                    if call.ownsInput { call.pause("已切换到文字输入，点继续恢复通话") }
-                    showDraftEditor = true
-                } label: { Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 48, height: 48) }
-                    .buttonStyle(.plain).foregroundStyle(Theme.textSecondary).accessibilityLabel("展开编辑长消息")
-                    .disabled(composerIsComposing)
-            }
-            Spacer(minLength: 0)
-            composerVoiceButton
-            Button { composerChoice = .context; inputFocused = false } label: { Image(systemName: "ellipsis").frame(width: 48, height: 48) }
-                .accessibilityLabel("更多输入设置")
-        }
-    }
-
-    private var stopButtonSecondary: some View {
-        Button { showStopConfirm = true } label: {
-            Image(systemName: "stop.fill")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.white)
-                .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-                .background(Circle().fill(Theme.danger))
-        }
-        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-        .buttonStyle(.plain)
-        .accessibilityLabel("停止任务")
-    }
-
     private var sendButton: some View {
         NativeComposerActionButton(
             phase: store.inputSending ? .sending : .idle,
@@ -1487,76 +1491,9 @@ struct ChatView: View {
         sessionModes.first { $0.id == id }?.label ?? "标准"
     }
 
-    private static func modeIcon(_ id: String) -> String {
-        switch id {
-        case "managed": return "sparkles"
-        case "full-access": return "lock.open.fill"
-        case "auto-edit": return "pencil"
-        case "native": return "terminal"
-        default: return "lock"
-        }
-    }
-
-    /// 高权限模式（托管 / 全权限）用橙色提示，其余用次要色。
-    private var modeTint: Color {
-        (store.mode == "full-access" || store.mode == "managed") ? Theme.warning : Theme.textSecondary
-    }
-
-    private func modeChip(compact _: Bool = false) -> some View {
-        let provider = currentProvider
-        let isCodex = provider == .codex
-        let currentModeLabel = Self.modeLabel(store.mode)
-        return Button {
-            composerChoice = .mode
-        } label: {
-            chipLabel(
-                icon: Self.modeIcon(store.mode),
-                text: currentModeLabel,
-                tint: modeTint,
-                showsText: false,
-                maxTextWidth: 0
-            )
-        }
-        .disabled(isCodex)
-        .buttonStyle(.plain)
-        .accessibilityLabel(
-            isCodex
-                ? "执行模式：\(currentModeLabel)，Codex 会话固定"
-                : "执行模式：\(currentModeLabel)"
-        )
-        .accessibilityHint(isCodex ? "" : "轻点选择执行模式")
-    }
-
-    private func modelThinkingChip(compact: Bool = false) -> some View {
-        Button {
-            modelPicker = .session
-        } label: {
-            chipLabel(
-                icon: "cpu",
-                text: modelThinkingText,
-                tint: thinkingTint,
-                showsText: !compact,
-                maxTextWidth: compact ? 94 : 140
-            )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("模型与思考深度")
-        .accessibilityValue("模型 \(shortModelLabel)，思考深度 \(thinkingLabel(store.thinkingEffort))")
-        .accessibilityHint("轻点选择模型或思考深度")
-    }
-
     private var modelThinkingText: String {
         let model = shortModelLabel
         return "\(model) · \(thinkingShortLabel(store.thinkingEffort))"
-    }
-
-    private var thinkingTint: Color {
-        switch store.thinkingEffort {
-        case "standard": return Theme.success
-        case "deep": return Theme.warning
-        case "max": return Theme.danger
-        default: return Theme.brand
-        }
     }
 
     /// 控制行徽标用的精简模型名：去掉「opus（最新 Opus）」这类括号补充（全角/半角都吃），只留主名。
@@ -1581,35 +1518,6 @@ struct ChatView: View {
         return clean.count > 12 ? String(clean.prefix(10)) + "…" : clean
     }
 
-    /// 控制行通用胶囊徽标：图标 + 文字 + 弱色底。
-    private func chipLabel(
-        icon: String,
-        text: String,
-        tint: Color,
-        showsText: Bool = true,
-        maxTextWidth: CGFloat = 140
-    ) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold))
-            if showsText {
-                Text(text)
-                    .font(.wand(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: maxTextWidth)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .opacity(0.6)
-            }
-        }
-        .foregroundColor(tint)
-        .padding(.horizontal, showsText ? 9 : 8)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(tint.opacity(0.10)))
-        .overlay(Capsule().stroke(tint.opacity(0.22), lineWidth: 1))
-    }
-
     private func refreshGitStatus() {
         Task {
             gitStatus = try? await api.gitStatus(sessionId: sessionId)
@@ -1629,24 +1537,6 @@ struct ChatView: View {
         quickCommitFeedback.fail()
         store.toast = message
         refreshGitStatus()
-    }
-
-    private var optimizeButton: some View {
-        Button {
-            composerDraft.optimize { text in try await api.optimizePrompt(id: sessionId, prompt: text) }
-        } label: {
-            ZStack {
-                Image(systemName: "sparkles").opacity(composerDraft.isOptimizing ? 0 : 1)
-                ProgressView().controlSize(.small).opacity(composerDraft.isOptimizing ? 1 : 0)
-            }
-            .font(.system(size: 16))
-            .foregroundStyle(Theme.textSecondary)
-            .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-            .animation(reduceMotion ? nil : WandMotion.stateSwap, value: composerDraft.isOptimizing)
-        }
-        .buttonStyle(.plain)
-        .disabled(composerDraft.isOptimizing || store.inputSending || attachments.isUploading || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        .accessibilityLabel(composerDraft.isOptimizing ? "正在优化提示词" : "优化提示词")
     }
 
     private var composerActionsMenu: some View {
@@ -1745,7 +1635,6 @@ struct ChatView: View {
     private func finishVoiceRecording(cancelled: Bool) {
         let revision = voiceDraftRevision, lifecycle = voiceDraftLifecycle
         voicePressed = false; voiceCanceling = false
-        if !keyboard.isVisible { composerEditing = false }
         speech.stop(cancelled: cancelled) { text in
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if composerDraft.textRevision == revision && composerDraft.lifecycleRevision == lifecycle { voiceNotice = "没有听到声音，请再试一次" }
@@ -1756,12 +1645,14 @@ struct ChatView: View {
             if composerDraft.textRevision != before { focusComposer() }
         }
         if cancelled { voiceNotice = "已取消，草稿保留" }
+        if !speech.isProcessing { composerFocus.resume("voice") }
     }
 
     /// 按满阈值进入录音态（原「按下立即录音」交互的主体）。
     private func startVoiceRecording() {
         guard !voicePressed, !speech.isProcessing, !store.inputSending, !store.providerSwitching, !composerDraft.isOptimizing, !attachments.isUploading else { return }
         if call.ownsInput { call.pause("已切换到按住说话，点继续恢复通话") }
+        composerFocus.borrow("voice", open: composerEditing)
         voiceDraftRevision = composerDraft.textRevision
         voiceDraftLifecycle = composerDraft.lifecycleRevision
         voicePressed = true
@@ -1773,6 +1664,7 @@ struct ChatView: View {
             store.toast = message
             voicePressed = false
             voiceCanceling = false
+            composerFocus.resume("voice")
         }
     }
 
@@ -1821,6 +1713,7 @@ struct ChatView: View {
                     SearchableChoiceItem(id: "mode", label: "执行模式 · \(Self.modeLabel(store.mode))"),
                     SearchableChoiceItem(id: "directory", label: "目录 · \(store.snapshot?.cwd ?? "未选择")"),
                     SearchableChoiceItem(id: "optimize", label: "优化提示词"),
+                    SearchableChoiceItem(id: "editor", label: "展开编辑长消息"),
                     SearchableChoiceItem(id: "call", label: "持续语音通话（自动发送与播报）")
                 ], selectedId: "")
             ]) { _, itemId in
@@ -1833,6 +1726,7 @@ struct ChatView: View {
                     case "directory":
                         if store.canChangeDirectory { showDirectoryPicker = true }
                         else { store.toast = "当前会话目录固定；更换目录请创建新会话" }
+                    case "editor": showDraftEditor = true
                     case "optimize":
                         guard !composerDraft.isOptimizing, !store.inputSending, !attachments.isUploading,
                               !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

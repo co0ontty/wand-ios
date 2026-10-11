@@ -48,30 +48,15 @@ import XCTest
 }
 
 @MainActor final class VoiceCallTests: XCTestCase {
-    func testNativeCatReservationKeepsViewportStableAcrossSidesAndStates() {
+    func testNativeTopCatReservationKeepsViewportStableAcrossSidesAndTextSizes() {
         for width: CGFloat in [320, 402, 768] {
-            var regularHeight: CGFloat = 0
             for type: DynamicTypeSize in [.large, .accessibility3] {
-                var reference: CGFloat?
                 for side: CatComposerSide in [.left, .right] {
-                    for status in ["", "正在听 · 上滑取消", "处理中", "正在朗读", "没有听到声音，请再试一次"] {
-                        let root = CatComposerSurface(expanded: false, hasDraft: !status.isEmpty,
-                            statusVisible: !status.isEmpty, side: side,
-                            face: { size in Color.clear.frame(width: size, height: size) },
-                            status: { Text(status).font(.caption) }, editor: { EmptyView() },
-                            tools: { EmptyView() }, actions: {
-                                HStack(spacing: 0) {
-                                    Image(systemName: "mic").frame(width: 48, height: 48)
-                                    Image(systemName: "keyboard").frame(width: 48, height: 48)
-                                }
-                            }).environment(\.dynamicTypeSize, type)
-                        let height = UIHostingController(rootView: root).sizeThatFits(in: CGSize(width: width, height: 800)).height
-                        if let reference { XCTAssertEqual(height, reference, accuracy: 1, "状态与侧别不得改变消息视口") }
-                        else { reference = height }
-                    }
+                    let root = TopChatCompanion(side: side) { size in Color.clear.frame(width: size, height: size) }
+                        .environment(\.dynamicTypeSize, type).environment(\.verticalSizeClass, .regular)
+                    let height = UIHostingController(rootView: root).sizeThatFits(in: CGSize(width: width, height: 800)).height
+                    XCTAssertEqual(height, 100, accuracy: 1, "顶部无文字的伙伴保留区不因字号或侧别移动")
                 }
-                if type == .large { regularHeight = reference ?? 0 }
-                else { XCTAssertGreaterThan(reference ?? 0, regularHeight, "无障碍字号需要更多固定状态空间") }
             }
         }
     }
@@ -166,9 +151,9 @@ import XCTest
             hasAttachments: false, composing: false, phase: .idle, unconfirmed: false))
     }
     func testLongDraftExpansionAffordance() {
-        XCTAssertEqual(composerMaximumInputHeight(compact: true, keyboardVisible: true), 64)
-        XCTAssertEqual(composerMaximumInputHeight(compact: true, keyboardVisible: false), 132)
-        XCTAssertEqual(composerMaximumInputHeight(compact: false, keyboardVisible: true), 180)
+        XCTAssertEqual(composerMaximumInputHeight(compact: true, keyboardVisible: true), 44)
+        XCTAssertEqual(composerMaximumInputHeight(compact: true, keyboardVisible: false), 88)
+        XCTAssertEqual(composerMaximumInputHeight(compact: false, keyboardVisible: true), 96)
         XCTAssertTrue(composerOffersExpandedEditor(text: "短屏多行", measuredHeight: 64, maximumHeight: 64))
         XCTAssertFalse(composerOffersExpandedEditor(text: "短消息", measuredHeight: 34))
         XCTAssertTrue(composerOffersExpandedEditor(text: String(repeating: "长", count: 852), measuredHeight: 180))
@@ -240,5 +225,104 @@ import XCTest
         XCTAssertEqual(avatarFileActivity(messages: messages, executing: false), .idle)
         let next = messages + [ConversationTurn(role: "user", content: [.text(text: "next", subagent: nil)])]
         XCTAssertEqual(avatarFileActivity(messages: next, executing: true), .idle)
+    }
+}
+
+@MainActor final class FocusComposerTests: XCTestCase {
+    func testTemporaryPickerAndVoiceKeepEditorAndRestoreFocus() {
+        let focus = ComposerFocusController()
+        focus.focus()
+        focus.borrow("picker")
+        focus.keyboardHidden()
+        XCTAssertTrue(focus.editing)
+        XCTAssertFalse(focus.focused)
+        focus.borrow("voice")
+        focus.resume("picker")
+        XCTAssertFalse(focus.focused)
+        focus.resume("voice")
+        XCTAssertTrue(focus.focused)
+    }
+    func testExplicitExitWinsOverLateDismissAndKeyboardCallbacks() {
+        let focus = ComposerFocusController()
+        focus.focus(); focus.borrow("settings")
+        focus.collapse(); focus.resume("settings")
+        XCTAssertFalse(focus.editing); XCTAssertFalse(focus.focused)
+        focus.focus(); focus.keyboardHidden()
+        XCTAssertFalse(focus.editing); XCTAssertFalse(focus.focused)
+        focus.resume("old-picker")
+        XCTAssertFalse(focus.focused)
+    }
+    func testAttachmentFromCollapsedCapsuleReturnsToEditor() {
+        let focus = ComposerFocusController()
+        focus.borrow("attachments", open: true); focus.keyboardHidden()
+        XCTAssertTrue(focus.editing)
+        focus.resume("attachments")
+        XCTAssertTrue(focus.focused)
+    }
+    func testTopCatRemainsBetweenNativeTargetsForNarrowAndWideScreens() {
+        for width: CGFloat in [320, 375, 402, 768, 1024] {
+            let center = topCompanionCenter(width: width, size: 88, side: .left, drag: 0)
+            XCTAssertLessThan(center, width / 2)
+            for side in [CatComposerSide.left, .right] {
+                for drag: CGFloat in [-999, 0, 999] {
+                    let x = topCompanionCenter(width: width, size: 88, side: side, drag: drag)
+                    XCTAssertGreaterThanOrEqual(x - 44, 64)
+                    XCTAssertLessThanOrEqual(x + 44, width - 116)
+                }
+            }
+        }
+    }
+}
+
+@MainActor private final class MorphEditorProbe: ObservableObject {
+    @Published var text = "前后"
+    let focus = ComposerFocusController()
+}
+private struct MorphEditorTestView: View {
+    @ObservedObject var probe: MorphEditorProbe
+    @ObservedObject var focus: ComposerFocusController
+    var body: some View {
+        FocusComposerSurface(expanded: focus.editing, hasDraft: !probe.text.isEmpty, onFocus: { focus.focus() }, editor: {
+            IMEAwareComposerTextView(text: $probe.text, placeholder: "消息", isFocused: focus.focused,
+                maximumHeight: 96, submitOnReturn: false, onFocusChange: { focus.focused = $0 },
+                onCompositionChange: { _ in }, onSubmit: {}, onHeightChange: { _ in }).frame(height: 44)
+        }, add: { Text("+").frame(width: 48, height: 48) }, voice: { EmptyView() }, send: { EmptyView() }, settings: { EmptyView() })
+    }
+}
+extension FocusComposerTests {
+    func testSameNativeEditorPreservesChineseCommitAndCaretAcrossMorphAndBorrow() async throws {
+        let probe = MorphEditorProbe()
+        let host = UIHostingController(rootView: MorphEditorTestView(probe: probe, focus: probe.focus))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible(); host.view.layoutIfNeeded()
+        defer { window.isHidden = true }
+        func find(_ view: UIView) -> ComposerUITextView? {
+            if let text = view as? ComposerUITextView { return text }
+            return view.subviews.lazy.compactMap { find($0) }.first
+        }
+        try await Task.sleep(for: .milliseconds(120))
+        let editor = try XCTUnwrap(find(host.view))
+        probe.focus.focus()
+        try await Task.sleep(for: .milliseconds(180))
+        editor.selectedRange = NSRange(location: 1, length: 0)
+        editor.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0))
+        XCTAssertEqual(probe.text, "前后")
+        editor.setMarkedText("你", selectedRange: NSRange(location: 1, length: 0)); editor.unmarkText()
+        XCTAssertEqual(probe.text, "前你后")
+        probe.focus.borrow("model"); probe.focus.keyboardHidden(); probe.focus.resume("model")
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertTrue(find(host.view) === editor)
+        XCTAssertEqual(editor.selectedRange.location, 2)
+        probe.focus.collapse()
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertTrue(find(host.view) === editor)
+        probe.focus.focus()
+        try await Task.sleep(for: .milliseconds(180))
+        XCTAssertTrue(find(host.view) === editor)
+        XCTAssertEqual(editor.text, "前你后")
+        XCTAssertEqual(editor.selectedRange.location, 2)
+        editor.deleteBackward()
+        XCTAssertEqual(probe.text, "前后")
     }
 }

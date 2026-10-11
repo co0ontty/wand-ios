@@ -117,58 +117,6 @@ func catCapsuleShowsThirdAction(text: String) -> Bool {
     !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 }
 
-/// Independent character and opposite function capsule. One scene, fixed status geometry.
-struct CatComposerSurface<Face: View, Status: View, Editor: View, Tools: View, Actions: View>: View {
-    let expanded: Bool
-    let hasDraft: Bool
-    let statusVisible: Bool
-    var side: CatComposerSide = .left
-    var dragOffset: CGFloat = 0
-    @ViewBuilder let face: (CGFloat) -> Face
-    @ViewBuilder let status: () -> Status
-    @ViewBuilder let editor: () -> Editor
-    @ViewBuilder let tools: () -> Tools
-    @ViewBuilder let actions: () -> Actions
-    @Environment(\.dynamicTypeSize) private var typeSize
-    @Environment(\.accessibilityReduceMotion) private var reduced
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            GeometryReader { row in
-                let travel = max(0, row.size.width - 96)
-                let offset = side == .left ? min(travel, max(0, dragOffset)) : max(-travel, min(0, dragOffset))
-                ZStack {
-                    VStack(spacing: 2) {
-                        face(96)
-                            .overlay(alignment: .topTrailing) {
-                                if !expanded && hasDraft {
-                                    Circle().fill(Theme.brand).frame(width: 7, height: 7)
-                                        .overlay(Circle().stroke(Theme.background, lineWidth: 2)).accessibilityHidden(true)
-                                }
-                            }
-                        status().lineLimit(2).frame(height: typeSize.isAccessibilitySize ? 64 : 34, alignment: .top)
-                            .opacity(expanded || statusVisible ? 1 : 0)
-                    }.frame(width: 96).offset(x: offset)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: side == .left ? .leading : .trailing)
-                    actions().padding(.horizontal, 6).padding(.vertical, 4)
-                        .background(Theme.surface, in: Capsule())
-                        .overlay(Capsule().stroke(Theme.border.opacity(0.65), lineWidth: 0.8))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: side == .left ? .trailing : .leading)
-                }
-            }.frame(height: typeSize.isAccessibilitySize ? 182 : 152)
-                .animation(reduced ? nil : WandMotion.disclosure, value: side)
-            if expanded {
-                VStack(spacing: 6) {
-                    editor()
-                    Divider().overlay(Theme.border.opacity(0.5))
-                    tools()
-                }.padding(10)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 20))
-                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(Theme.border.opacity(0.65), lineWidth: 0.8))
-            }
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 6)
-    }
-}
-
 func composerPrimaryActionStops(phase: ComposerSendPhase, turnRunning: Bool, hasDraft: Bool) -> Bool {
     phase == .idle && turnRunning && !hasDraft
 }
@@ -224,8 +172,9 @@ struct NativeComposerActionButton: View {
             .background(Circle().fill(tint))
             .animation(reduceMotion ? nil : WandMotion.stateSwap, value: phase)
             .animation(reduceMotion ? nil : WandMotion.stateSwap, value: stopping)
+            .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+            .contentShape(Rectangle())
         }
-        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
         .buttonStyle(.plain)
         .disabled(phase == .sending || (!canSubmit && !stopping))
         .accessibilityLabel(label)
@@ -453,7 +402,7 @@ struct ComposerDraftEditor: View {
 }
 
 func composerMaximumInputHeight(compact: Bool, keyboardVisible: Bool) -> CGFloat {
-    compact ? (keyboardVisible ? 64 : 132) : ComposerMetrics.expandedInputMaxHeight
+    compact ? (keyboardVisible ? 44 : 88) : (keyboardVisible ? 96 : 112)
 }
 
 func composerOffersExpandedEditor(text: String, measuredHeight: CGFloat,

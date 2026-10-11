@@ -1,14 +1,16 @@
 #if DEBUG
 import SwiftUI
+import UIKit
 
 /// Interactive native fixture. No session, API mutation, microphone or synthesized audio.
 struct ChatDesignPreview: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var text = ""
     @State private var activity = AvatarFileActivity.idle
-    @State private var focused = false
+    @StateObject private var composerFocus = ComposerFocusController()
+    private var focused: Bool { get { composerFocus.focused } nonmutating set { composerFocus.focused = newValue } }
     @State private var acknowledged = false
-    @State private var editing = false
+    private var editing: Bool { get { composerFocus.editing } nonmutating set { composerFocus.editing = newValue } }
     @State private var recording = false
     @State private var canceling = false
     @State private var processing = false
@@ -24,6 +26,11 @@ struct ChatDesignPreview: View {
     @State private var running = false
     @State private var editor = false
     @State private var context = false
+    @State private var setting = "模型"
+    @State private var selectedModel = "Sonnet"
+    @State private var selectedMode = "标准"
+    @State private var selectedThinking = "自动"
+    @State private var previewFile: ServerFilePreviewItem?
     @State private var voice = false
     @State private var stage = "空态"
     @StateObject private var keyboard = KeyboardObserver()
@@ -39,46 +46,57 @@ struct ChatDesignPreview: View {
                         VStack(alignment: .leading, spacing: 18) {
                             Text("帮我整理这份设计说明，先检查交互，再列出需要修改的地方。")
                                 .font(.body).padding(12).background(Theme.brandSoft, in: RoundedRectangle(cornerRadius: 16))
-                            HStack(spacing: 6) {
-                                ContactAvatar(id: "e_wand_default", avatar: "plush-cat:v1:silver", size: 28)
-                                Text("赛博虎妞").font(.subheadline.weight(.semibold))
-                                Text("14:32").font(.caption).foregroundStyle(Theme.textSecondary)
-                            }
                             Text("我会先阅读说明。你可以继续补充要求，附件和草稿都会保留。\n\n发送、停止任务和停止朗读是独立操作；发送状态不明确时先核对会话。").font(.body).lineSpacing(4)
                             Text("离线交互预览 · \(stage)").font(.caption).foregroundStyle(Theme.textSecondary)
                         }.padding(16).frame(maxWidth: 760).frame(maxWidth: .infinity)
-                    }.padding(.top, 56)
+                    }.onTapGesture { composerFocus.collapse() }.padding(.top, verticalSizeClass == .compact ? 56 : 100)
                     previewComposer.padding(.bottom, keyboard.lift)
                 }.frame(width: root.size.width, height: root.size.height, alignment: .top)
             }.background(Theme.background).toolbar(.hidden, for: .navigationBar)
                 .ignoresSafeArea(.keyboard, edges: .bottom)
                 .overlay(alignment: .top) {
+                    ZStack(alignment: .top) {
+                    TopChatCompanion(side: CatComposerSide(rawValue: sideRaw) ?? .left, dragOffset: dragOffset) { size in
+                        WorkingAvatar(id: "e_wand_default", name: "赛博虎妞", avatar: "plush-cat:v1:silver", activity: activity,
+                            thinking: thinking, speaking: speaking, size: size).overlay { Color.clear.modifier(fixtureGesture) }
+                    }
                     FloatingChatControls(onBack: { stage = "返回会话列表（预览）" }) {
-                        Button { focused = false; voice = true } label: { FloatingChatIcon(symbol: "phone") }.accessibilityLabel("持续通话预览")
                         Button { stage = "会话文件（预览）" } label: { FloatingChatIcon(symbol: "folder") }.accessibilityLabel("会话文件预览")
                         Menu {
                             if running { Button("停止当前任务", role: .destructive) { running = false; activity = .idle; thinking = false } }
                             if speaking { Button("暂停朗读声音") { speaking = false } }
+                            Button("猫头控件间居中") { sideRaw = "left" }
+                            Button("猫头向右微移") { sideRaw = "right" }
+                            Button("持续通话预览") { voice = true }
                             Text("当前员工：赛博虎妞")
                             Text("目录：/工作区/Wand")
-                            Button("会话上下文") { context = true }
+                            Button("模型设置（离线样例）") { openSetting("模型") }
                             ForEach(stages, id: \.self) { title in
                                 Button(title) { apply(title) }
                             }
                         } label: { FloatingChatIcon(symbol: "ellipsis") }.accessibilityLabel("更多与预览状态")
+                    }.padding(.top, verticalSizeClass == .compact ? 0 : 18)
                     }
                 }
                 .sheet(isPresented: $editor, onDismiss: { composing = false; focused = true }) {
                     ComposerDraftEditor(text: $text, onCompositionChange: { composing = $0 })
                 }
-                .sheet(isPresented: $context) {
-                    NavigationStack { List {
-                        LabeledContent("模型与思考", value: "Wand Agent · 默认")
-                        LabeledContent("运行目录", value: "/工作区/Wand")
-                        LabeledContent("执行模式", value: "标准")
-                        Button("优化提示词（预览）") { context = false }
-                    }.navigationTitle("会话上下文").toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { context = false } } } }
+                .sheet(isPresented: $context, onDismiss: { composerFocus.resume("settings") }) {
+                    NavigationStack {
+                        List {
+                            Text("离线选择器样例，不修改真实配置").font(.caption)
+                            ForEach(setting == "模型" ? ["Sonnet", "Opus", "长名称模型 · 完整名称与候选可在这里查看"] : setting == "权限模式" ? ["标准", "自动编辑", "全权限"] : ["自动", "低", "中", "高"], id: \.self) { option in
+                                Button(option) {
+                                    if setting == "模型" { selectedModel = option }
+                                    else if setting == "权限模式" { selectedMode = option }
+                                    else { selectedThinking = option }
+                                    context = false
+                                }
+                            }
+                        }.navigationTitle(setting).toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { context = false } } }
+                    }
                 }
+                .sheet(item: $previewFile, onDismiss: { composerFocus.resume("preview") }) { ServerFilePreviewView(item: $0) }
                 .confirmationDialog("语音入口（预览，无录音）", isPresented: $voice, titleVisibility: .visible) {
                     Button("按住麦克风 · 转为草稿") { stage = "按住说话仅填入草稿" }
                     Button("持续通话 · 自动发送与播报") { stage = "持续通话须确认员工与目录" }
@@ -95,7 +113,8 @@ struct ChatDesignPreview: View {
         }
     }
     private let stages = ["思考中", "阅读中", "书写中", "流式文本", "右侧阅读", "有稿运行", "仅附件", "空态", "短按文字", "按住说话", "上滑取消", "已取消", "转写中", "转写草稿", "附件", "附件取消", "发送确认", "失败保稿", "未知送达", "无声音", "权限未开启", "正在朗读", "收起草稿"]
-    private func focus() { editing = true; focused = true; notice = "" }
+    private func focus() { composerFocus.focus(); notice = "" }
+    private func openSetting(_ title: String) { setting = title; composerFocus.borrow("settings", open: true); context = true }
     private func apply(_ title: String) {
         stage = title; editor = false; context = false; voice = false
         failed = false; running = false; activity = .idle; acknowledged = false; files = []; focused = false
@@ -125,74 +144,73 @@ struct ChatDesignPreview: View {
         default: break
         }
     }
-    private var maximumHeight: CGFloat { composerMaximumInputHeight(compact: verticalSizeClass == .compact, keyboardVisible: keyboard.isVisible) }
+    @Environment(\.dynamicTypeSize) private var typeSize
+    private var maximumHeight: CGFloat { max(typeSize.isAccessibilitySize ? 80 : 0, composerMaximumInputHeight(compact: verticalSizeClass == .compact, keyboardVisible: keyboard.isVisible)) }
     private var previewStatus: some View {
         Text(canceling ? "松开取消" : recording ? "正在听 · 上滑取消" : processing ? "转写中…" : speaking ? "正在朗读" : running ? "处理中" : !notice.isEmpty ? notice : "正在输入")
             .font(.caption).foregroundStyle(canceling ? Theme.danger : Theme.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
     }
     private var fixtureGesture: CatInputGesture {
-        CatInputGesture(onTap: focus, onHold: { recording = true; focused = false; notice = "" },
+        CatInputGesture(onTap: focus, onHold: { composerFocus.borrow("voice", open: editing); recording = true; notice = "" },
             onMove: { canceling = $0 }, onRelease: { cancelled in
-                recording = false; canceling = false
+                recording = false; canceling = false; composerFocus.resume("voice")
                 if cancelled { notice = "已取消，草稿保留" }
                 else { text += text.isEmpty ? "转写后的草稿，等待我点发送。" : "\n转写后的草稿，等待我点发送。"; focus() }
             }, onDrag: { dragOffset = $0 }, onDrop: { offset in
                 sideRaw = (CatComposerSide(rawValue: sideRaw) ?? .left).dropped(translation: offset).rawValue; dragOffset = 0
             })
     }
+    private func openFixtureFile() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("离线样例-设计说明.pdf")
+        let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 420, height: 594))
+        do {
+            try renderer.writePDF(to: url) { context in
+                context.beginPage()
+                ("离线附件样例\n\n同一输入表面随焦点展开。关闭预览后返回原草稿。\n移除附件不会清空文字。" as NSString).draw(in: CGRect(x: 30, y: 40, width: 360, height: 480), withAttributes: [.font: UIFont.systemFont(ofSize: 18)])
+            }
+            composerFocus.borrow("preview", open: true)
+            previewFile = ServerFilePreviewItem(url: url)
+        } catch { notice = "离线附件无法创建" }
+    }
     private var previewComposer: some View {
-        CatComposerSurface(expanded: expanded, hasDraft: !text.isEmpty || !files.isEmpty,
-            statusVisible: recording || processing || speaking || running || !notice.isEmpty,
-            side: CatComposerSide(rawValue: sideRaw) ?? .left, dragOffset: dragOffset,
-            face: { size in
-                WorkingAvatar(id: "e_wand_default", name: "赛博虎妞", avatar: "plush-cat:v1:silver", activity: activity,
-                    thinking: thinking, speaking: speaking, size: size).overlay { Color.clear.modifier(fixtureGesture) }
-            }, status: { previewStatus }, editor: {
-                VStack(alignment: .leading, spacing: 6) {
-                    PendingAttachmentsPreview(baseURL: URL(string: "http://127.0.0.1:9")!, attachments: files,
-                        onRemove: { file in files.removeAll { $0.savedPath == file.savedPath } })
-                    if text.isEmpty && !files.isEmpty {
-                        Button("发送附件") { files = []; editing = false; running = true; activity = .reading }
-                            .frame(maxWidth: .infinity, minHeight: 48, alignment: .trailing)
+        VStack(spacing: 4) {
+            if recording || processing || speaking || running || !notice.isEmpty { previewStatus.padding(.horizontal, 16) }
+            FocusComposerSurface(expanded: expanded, hasDraft: !text.isEmpty || !files.isEmpty,
+                onFocus: focus, editor: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        PendingAttachmentsPreview(baseURL: URL(string: "http://127.0.0.1:9")!, attachments: files,
+                            onRemove: { file in files.removeAll { $0.savedPath == file.savedPath } },
+                            onPreview: { _ in openFixtureFile() })
+                        if failed {
+                            Text(stage == "未知送达" ? "送达未确认，请先核对会话。" : "发送失败，草稿和附件保留。")
+                                .font(.caption).foregroundStyle(Theme.danger)
+                        }
+                        IMEAwareComposerTextView(text: $text, placeholder: "输入消息，回车换行", isFocused: focused,
+                            maximumHeight: maximumHeight, submitOnReturn: false, onFocusChange: { focused = $0 },
+                            onCompositionChange: { composing = $0 }, onSubmit: {}, onHeightChange: { height = $0 })
+                            .frame(height: min(maximumHeight, max(34, height)))
                     }
-                    if failed {
-                        Text(stage == "未知送达" ? "送达未确认，请先核对会话。" : "发送失败，草稿和附件保留。")
-                            .font(.caption).foregroundStyle(Theme.danger)
+                }, add: {
+                    Button { if files.isEmpty { files.append(fixtureFile) }; focus() } label: { Image(systemName: "plus").frame(width: 48, height: 48) }.accessibilityLabel("添加示例附件")
+                }, voice: {
+                    Image(systemName: recording ? "waveform" : "mic").frame(width: 48, height: 48).modifier(fixtureGesture).accessibilityLabel("语音输入")
+                }, send: {
+                    if running && catCapsuleShowsThirdAction(text: text) {
+                        ComposerStopAction { running = false; activity = .idle; thinking = false }
+                    } else if !text.isEmpty || !files.isEmpty {
+                        NativeComposerActionButton(phase: .idle, turnRunning: false, hasDraft: true, canSubmit: !failed && !composing && !recording,
+                            message: nil, onSend: { text = ""; files = []; composerFocus.collapse(); acknowledged = true; running = true; activity = .writing }, onStop: {})
                     }
-                    IMEAwareComposerTextView(text: $text, placeholder: "输入消息，回车换行", isFocused: focused,
-                        maximumHeight: maximumHeight, submitOnReturn: false, onFocusChange: { focused = $0 },
-                        onCompositionChange: { composing = $0 }, onSubmit: {}, onHeightChange: { height = $0 })
-                        .frame(height: min(maximumHeight, max(34, height)))
-                }
-            }, tools: {
-                HStack(spacing: 0) {
-                    Button { files.append(fixtureFile) } label: { Image(systemName: "plus").frame(width: 48, height: 48) }.accessibilityLabel("添加示例附件")
-                    Button { focused = false; context = true } label: { ComposerContextLabel() }
-                    if composerOffersExpandedEditor(text: text, measuredHeight: height, maximumHeight: maximumHeight) {
-                        Button { focused = false; editor = true } label: { Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 48, height: 48) }.accessibilityLabel("展开编辑长消息")
-                    }
-                    Spacer(minLength: 0)
-                    Image(systemName: "mic").frame(width: 48, height: 48).modifier(fixtureGesture)
-                    Button { context = true } label: { Image(systemName: "ellipsis").frame(width: 48, height: 48) }.accessibilityLabel("更多输入设置")
-                }.foregroundStyle(Theme.textSecondary)
-            }, actions: {
-                HStack(spacing: 0) {
-                    Image(systemName: "mic").frame(width: 48, height: 48)
-                        .modifier(CatInputGesture(onTap: focus, onHold: { recording = true; focused = false },
-                            onMove: { canceling = $0 }, onRelease: { cancelled in recording = false; canceling = false; if !cancelled { text = "转写草稿，等待确认发送。"; focus() } }))
-                    Button(action: focus) { Image(systemName: "keyboard").frame(width: 48, height: 48) }.accessibilityLabel("展开文字输入")
-                    if catCapsuleShowsThirdAction(text: text) {
-                        Button {
-                            if running { running = false; activity = .idle }
-                            else { text = ""; files = []; focused = false; editing = false; acknowledged = true; running = true; activity = .writing }
-                        } label: { Image(systemName: running ? "stop.fill" : "arrow.up").frame(width: 48, height: 48) }
-                            .disabled(!running && (failed || composing)).accessibilityLabel(running ? "停止当前任务" : "发送消息")
-                    }
-                }.foregroundStyle(Theme.textPrimary)
-
-            })
-            .onChange(of: keyboard.isVisible) { _, visible in if !visible && !focused && !recording { editing = false } }
+                }, settings: {
+                    HStack(spacing: 2) {
+                        Button { openSetting("模型") } label: { ComposerSettingLabel(title: selectedModel) }.accessibilityLabel("模型：" + selectedModel)
+                        Button { openSetting("权限模式") } label: { ComposerSettingLabel(title: selectedMode) }.accessibilityLabel("权限模式：" + selectedMode)
+                        Button { openSetting("思考深度") } label: { ComposerSettingLabel(title: "思考：" + selectedThinking) }.accessibilityLabel("思考深度：" + selectedThinking)
+                    }.buttonStyle(.plain)
+                })
+        }
+        .onChange(of: keyboard.isVisible) { old, visible in if old && !visible { composerFocus.keyboardHidden() } }
     }
 }
 #endif

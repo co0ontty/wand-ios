@@ -357,46 +357,27 @@ struct PendingAttachmentsPreview: View {
     let baseURL: URL
     let attachments: [UploadedFile]
     let onRemove: (UploadedFile) -> Void
-
+    var onPreview: ((UploadedFile) -> Void)? = nil
     var body: some View {
         if !attachments.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 8) {
-                    ForEach(Array(attachments.enumerated()), id: \.offset) { _, file in
-                        attachmentItem(file)
+                HStack(spacing: 8) {
+                    ForEach(attachments, id: \.savedPath) { file in
+                        HStack(spacing: 0) {
+                            if let onPreview {
+                                Button { onPreview(file) } label: { WandFileChip(path: file.originalName).frame(minHeight: 44).contentShape(Rectangle()) }
+                                    .buttonStyle(.plain).accessibilityLabel("预览附件 \(file.originalName)")
+                            } else if isImagePath(file.savedPath) {
+                                WandImageThumbnail(baseURL: baseURL, path: file.savedPath, maxWidth: 96, maxHeight: 72)
+                            } else { WandFileChip(path: file.originalName).frame(minHeight: 44) }
+                            Button { onRemove(file) } label: {
+                                Image(systemName: "xmark.circle.fill").font(.body)
+                                    .foregroundStyle(Theme.textSecondary).frame(width: 44, height: 44).contentShape(Rectangle())
+                            }.buttonStyle(.plain).accessibilityLabel("移除附件 \(file.originalName)")
+                        }.frame(maxWidth: 260)
                     }
                 }
-                .padding(.horizontal, 2)
-                .padding(.vertical, 1)
-            }
-        }
-    }
-
-    @ViewBuilder private func attachmentItem(_ file: UploadedFile) -> some View {
-        ZStack(alignment: .topTrailing) {
-            if isImagePath(file.savedPath) {
-                WandImageThumbnail(
-                    baseURL: baseURL,
-                    path: file.savedPath,
-                    maxWidth: 96,
-                    maxHeight: 72
-                )
-            } else {
-                WandFileChip(path: file.savedPath)
-                    .frame(maxWidth: 190, alignment: .leading)
-            }
-            Button {
-                onRemove(file)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(Theme.textSecondary)
-                    .frame(width: 22, height: 22)
-                    .background(Circle().fill(Theme.surface.opacity(0.94)))
-                    .overlay(Circle().stroke(Theme.border, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("移除附件")
+            }.frame(maxHeight: 76)
         }
     }
 }
