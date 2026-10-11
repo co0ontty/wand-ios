@@ -38,7 +38,6 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
     @ViewBuilder let send: () -> Send
     @ViewBuilder let settings: () -> Settings
     @Environment(\.accessibilityReduceMotion) private var reduced
-    @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
         VStack(spacing: 0) {
             editor().padding(.horizontal, 12).padding(.top, expanded ? 10 : 0)
@@ -65,8 +64,8 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
         .foregroundStyle(Theme.textSecondary)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: expanded ? 20 : 26))
         .overlay(RoundedRectangle(cornerRadius: expanded ? 20 : 26).stroke(Theme.border, lineWidth: 0.8))
-        .frame(maxWidth: expanded ? .infinity : (typeSize.isAccessibilitySize ? 296 : 224))
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        // Collapsed and expanded share the row. The companion is no longer in the leading lane.
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, 12).padding(.bottom, 6)
         .animation(reduced ? nil : WandMotion.disclosure, value: expanded)
     }
