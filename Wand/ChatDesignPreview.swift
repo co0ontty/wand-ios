@@ -49,7 +49,7 @@ struct ChatDesignPreview: View {
                             Text("我会先阅读说明。你可以继续补充要求，附件和草稿都会保留。\n\n发送、停止任务和停止朗读是独立操作；发送状态不明确时先核对会话。").font(.body).lineSpacing(4)
                             Text("离线交互预览 · \(stage)").font(.caption).foregroundStyle(Theme.textSecondary)
                         }.padding(16).frame(maxWidth: 760).frame(maxWidth: .infinity)
-                    }.onTapGesture { composerFocus.collapse() }.padding(.top, verticalSizeClass == .compact ? 56 : 100)
+                    }.clipped().onTapGesture { composerFocus.collapse() }.padding(.top, ChatTopLayout.clearance(compact: verticalSizeClass == .compact))
                     previewComposer.padding(.bottom, keyboard.lift)
                 }.frame(width: root.size.width, height: root.size.height, alignment: .top)
             }.background(Theme.background).toolbar(.hidden, for: .navigationBar)
@@ -196,19 +196,16 @@ struct ChatDesignPreview: View {
                 }, voice: {
                     Image(systemName: recording ? "waveform" : "mic").frame(width: 48, height: 48).modifier(fixtureGesture).accessibilityLabel("语音输入")
                 }, send: {
-                    if running && catCapsuleShowsThirdAction(text: text) {
-                        ComposerStopAction { running = false; activity = .idle; thinking = false }
-                    } else if !text.isEmpty || !files.isEmpty {
-                        NativeComposerActionButton(phase: .idle, turnRunning: false, hasDraft: true, canSubmit: !failed && !composing && !recording,
-                            message: nil, onSend: { text = ""; files = []; composerFocus.collapse(); acknowledged = true; running = true; activity = .writing }, onStop: {})
-                    }
+                        NativeComposerActionButton(phase: .idle, turnRunning: running, hasDraft: !running, canSubmit: !failed && !composing && !recording,
+                            message: nil, onSend: { text = ""; files = []; composerFocus.collapse(); acknowledged = true; running = true; activity = .writing },
+                            onStop: { running = false; activity = .idle; thinking = false })
                 }, settings: {
                     HStack(spacing: 2) {
                         Button { openSetting("模型") } label: { ComposerSettingLabel(title: selectedModel) }.accessibilityLabel("模型：" + selectedModel)
                         Button { openSetting("权限模式") } label: { ComposerSettingLabel(title: selectedMode) }.accessibilityLabel("权限模式：" + selectedMode)
                         Button { openSetting("思考深度") } label: { ComposerSettingLabel(title: "思考：" + selectedThinking) }.accessibilityLabel("思考深度：" + selectedThinking)
                     }.buttonStyle(.plain)
-                })
+                }, primaryVisible: running || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty)
         }
         .onChange(of: keyboard.isVisible) { old, visible in if old && !visible { composerFocus.keyboardHidden() } }
     }

@@ -362,7 +362,7 @@ struct FloatingChatIcon: View {
             .frame(width: 36, height: 36)
             .background(Theme.surface, in: Circle())
             .overlay(Circle().stroke(Theme.border.opacity(0.55), lineWidth: 0.8))
-            .frame(width: 48, height: 48).contentShape(Rectangle())
+            .frame(width: ChatTopLayout.controlTouch, height: ChatTopLayout.controlTouch).contentShape(Rectangle())
     }
 }
 
@@ -375,7 +375,7 @@ struct FloatingChatControls<Actions: View>: View {
                 .buttonStyle(.plain).accessibilityLabel("返回会话列表")
             Spacer(minLength: 0)
             actions()
-        }.padding(.horizontal, 12).padding(.top, 4)
+        }.padding(.horizontal, 12).padding(.top, ChatTopLayout.controlRowInset)
     }
 }
 

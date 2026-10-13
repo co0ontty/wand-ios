@@ -37,8 +37,17 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
     @ViewBuilder let voice: () -> Voice
     @ViewBuilder let send: () -> Send
     @ViewBuilder let settings: () -> Settings
+    var primaryVisible = true
     @Environment(\.accessibilityReduceMotion) private var reduced
     var body: some View {
+        HStack(alignment: .bottom, spacing: 4) {
+            capsule
+            send().frame(width: 48, height: 48).padding(.bottom, 2)
+                .opacity(primaryVisible ? 1 : 0).allowsHitTesting(primaryVisible).accessibilityHidden(!primaryVisible)
+                .animation(reduced ? nil : WandMotion.stateSwap, value: primaryVisible)
+        }.padding(.horizontal, 12).padding(.bottom, 6)
+    }
+    private var capsule: some View {
         VStack(spacing: 0) {
             editor().padding(.horizontal, 12).padding(.top, expanded ? 10 : 0)
                 .frame(height: expanded ? nil : 0).clipped()
@@ -55,7 +64,6 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
                     }.buttonStyle(.plain).accessibilityLabel(hasDraft ? "编辑未发送草稿及附件" : "展开文字输入")
                 }
                 voice()
-                if expanded { send() }
             }.padding(.horizontal, 4)
             settings().padding(.horizontal, 8)
                 .frame(height: expanded ? nil : 0).clipped()
@@ -66,7 +74,6 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
         .overlay(RoundedRectangle(cornerRadius: expanded ? 20 : 26).stroke(Theme.border, lineWidth: 0.8))
         // Collapsed and expanded share the row. The companion is no longer in the leading lane.
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, 12).padding(.bottom, 6)
         .animation(reduced ? nil : WandMotion.disclosure, value: expanded)
     }
 }
@@ -80,6 +87,16 @@ func topCompanionCenter(width: CGFloat, size: CGFloat, side: CatComposerSide, dr
     return min(maximum, max(minimum, resting + drag))
 }
 
+/// One shared boundary for chat, IM and previews; independent of drafts and the keyboard.
+enum ChatTopLayout {
+    static let controlTouch: CGFloat = 48
+    static let controlRowInset: CGFloat = 4
+    static let controlsClearance = controlTouch + controlRowInset * 2
+    static func clearance(compact: Bool) -> CGFloat {
+        max(controlsClearance, compact ? 56 : 100)
+    }
+}
+
 struct TopChatCompanion<Face: View>: View {
     var side: CatComposerSide = .left
     var dragOffset: CGFloat = 0
@@ -90,7 +107,7 @@ struct TopChatCompanion<Face: View>: View {
             let size: CGFloat = verticalSizeClass == .compact ? 48 : 88
             face(size).frame(width: size, height: size)
                 .position(x: topCompanionCenter(width: area.size.width, size: size, side: side, drag: dragOffset), y: size / 2 + 4)
-        }.frame(height: verticalSizeClass == .compact ? 56 : 100)
+        }.frame(height: ChatTopLayout.clearance(compact: verticalSizeClass == .compact))
     }
 }
 
@@ -101,17 +118,6 @@ struct ComposerSettingLabel: View {
             Text(title).font(.subheadline).lineLimit(1).truncationMode(.tail)
             Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
         }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
-    }
-}
-
-struct ComposerStopAction: View {
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "stop.fill").font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white).frame(width: 34, height: 34).background(Theme.danger, in: Circle())
-                .frame(width: 48, height: 48).contentShape(Rectangle())
-        }.buttonStyle(.plain).accessibilityLabel("停止当前任务")
     }
 }
 

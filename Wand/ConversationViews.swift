@@ -273,7 +273,7 @@ struct ConversationDetailView: View {
                         Spacer(); Button("查看全部") { store.filters[id] = nil }
                     }.padding(10).background(Theme.surface)
                 }
-                messageList(detail).onTapGesture { composerFocus.collapse() }
+                messageList(detail).clipped().onTapGesture { composerFocus.collapse() }
                 ConversationComposerView(id: id, store: store, detail: detail, target: store.targets[id], focus: composerFocus, voice: voice, onEmployee: onEmployee)
                     .id(store.draftKey(id, target: store.targets[id]))
                     .padding(.bottom, keyboard.lift)
@@ -284,7 +284,7 @@ struct ConversationDetailView: View {
                 Spacer()
             }
         }
-        .padding(.top, verticalSizeClass == .compact ? 56 : 100)
+        .padding(.top, ChatTopLayout.clearance(compact: verticalSizeClass == .compact))
         .background(Theme.background)
         .navigationTitle("").navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .navigationBar)
@@ -557,15 +557,12 @@ private struct ConversationComposerView: View {
                     Image(systemName: voice.holding ? "waveform" : "mic").frame(width: 48, height: 48)
                         .modifier(voice.gesture(draft: draft, focus: focus)).accessibilityLabel("语音输入")
                 }, send: {
-                    if running && !dispatch && catCapsuleShowsThirdAction(text: draft.text) && draft.sendPhase != .sending {
-                        ComposerStopAction { stopConfirm = true }.disabled(!action.canSubmit)
-                    } else if !draft.text.isEmpty || !attachments.attachments.isEmpty || draft.sendPhase == .sending {
-                        NativeComposerActionButton(phase: action.phase == .idle ? draft.sendPhase : action.phase, turnRunning: running,
-                            hasDraft: !draft.text.isEmpty || !attachments.attachments.isEmpty,
+                        NativeComposerActionButton(phase: running && !dispatch ? .idle : action.phase == .idle ? draft.sendPhase : action.phase,
+                            turnRunning: running && !dispatch, hasDraft: !(running && !dispatch),
                             canSubmit: !voice.holding && !voice.speech.isProcessing && composerDraftIsSendable(draft.text, hasAttachments: !attachments.attachments.isEmpty, isComposing: composing)
                                 && !attachments.isUploading && !store.hasUnknown(id, target: target) && detail.dissolvedAt == nil && !detail.deleting,
-                            message: action.message ?? draft.sendFeedback, onSend: send, onStop: { stopConfirm = true })
-                    }
+                            message: action.message ?? draft.sendFeedback, onSend: send, onStop: { if action.canSubmit { stopConfirm = true } })
+                            .disabled(running && !dispatch && !action.canSubmit)
                 }, settings: {
                     if let execution, !dispatch, target != nil || detail.kind == "group" { SessionComposerSettings(store: execution, focus: focus) }
                     else {
@@ -578,7 +575,8 @@ private struct ConversationComposerView: View {
                             }.font(.caption).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         }.buttonStyle(.plain).accessibilityHint("查看真实配置与生效范围")
                     }
-                })
+                }, primaryVisible: running && !dispatch || !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                    !attachments.attachments.isEmpty || draft.sendPhase != .idle || action.phase != .idle)
         }
         .onAppear { if !visible { draft.acquire(draftConsumer) }; visible = true; attachments.setToastHandler { notice = $0 } }
         .onDisappear { menu = false; voice.finish(cancelled: true); if visible { draft.release(draftConsumer) }; visible = false }

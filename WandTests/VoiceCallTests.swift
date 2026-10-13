@@ -60,6 +60,27 @@ import XCTest
             }
         }
     }
+    func testReadingBoundaryClearsRealControlsAndCompanionInBothSizeClasses() {
+        for compact in [false, true] {
+            let sizeClass: UserInterfaceSizeClass = compact ? .compact : .regular
+            let clearance = ChatTopLayout.clearance(compact: compact)
+            XCTAssertEqual(clearance, compact ? 56 : 100)
+            XCTAssertGreaterThanOrEqual(clearance, ChatTopLayout.controlsClearance)
+            for width: CGFloat in [320, 402, 768] {
+                for type: DynamicTypeSize in [.large, .accessibility3] {
+                    let controls = FloatingChatControls(onBack: {}) {
+                        FloatingChatIcon(symbol: "folder")
+                        FloatingChatIcon(symbol: "ellipsis")
+                    }.padding(.top, compact ? 0 : 18).environment(\.dynamicTypeSize, type)
+                    let controlHeight = UIHostingController(rootView: controls).sizeThatFits(in: CGSize(width: width, height: 800)).height
+                    XCTAssertLessThanOrEqual(controlHeight, clearance)
+                    let companion = TopChatCompanion { size in Color.clear.frame(width: size, height: size) }
+                        .environment(\.verticalSizeClass, sizeClass).environment(\.dynamicTypeSize, type)
+                    XCTAssertEqual(UIHostingController(rootView: companion).sizeThatFits(in: CGSize(width: width, height: 800)).height, clearance, accuracy: 1)
+                }
+            }
+        }
+    }
     func testFailedDraftStaysExpandedAfterTransientSendFeedbackExpires() async throws {
         let draft = ComposerDraftState(sessionId: UUID().uuidString, api: WandAPI(baseURL: URL(string: "http://127.0.0.1:9")!, token: nil))
         draft.beginSending(); draft.finishSending(accepted: false, message: "明确未接受")

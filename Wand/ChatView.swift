@@ -164,7 +164,8 @@ struct ChatView: View {
                 }
                 VStack(spacing: 0) {
                     mainContent
-                        .padding(.top, showsNavigationChrome ? (verticalSizeClass == .compact ? 56 : 100) : 0)
+                        .clipped() // Clip the viewport, not just the first message's padding.
+                        .padding(.top, showsNavigationChrome ? ChatTopLayout.clearance(compact: verticalSizeClass == .compact) : 0)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .onTapGesture { composerFocus.collapse() }
                         .overlay(alignment: .bottom) { toastView }
@@ -1364,11 +1365,10 @@ struct ChatView: View {
             if catStatusVisible { composerStatus.padding(.horizontal, 16) }
             FocusComposerSurface(expanded: catInputExpanded, hasDraft: !draft.isEmpty || !attachments.attachments.isEmpty,
                 onFocus: focusComposer, editor: { composerInputContent }, add: { composerActionsMenu },
-                voice: { composerVoiceButton }, send: {
-                    if store.isResponding && !store.inputSending && catCapsuleShowsThirdAction(text: draft) {
-                        ComposerStopAction { showStopConfirm = true }
-                    } else if !draft.isEmpty || !attachments.attachments.isEmpty || store.inputSending { sendButton }
-                }, settings: { SessionComposerSettings(store: store, focus: composerFocus) })
+                voice: { composerVoiceButton }, send: { sendButton },
+                settings: { SessionComposerSettings(store: store, focus: composerFocus) },
+                primaryVisible: store.isResponding || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                    !attachments.attachments.isEmpty || store.inputSending)
         }
         .onChange(of: keyboard.isVisible) { old, visible in
             if old && !visible { composerFocus.keyboardHidden() }
@@ -1462,11 +1462,9 @@ struct ChatView: View {
 
     private var sendButton: some View {
         NativeComposerActionButton(
-            phase: store.inputSending ? .sending : .idle,
+            phase: store.isResponding ? .idle : store.inputSending ? .sending : .idle,
             turnRunning: store.isResponding,
-            hasDraft: composerIsComposing || composerDraftIsSendable(
-                draft, hasAttachments: !attachments.attachments.isEmpty, isComposing: false
-            ),
+            hasDraft: !store.isResponding,
             canSubmit: canSend,
             // The expanded editor owns the full failure message; keep the capsule icon-only.
             message: nil,
