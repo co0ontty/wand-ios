@@ -40,8 +40,8 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
     var primaryVisible = true
     @Environment(\.accessibilityReduceMotion) private var reduced
     var body: some View {
-        HStack(alignment: .bottom, spacing: 4) {
-            capsule
+        ZStack(alignment: .bottomTrailing) {
+            capsule.padding(.trailing, expanded ? 0 : 52)
             send().frame(width: 48, height: 48).padding(.bottom, 2)
                 .opacity(primaryVisible ? 1 : 0).allowsHitTesting(primaryVisible).accessibilityHidden(!primaryVisible)
                 .animation(reduced ? nil : WandMotion.stateSwap, value: primaryVisible)
@@ -50,6 +50,9 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
     private var capsule: some View {
         VStack(spacing: 0) {
             editor().padding(.horizontal, 12).padding(.top, expanded ? 10 : 0)
+                .frame(height: expanded ? nil : 0).clipped()
+                .opacity(expanded ? 1 : 0).allowsHitTesting(expanded).accessibilityHidden(!expanded)
+            settings().padding(.horizontal, 8)
                 .frame(height: expanded ? nil : 0).clipped()
                 .opacity(expanded ? 1 : 0).allowsHitTesting(expanded).accessibilityHidden(!expanded)
             HStack(spacing: 0) {
@@ -64,15 +67,12 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
                     }.buttonStyle(.plain).accessibilityLabel(hasDraft ? "编辑未发送草稿及附件" : "展开文字输入")
                 }
                 voice()
-            }.padding(.horizontal, 4)
-            settings().padding(.horizontal, 8)
-                .frame(height: expanded ? nil : 0).clipped()
-                .opacity(expanded ? 1 : 0).allowsHitTesting(expanded).accessibilityHidden(!expanded)
+            }.padding(.horizontal, 4).padding(.trailing, expanded ? 52 : 0)
         }
         .foregroundStyle(Theme.textSecondary)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: expanded ? 20 : 26))
         .overlay(RoundedRectangle(cornerRadius: expanded ? 20 : 26).stroke(Theme.border, lineWidth: 0.8))
-        // Collapsed and expanded share the row. The companion is no longer in the leading lane.
+        // The editor uses full width; only the bottom toolbar reserves the send slot.
         .frame(maxWidth: .infinity)
         .animation(reduced ? nil : WandMotion.disclosure, value: expanded)
     }

@@ -311,6 +311,35 @@ private struct MorphEditorTestView: View {
     }
 }
 extension FocusComposerTests {
+    func testExpandedEditorUsesFullWidthForEmptySingleAndMultilineDrafts() async throws {
+        let probe = MorphEditorProbe()
+        let host = UIHostingController(rootView: MorphEditorTestView(probe: probe, focus: probe.focus))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        func find(_ view: UIView) -> ComposerUITextView? {
+            if let text = view as? ComposerUITextView { return text }
+            return view.subviews.lazy.compactMap { find($0) }.first
+        }
+        probe.focus.focus()
+        try await Task.sleep(for: .milliseconds(180))
+        let editor = try XCTUnwrap(find(host.view))
+        for width: CGFloat in [320, 390, 768] {
+            host.view.frame = CGRect(x: 0, y: 0, width: width, height: 600)
+            for text in ["", "单行文字", "第一行中文\n第二行保留光标", ""] {
+                probe.text = text
+                try await Task.sleep(for: .milliseconds(120))
+                host.view.layoutIfNeeded()
+                XCTAssertTrue(find(host.view) === editor)
+                let bounds = editor.convert(editor.bounds, to: host.view)
+                XCTAssertEqual(bounds.minX, 24, accuracy: 1)
+                XCTAssertEqual(bounds.maxX, width - 24, accuracy: 1,
+                    "Only horizontal surface padding remains, with no send-button lane")
+            }
+        }
+    }
+
     func testSameNativeEditorPreservesChineseCommitAndCaretAcrossMorphAndBorrow() async throws {
         let probe = MorphEditorProbe()
         let host = UIHostingController(rootView: MorphEditorTestView(probe: probe, focus: probe.focus))
