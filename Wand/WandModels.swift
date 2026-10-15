@@ -17,7 +17,6 @@ enum WandProvider: String, CaseIterable, Identifiable, Codable {
     case grok
     case qoder
     case pi
-    case gemini
 
     var id: String { rawValue }
 
@@ -28,8 +27,6 @@ enum WandProvider: String, CaseIterable, Identifiable, Codable {
         "qodercli": .qoder,
         "pi-cli": .pi,
         "pi-cli-json": .pi,
-        "gemini-cli": .gemini,
-        "gemini-cli-json": .gemini,
     ]
 
     /// 归一后的规范 id；未知或空值返回 nil。
@@ -70,7 +67,6 @@ enum WandProvider: String, CaseIterable, Identifiable, Codable {
         case .grok: return "Grok"
         case .qoder: return "Qoder"
         case .pi: return "Pi"
-        case .gemini: return "Gemini"
         }
     }
 
@@ -91,7 +87,6 @@ enum WandProvider: String, CaseIterable, Identifiable, Codable {
         case .grok: return "grok-cli-headless"
         case .qoder: return "qoder-cli-print"
         case .pi: return "pi-cli-json"
-        case .gemini: return "gemini-cli-json"
         }
     }
 
@@ -105,7 +100,7 @@ enum WandProvider: String, CaseIterable, Identifiable, Codable {
             return ["default", "full-access", "managed"]
         case .qoder:
             return ["default", "full-access", "auto-edit", "managed"]
-        case .claude, .gemini:
+        case .claude:
             return ["default", "full-access", "auto-edit", "native", "managed"]
         }
     }
@@ -1385,7 +1380,6 @@ struct ModelsResponse: Decodable {
     let grokModels: [ModelInfo]
     let qoderModels: [ModelInfo]
     let piModels: [ModelInfo]
-    let geminiModels: [ModelInfo]
     let freeModels: [ModelInfo]
     let modelGroupsSupported: Bool
     let defaultModel: String?
@@ -1394,13 +1388,12 @@ struct ModelsResponse: Decodable {
     let defaultGrokModel: String?
     let defaultQoderModel: String?
     let defaultPiModel: String?
-    let defaultGeminiModel: String?
     let defaultModels: ProviderDefaultModels?
     let thinkingEfforts: [String: [ReasoningEffortInfo]]
 
     private enum CodingKeys: String, CodingKey {
-        case models, codexModels, opencodeModels, grokModels, qoderModels, piModels, geminiModels, freeModels, modelGroupsSupported
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultGeminiModel, defaultModels
+        case models, codexModels, opencodeModels, grokModels, qoderModels, piModels, freeModels, modelGroupsSupported
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultModels
         case thinkingEfforts
     }
     private struct EffortProviderKey: CodingKey {
@@ -1420,7 +1413,6 @@ struct ModelsResponse: Decodable {
         grokModels = (try? container.decode([ModelInfo].self, forKey: .grokModels)) ?? []
         qoderModels = (try? container.decode([ModelInfo].self, forKey: .qoderModels)) ?? []
         piModels = (try? container.decode([ModelInfo].self, forKey: .piModels)) ?? []
-        geminiModels = (try? container.decode([ModelInfo].self, forKey: .geminiModels)) ?? []
         freeModels = (try? container.decode([ModelInfo].self, forKey: .freeModels)) ?? []
         modelGroupsSupported = (try? container.decode(Bool.self, forKey: .modelGroupsSupported)) ?? false
         defaultModel = try? container.decode(String.self, forKey: .defaultModel)
@@ -1429,7 +1421,6 @@ struct ModelsResponse: Decodable {
         defaultGrokModel = try? container.decode(String.self, forKey: .defaultGrokModel)
         defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
         defaultPiModel = try? container.decode(String.self, forKey: .defaultPiModel)
-        defaultGeminiModel = try? container.decode(String.self, forKey: .defaultGeminiModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
         if let efforts = try? container.nestedContainer(keyedBy: EffortProviderKey.self, forKey: .thinkingEfforts) {
             var catalog: [String: [ReasoningEffortInfo]] = [:]
@@ -1458,7 +1449,6 @@ struct ModelsResponse: Decodable {
         case .grok: return grokModels
         case .qoder: return qoderModels
         case .pi: return piModels
-        case .gemini: return geminiModels
         }
     }
 
@@ -1476,8 +1466,6 @@ struct ModelsResponse: Decodable {
             return defaultModels?.qoder ?? defaultQoderModel ?? ""
         case .pi:
             return defaultModels?.pi ?? defaultPiModel ?? ""
-        case .gemini:
-            return defaultModels?.gemini ?? defaultGeminiModel ?? ""
         }
     }
 }
@@ -1525,7 +1513,6 @@ struct ServerConfigInfo: Decodable {
     let defaultGrokModel: String?
     let defaultQoderModel: String?
     let defaultPiModel: String?
-    let defaultGeminiModel: String?
     let defaultModels: ProviderDefaultModels?
     let defaultThinkingEffort: String?
     let cardDefaults: CardExpandDefaults?
@@ -1537,7 +1524,7 @@ struct ServerConfigInfo: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case defaultCwd, defaultProvider, defaultSessionKind, defaultTaskWorktree, defaultMode, defaultEngine
-        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultGeminiModel, defaultModels
+        case defaultModel, defaultCodexModel, defaultOpenCodeModel, defaultGrokModel, defaultQoderModel, defaultPiModel, defaultModels
         case defaultThinkingEffort, cardDefaults
         case currentVersion, latestVersion, updateAvailable, updateChannel, canManageSettings
     }
@@ -1556,7 +1543,6 @@ struct ServerConfigInfo: Decodable {
         defaultGrokModel = try? container.decode(String.self, forKey: .defaultGrokModel)
         defaultQoderModel = try? container.decode(String.self, forKey: .defaultQoderModel)
         defaultPiModel = try? container.decode(String.self, forKey: .defaultPiModel)
-        defaultGeminiModel = try? container.decode(String.self, forKey: .defaultGeminiModel)
         defaultModels = try? container.decode(ProviderDefaultModels.self, forKey: .defaultModels)
         defaultThinkingEffort = try? container.decode(String.self, forKey: .defaultThinkingEffort)
         cardDefaults = try? container.decode(CardExpandDefaults.self, forKey: .cardDefaults)
@@ -1581,8 +1567,6 @@ struct ServerConfigInfo: Decodable {
             return defaultModels?.qoder ?? defaultQoderModel ?? ""
         case .pi:
             return defaultModels?.pi ?? defaultPiModel ?? ""
-        case .gemini:
-            return defaultModels?.gemini ?? defaultGeminiModel ?? ""
         }
     }
 
@@ -1599,18 +1583,16 @@ struct ProviderDefaultModels: Decodable {
     let grok: String?
     let qoder: String?
     let pi: String?
-    let gemini: String?
 
-    private enum CodingKeys: String, CodingKey { case claude, codex, opencode, grok, qoder, pi, gemini }
+    private enum CodingKeys: String, CodingKey { case claude, codex, opencode, grok, qoder, pi }
 
-    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil, grok: String? = nil, qoder: String? = nil, pi: String? = nil, gemini: String? = nil) {
+    init(claude: String? = nil, codex: String? = nil, opencode: String? = nil, grok: String? = nil, qoder: String? = nil, pi: String? = nil) {
         self.claude = claude
         self.codex = codex
         self.opencode = opencode
         self.grok = grok
         self.qoder = qoder
         self.pi = pi
-        self.gemini = gemini
     }
 
     init(from decoder: Decoder) throws {
@@ -1621,7 +1603,6 @@ struct ProviderDefaultModels: Decodable {
         grok = try? container.decode(String.self, forKey: .grok)
         qoder = try? container.decode(String.self, forKey: .qoder)
         pi = try? container.decode(String.self, forKey: .pi)
-        gemini = try? container.decode(String.self, forKey: .gemini)
     }
 
     func modelId(for provider: String) -> String? {
@@ -1632,7 +1613,6 @@ struct ProviderDefaultModels: Decodable {
         case .grok: return grok
         case .qoder: return qoder
         case .pi: return pi
-        case .gemini: return gemini
         }
     }
 }

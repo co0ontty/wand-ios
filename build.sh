@@ -15,6 +15,15 @@
 
 set -euo pipefail
 
+# Local opt-in storage policy; unconfigured machines and CI retain normal paths.
+NATIVE_BUILD_ENV="${WAND_NATIVE_BUILD_ENV:-$HOME/.config/wand-build/environment.sh}"
+if [[ -f "$NATIVE_BUILD_ENV" ]]; then
+  source "$NATIVE_BUILD_ENV"
+elif [[ -n "${WAND_NATIVE_BUILD_ENV:-}" ]]; then
+  echo "Native build environment file not found: $NATIVE_BUILD_ENV" >&2
+  exit 1
+fi
+
 if [[ "$(uname)" != "Darwin" ]]; then
   echo "❌ build.sh 只能在 macOS 上运行（当前系统 $(uname)），需要 Xcode 工具链" >&2
   exit 1
@@ -72,8 +81,23 @@ fi
 
 cd "$(dirname "$0")"
 PROJECT_ROOT="$(pwd)"
-BUILD_DIR="$PROJECT_ROOT/build"
-DIST_DIR="$PROJECT_ROOT/dist"
+DEFAULT_BUILD_DIR="$PROJECT_ROOT/build"
+DEFAULT_DIST_DIR="$PROJECT_ROOT/dist"
+if [[ -n "${WAND_BUILD_STORAGE_ROOT:-}" ]]; then
+  DEFAULT_BUILD_DIR="$WAND_BUILD_STORAGE_ROOT/ios/release/build"
+  DEFAULT_DIST_DIR="$WAND_BUILD_STORAGE_ROOT/ios/release/dist"
+fi
+BUILD_DIR="${WAND_BUILD_DIR:-$DEFAULT_BUILD_DIR}"
+DIST_DIR="${WAND_DIST_DIR:-$DEFAULT_DIST_DIR}"
+if [[ -n "${WAND_BUILD_DIR:-}" && ( "$BUILD_DIR" != /* || -e "$BUILD_DIR" ) ]] \
+  || [[ -n "${WAND_DIST_DIR:-}" && ( "$DIST_DIR" != /* || -e "$DIST_DIR" ) ]]; then
+  echo "错误：WAND_BUILD_DIR / WAND_DIST_DIR 必须是尚不存在的绝对路径。" >&2
+  exit 1
+fi
+if type wand_assert_external_build_path >/dev/null 2>&1; then
+  wand_assert_external_build_path "$BUILD_DIR"
+  wand_assert_external_build_path "$DIST_DIR"
+fi
 ICONSET_DIR="$PROJECT_ROOT/Wand/Assets.xcassets/AppIcon.appiconset"
 
 rm -rf "$BUILD_DIR" "$DIST_DIR"

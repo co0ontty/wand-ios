@@ -56,6 +56,7 @@ private enum TaskListConfirm: Identifiable {
     case deleteWorkspace(Workspace)
     case deleteManaged(TaskListPresentation.ManageSelection)
     case archiveManaged(TaskListPresentation.ManageSelection)
+    case organizeByTitle(TaskListPresentation.ManageSelection)
 
     var id: String {
         switch self {
@@ -66,6 +67,7 @@ private enum TaskListConfirm: Identifiable {
         case .deleteWorkspace(let workspace): return "delete-workspace-\(workspace.id)"
         case .deleteManaged: return "delete-managed"
         case .archiveManaged: return "archive-managed"
+        case .organizeByTitle: return "organize-by-title"
         }
     }
 }
@@ -257,6 +259,11 @@ struct WorkspaceListView: View {
     @ViewBuilder
     private var trailingToolbarButtons: some View {
         if isSelecting {
+            if !managedToolbarSelection.taskIds.isEmpty {
+                Button("按标题归类") {
+                    presentConfirm(.organizeByTitle(managedToolbarSelection))
+                }
+            }
             Button("归档所选") {
                 requestManagedSelection()
             }
@@ -456,6 +463,7 @@ struct WorkspaceListView: View {
         case .deleteManaged(let selection):
             return "\(TaskListPresentation.describeManagedAction(selection))？"
         case .archiveManaged: return "归档所选任务和会话？"
+        case .organizeByTitle: return "按标题归类？"
         case .none: return ""
         }
     }
@@ -464,6 +472,7 @@ struct WorkspaceListView: View {
         switch pendingConfirm {
         case .archiveTask: return "确认归档"
         case .archiveManaged: return "确认归档"
+        case .organizeByTitle: return "确认按标题归类"
         case .clearSessions: return "确认清空"
         case .deleteManaged(let selection):
             return "确认\(TaskListPresentation.describeManagedAction(selection))"
@@ -474,7 +483,7 @@ struct WorkspaceListView: View {
     /// 纯归档不该渲染成红色破坏性操作（对齐 web 端 managedSelectionIsDestructive）。
     private var confirmIsDestructive: Bool {
         switch pendingConfirm {
-        case .archiveTask, .archiveManaged: return false
+        case .archiveTask, .archiveManaged, .organizeByTitle: return false
         case .deleteManaged(let selection):
             return TaskListPresentation.managedSelectionIsDestructive(selection)
         default: return true
@@ -504,6 +513,8 @@ struct WorkspaceListView: View {
             return "所选任务会移入看板归档（终端与 Worktree 保留），同时结束所选终端。"
         case .archiveManaged:
             return "所选任务移入看板归档，所选会话收进已归档区。终端继续运行，历史与 Worktree 都保留。"
+        case .organizeByTitle:
+            return "按标题把所选任务归成同类，并把这些任务里的会话归入标题对应的任务。只共享关键词的不移动。"
         case .none:
             return ""
         }
@@ -941,6 +952,13 @@ struct WorkspaceListView: View {
                 .foregroundColor(Theme.textPrimary)
             }
             HStack(spacing: 16) {
+            if !resolved.taskIds.isEmpty {
+                Button("按标题归类") {
+                    presentConfirm(.organizeByTitle(resolved))
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Theme.brand)
+            }
             Button("归档所选") {
                 requestManagedSelection()
             }
@@ -1658,6 +1676,13 @@ struct WorkspaceListView: View {
                 }
                 endManagedSelection()
                 showToast("已删除 \(selection.sessionIds.count) 个终端")
+            case .organizeByTitle(let selection):
+                let result = try await store.organizeTasksByTitle(
+                    taskIds: Array(selection.taskIds),
+                    sessionIds: Array(selection.sessionIds)
+                )
+                endManagedSelection()
+                showToast(titleOrganizeMessage(result))
             case .archiveManaged(let selection):
                 if !selection.sessionIds.isEmpty {
                     let failed = try await store.archiveSessions(Array(selection.sessionIds), archived: true)
@@ -1810,6 +1835,23 @@ struct WorkspaceListView: View {
                 Label("删除", systemImage: "trash")
             }
         }
+    }
+
+    private func titleOrganizeMessage(_ result: TitleOrganizeResponse) -> String {
+        let moved = result.movedSessions?.count ?? 0
+        let categorized = result.categorizedTasks?.count ?? 0
+        let reason = result.refused?.first?.reason ?? ""
+        if moved == 0 && categorized == 0 {
+            return reason.isEmpty ? "所选标题已归类" : reason
+        }
+        var label = "已"
+        if categorized > 0 { label += "归类 \(categorized) 个任务" }
+        if categorized > 0 && moved > 0 { label += "、" }
+        if moved > 0 { label += "归属 \(moved) 个会话" }
+        if let extra = result.refused, !extra.isEmpty, !reason.isEmpty {
+            return "\(label)。另有 \(extra.count) 项未处理：\(reason)"
+        }
+        return label
     }
 
     private func showToast(_ message: String) {

@@ -30,7 +30,7 @@ final class ThinkingEffortParityTests: XCTestCase {
     }
 
     func testNonReasoningModelsOnlyOfferAutomaticAcrossProviders() {
-        for provider in ["pi", "codex", "opencode", "gemini"] {
+        for provider in ["pi", "codex", "opencode"] {
             XCTAssertEqual(choices(provider, ["off"]).map(\.id), ["off"])
         }
     }
@@ -868,33 +868,19 @@ final class AlignmentParityTests: XCTestCase {
     // MARK: - Provider and activity parity
 
     /// provider 名单与服务端 `SESSION_PROVIDERS` 一致。历史回归：iOS 与 macOS 都只有
-    /// 6 个 case 且未知值兜底成 Claude，Gemini 会话因此被错标成 Claude。
     func testProviderCatalogCoversEveryServerProvider() throws {
         XCTAssertEqual(
             WandProvider.allCases.map(\.rawValue),
-            ["claude", "codex", "opencode", "grok", "qoder", "pi", "gemini"]
+            ["claude", "codex", "opencode", "grok", "qoder", "pi"]
         )
     }
 
-    func testGeminiNormalizesFromServerAliasesAndKeepsItsRunner() throws {
-        for raw in ["gemini", "Gemini", " gemini-cli ", "gemini-cli-json"] {
-            XCTAssertEqual(WandProvider(normalizing: raw), .gemini, raw)
-            XCTAssertEqual(WandProvider.normalizedID(raw), "gemini", raw)
-        }
-        XCTAssertEqual(WandProvider.gemini.title, "Gemini")
-        XCTAssertEqual(WandProvider.gemini.structuredRunner, "gemini-cli-json")
-        // 任务派发目标必须认得 gemini，否则 init(provider:) 会静默回落成 Claude。
-        XCTAssertEqual(WorkspaceSessionTarget(provider: .gemini), .gemini)
-    }
 
     func testUnknownProviderIsNotDisguisedAsAKnownOne() throws {
-        XCTAssertEqual(WandProvider.title(for: "gemini"), "Gemini")
         XCTAssertEqual(WandProvider.title(for: "some-future-cli"), "some-future-cli")
         XCTAssertEqual(WandProvider.title(for: nil), "Claude")
         XCTAssertNil(WandProvider.normalizedID("some-future-cli"))
         XCTAssertEqual(WandProvider(normalizing: "some-future-cli"), .claude)
-        // 实时活动与看板卡片不得把 Gemini 说成 Claude。
-        XCTAssertEqual(wandBoardProviderLabel("gemini"), "Gemini")
         XCTAssertEqual(wandBoardProviderLabel("shell"), "终端")
     }
 
@@ -909,27 +895,8 @@ final class AlignmentParityTests: XCTestCase {
             WandProvider.claude.supportedModeIDs,
             ["default", "full-access", "auto-edit", "native", "managed"]
         )
-        // gemini 与 claude 同走兜底全量；客户端不单方面收紧。
-        XCTAssertEqual(WandProvider.gemini.supportedModeIDs, WandProvider.claude.supportedModeIDs)
     }
 
-    /// Gemini 的模型与默认模型必须来自自己的目录，不能落到 Claude 的。
-    func testGeminiModelsComeFromItsOwnCatalog() throws {
-        let models = try decode(
-            ModelsResponse.self,
-            from: #"""
-            {
-              "models": [{"id":"claude-model","label":"Claude"}],
-              "codexModels": [],
-              "geminiModels": [{"id":"gemini-model","label":"Gemini"}],
-              "defaultModels": {"gemini":"gemini-model"}
-            }
-            """#
-        )
-        XCTAssertEqual(models.models(for: WandProvider.gemini).map(\.id), ["gemini-model"])
-        XCTAssertEqual(models.models(for: WandProvider.claude).map(\.id), ["claude-model"])
-        XCTAssertEqual(models.defaultModelId(for: "gemini"), "gemini-model")
-    }
 
     /// 会话归档的语义边界：归档是软标记，只是从活跃列表拆进折叠区，不改身份与归属。
     func testArchivedSessionsSplitOutOfTheActiveListOnce() throws {

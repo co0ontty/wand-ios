@@ -175,9 +175,6 @@ enum Theme {
     }
     /// Codex（OpenAI）标识蓝，与 Android / Web info 色对一致。
     static let codex = dynamic(light: rgb(0.290, 0.435, 0.647), dark: rgb(0.494, 0.612, 0.769)) // #4A6FA5 / #7E9CC4
-    /// Gemini 官方标是蓝紫粉渐变，单色 token 取渐变里的蓝段（与 macOS 同值）。
-    /// Web 用中性文字色避免假装有品牌色；这里保留可辨识的蓝，7 个 provider 不撞色。
-    static let gemini = dynamic(light: rgb(0.231, 0.435, 0.831), dark: rgb(0.498, 0.651, 0.941))
     static let info = dynamic(light: hex(0x4A6FA5), dark: hex(0x8FB0DC))
 
     /// provider → 徽标色。与 macOS `Theme.providerColor(_:)` 同构。
@@ -185,7 +182,6 @@ enum Theme {
     static func providerColor(_ provider: String?) -> Color {
         switch WandProvider.normalizedID(provider) {
         case WandProvider.codex.rawValue: return codex
-        case WandProvider.gemini.rawValue: return gemini
         default: return brand
         }
     }

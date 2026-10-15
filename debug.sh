@@ -7,6 +7,15 @@
 
 set -euo pipefail
 
+# Local opt-in storage policy; unconfigured machines and CI retain normal paths.
+NATIVE_BUILD_ENV="${WAND_NATIVE_BUILD_ENV:-$HOME/.config/wand-build/environment.sh}"
+if [[ -f "$NATIVE_BUILD_ENV" ]]; then
+  source "$NATIVE_BUILD_ENV"
+elif [[ -n "${WAND_NATIVE_BUILD_ENV:-}" ]]; then
+  echo "Native build environment file not found: $NATIVE_BUILD_ENV" >&2
+  exit 1
+fi
+
 if [[ "$(uname)" != "Darwin" ]]; then
   echo "错误：debug.sh 只能在安装了 Xcode 的 macOS 上运行。" >&2
   exit 1
@@ -23,7 +32,14 @@ cd "$(dirname "$0")"
 
 SIMULATOR_NAME="${SIMULATOR_NAME:-Wand Debug}"
 DEVICE_TYPE="${DEVICE_TYPE:-iPhone Air}"
-DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-$PWD/.debug-derived-data}"
+DEFAULT_DD="$PWD/.debug-derived-data"
+if [[ -n "${WAND_BUILD_STORAGE_ROOT:-}" ]]; then
+  DEFAULT_DD="$WAND_BUILD_STORAGE_ROOT/ios/debug"
+fi
+DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-$DEFAULT_DD}"
+if type wand_assert_external_build_path >/dev/null 2>&1; then
+  wand_assert_external_build_path "$DERIVED_DATA_PATH"
+fi
 PROJECT="Wand.xcodeproj"
 SCHEME="Wand"
 BUNDLE_ID="com.wand.app"

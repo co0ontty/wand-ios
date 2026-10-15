@@ -121,6 +121,42 @@ func composerPrimaryActionStops(phase: ComposerSendPhase, turnRunning: Bool, has
     phase == .idle && turnRunning && !hasDraft
 }
 
+struct ComposerActionPresentation {
+    let send: Bool
+    let stop: Bool
+    var slotCount: Int { (send ? 1 : 0) + (stop ? 1 : 0) }
+    init(phase: ComposerSendPhase, turnRunning: Bool, hasDraft: Bool) {
+        send = hasDraft || phase != .idle
+        stop = turnRunning
+    }
+}
+
+/// Keep stop available during submission and receipt feedback; each action has its own lock.
+struct NativeComposerActions: View {
+    let phase: ComposerSendPhase
+    let turnRunning: Bool
+    let hasDraft: Bool
+    let canSubmit: Bool
+    var canStop = true
+    let message: String?
+    var sendLabel = "发送消息"
+    let onSend: () -> Void
+    let onStop: () -> Void
+    var body: some View {
+        let actions = ComposerActionPresentation(phase: phase, turnRunning: turnRunning, hasDraft: hasDraft)
+        HStack(spacing: ComposerMetrics.actionSpacing) {
+            if actions.stop {
+                NativeComposerActionButton(phase: .idle, turnRunning: true, hasDraft: false, canSubmit: true,
+                    message: nil, onSend: {}, onStop: onStop).disabled(!canStop)
+            }
+            if actions.send {
+                NativeComposerActionButton(phase: phase, turnRunning: false, hasDraft: hasDraft, canSubmit: canSubmit,
+                    message: message, sendLabel: sendLabel, onSend: onSend, onStop: {})
+            }
+        }
+    }
+}
+
 /// The same button instance carries Send/Stop/loading/result in a fixed slot.
 struct NativeComposerActionButton: View {
     let phase: ComposerSendPhase
@@ -128,6 +164,7 @@ struct NativeComposerActionButton: View {
     let hasDraft: Bool
     let canSubmit: Bool
     let message: String?
+    var sendLabel = "发送消息"
     let onSend: () -> Void
     let onStop: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -136,6 +173,7 @@ struct NativeComposerActionButton: View {
         composerPrimaryActionStops(phase: phase, turnRunning: turnRunning, hasDraft: hasDraft)
     }
     private var tint: Color {
+        if stopping { return Theme.danger }
         switch phase {
         case .sent: return Theme.success
         case .failed: return Theme.danger
@@ -148,7 +186,7 @@ struct NativeComposerActionButton: View {
         case .sending: return "发送中"
         case .sent: return "已送达"
         case .failed: return message ?? "发送失败"
-        case .idle: return stopping ? "停止任务" : "发送"
+        case .idle: return stopping ? "停止任务" : sendLabel
         }
     }
 

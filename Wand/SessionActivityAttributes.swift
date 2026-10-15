@@ -63,7 +63,6 @@ extension SessionActivityAttributes.SessionEntry {
         case "grok": return "Grok"
         case "qoder", "qodercli": return "Qoder"
         case "pi": return "Pi"
-        case "gemini", "gemini-cli", "gemini-cli-json": return "Gemini"
         case "shell", "terminal", "": return "终端"
         default: return String(normalizedProvider.prefix(40))
         }

@@ -1040,9 +1040,6 @@ final class WandAPI: SessionInputTransport {
             case .pi:
                 body["defaultPiModel"] = model
                 body["defaultModels"] = ["pi": model]
-            case .gemini:
-                body["defaultGeminiModel"] = model
-                body["defaultModels"] = ["gemini": model]
             case .claude:
                 body["defaultModel"] = model
                 body["defaultModels"] = ["claude": model]

@@ -10,6 +10,8 @@ protocol WorkspaceServing: AnyObject {
     func archiveWorkspaceTask(taskId: String) async throws -> WorkspaceTask
     /// 移动会话归属；会话本身、运行目录与历史都不变。
     func moveWorkspaceSession(taskId: String, sessionId: String) async throws
+    /// 按标题归类所选任务，并处理这些任务下的会话归属。不确定的不移动。
+    func organizeTasksByTitle(taskIds: [String], sessionIds: [String]) async throws -> TitleOrganizeResponse
     /// 合成目录（无工作区实体）改显示名。
     func renameSessionDirectory(path: String, name: String) async throws
     func getWorkspaceTask(taskId: String) async throws -> WorkspaceTaskDetail
@@ -64,6 +66,9 @@ protocol WorkspaceServing: AnyObject {
 }
 
 extension WorkspaceServing {
+    func organizeTasksByTitle(taskIds: [String], sessionIds: [String]) async throws -> TitleOrganizeResponse {
+        throw WandAPI.APIError.network("当前服务不支持按标题归类，请更新服务端")
+    }
     func saveWorkspaceGroupOrder(_ ids: [String]) async throws { throw WandAPI.APIError.network("当前服务不支持保存工作区顺序，请更新服务端") }
     func createWorkspaceEmployeeTaskWindow(employeeID: String, binding: WorkspaceBinding, prompt: String?) async throws -> SessionSnapshot {
         throw WandAPI.APIError.network("当前服务不支持硅基员工会话。")
@@ -797,6 +802,15 @@ final class WorkspaceStore: ObservableObject {
         invalidateTaskGroupsLoad()
         await loadTaskGroups(force: true)
         await refreshCurrentTaskInBackground()
+    }
+
+    /// 多选任务后按标题归类，并处理这些任务下的会话归属。不确定的不移动。
+    func organizeTasksByTitle(taskIds: [String], sessionIds: [String]) async throws -> TitleOrganizeResponse {
+        let result = try await api.organizeTasksByTitle(taskIds: taskIds, sessionIds: sessionIds)
+        invalidateTaskGroupsLoad()
+        await loadTaskGroups(force: true)
+        await refreshCurrentTaskInBackground()
+        return result
     }
 
     /// 归档任务（软删除）：终端继续跑、worktree 保留，只从侧栏隐藏并进入看板归档。

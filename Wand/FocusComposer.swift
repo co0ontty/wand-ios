@@ -37,14 +37,12 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
     @ViewBuilder let voice: () -> Voice
     @ViewBuilder let send: () -> Send
     @ViewBuilder let settings: () -> Settings
-    var primaryVisible = true
+    var actionCount = 0
     @Environment(\.accessibilityReduceMotion) private var reduced
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            capsule.padding(.trailing, expanded ? 0 : 52)
-            send().frame(width: 48, height: 48).padding(.bottom, 2)
-                .opacity(primaryVisible ? 1 : 0).allowsHitTesting(primaryVisible).accessibilityHidden(!primaryVisible)
-                .animation(reduced ? nil : WandMotion.stateSwap, value: primaryVisible)
+            capsule.padding(.trailing, expanded ? 0 : actionInset)
+            if actionCount > 0 { send().frame(width: actionWidth, height: 48) }
         }.padding(.horizontal, 12).padding(.bottom, 6)
     }
     private var capsule: some View {
@@ -52,22 +50,21 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
             editor().padding(.horizontal, 12).padding(.top, expanded ? 10 : 0)
                 .frame(height: expanded ? nil : 0).clipped()
                 .opacity(expanded ? 1 : 0).allowsHitTesting(expanded).accessibilityHidden(!expanded)
-            settings().padding(.horizontal, 8)
-                .frame(height: expanded ? nil : 0).clipped()
-                .opacity(expanded ? 1 : 0).allowsHitTesting(expanded).accessibilityHidden(!expanded)
-            HStack(spacing: 0) {
+            ComposerCapsuleToolbarLayout(expanded: expanded, actionInset: expanded ? actionInset : 0) {
                 add()
-                if expanded { Spacer(minLength: 0) }
-                else {
+                settings().frame(maxWidth: expanded ? .infinity : nil)
+                    .frame(width: expanded ? nil : 0, height: expanded ? nil : 0).clipped()
+                    .opacity(expanded ? 1 : 0).allowsHitTesting(expanded).accessibilityHidden(!expanded)
                     Button(action: onFocus) {
                         HStack(spacing: 4) {
                             if hasDraft { Circle().fill(Theme.brand).frame(width: 6, height: 6) }
                             Text(hasDraft ? "草稿 · 未发送" : "发消息…").font(.subheadline).lineLimit(1)
                         }.frame(maxWidth: .infinity, minHeight: 48).contentShape(Rectangle())
                     }.buttonStyle(.plain).accessibilityLabel(hasDraft ? "编辑未发送草稿及附件" : "展开文字输入")
-                }
+                        .frame(height: expanded ? 0 : nil).clipped()
+                        .opacity(expanded ? 0 : 1).allowsHitTesting(!expanded).accessibilityHidden(expanded)
                 voice()
-            }.padding(.horizontal, 4).padding(.trailing, expanded ? 52 : 0)
+            }.padding(.horizontal, 4)
         }
         .foregroundStyle(Theme.textSecondary)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: expanded ? 20 : 26))
@@ -75,6 +72,37 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
         // The editor uses full width; only the bottom toolbar reserves the send slot.
         .frame(maxWidth: .infinity)
         .animation(reduced ? nil : WandMotion.disclosure, value: expanded)
+    }
+    private var actionWidth: CGFloat { CGFloat(actionCount) * ComposerMetrics.actionTouchSize }
+    private var actionInset: CGFloat { actionCount > 0 ? actionWidth + 4 : 0 }
+}
+
+/// Native layout changes placement without replacing the editor or settings sheet owner.
+private struct ComposerCapsuleToolbarLayout: Layout {
+    let expanded: Bool
+    let actionInset: CGFloat
+    private let touch: CGFloat = 48
+    private func metrics(width: CGFloat, subviews: Subviews) -> (settingsWidth: CGFloat, settingsHeight: CGFloat, rowHeight: CGFloat, stacked: Bool) {
+        let stacked = expanded && width - actionInset < touch * 5
+        let settingsWidth = stacked ? width : max(0, width - actionInset - touch * 2)
+        let settingsHeight = expanded ? subviews[1].sizeThatFits(ProposedViewSize(width: settingsWidth, height: nil)).height : 0
+        return (settingsWidth, stacked ? settingsHeight : 0, max(touch, stacked ? 0 : settingsHeight), stacked)
+    }
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 320
+        let layout = metrics(width: width, subviews: subviews)
+        return CGSize(width: width, height: layout.settingsHeight + layout.rowHeight)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let layout = metrics(width: bounds.width, subviews: subviews)
+        let y = bounds.minY + layout.settingsHeight + (layout.rowHeight - touch) / 2
+        subviews[0].place(at: CGPoint(x: bounds.minX, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: touch, height: touch))
+        subviews[1].place(at: CGPoint(x: bounds.minX + (layout.stacked ? 0 : touch), y: bounds.minY + (layout.stacked ? 0 : (layout.rowHeight - touch) / 2)),
+            anchor: .topLeading, proposal: ProposedViewSize(width: expanded ? layout.settingsWidth : 0, height: expanded ? touch : 0))
+        subviews[2].place(at: CGPoint(x: bounds.minX + touch, y: y), anchor: .topLeading,
+            proposal: ProposedViewSize(width: expanded ? 0 : max(0, bounds.width - touch * 2), height: expanded ? 0 : touch))
+        subviews[3].place(at: CGPoint(x: bounds.minX + (layout.stacked ? touch : bounds.width - actionInset - touch), y: y),
+            anchor: .topLeading, proposal: ProposedViewSize(width: touch, height: touch))
     }
 }
 
@@ -113,11 +141,46 @@ struct TopChatCompanion<Face: View>: View {
 
 struct ComposerSettingLabel: View {
     let title: String
+    var symbol: String? = nil
     var body: some View {
-        HStack(spacing: 3) {
-            Text(title).font(.subheadline).lineLimit(1).truncationMode(.tail)
-            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-        }.frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+        Group {
+            if let symbol {
+                Image(systemName: symbol).font(.system(size: 16)).frame(width: 44, height: 48)
+            } else {
+                HStack(spacing: 3) {
+                    Text(title).font(.caption).lineLimit(1).truncationMode(.tail)
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                }.frame(minWidth: 44, maxWidth: .infinity, minHeight: 48)
+            }
+        }.contentShape(Rectangle())
+    }
+}
+
+/// Reuse native buttons; narrow toolbars keep the model name and two independent icons.
+struct ComposerSettingsStrip: View {
+    let model: String
+    let mode: String
+    let thinking: String
+    let onModel: () -> Void
+    let onMode: () -> Void
+    let onThinking: () -> Void
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                setting(model, accessibility: "模型：\(model)", action: onModel)
+                setting(mode, accessibility: "权限模式：\(mode)", action: onMode)
+                setting(thinking, accessibility: "思考深度：\(thinking)", action: onThinking)
+            }.fixedSize(horizontal: true, vertical: false)
+            HStack(spacing: 0) {
+                setting(model, accessibility: "模型：\(model)", action: onModel)
+                setting(mode, symbol: "lock", accessibility: "权限模式：\(mode)", action: onMode)
+                setting(thinking, symbol: "brain", accessibility: "思考深度：\(thinking)", action: onThinking)
+            }
+        }.buttonStyle(.plain).foregroundStyle(Theme.textSecondary)
+    }
+    private func setting(_ label: String, symbol: String? = nil, accessibility: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { ComposerSettingLabel(title: label, symbol: symbol) }
+            .accessibilityLabel(accessibility).accessibilityHint("打开完整选项")
     }
 }
 
@@ -181,11 +244,9 @@ struct SessionComposerSettings: View {
     private let modes = [("default", "标准 · 按需确认"), ("auto-edit", "自动编辑 · 写入文件自动批准"), ("full-access", "全权限 · 自动批准工具操作"), ("managed", "托管 · 由托管规则处理确认"), ("native", "原生 · 由执行工具管理权限")]
     private var modeLabel: String { ["default": "标准", "auto-edit": "自动编辑", "full-access": "全权限", "managed": "托管", "native": "原生"][store.mode] ?? store.mode }
     var body: some View {
-        HStack(spacing: 2) {
-            setting(.model, label: modelLabel, accessibility: "模型：\(modelLabel)")
-            setting(.mode, label: modeLabel, accessibility: "权限模式：\(modeLabel)")
-            setting(.thinking, label: "思考：\(thinkingLabel)", accessibility: "思考深度：\(thinkingLabel)")
-        }
+        ComposerSettingsStrip(model: modelLabel, mode: modeLabel, thinking: thinkingLabel,
+            onModel: { open(.model) }, onMode: { open(.mode) }, onThinking: { open(.thinking) })
+        .disabled(store.loading || store.loadError != nil || store.providerSwitching || store.directoryChanging)
         .sheet(item: $picker, onDismiss: {
             if proposedMode == nil { focus.resume("settings") }
             else { confirmMode = true }
@@ -202,10 +263,8 @@ struct SessionComposerSettings: View {
             Text(modes.first { $0.0 == proposedMode }?.1 ?? "")
         }
     }
-    private func setting(_ value: Setting, label: String, accessibility: String) -> some View {
-        Button { focus.borrow("settings", open: true); picker = value } label: { ComposerSettingLabel(title: label) }
-            .buttonStyle(.plain).accessibilityLabel(accessibility).accessibilityHint("打开完整选项")
-            .disabled(store.loading || store.loadError != nil || store.providerSwitching || store.directoryChanging)
+    private func open(_ value: Setting) {
+        focus.borrow("settings", open: true); picker = value
     }
     @ViewBuilder private func settingsSheet(_ selection: Setting) -> some View {
         if selection == .thinking && (options == nil || options!.count <= 1) {

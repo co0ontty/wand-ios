@@ -368,10 +368,6 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertEqual(groups.count, 2); XCTAssertEqual(groups.map(\.toolLabel), ["Pi", "Wand Agent"])
         XCTAssertNotEqual(groups[0].id, groups[1].id)
     }
-    func testGeminiCandidateAndBoardUseTheSharedProviderCatalog() {
-        var candidate = ContactCandidate(); candidate.provider = "gemini"; candidate.thinkingEffort = "gemini:high"
-        XCTAssertNil(contactCandidateError([candidate])); XCTAssertTrue(wandBoardProviders.contains("gemini"))
-    }
     func testPaletteMatchesCurrentAndroidInBothAppearances() {
         let rows: [(Color, UInt32, UInt32)] = [(Theme.brand, 0x0076D6, 0x63B4FF), (Theme.background, 0xF2F3F7, 0x101114), (Theme.surface, 0xFFFFFF, 0x1C1D21), (Theme.surfaceSoft, 0xEDEEF2, 0x27282D), (Theme.textPrimary, 0x1C1D21, 0xF4F5F7), (Theme.textSecondary, 0x60636B, 0xC4C7CF)]
         for (color, light, dark) in rows {

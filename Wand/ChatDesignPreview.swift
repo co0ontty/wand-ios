@@ -196,16 +196,16 @@ struct ChatDesignPreview: View {
                 }, voice: {
                     Image(systemName: recording ? "waveform" : "mic").frame(width: 48, height: 48).modifier(fixtureGesture).accessibilityLabel("语音输入")
                 }, send: {
-                        NativeComposerActionButton(phase: .idle, turnRunning: running, hasDraft: !running, canSubmit: !failed && !composing && !recording,
-                            message: nil, onSend: { text = ""; files = []; composerFocus.collapse(); acknowledged = true; running = true; activity = .writing },
+                        NativeComposerActions(phase: .idle, turnRunning: running, hasDraft: !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty,
+                            canSubmit: !failed && !composing && !recording,
+                            message: nil, sendLabel: running ? "继续发送（排队）" : "发送消息",
+                            onSend: { text = ""; files = []; composerFocus.collapse(); acknowledged = true; running = true; activity = .writing },
                             onStop: { running = false; activity = .idle; thinking = false })
                 }, settings: {
-                    HStack(spacing: 2) {
-                        Button { openSetting("模型") } label: { ComposerSettingLabel(title: selectedModel) }.accessibilityLabel("模型：" + selectedModel)
-                        Button { openSetting("权限模式") } label: { ComposerSettingLabel(title: selectedMode) }.accessibilityLabel("权限模式：" + selectedMode)
-                        Button { openSetting("思考深度") } label: { ComposerSettingLabel(title: "思考：" + selectedThinking) }.accessibilityLabel("思考深度：" + selectedThinking)
-                    }.buttonStyle(.plain)
-                }, primaryVisible: running || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty)
+                    ComposerSettingsStrip(model: selectedModel, mode: selectedMode, thinking: selectedThinking,
+                        onModel: { openSetting("模型") }, onMode: { openSetting("权限模式") }, onThinking: { openSetting("思考深度") })
+                }, actionCount: ComposerActionPresentation(phase: .idle, turnRunning: running,
+                    hasDraft: !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty).slotCount)
         }
         .onChange(of: keyboard.isVisible) { old, visible in if old && !visible { composerFocus.keyboardHidden() } }
     }

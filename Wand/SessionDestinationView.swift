@@ -111,7 +111,6 @@ private struct PtySessionView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     bottomBar(
-                        safeBottom: root.safeAreaInsets.bottom,
                         maximumInputHeight: min(160, max(60, (root.size.height - keyboard.lift) * 0.35))
                     )
                 }
@@ -372,7 +371,7 @@ private struct PtySessionView: View {
         .accessibilityLabel(accessibilityLabel)
     }
 
-    private func bottomBar(safeBottom: CGFloat, maximumInputHeight: CGFloat) -> some View {
+    private func bottomBar(maximumInputHeight: CGFloat) -> some View {
         VStack(spacing: 0) {
             if voicePressed || speech.isProcessing {
                 voiceBubble
@@ -385,7 +384,8 @@ private struct PtySessionView: View {
             }
             terminalShortcutBar
         }
-        .padding(.bottom, safeBottom + keyboard.lift)
+        // GeometryReader already excludes the bottom safe area; lift only above it.
+        .padding(.bottom, keyboard.lift)
         .animation(WandMotion.scroll, value: keyboard.lift)
         .animation(WandMotion.scroll, value: inputDrawerOpen)
     }

@@ -523,6 +523,8 @@ private struct ConversationComposerView: View {
     private var run: ContactRunDetail? { detail.runDetails.first { $0.run.id == target?.runId } }
     private var execution: ChatStore? { (run?.run.chatSessionId ?? detail.communicationSessionId).map { store.executionStore($0) } }
     private var running: Bool { target != nil ? ["running", "awaiting_approval", "waiting_user"].contains(run?.run.status ?? "") : execution?.isResponding == true }
+    private var hasComposerDraft: Bool { !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.attachments.isEmpty }
+    private var composerPhase: ComposerSendPhase { action.phase == .idle ? draft.sendPhase : action.phase }
     var body: some View {
         VStack(spacing: 6) {
             if target != nil || dispatch {
@@ -557,26 +559,24 @@ private struct ConversationComposerView: View {
                     Image(systemName: voice.holding ? "waveform" : "mic").frame(width: 48, height: 48)
                         .modifier(voice.gesture(draft: draft, focus: focus)).accessibilityLabel("语音输入")
                 }, send: {
-                        NativeComposerActionButton(phase: running && !dispatch ? .idle : action.phase == .idle ? draft.sendPhase : action.phase,
-                            turnRunning: running && !dispatch, hasDraft: !(running && !dispatch),
+                        NativeComposerActions(phase: composerPhase,
+                            turnRunning: running && !dispatch, hasDraft: hasComposerDraft,
                             canSubmit: !voice.holding && !voice.speech.isProcessing && composerDraftIsSendable(draft.text, hasAttachments: !attachments.attachments.isEmpty, isComposing: composing)
-                                && !attachments.isUploading && !store.hasUnknown(id, target: target) && detail.dissolvedAt == nil && !detail.deleting,
-                            message: action.message ?? draft.sendFeedback, onSend: send, onStop: { if action.canSubmit { stopConfirm = true } })
-                            .disabled(running && !dispatch && !action.canSubmit)
+                                && !attachments.isUploading && !store.hasUnknown(id, target: target) && action.canSubmit && detail.dissolvedAt == nil && !detail.deleting,
+                            canStop: action.canSubmit,
+                            message: action.message ?? draft.sendFeedback, sendLabel: dispatch ? "确认派发任务" : running ? "继续发送" : "发送消息",
+                            onSend: send, onStop: { if action.canSubmit { stopConfirm = true } })
                 }, settings: {
                     if let execution, !dispatch, target != nil || detail.kind == "group" { SessionComposerSettings(store: execution, focus: focus) }
                     else {
                         Button { focus.borrow("settings", open: true); settingsInfo = true } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                if let candidate = store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) })?.agents.first {
-                                    Text("员工默认配置 · \(candidate.model == "default" ? "跟随服务端模型" : candidate.model)").lineLimit(1)
-                                    Text("权限：\(composerModeName(candidate.mode)) · 思考：\(composerThinkingName(candidate.thinkingEffort)) · 后续新工作").lineLimit(2)
-                                } else { Text("员工默认配置不可用：未取得首选候选") }
-                            }.font(.caption).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            ComposerSettingLabel(title: store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) })?.agents.first.map {
+                                $0.model == "default" ? "默认模型" : $0.model
+                            } ?? "员工配置")
                         }.buttonStyle(.plain).accessibilityHint("查看真实配置与生效范围")
                     }
-                }, primaryVisible: running && !dispatch || !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                    !attachments.attachments.isEmpty || draft.sendPhase != .idle || action.phase != .idle)
+                }, actionCount: ComposerActionPresentation(phase: composerPhase,
+                    turnRunning: running && !dispatch, hasDraft: hasComposerDraft).slotCount)
         }
         .onAppear { if !visible { draft.acquire(draftConsumer) }; visible = true; attachments.setToastHandler { notice = $0 } }
         .onDisappear { menu = false; voice.finish(cancelled: true); if visible { draft.release(draftConsumer) }; visible = false }

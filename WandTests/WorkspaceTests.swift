@@ -346,6 +346,7 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/workspace-tasks/task-1/archive"))
         XCTAssertTrue(changesTaskHierarchy(method: "PATCH", path: "/api/workspace-tasks/task-1"))
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/tasks"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/tasks/organize-by-title"))
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/workspaces/ws-1/tasks"))
         XCTAssertTrue(changesTaskHierarchy(method: "DELETE", path: "/api/workspaces/ws-1"))
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/wand-tasks/task-1"))

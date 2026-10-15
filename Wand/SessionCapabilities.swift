@@ -7,7 +7,6 @@ import Network
 enum WandAgentTool: String, CaseIterable, Identifiable {
     case claude, codex, opencode, grok, qoder, pi
     case wandAgent = "wand-agent"
-    case gemini
     var id: String { rawValue }
     var provider: WandProvider { self == .wandAgent ? .pi : WandProvider(normalizing: rawValue) }
     var engine: String? { self == .wandAgent ? "sdk" : self == .pi ? "cli" : nil }

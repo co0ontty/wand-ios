@@ -28,7 +28,6 @@ enum WorkspaceSessionTarget: String, CaseIterable, Codable, Identifiable {
     case grok
     case qoder
     case pi
-    case gemini
     case wandAgent = "wand-agent"
     case shell
 
@@ -51,7 +50,6 @@ enum WorkspaceSessionTarget: String, CaseIterable, Codable, Identifiable {
         case .qoder: return "Qoder CLI"
         case .pi: return "Pi CLI"
         case .wandAgent: return "Wand 进程内 Agent"
-        case .gemini: return "Gemini CLI"
         case .shell: return "不启动 Agent 的交互式 Shell"
         }
     }
@@ -744,14 +742,14 @@ enum TaskListPresentation {
 
     /// 占位标题（空 / 会话 / 裸 CLI 名 / 「CLI N」）不是会话标题。
     private static let placeholderSessionTitles: Set<String> = [
-        "会话", "wand 会话", "claude", "codex", "opencode", "grok", "qoder", "pi", "gemini", "终端",
+        "会话", "wand 会话", "claude", "codex", "opencode", "grok", "qoder", "pi", "终端",
     ]
 
     static func isPlaceholderSessionTitle(_ title: String) -> Bool {
         let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalized.isEmpty || placeholderSessionTitles.contains(normalized) { return true }
         return normalized.range(
-            of: #"^(claude|codex|opencode|grok|qoder|pi|gemini|终端)\s+\d+$"#,
+            of: #"^(claude|codex|opencode|grok|qoder|pi|终端)\s+\d+$"#,
             options: .regularExpression
         ) != nil
     }
@@ -916,6 +914,16 @@ enum SessionCompletion {
 }
 
 /// `POST /api/sessions/batch-archive` 的响应：`failed` 缺省即全部成功。
+struct TitleOrganizeResponse: Decodable {
+    let movedSessions: [TitleOrganizeMove]?
+    let categorizedTasks: [TitleOrganizeParent]?
+    let refused: [TitleOrganizeRefusal]?
+}
+
+struct TitleOrganizeMove: Decodable { let sessionId: String?; let taskId: String? }
+struct TitleOrganizeParent: Decodable { let taskId: String?; let parentTaskId: String? }
+struct TitleOrganizeRefusal: Decodable { let id: String?; let reason: String? }
+
 struct SessionBatchArchiveResponse: Decodable {
     let archived: Int?
     let failed: [String]?

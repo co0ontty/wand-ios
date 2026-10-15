@@ -110,7 +110,7 @@ func contactCandidateError(_ agents: [ContactCandidate]) -> String? {
     if agents.contains(where: { $0.kind != "structured" || WandProvider(rawValue: $0.provider) == nil }) { return "员工只能使用已支持的结构化CLI。" }
     if agents.contains(where: { $0.model.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count > 128 || !["managed", "full-access", "default"].contains($0.mode) }) { return "候选模型过长或执行模式无效。" }
     if agents.contains(where: { !["off", "standard", "deep", "max"].contains($0.thinkingEffort) &&
-        $0.thinkingEffort.range(of: #"^(?:claude|codex|opencode|grok|qoder|pi|gemini):[a-z0-9][a-z0-9_-]{0,31}$"#, options: .regularExpression) == nil }) { return "思考深度无效。" }
+        $0.thinkingEffort.range(of: #"^(?:claude|codex|opencode|grok|qoder|pi):[a-z0-9][a-z0-9_-]{0,31}$"#, options: .regularExpression) == nil }) { return "思考深度无效。" }
     if Set(agents.map(\.identity)).count != agents.count { return "执行候选重复，请调整模型或深度。" }
     return nil
 }

@@ -267,6 +267,45 @@ final class WandProtocolTests: XCTestCase {
     }
 
     @MainActor
+    func testFocusComposerOnlyReservesVisibleActionsAndWrapsNarrowDualActions() {
+        for expanded in [false, true] {
+            for actionCount in [0, 1, 2] {
+            let surface = FocusComposerSurface(expanded: expanded, hasDraft: true, onFocus: {},
+                editor: { Text("继续补充要求").frame(height: 34) },
+                add: { Color.clear.frame(width: 48, height: 48) },
+                voice: { Color.clear.frame(width: 48, height: 48) },
+                send: { Color.clear.frame(width: CGFloat(actionCount) * 48, height: 48) },
+                settings: { ComposerSettingsStrip(model: "provider/very-long-model-name", mode: "全权限", thinking: "超高",
+                    onModel: {}, onMode: {}, onThinking: {}) }, actionCount: actionCount)
+            let host = UIHostingController(rootView: surface)
+            for width: CGFloat in [320, 390, 768] {
+                let fitted = host.sizeThatFits(in: CGSize(width: width, height: 600))
+                XCTAssertLessThanOrEqual(fitted.width, width + 1)
+                let narrowActions = width == 320 && actionCount > 0
+                XCTAssertEqual(fitted.height, expanded ? (narrowActions ? 146 : 98) : 54, accuracy: 1,
+                    "Only a narrow toolbar adds a settings row; no remaining-screen spacer")
+            }
+            }
+        }
+    }
+
+    func testComposerActionsKeepSendAndStopIndependentDuringDraftsAndReceipts() {
+        for running in [false, true] {
+            for hasDraft in [false, true] {
+                let actions = ComposerActionPresentation(phase: .idle, turnRunning: running, hasDraft: hasDraft)
+                XCTAssertEqual(actions.send, hasDraft)
+                XCTAssertEqual(actions.stop, running)
+                XCTAssertEqual(actions.slotCount, (running ? 1 : 0) + (hasDraft ? 1 : 0))
+                for phase: ComposerSendPhase in [.sending, .sent, .failed] {
+                    let receipt = ComposerActionPresentation(phase: phase, turnRunning: running, hasDraft: hasDraft)
+                    XCTAssertTrue(receipt.send)
+                    XCTAssertEqual(receipt.stop, running)
+                }
+            }
+        }
+    }
+
+    @MainActor
     func testComposerHeightDoesNotConsumeRemainingScreenSpace() {
         for expanded in [false, true] {
             let shell = NativeComposerShell(

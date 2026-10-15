@@ -40,7 +40,7 @@ struct BrandLogo: View {
         case .claude:
             BrandLogoShape(provider: provider)
                 .fill(BrandLogoPalette.claude)
-        case .codex, .grok, .pi, .gemini:
+        case .codex, .grok, .pi:
             BrandLogoShape(provider: provider)
                 .fill(monoFill)
         }
@@ -94,7 +94,6 @@ struct BrandLogoShape: Shape {
         case .grok: return Self.grokPath(in: rect)
         case .qoder: return Path()
         case .pi: return Self.piPath(in: rect)
-        case .gemini: return Self.geminiPath(in: rect)
         }
     }
 
@@ -293,33 +292,6 @@ struct BrandLogoShape: Shape {
         return p
     }
 
-/// Gemini 四角星芒。几何直接取自 Web 的 `GEMINI_LOGO_PATH`
-    /// （`src/web-ui/provider-identity.ts`），24x24 viewBox，两端形状一致。
-    /// SVG 里的 3 段 `a` 圆弧按 SVG 规范换算成中心圆弧参数后，用三次贝塞尔逼近
-    /// （21.5° 小弧，中点误差 < 1e-14），避免依赖 SwiftUI 圆弧的旋向约定。
-    private static func geminiPath(in rect: CGRect) -> Path {
-        let w = rect.width / 24.0
-        let h = rect.height / 24.0
-        var p = Path()
-        p.move(to: CGPoint(x: 11.04 * w, y: 19.32 * h))
-        p.addQuadCurve(to: CGPoint(x: 12 * w, y: 24 * h), control: CGPoint(x: 12 * w, y: 21.51 * h))
-        p.addQuadCurve(to: CGPoint(x: 12.93 * w, y: 19.32 * h), control: CGPoint(x: 12 * w, y: 21.51 * h))
-        p.addQuadCurve(to: CGPoint(x: 15.51 * w, y: 15.51 * h), control: CGPoint(x: 13.89 * w, y: 17.13 * h))
-        p.addQuadCurve(to: CGPoint(x: 19.32 * w, y: 12.96 * h), control: CGPoint(x: 17.13 * w, y: 13.89 * h))
-        p.addQuadCurve(to: CGPoint(x: 24 * w, y: 12 * h), control: CGPoint(x: 21.51 * w, y: 12 * h))
-        p.addQuadCurve(to: CGPoint(x: 19.32 * w, y: 11.07 * h), control: CGPoint(x: 21.51 * w, y: 12 * h))
-        p.addCurve(to: CGPoint(x: 15.51 * w, y: 8.49 * h), control1: CGPoint(x: 17.899 * w, y: 10.4573 * h), control2: CGPoint(x: 16.6064 * w, y: 9.582 * h))
-        p.addCurve(to: CGPoint(x: 12.93 * w, y: 4.68 * h), control1: CGPoint(x: 14.418 * w, y: 7.3936 * h), control2: CGPoint(x: 13.5427 * w, y: 6.101 * h))
-        p.addQuadCurve(to: CGPoint(x: 12 * w, y: 0 * h), control: CGPoint(x: 12 * w, y: 2.49 * h))
-        p.addQuadCurve(to: CGPoint(x: 11.04 * w, y: 4.68 * h), control: CGPoint(x: 12 * w, y: 2.49 * h))
-        p.addQuadCurve(to: CGPoint(x: 8.49 * w, y: 8.49 * h), control: CGPoint(x: 10.11 * w, y: 6.87 * h))
-        p.addCurve(to: CGPoint(x: 4.68 * w, y: 11.07 * h), control1: CGPoint(x: 7.3936 * w, y: 9.582 * h), control2: CGPoint(x: 6.101 * w, y: 10.4573 * h))
-        p.addQuadCurve(to: CGPoint(x: 0 * w, y: 12 * h), control: CGPoint(x: 2.49 * w, y: 12 * h))
-        p.addQuadCurve(to: CGPoint(x: 4.68 * w, y: 12.96 * h), control: CGPoint(x: 2.49 * w, y: 12 * h))
-        p.addQuadCurve(to: CGPoint(x: 8.49 * w, y: 15.51 * h), control: CGPoint(x: 6.87 * w, y: 13.89 * h))
-        p.addQuadCurve(to: CGPoint(x: 11.04 * w, y: 19.32 * h), control: CGPoint(x: 10.11 * w, y: 17.13 * h))
-        return p
-    }
 
     /// Codex（OpenAI 六角结）。
     private static func codexPath(in rect: CGRect) -> Path {

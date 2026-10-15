@@ -157,7 +157,7 @@ struct ChatView: View {
     }
 
     private var chatLayout: some View {
-        GeometryReader { root in
+        GeometryReader { _ in
             ZStack(alignment: .bottom) {
                 if showsNavigationChrome {
                     WandAmbientBackground()
@@ -170,8 +170,8 @@ struct ChatView: View {
                         .onTapGesture { composerFocus.collapse() }
                         .overlay(alignment: .bottom) { toastView }
 
+                    // The parent already ends at the bottom safe-area boundary.
                     bottomBar
-                        .padding(.bottom, root.safeAreaInsets.bottom)
                         .animation(WandMotion.scroll, value: keyboard.lift)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1367,8 +1367,8 @@ struct ChatView: View {
                 onFocus: focusComposer, editor: { composerInputContent }, add: { composerActionsMenu },
                 voice: { composerVoiceButton }, send: { sendButton },
                 settings: { SessionComposerSettings(store: store, focus: composerFocus) },
-                primaryVisible: store.isResponding || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                    !attachments.attachments.isEmpty || store.inputSending)
+                actionCount: ComposerActionPresentation(phase: store.inputSending ? .sending : .idle,
+                    turnRunning: store.isResponding, hasDraft: hasComposerDraft).slotCount)
         }
         .onChange(of: keyboard.isVisible) { old, visible in
             if old && !visible { composerFocus.keyboardHidden() }
@@ -1460,14 +1460,18 @@ struct ChatView: View {
             .accessibilityValue(voicePressed ? "正在录音" : "长按录音")
     }
 
+    private var hasComposerDraft: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.attachments.isEmpty
+    }
     private var sendButton: some View {
-        NativeComposerActionButton(
-            phase: store.isResponding ? .idle : store.inputSending ? .sending : .idle,
+        NativeComposerActions(
+            phase: store.inputSending ? .sending : .idle,
             turnRunning: store.isResponding,
-            hasDraft: !store.isResponding,
+            hasDraft: hasComposerDraft,
             canSubmit: canSend,
             // The expanded editor owns the full failure message; keep the capsule icon-only.
             message: nil,
+            sendLabel: store.isResponding ? "继续发送（排队）" : "发送消息",
             onSend: sendDraft,
             onStop: { showStopConfirm = true }
         )
@@ -1598,7 +1602,9 @@ struct ChatView: View {
         // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
         // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
         // 组字未确认时不能发，否则会把拼音半成品送出去，或把候选确认键当成发送。
-        !voicePressed && !speech.isRecording && !speech.isProcessing && !store.inputSending && !store.providerSwitching && !composerDraft.isOptimizing && !attachments.isUploading && composerDraftIsSendable(
+        !voicePressed && !speech.isRecording && !speech.isProcessing && !store.inputSending &&
+        !store.providerSwitching && !store.directoryChanging && !composerDraft.isOptimizing && !attachments.isUploading &&
+        !composerDraft.isUnconfirmed(composerDraft.submission().prompt) && composerDraftIsSendable(
             draft,
             hasAttachments: !attachments.attachments.isEmpty,
             isComposing: composerIsComposing

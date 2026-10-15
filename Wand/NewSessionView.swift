@@ -88,7 +88,6 @@ struct NewSessionView: View {
     @State private var grokModels: [ModelInfo] = []
     @State private var qoderModels: [ModelInfo] = []
     @State private var piModels: [ModelInfo] = []
-    @State private var geminiModels: [ModelInfo] = []
     @State private var providerThinkingEfforts: [String: [ReasoningEffortInfo]] = [:]
     @State private var serverDefaultModels = ProviderDefaultModels(
         claude: nil,
@@ -215,7 +214,6 @@ struct NewSessionView: View {
         case .grok: grokModels
         case .qoder: qoderModels
         case .pi: piModels
-        case .gemini: geminiModels
         case .claude: availableModels
         }
     }
@@ -522,7 +520,6 @@ struct NewSessionView: View {
         grokModels = []
         qoderModels = []
         piModels = []
-        geminiModels = []
         providerThinkingEfforts = [:]
         recentPaths = []
 
@@ -545,8 +542,7 @@ struct NewSessionView: View {
                 opencode: config.defaultModelId(for: WandProvider.opencode.rawValue),
                 grok: config.defaultModelId(for: WandProvider.grok.rawValue),
                 qoder: config.defaultModelId(for: WandProvider.qoder.rawValue),
-                pi: config.defaultModelId(for: WandProvider.pi.rawValue),
-                gemini: config.defaultModelId(for: WandProvider.gemini.rawValue)
+                pi: config.defaultModelId(for: WandProvider.pi.rawValue)
             )
             selectedModel = ""
             thinkingEffort = config.resolvedDefaultThinkingEffort
@@ -742,7 +738,6 @@ struct NewSessionView: View {
         case .grok: models = grokModels
         case .qoder: models = qoderModels
         case .pi: models = piModels
-        case .gemini: models = geminiModels
         case .claude: models = availableModels
         }
         guard !models.isEmpty else { return normalized }
@@ -756,7 +751,6 @@ struct NewSessionView: View {
         case .grok: serverDefaultModels.grok ?? ""
         case .qoder: serverDefaultModels.qoder ?? ""
         case .pi: serverDefaultModels.pi ?? ""
-        case .gemini: serverDefaultModels.gemini ?? ""
         case .claude: serverDefaultModels.claude ?? ""
         }
     }
@@ -796,7 +790,6 @@ struct NewSessionView: View {
         grokModels = response.models(for: WandProvider.grok.rawValue)
         qoderModels = response.models(for: WandProvider.qoder.rawValue)
         piModels = response.models(for: WandProvider.pi.rawValue)
-        geminiModels = response.models(for: WandProvider.gemini.rawValue)
         providerThinkingEfforts = response.thinkingEfforts
         serverDefaultModels = ProviderDefaultModels(
             claude: response.defaultModelId(for: WandProvider.claude.rawValue),
@@ -804,8 +797,7 @@ struct NewSessionView: View {
             opencode: response.defaultModelId(for: WandProvider.opencode.rawValue),
             grok: response.defaultModelId(for: WandProvider.grok.rawValue),
             qoder: response.defaultModelId(for: WandProvider.qoder.rawValue),
-            pi: response.defaultModelId(for: WandProvider.pi.rawValue),
-            gemini: response.defaultModelId(for: WandProvider.gemini.rawValue)
+            pi: response.defaultModelId(for: WandProvider.pi.rawValue)
         )
         didLoadModels = true
 
@@ -998,8 +990,6 @@ struct NewSessionView: View {
                 return "Qoder stream-json 结构化聊天界面，支持续聊、思考过程和工具调用展示。"
             case .pi:
                 return "Pi JSON 结构化聊天界面，支持续聊、思考过程和工具调用展示。"
-            case .gemini:
-                return "Gemini stream-json 结构化聊天界面，支持多轮续聊和工具调用展示。"
             case .claude:
                 return "结构化聊天界面，支持多轮对话、流式输出和工具调用展示。"
             }
@@ -1015,8 +1005,6 @@ struct NewSessionView: View {
             return "Qoder CLI TUI 的原始 PTY 终端会话。"
         case .pi:
             return "Pi TUI 的原始 PTY 终端会话。"
-        case .gemini:
-            return "Gemini CLI TUI 的原始 PTY 终端会话。"
         case .claude:
             return "原始 PTY 终端会话，支持持续交互、终端视图和权限流。"
         }
@@ -1048,19 +1036,6 @@ struct NewSessionView: View {
                 return "Pi 将自动批准工具调用；支持 TUI 与 JSON 结构化会话。"
             }
             return "Pi 使用自身权限确认；支持 TUI 与 JSON 结构化会话。"
-        case .gemini:
-            // Gemini CLI 只有 --approval-mode yolo/auto_edit/default，
-            // 没有对应 .native 的开关；如实说明它退化成什么，别给"原生输出"的错觉。
-            switch mode {
-            case "full-access", "managed":
-                return "Gemini 以 yolo 运行，会自动批准工具调用；支持 TUI 与 stream-json 结构化会话。"
-            case "auto-edit":
-                return "Gemini 以 auto_edit 运行，自动确认文件修改，其他操作保持 CLI 的权限流程。"
-            case "native":
-                return "Gemini 没有独立的原生输出开关，这一档与「标准」等价（--approval-mode default）。"
-            default:
-                return "Gemini 使用自身权限确认；支持 TUI 与 stream-json 结构化会话。"
-            }
         case .claude:
             break
         }
@@ -1167,7 +1142,6 @@ struct NewSessionView: View {
         var grok = serverDefaultModels.grok
         var qoder = serverDefaultModels.qoder
         var pi = serverDefaultModels.pi
-        var gemini = serverDefaultModels.gemini
         for (provider, model) in values.modelUpdates {
             switch WandProvider(normalizing: provider) {
             case .claude: claude = model
@@ -1176,7 +1150,6 @@ struct NewSessionView: View {
             case .grok: grok = model
             case .qoder: qoder = model
             case .pi: pi = model
-            case .gemini: gemini = model
             }
             if pendingModelDefaults[provider] == model {
                 pendingModelDefaults.removeValue(forKey: provider)
@@ -1188,8 +1161,7 @@ struct NewSessionView: View {
             opencode: opencode,
             grok: grok,
             qoder: qoder,
-            pi: pi,
-            gemini: gemini
+            pi: pi
         )
     }
 

@@ -59,7 +59,7 @@ func changesTaskHierarchy(method: String, path: String) -> Bool {
     if method == "GET" { return false }
     let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
     if route.hasSuffix("/layout") { return false }
-    if route == "/api/tasks" || route.hasPrefix("/api/workspace-tasks/") { return true }
+    if route == "/api/tasks" || route.hasPrefix("/api/tasks/") || route.hasPrefix("/api/workspace-tasks/") { return true }
     if route == "/api/workspaces" || route.hasPrefix("/api/workspaces/") { return true }
     if route == "/api/wand-tasks" || route.hasPrefix("/api/wand-tasks/") { return true }
     if route == "/api/commands" || route == "/api/structured-sessions" { return true }
@@ -241,6 +241,17 @@ extension WandAPI {
             WorkspaceTask.self,
             method: "POST",
             path: "/api/workspace-tasks/\(id)/archive"
+        )
+    }
+
+    /// 按标题归类所选任务，并处理这些任务下的会话归属。不确定的不移动。
+    func organizeTasksByTitle(taskIds: [String], sessionIds: [String]) async throws -> TitleOrganizeResponse {
+        try await request(
+            TitleOrganizeResponse.self,
+            method: "POST",
+            path: "/api/tasks/organize-by-title",
+            body: ["taskIds": taskIds, "sessionIds": sessionIds],
+            timeout: 90
         )
     }
 
