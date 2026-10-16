@@ -481,8 +481,8 @@ final class WorkspaceStore: ObservableObject {
             await syncCurrentTaskMetadata()
         } catch {
             guard generation == taskGroupsGeneration, !Task.isCancelled else { return }
-            // 保留旧数据，仅记错误供 UI 提示；老服务端无该接口时静默降级。
-            if taskGroups.isEmpty { taskGroupsError = error.localizedDescription }
+            // 保留旧数据并显示错误；绝不能把读取失败伪装成空目录。
+            taskGroupsError = error.localizedDescription
         }
     }
 

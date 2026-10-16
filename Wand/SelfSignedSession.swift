@@ -7,7 +7,7 @@ import Foundation
 /// ports, so two Wand servers on `host:3000` and `host:4000` would otherwise share login
 /// state. REST, WebSocket, auth, and resource callers must obtain the instance for their
 /// base URL through `forEndpoint(_:)`.
-final class SelfSignedSession: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+final class SelfSignedSession: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private final class EndpointPool: @unchecked Sendable {
         private let lock = NSLock()
         private var entries: [String: SelfSignedSession] = [:]
@@ -75,6 +75,8 @@ final class SelfSignedSession: NSObject, URLSessionTaskDelegate, @unchecked Send
 
     private let lifecycleLock = NSLock()
     private var retired = false
+    private let feedbackLock = NSLock()
+    private var feedbackCompletions: [Int: @Sendable () -> Void] = [:]
     /// Keeps authenticated resource caches scoped to this exact credential lifetime.
     let resourceCacheNamespace = UUID().uuidString
 
@@ -131,6 +133,33 @@ final class SelfSignedSession: NSObject, URLSessionTaskDelegate, @unchecked Send
         session.invalidateAndCancel()
     }
 
+    /// Delegate-only task: the completion-handler dataTask variant buffers the whole response.
+    /// Feedback needs only response headers and must never collect a response body.
+    func feedbackTask(with request: URLRequest, completion: @escaping @Sendable () -> Void) -> URLSessionDataTask? {
+        guard !isRetired else { completion(); return nil }
+        feedbackLock.lock()
+        let task = session.dataTask(with: request)
+        feedbackCompletions[task.taskIdentifier] = completion
+        feedbackLock.unlock()
+        return task
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
+    ) {
+        completionHandler(ClientFeedbackReport.isFeedbackRequest(dataTask.originalRequest?.url) ? .cancel : .allow)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        feedbackLock.lock()
+        let completion = feedbackCompletions.removeValue(forKey: task.taskIdentifier)
+        feedbackLock.unlock()
+        completion?()
+    }
+
     // MARK: - URLSessionDelegate
 
     // Wand is a LAN/self-hosted service and its generated HTTPS certificate is self-signed.
@@ -157,7 +186,8 @@ final class SelfSignedSession: NSObject, URLSessionTaskDelegate, @unchecked Send
         newRequest request: URLRequest,
         completionHandler: @escaping @Sendable (URLRequest?) -> Void
     ) {
-        guard let target = request.url,
+        guard ClientFeedbackReport.permitsRedirect(originalURL: task.originalRequest?.url),
+              let target = request.url,
               endpointScope?.contains(target) == true else {
             completionHandler(nil)
             return

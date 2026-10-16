@@ -121,11 +121,14 @@ struct WorkspaceListView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var collapsedArchivedTaskIds = Set<String>()
     @State private var renameDirectoryBusy = false
+    @State private var conversationOrganizationTarget: TaskDirectoryGroup?
+    @State private var conversationOrganizationControllers: [String: ConversationOrganizationController] = [:]
 
     @State private var reviewTarget: Workspace?
     @State private var moveSessionTarget: WorkspaceSessionSummary?
     @State private var toastMessage: String?
     @State private var searchQuery = ""
+    private var searchingWorkspaces: Bool { !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     @FocusState private var searchFocused: Bool
     @State private var attentionOnly = false
     @AppStorage("wand.homeFold.recent") private var recentFoldRaw = HomeFoldMode.expand.rawValue
@@ -206,10 +209,14 @@ struct WorkspaceListView: View {
                 requestNewTask.wrappedValue = false
             }
             .onChange(of: isSelecting) { _, selecting in
+                conversationOrganizationTarget = nil
                 if !selecting { clearManagedSelection() }
             }
+            .onChange(of: searchQuery) { _, _ in conversationOrganizationTarget = nil }
+            .onChange(of: attentionOnly) { _, _ in conversationOrganizationTarget = nil }
             .onChange(of: recentFoldRaw) { _, _ in temporaryExpandedRecent.removeAll() }
             .onChange(of: workspaceFoldRaw) { _, _ in
+                conversationOrganizationTarget = nil
                 temporaryExpandedWorkspaces.removeAll()
                 temporaryCollapsedTasks.removeAll()
                 temporaryCollapsedLoose.removeAll()
@@ -524,6 +531,7 @@ struct WorkspaceListView: View {
     private func presentAfterSwipe(_ action: @escaping () -> Void) {
         renameTarget = nil
         renameDirectoryTarget = nil
+        conversationOrganizationTarget = nil
         pendingConfirm = nil
         confirmError = nil
         DispatchQueue.main.async(execute: action)
@@ -531,6 +539,27 @@ struct WorkspaceListView: View {
 
     private func presentConfirm(_ confirm: TaskListConfirm) {
         presentAfterSwipe { pendingConfirm = confirm }
+    }
+
+    private func presentConversationOrganization(_ group: TaskDirectoryGroup) {
+        guard let target = group.conversationOrganizationTarget else {
+            showToast("此目录没有可用的工作区范围")
+            return
+        }
+        if conversationOrganizationControllers[group.id]?.target != target {
+            conversationOrganizationControllers[group.id]?.stopPolling()
+            conversationOrganizationControllers[group.id] = ConversationOrganizationController(
+                api: api, target: target, onFinished: { [store] in
+                    await store.loadTaskGroups(force: true)
+                    await store.loadWorkspaceIndex()
+                }
+            )
+        }
+        if conversationOrganizationTarget?.id == group.id {
+            conversationOrganizationTarget = nil
+        } else {
+            presentAfterSwipe { conversationOrganizationTarget = group }
+        }
     }
 
     private var renameDirectoryPresented: Binding<Bool> {
@@ -613,7 +642,7 @@ struct WorkspaceListView: View {
             }
             let visible = HomePresentation.visibleGroups(
                 TaskListPresentation.orderedDirectoryGroups(store.taskGroups),
-                query: searchQuery, attentionOnly: attentionOnly)
+                query: searchQuery, attentionOnly: attentionOnly, employees: employees)
             if hidesHomeChrome && isSelecting {
                 homeManageBar(visible: visible)
             }
@@ -666,7 +695,9 @@ struct WorkspaceListView: View {
             }
         }
         .listStyle(.plain)
+        .animation(reduceMotion ? nil : WandMotion.stateSwap, value: conversationOrganizationTarget?.id)
         .refreshable {
+            conversationOrganizationTarget = nil
             await store.loadTaskGroups(force: true)
             await store.loadWorkspaceIndex()
         }
@@ -678,7 +709,7 @@ struct WorkspaceListView: View {
 
     private var modalVisible: Bool {
         newTaskSheetPresented || reviewTarget != nil || moveSessionTarget != nil
-            || renameTarget != nil || renameDirectoryTarget != nil || pendingConfirm != nil
+            || renameTarget != nil || renameDirectoryTarget != nil || conversationOrganizationTarget != nil || pendingConfirm != nil
     }
 
     private var creationBusy: Bool { workspaceCreateBusy || terminalCreateBusy || terminalCreateUnconfirmed }
@@ -722,13 +753,13 @@ struct WorkspaceListView: View {
     }
 
     @ViewBuilder private func recentConversationRows(_ visible: [TaskDirectoryGroup]) -> some View {
-        let groups = HomePresentation.recentGroups(store.taskGroups, employees: employees, teams: teams)
-        let fold = HomeFoldMode(rawValue: recentFoldRaw) ?? .expand
+        let groups = HomePresentation.recentGroups(store.taskGroups, employees: employees, teams: teams, limit: .max)
+        let fold: HomeFoldMode = searchingWorkspaces ? .expand : (HomeFoldMode(rawValue: recentFoldRaw) ?? .expand)
         ForEach(groups) { group in
             let titleMatches = HomePresentation.matches(searchQuery, [group.title])
             let matching = group.conversations.filter {
-                (titleMatches || HomePresentation.matches(searchQuery, HomePresentation.sessionFields($0.session)
-                    + [$0.task?.name, $0.group.workspaceName, $0.group.workspaceCwd]))
+                (titleMatches || HomePresentation.matches(searchQuery, HomePresentation.sessionFields($0.session, employees: employees)
+                    + [group.title, $0.task?.name, $0.task?.cwd, $0.group.workspaceName, $0.group.workspaceCwd]))
                 && (!attentionOnly || HomePresentation.pulse($0.session) == .needsYou)
             }
             let groupFold = HomePresentation.recentGroupFold(
@@ -1016,13 +1047,24 @@ struct WorkspaceListView: View {
 
     @ViewBuilder
     private func taskGroupSection(_ group: TaskDirectoryGroup) -> some View {
-        let fold = HomePresentation.recentGroupFold(workspaceFold,
+        let fold = searchingWorkspaces ? .expand : HomePresentation.recentGroupFold(workspaceFold,
             temporarilyExpanded: temporaryExpandedWorkspaces.contains(group.id))
-        let expanded = isSelecting || (fold != .collapse &&
+        let expanded = searchingWorkspaces || isSelecting || (fold != .collapse &&
             (temporaryExpandedWorkspaces.contains(group.id) || !collapsedTaskGroups.contains(group.id)))
         taskGroupHeader(group, expanded: expanded)
             .listRowBackground(Theme.background)
             .listRowSeparator(.hidden)
+        if conversationOrganizationTarget?.id == group.id, let controller = conversationOrganizationControllers[group.id] {
+            ConversationOrganizationPanel(
+                group: group,
+                onClose: { conversationOrganizationTarget = nil },
+                controller: controller
+            )
+            .id("organization-" + group.id + group.workspaceCwd)
+            .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+            .listRowBackground(Theme.background)
+            .listRowSeparator(.hidden)
+        }
         if expanded {
             ForEach(TaskListPresentation.orderedTaskSummaries(group.tasks).filter {
                 fold != .running || !HomePresentation.sessions($0.sessions, fold: .running).isEmpty
@@ -1045,7 +1087,7 @@ struct WorkspaceListView: View {
 
     @ViewBuilder
     private func standaloneSessionSection(_ group: TaskDirectoryGroup, fold: HomeFoldMode) -> some View {
-        let expanded = !(temporaryExpandedWorkspaces.contains(group.id)
+        let expanded = searchingWorkspaces || !(temporaryExpandedWorkspaces.contains(group.id)
             ? temporaryCollapsedLoose.contains(group.id) : collapsedLooseGroups.contains(group.id))
         Button {
             toggleCollapsedLooseGroup(group.id)
@@ -1137,6 +1179,11 @@ struct WorkspaceListView: View {
             Button("下移工作区") { store.moveWorkspaceGroup(group.id, delta: 1) }
                 .disabled(store.taskGroups.last?.id == group.id)
             // 全局（未归属）组不参与改名，合成目录与真实工作区走各自接口；删除只留给真实工作区。
+            Button {
+                presentConversationOrganization(group)
+            } label: {
+                Label("根据会话内容自动分组", systemImage: "wand.and.stars")
+            }
             if !group.isGlobal {
                 Button {
                     renameDirectoryDraft = group.workspaceName
@@ -1227,11 +1274,11 @@ struct WorkspaceListView: View {
 
     @ViewBuilder
     private func taskRows(_ summary: WorkspaceTaskSummary, group: TaskDirectoryGroup, fold: HomeFoldMode) -> some View {
-        let expanded = (isSelecting || fold != .collapse) && TaskListPresentation.isTaskSessionsExpanded(
+        let expanded = searchingWorkspaces || ((isSelecting || fold != .collapse) && TaskListPresentation.isTaskSessionsExpanded(
             userCollapsed: taskIsCollapsed(summary.id, in: group.id),
             sessionCount: summary.listedSessionCount,
             isOnlyTask: group.tasks.count == 1
-        )
+        ))
         let workspace = workspace(for: summary, group: group)
         taskSummaryRow(summary, group: group)
             .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: 2, trailing: 12))

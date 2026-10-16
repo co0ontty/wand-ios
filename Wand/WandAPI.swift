@@ -115,6 +115,7 @@ final class WandAPI: SessionInputTransport {
             guard relogged else { throw APIError.unauthorized }
             (data, http) = try await perform(req)
         }
+        reportHTTPFailure(status: http.statusCode, data: data, path: path)
         return (data, http)
     }
 
@@ -888,6 +889,18 @@ final class WandAPI: SessionInputTransport {
     }
 
     // MARK: - 任务管理
+
+    func boardTaskComments(id: String) async throws -> [WandTaskComment] {
+        do {
+            return try await request(
+                WandTaskCommentsResponse.self,
+                method: "GET",
+                path: "/api/wand-tasks/\(percentEncodePathComponent(id))/comments"
+            ).comments
+        } catch APIError.server(let status, _) where status == 404 {
+            return [] // Older servers have no comment endpoint.
+        }
+    }
 
     func listBoardTasks(workspaceId: String? = nil) async throws -> [WandBoardTask] {
         var queryItems: [URLQueryItem]?

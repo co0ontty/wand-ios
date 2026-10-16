@@ -14,6 +14,7 @@ struct TaskBoardView: View {
     var refreshNonce: Int = 0
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var tasks: [WandBoardTask] = []
     @State private var workspaces: [Workspace] = []
     @State private var catalog: ModelsResponse?
@@ -39,6 +40,7 @@ struct TaskBoardView: View {
     @State private var archiveExpanded = false
     @State private var statusFilter = ""
     @State private var pendingSwipe: (task: WandBoardTask, action: WandBoardSwipeAction)?
+    @State private var expandedUnassignedGroups = Set<String>()
     /// 当前划开的卡片：同一时刻只允许一张，划开期间悬浮「新建任务」让位，动作条始终点得到。
     @State private var swipedTaskId: String?
 
@@ -192,6 +194,20 @@ struct TaskBoardView: View {
 
     private var boardStats: WandBoardTaskStats { wandBoardTaskStats(visibleTasks) }
 
+    private var formalSessionIDs: Set<String> {
+        Set(tasks.filter { $0.status != "archived" }.flatMap { $0.sessionIds + $0.sessions.map(\.id) })
+    }
+
+    private var visibleUnassignedGroups: [WandBoardUnassignedGroup] {
+        guard statusFilter.isEmpty else { return [] }
+        return wandBoardUnassignedGroups(
+            groups: workspaceStore.taskGroups,
+            formalSessionIDs: formalSessionIDs,
+            workspaceID: filterWorkspaceId,
+            query: query
+        )
+    }
+
     private var projectName: String {
         workspaces.first(where: { $0.id == filterWorkspaceId })?.name ?? "全部任务"
     }
@@ -205,6 +221,7 @@ struct TaskBoardView: View {
                         boardDetailChrome(title: selected.title.isEmpty ? "任务详情" : selected.title)
                     }
                     TaskBoardDetailView(
+                        api: api,
                         task: selected,
                         workspaces: workspaces,
                         catalog: catalog,
@@ -267,6 +284,17 @@ struct TaskBoardView: View {
     private var listContent: some View {
         ZStack(alignment: .bottomTrailing) {
             List {
+                if let groupError = workspaceStore.taskGroupsError {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle")
+                        Text("未分组任务读取失败：\(groupError)")
+                            .font(.caption)
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundColor(Theme.danger)
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
                 Section {
                     TaskBoardHero(
                         projectName: projectName,
@@ -283,7 +311,10 @@ struct TaskBoardView: View {
                         .listRowBackground(Color.clear)
                 }
 
-                if visibleTasks.isEmpty {
+                ForEach(visibleUnassignedGroups) { group in
+                    unassignedGroupSection(group)
+                }
+                if visibleTasks.isEmpty && visibleUnassignedGroups.isEmpty {
                     Section {
                         boardEmptyState
                             .listRowSeparator(.hidden)
@@ -327,11 +358,16 @@ struct TaskBoardView: View {
                 }
             }
             .listStyle(.plain)
+            .refreshable {
+                expandedUnassignedGroups.removeAll()
+                await refresh(showProgress: false)
+            }
             .scrollContentBackground(.hidden)
             .contentMargins(.bottom, 88, for: .scrollContent)
             // 筛选条件变了就把划开状态收掉，否则卡片被筛走后悬浮按钮会一直被藏着。
             .onChange(of: [statusFilter, filterWorkspaceId, query]) { _, _ in
                 swipedTaskId = nil
+                expandedUnassignedGroups.removeAll()
             }
             // 竖向滚动时也收掉：和系统 swipeActions 一样，否则划开的卡片滚出屏幕后悬浮按钮就回不来了。
             .simultaneousGesture(
@@ -442,6 +478,87 @@ struct TaskBoardView: View {
                 }
             }
         }
+    }
+
+    private func unassignedGroupSection(_ group: WandBoardUnassignedGroup) -> some View {
+        let expanded = expandedUnassignedGroups.contains(group.id)
+        return Section {
+            Button {
+                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) {
+                    if expanded { expandedUnassignedGroups.remove(group.id) }
+                    else { expandedUnassignedGroups.insert(group.id) }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "tray")
+                        .foregroundColor(Theme.brand)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(group.title)
+                            .font(.wand(size: 13, weight: .semibold))
+                            .foregroundColor(Theme.textPrimary)
+                            .lineLimit(1)
+                        Text("\(group.sessions.count) 个会话 · \(TaskListPresentation.shortenWorkspacePath(group.workspaceCwd))")
+                            .font(.caption)
+                            .foregroundColor(Theme.textMuted)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(Theme.textMuted)
+                        .rotationEffect(.degrees(expanded ? 0 : -90))
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(group.title)，\(group.sessions.count) 个会话")
+            .listRowInsets(EdgeInsets(top: 10, leading: 18, bottom: 2, trailing: 14))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            if expanded {
+                ForEach(Array(group.sessions.enumerated()), id: \.element.id) { index, session in
+                    unassignedSessionRow(session, index: index)
+                }
+            }
+        }
+    }
+
+    private func unassignedSessionRow(_ session: WorkspaceSessionSummary, index: Int) -> some View {
+        Button {
+            expandedUnassignedGroups.removeAll()
+            onOpenSession(session.id)
+        } label: {
+            HStack(spacing: 10) {
+                BrandLogo(provider: session.provider ?? "terminal", color: Theme.brand)
+                    .frame(width: 18, height: 18)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(TaskListPresentation.listSessionLabel(
+                        title: session.title,
+                        providerLabel: session.providerLabel,
+                        cwd: session.cwd,
+                        index: index
+                    ))
+                    .font(.wand(size: 13, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(session.employeeName ?? session.providerLabel)
+                        Text("·")
+                        Text(HomePresentation.statusLabel(session.activityStatus))
+                    }
+                    .font(.caption)
+                    .foregroundColor(Theme.textMuted)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.up.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(Theme.textMuted)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("打开会话 \(session.title ?? session.providerLabel)")
+        .listRowInsets(EdgeInsets(top: 4, leading: 38, bottom: 4, trailing: 18))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
     }
 
     private var boardEmptyState: some View {
@@ -590,13 +707,20 @@ struct TaskBoardView: View {
     }
 
     private func performRefresh(showProgress: Bool) async {
+        let generation = operationGeneration
         if showProgress { loading = true }
         do {
-            tasks = try await api.listBoardTasks()
+            let loadedTasks = try await api.listBoardTasks()
+            guard activeView, generation == operationGeneration, !Task.isCancelled else { return }
+            tasks = loadedTasks
             errorMessage = nil
         } catch {
+            guard activeView, generation == operationGeneration, !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
         }
+        // 默认任务组与正式任务必须同一轮刷新，迟到的 WorkspaceStore 请求由其 generation 丢弃。
+        await workspaceStore.loadTaskGroups(force: true)
+        guard activeView, generation == operationGeneration, !Task.isCancelled else { return }
         loading = false
         // 卡片被筛掉或已经不在列表里（改状态、归档）时，清掉划开状态。
         if let id = swipedTaskId, !tasks.contains(where: { $0.id == id }) { swipedTaskId = nil }
@@ -1221,6 +1345,7 @@ private func boardAgentDotLift(index: Int, now: TimeInterval) -> CGFloat {
 }
 
 private struct TaskBoardDetailView: View {
+    let api: WandAPI
     let task: WandBoardTask
     let workspaces: [Workspace]
     let catalog: ModelsResponse?
@@ -1245,8 +1370,10 @@ private struct TaskBoardDetailView: View {
     @State private var agent: WandBoardTaskAgent
     @State private var composePrompt = ""
     @State private var subject: ContactExecutionSubject?
+    @State private var commentState = WandTaskCommentState()
 
     init(
+        api: WandAPI,
         task: WandBoardTask,
         workspaces: [Workspace],
         catalog: ModelsResponse?,
@@ -1262,6 +1389,7 @@ private struct TaskBoardDetailView: View {
         onClose: @escaping () -> Void,
         onMoveSession: @escaping (WandBoardTaskSession) -> Void = { _ in }
     ) {
+        self.api = api
         self.task = task
         self.workspaces = workspaces
         self.catalog = catalog
@@ -1284,6 +1412,20 @@ private struct TaskBoardDetailView: View {
 
     var body: some View {
         Form {
+            if !commentState.visible(taskId: task.id).isEmpty {
+                Section("评论") {
+                    ForEach(commentState.visible(taskId: task.id)) { comment in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(comment.authorName).font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Text(comment.createdAt).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Text(comment.body).textSelection(.enabled)
+                        }
+                    }
+                }
+            }
             Section("内容") {
                 TextField("任务标题", text: $title)
                 TextField("描述", text: $description, axis: .vertical)
@@ -1449,6 +1591,17 @@ private struct TaskBoardDetailView: View {
             }
         }
         .disabled(busy)
+        .task(id: task.id) {
+            let taskId = task.id
+            let requestId = commentState.begin(taskId: taskId)
+            do {
+                let comments = try await api.boardTaskComments(id: taskId)
+                guard !Task.isCancelled else { return }
+                commentState.accept(comments, taskId: taskId, requestId: requestId)
+            } catch {
+                // Nonessential read-only projection; keep existing comments on a transient failure.
+            }
+        }
         .onChange(of: task.id) { _, _ in
             title = task.title
             description = task.description

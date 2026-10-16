@@ -307,6 +307,18 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertNil(modelGroupValidation([ModelGroup(id: "x", provider: "claude", name: "组", models: ["model-a", "model-b"])]))
         XCTAssertNotNil(modelGroupValidation([ModelGroup(id: "x", provider: "claude", name: "组", models: ["model-a", "model-a"])]))
     }
+    func testOpenCodeFreeGroupKeepsNativeSelectorAndSavedServerMembership() throws {
+        let group = ModelGroup(id: "opencode-free", provider: "opencode", name: "免费分组", models: ["opencode/a-free", "opencode/b-free"])
+        XCTAssertTrue(group.builtIn)
+        XCTAssertEqual(group.selector, "wand-model-group/opencode/opencode-free")
+        XCTAssertNil(modelGroupValidation([group]))
+        XCTAssertNil(modelGroupValidation([ModelGroup(id: group.id, provider: group.provider, name: group.name, models: [])]))
+        XCTAssertNil(modelGroupValidation([ModelGroup(id: group.id, provider: group.provider, name: group.name, models: ["opencode/big-pickle"])]))
+        XCTAssertNotNil(modelGroupValidation([ModelGroup(id: group.id, provider: group.provider, name: group.name, models: ["other/paid"])]))
+        XCTAssertNotNil(modelGroupValidation([ModelGroup(id: group.id, provider: group.provider, name: group.name, models: ["opencode/default"])]))
+        let catalog = try parityDecode(ModelsResponse.self, #"{"modelGroups":[],"freeModels":[]}"#)
+        XCTAssertEqual(modelGroupsDraft([group], catalog: catalog).first { $0.openCodeFree }, group)
+    }
     func testFreeGroupKeepsPriorityAndAppendsOnlyVerifiedNewMembers() throws {
         let catalog = try parityDecode(ModelsResponse.self, #"{"modelGroupsSupported":true,"freeModels":[{"id":"wand-openrouter-free/a","label":"a"},{"id":"wand-openrouter-free/b","label":"b"}]}"#)
         let rows = modelGroupsDraft([ModelGroup(id: "openrouter-free", provider: "pi", name: "免费分组", models: ["wand-openrouter-free/b", "removed"])], catalog: catalog)

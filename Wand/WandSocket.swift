@@ -115,6 +115,7 @@ final class WandSocket: PtySocketTransport {
                 sendSubscription(); receiveNext(socket, generation: gen)
             } catch {
                 guard !closed, gen == generation else { return }
+                reportFailure(error)
                 onError?(error.localizedDescription); scheduleReconnect()
             }
         }
@@ -125,7 +126,8 @@ final class WandSocket: PtySocketTransport {
                 guard let self, !self.closed, gen == self.generation else { return }
                 guard !self.endpointSession.isRetired else { self.close(); return }
                 switch result {
-                case .failure: self.scheduleReconnect()
+                case .failure(let error):
+                    self.reportFailure(error); self.scheduleReconnect()
                 case .success(let message):
                     self.lastMessageAt = Date(); self.reconnectDelay = 1
                     if !self.connected { self.connected = true; self.onConnectionChange?(true) }
@@ -173,6 +175,7 @@ final class WandSocket: PtySocketTransport {
             frames.append(text); bytes += data.count
         }
         guard queuedBytes + bytes <= Self.queueLimit else {
+            reportFailure(NSError(domain: "WandSocket", code: 1, userInfo: [NSLocalizedDescriptionKey: "WebSocket send queue exceeded its byte limit"]))
             onError?("终端发送积压，连接已重置；未确认的输入不会自动重发。")
             scheduleReconnect(); return false
         }
@@ -184,7 +187,8 @@ final class WandSocket: PtySocketTransport {
         socket.send(.string(text)) { [weak self] error in
             DispatchQueue.main.async {
                 guard let self, gen == self.generation else { return }
-                if error != nil {
+                if let error {
+                    self.reportFailure(error)
                     self.onError?("发送结果未确认；请核对终端输出，输入不会自动重发。")
                     self.scheduleReconnect(); return
                 }
@@ -192,6 +196,10 @@ final class WandSocket: PtySocketTransport {
                 self.drainSendQueue()
             }
         }
+    }
+    private func reportFailure(_ error: Error) {
+        guard !closed, !endpointSession.isRetired else { return }
+        WandAPI(baseURL: baseURL, token: nil).reportClientFeedback(event: "websocket_error", feature: "realtime", error: error)
     }
     private func invalidateConnection() {
         generation += 1; preparation?.cancel(); preparation = nil
@@ -212,7 +220,10 @@ final class WandSocket: PtySocketTransport {
         watchdog?.invalidate()
         watchdog = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             guard let self, !self.closed, self.task != nil else { return }
-            if Date().timeIntervalSince(self.lastMessageAt) > 40 { self.scheduleReconnect() }
+            if Date().timeIntervalSince(self.lastMessageAt) > 40 {
+                self.reportFailure(NSError(domain: "WandSocket", code: 2, userInfo: [NSLocalizedDescriptionKey: "WebSocket heartbeat timed out after 40 seconds"]))
+                self.scheduleReconnect()
+            }
         }
     }
 }

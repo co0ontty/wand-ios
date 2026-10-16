@@ -443,6 +443,8 @@ struct SettingsView: View {
         do {
             iosUpdate = try await api.iosIpaUpdate(currentVersion: marketingVersion)
         } catch {
+            guard !ClientFeedbackError.isCancellation(error) else { return }
+            api.reportClientFeedback(event: "update_failed", feature: "app_update", error: error)
             iosUpdateError = error.localizedDescription
         }
     }
@@ -459,11 +461,23 @@ struct SettingsView: View {
     private func openIosUpdate() {
         guard let info = iosUpdate else { return }
         if info.otaReadyValue, let raw = info.installUrl, let url = URL(string: raw) {
-            UIApplication.shared.open(url)
+            openUpdateInstaller(url)
             return
         }
         if let url = resolvedUpdateURL(info.installPageUrl) ?? resolvedUpdateURL("/ios/install") {
-            UIApplication.shared.open(url)
+            openUpdateInstaller(url)
+        }
+    }
+
+    private func openUpdateInstaller(_ url: URL) {
+        // This callback only confirms handoff. iOS does not expose the subsequent installation result.
+        UIApplication.shared.open(url, options: [:]) { opened in
+            guard !opened else { return }
+            let error = NSError(domain: "WandUpdate", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "iOS could not open the update installer or installation page",
+            ])
+            api.reportClientFeedback(event: "update_failed", feature: "app_update", error: error)
+            iosUpdateError = error.localizedDescription
         }
     }
 

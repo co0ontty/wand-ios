@@ -371,6 +371,7 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
     let teamStep: HomeTeamStepIdentity?
     let permissionBlocked: Bool?
     let providerCliExitCode: Int?
+    var ptyCommandRunning: Bool? = nil
 
     init(snapshot: SessionSnapshot) {
         id = snapshot.id
@@ -414,6 +415,14 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
 
     var activityStatus: String {
         if permissionBlocked == true { return "permission" }
+        if !["permission", "permission-blocked", "waiting-input", "waiting_input", "failed", "reconnecting"].contains(status ?? "") {
+            if archived != true && (ptyBusy == true || inFlight == true || status == "thinking") {
+                return status == "thinking" ? "thinking" : "running"
+            }
+            if sessionKind != "structured" && !isProviderCliSession(provider) && status == "running" {
+                return ptyCommandRunning == true ? "running" : "idle"
+            }
+        }
         return effectiveSessionStatus(
             sessionKind: sessionKind,
             status: status,
@@ -431,7 +440,8 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
 
     /// 完成但还没被明确打开看过。纯展示态，不改会话状态。
     var isJustCompleted: Bool {
-        SessionCompletion.isJustCompleted(
+        guard ptyCommandRunning != true else { return false }
+        return SessionCompletion.isJustCompleted(
             completion: completionRevision,
             viewed: viewedCompletionRevision,
             status: status,
