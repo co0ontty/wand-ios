@@ -1,5 +1,7 @@
 import Foundation
 import XCTest
+import SwiftUI
+import UIKit
 @testable import Wand
 
 @MainActor
@@ -1008,6 +1010,102 @@ final class WorkspaceTests: XCTestCase {
         )
     }
 
+
+    func testDirectorySummaryUsesLiveStateAndDoesNotCountArchivedActivity() throws {
+        let sessions = try decode([WorkspaceSessionSummary].self, from: #"[{"id":"run","inFlight":true},{"id":"run","inFlight":true},{"id":"wait","permissionBlocked":true},{"id":"old","inFlight":true,"archived":true}]"#)
+        XCTAssertEqual(HomePresentation.sessionSummary(sessions), "3 个会话 · 1 在跑 · 1 等你")
+        XCTAssertEqual(HomePresentation.sessionSummary(sessions, total: 9), "9 个会话 · 1 在跑 · 1 等你")
+        XCTAssertEqual(HomePresentation.sessionSummary([]), "0 个会话")
+    }
+
+    /// Renders the actual List and owns no real session or model execution.
+    func testWorkspaceDirectoryLayout() async throws {
+        let service = MockWorkspaceService()
+        let fixture = #"[{"workspaceId":"layout-w","workspaceName":"Wand 移动端","workspaceCwd":"/Users/example/Projects/wand","tasks":[{"id":"layout-task","workspaceId":"layout-w","name":"优化目录与会话层级，保留长标题的可读性","cwd":"/Users/example/Projects/wand","status":"active","createdAt":"","totalSessions":3,"sessions":[{"id":"layout-session","title":"验证目录展开与状态显示","provider":"codex","sessionKind":"structured","inFlight":true},{"id":"layout-wait","title":"等待确认的会话","provider":"pi","sessionKind":"pty","permissionBlocked":true},{"id":"layout-archive","title":"已归档的历史会话","provider":"pi","archived":true}]},{"id":"layout-empty-task","workspaceId":"layout-w","name":"第二个任务","cwd":"/Users/example/Projects/wand","status":"active","createdAt":"","sessions":[]}],"standaloneSessions":[{"id":"layout-loose","title":"未分组的独立会话","provider":"codex","sessionKind":"structured"}]},{"workspaceId":"layout-other","workspaceName":"Wand 移动端","workspaceCwd":"/Volumes/Other/Archive/wand","tasks":[],"standaloneSessions":[]},{"workspaceId":"wand-global","workspaceName":"global","workspaceCwd":"/private/internal","global":true,"tasks":[],"standaloneSessions":[{"id":"layout-global","title":"未归属的会话","provider":"pi"}]}]"#
+        service.directoryGroups = try decode([TaskDirectoryGroup].self, from: fixture)
+        service.workspaces = service.directoryGroups.filter(\.isBindableProject).map {
+            Workspace(id: $0.id, name: $0.workspaceName, cwd: $0.workspaceCwd, defaultProvider: nil, layout: nil, createdAt: "", lastOpenedAt: nil)
+        }
+        var api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
+        var store = WorkspaceStore(api: service, serverID: "layout-fixture")
+        await store.loadWorkspaceIndex(); await store.loadTaskGroups(force: true)
+        let collapseKinds = ["groups", "tasks", "loose"]
+        let priorCollapsed = collapseKinds.map { TaskListExpansionStorage.collapsedIds(kind: $0) }
+        for kind in collapseKinds { TaskListExpansionStorage.setCollapsedIds([], kind: kind) }
+        let keys = ["wand.homeFold.recent", "wand.homeFold.workspaces"]
+        let prior = keys.map { UserDefaults.standard.object(forKey: $0) }
+        UserDefaults.standard.set("collapse", forKey: keys[0]); UserDefaults.standard.set("expand", forKey: keys[1])
+        defer {
+            store.stopTaskGroupsSync()
+            for (kind, ids) in zip(collapseKinds, priorCollapsed) { TaskListExpansionStorage.setCollapsedIds(ids, kind: kind) }
+            for (key, value) in zip(keys, prior) {
+                if let value { UserDefaults.standard.set(value, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+            }
+        }
+        var openedTasks = 0, openedSessions = 0, openedTaskSessions = 0, newSessions = 0
+        let touching = ProcessInfo.processInfo.environment["WAND_DIRECTORY_TOUCH"] == "1"
+        let installed = ProcessInfo.processInfo.environment["WAND_DIRECTORY_INSTALLED"] == "1"
+        let installedPointer = URL(fileURLWithPath: "/tmp/wand-ios-directory-installed-profile-path")
+        if installed {
+            struct Profile: Decodable { let serverURL: String; let connectionCode: String }
+            let path = try String(contentsOf: installedPointer, encoding: .utf8)
+            let profile = try JSONDecoder().decode(Profile.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+            let connection = try XCTUnwrap(WandAuth.decodeConnectCode(profile.connectionCode))
+            api = WandAPI(baseURL: connection.url, token: connection.token)
+            store = WorkspaceStore(api: api, serverID: "layout-installed-read-only")
+            await store.loadWorkspaceIndex(); await store.loadTaskGroups(force: true)
+            XCTAssertFalse(store.taskGroups.isEmpty)
+        }
+        let variants: [(String, CGSize, ColorScheme, ContentSizeCategory)] = touching || installed
+            ? [(touching ? "touch" : "installed", CGSize(width: 440, height: 956), .light, .large)]
+            : [("phone-light", CGSize(width: 390, height: 1000), .light, .large),
+               ("phone-dark", CGSize(width: 390, height: 1000), .dark, .large),
+               ("narrow", CGSize(width: 320, height: 1000), .light, .large),
+               ("large-type", CGSize(width: 390, height: 1100), .light, .accessibilityExtraExtraLarge),
+               ("tablet", CGSize(width: 768, height: 1100), .light, .large)]
+        for (name, size, scheme, type) in variants {
+            let list = WorkspaceListView(store: store, api: api, selectedTaskId: "layout-task", selectedSessionId: "layout-session",
+                hidesHomeChrome: true, isSelecting: .constant(false), onOpenTask: { _, _ in openedTasks += 1 },
+                onOpenSession: { _, _ in openedSessions += 1 }, onOpenTaskSession: { _, _, _ in openedTaskSessions += 1 },
+                onRequestNewSession: { _, _ in newSessions += 1 })
+            let host = UIHostingController(rootView: ScrollViewReader { proxy in
+                NavigationStack { list }
+                    .task {
+                        try? await Task.sleep(for: .milliseconds(180))
+                        if let first = TaskListPresentation.orderedDirectoryGroups(store.taskGroups).first { proxy.scrollTo("workspace-directory-" + first.id, anchor: .top) }
+                    }
+            }.environment(\.colorScheme, scheme).environment(\.sizeCategory, type))
+            host.traitOverrides.horizontalSizeClass = size.width > 600 ? .regular : .compact
+            host.traitOverrides.userInterfaceStyle = scheme == .dark ? .dark : .light
+            host.traitOverrides.preferredContentSizeCategory = type == .accessibilityExtraExtraLarge ? .accessibilityExtraExtraLarge : .large
+            let window: UIWindow
+            if touching || installed {
+                let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                window = UIWindow(windowScene: scene)
+            } else {
+                window = UIWindow(frame: CGRect(origin: .zero, size: size))
+            }
+            window.rootViewController = host; window.makeKeyAndVisible()
+            host.view.frame = window.bounds; host.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(450))
+            if touching {
+                let done = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/directory-touch-done")
+                try? FileManager.default.removeItem(at: done)
+                for _ in 0..<120 {
+                    if FileManager.default.fileExists(atPath: done.path) { break }
+                    try await Task.sleep(for: .seconds(1))
+                }
+                XCTAssertTrue(FileManager.default.fileExists(atPath: done.path), "External native touch driver did not finish")
+                XCTAssertEqual(openedTasks, 1); XCTAssertEqual(openedSessions, 1)
+                XCTAssertEqual(openedTaskSessions, 1); XCTAssertEqual(newSessions, 1)
+            }
+            let image = UIGraphicsImageRenderer(size: size).image { _ in host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true) }
+            let attachment = XCTAttachment(image: image); attachment.name = "directory-layout-" + name; attachment.lifetime = .keepAlways; add(attachment)
+            XCTAssertEqual(image.size, size)
+            window.isHidden = true
+        }
+    }
+
     private func decode<T: Decodable>(_ type: T.Type, from json: String) throws -> T {
         try JSONDecoder().decode(type, from: XCTUnwrap(json.data(using: .utf8)))
     }
@@ -1047,6 +1145,7 @@ private final class MockWorkspaceService: WorkspaceServing {
     }
 
     var workspaces: [Workspace] = []
+    var directoryGroups: [TaskDirectoryGroup] = []
     var tasks: [String: [WorkspaceTask]] = [:]
     var taskDetails: [String: WorkspaceTaskDetail] = [:]
     var taskDelays: [String: UInt64] = [:]
@@ -1229,11 +1328,11 @@ private final class MockWorkspaceService: WorkspaceServing {
     }
 
     func listTaskGroups() async throws -> [TaskDirectoryGroup] {
-        []
+        directoryGroups
     }
 
     func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage {
-        TaskGroupsPage(groups: [], revision: revision, unchanged: revision != nil)
+        TaskGroupsPage(groups: directoryGroups, revision: revision, unchanged: false)
     }
 
     func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int {

@@ -344,6 +344,63 @@ func wandBoardSessionGroups(
     }
 }
 
+/// 看板中的非持久「目录 - 未分组任务」投影。它不是 WandTask，不参与正式任务统计或状态筛选。
+struct WandBoardUnassignedGroup: Identifiable, Equatable {
+    let id: String
+    let workspaceName: String
+    let workspaceCwd: String
+    let sessions: [WorkspaceSessionSummary]
+
+    var title: String { "\(workspaceName) - 未分组任务" }
+}
+
+/// GET /api/tasks 已经完成目录归属；看板只负责将 standaloneSessions 投影成默认任务组。
+/// 正式任务会话 ID 优先去重，避免同一会话同时出现在正式任务与默认组。
+func wandBoardUnassignedGroups(
+    groups: [TaskDirectoryGroup],
+    formalSessionIDs: Set<String>,
+    workspaceID: String = "",
+    query: String = ""
+) -> [WandBoardUnassignedGroup] {
+    let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    var seen = formalSessionIDs.union(groups.flatMap { $0.tasks.flatMap { $0.sessions.map(\.id) } })
+    var result: [WandBoardUnassignedGroup] = []
+
+    for group in groups {
+        if !workspaceID.isEmpty && group.workspaceId != workspaceID { continue }
+        let directoryMatches = trimmedQuery.isEmpty
+            || ["\(group.workspaceName) - 未分组任务", group.workspaceCwd].contains {
+                $0.localizedCaseInsensitiveContains(trimmedQuery)
+            }
+        var sessions: [WorkspaceSessionSummary] = []
+        for session in group.standaloneSessions {
+            // /api/tasks 已排除归档项；再次核对字段，兼容旧服务端和缓存快照。
+            guard session.archived != true,
+                  session.teamChat == nil,
+                  session.workspaceTaskId == nil,
+                  !seen.contains(session.id) else { continue }
+            let sessionMatches = directoryMatches || [
+                session.title,
+                session.cwd,
+                session.providerLabel,
+                session.employeeName,
+            ].compactMap { $0 }.contains {
+                $0.localizedCaseInsensitiveContains(trimmedQuery)
+            }
+            guard sessionMatches, seen.insert(session.id).inserted else { continue }
+            sessions.append(session)
+        }
+        guard !sessions.isEmpty else { continue }
+        result.append(WandBoardUnassignedGroup(
+            id: group.id,
+            workspaceName: group.workspaceName,
+            workspaceCwd: group.workspaceCwd,
+            sessions: sessions
+        ))
+    }
+    return result
+}
+
 let wandUnnamedTaskName = "未命名任务"
 
 /// 划开看板卡后露出的动作条宽度。

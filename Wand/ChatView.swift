@@ -2981,10 +2981,11 @@ private struct SubagentActivityShelf: View {
     }
 
     private var summary: String {
-        if isResponding {
-            return runningCount > 0 ? "\(runningCount) 个正在运行" : "\(activities.count) 个子任务已完成"
-        }
-        if !completedClock.isEmpty { return "完成 \(completedClock)" }
+        let failed = activities.filter { $0.state == .failed }.count
+        let unknown = activities.filter { $0.state == .unknown }.count
+        if failed > 0 { return "\(failed) 个执行失败" }
+        if runningCount > 0 { return "\(runningCount) 个正在运行" }
+        if unknown > 0 { return "\(unknown) 个运行状态未知" }
         return "\(activities.count) 个子任务已完成"
     }
 
@@ -3090,6 +3091,8 @@ private struct SubagentActivityShelf: View {
             Image(systemName: "checkmark.circle.fill").foregroundColor(Theme.textMuted)
         case .failed:
             Image(systemName: "exclamationmark.triangle.fill").foregroundColor(Theme.danger)
+        case .unknown:
+            Image(systemName: "questionmark.circle").foregroundColor(Theme.textMuted)
         }
     }
 
@@ -3235,6 +3238,8 @@ private struct SubagentActivityDetail: View {
             Image(systemName: "checkmark.circle.fill").foregroundColor(Theme.textMuted)
         case .failed:
             Image(systemName: "exclamationmark.triangle.fill").foregroundColor(Theme.danger)
+        case .unknown:
+            Image(systemName: "questionmark.circle").foregroundColor(Theme.textMuted)
         }
     }
 }
@@ -3274,6 +3279,7 @@ private func subagentTint(_ state: SubagentActivity.State) -> Color {
     case .running: return Theme.brand
     case .completed: return Theme.textMuted
     case .failed: return Theme.danger
+    case .unknown: return Theme.textMuted
     }
 }
 
@@ -3282,6 +3288,7 @@ private func subagentStateText(_ state: SubagentActivity.State) -> String {
     case .running: return "正在运行"
     case .completed: return "已完成"
     case .failed: return "执行失败"
+    case .unknown: return "运行状态未知"
     }
 }
 
@@ -3595,7 +3602,7 @@ private struct UnknownBlockCard: View {
 }
 
 /// 原生 Markdown 渲染：块级结构独立布局，内联标记交给 AttributedString。
-private struct MarkdownText: View {
+struct MarkdownText: View {
     let text: String
 
     @Environment(\.chatAPI) private var api
@@ -3623,7 +3630,7 @@ private struct MarkdownText: View {
         }
     }
 
-    private enum Block {
+    enum Block: Equatable {
         case paragraph(String)
         case heading(Int, String)
         case listItem(marker: String, text: String, indent: Int, checked: Bool?)
@@ -3711,13 +3718,15 @@ private struct MarkdownText: View {
                     .foregroundColor(header ? Theme.textPrimary : Theme.textSecondary)
                     .tint(Theme.brand)
                     .textSelection(.enabled)
-                    .frame(minWidth: 110, maxWidth: 190, alignment: .leading)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: 190, alignment: .leading)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 9)
                     .background(header ? Theme.brand.opacity(0.09) : Color.clear)
                     .overlay(alignment: .trailing) {
                         if index < cells.count - 1 {
-                            Divider().overlay(Theme.border)
+                            Rectangle().fill(Theme.border).frame(width: 1)
                         }
                     }
             }
@@ -3753,7 +3762,9 @@ private struct MarkdownText: View {
         }
     }
 
-    private var blocks: [Block] {
+    private var blocks: [Block] { Self.parseBlocks(text) }
+
+    static func parseBlocks(_ text: String) -> [Block] {
         var result: [Block] = []
         var paragraph: [String] = []
         var code: [String] = []
@@ -3841,7 +3852,7 @@ private struct MarkdownText: View {
         return result
     }
 
-    private func tableCells(_ line: String) -> [String]? {
+    private static func tableCells(_ line: String) -> [String]? {
         var trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.contains("|") else { return nil }
         if trimmed.hasPrefix("|") { trimmed.removeFirst() }
@@ -3851,7 +3862,7 @@ private struct MarkdownText: View {
         return cells.count >= 2 ? cells : nil
     }
 
-    private func isTableSeparator(_ line: String, columnCount: Int) -> Bool {
+    private static func isTableSeparator(_ line: String, columnCount: Int) -> Bool {
         guard let cells = tableCells(line), cells.count == columnCount else { return false }
         return cells.allSatisfy { cell in
             let marker = cell.replacingOccurrences(of: ":", with: "")
@@ -3859,7 +3870,7 @@ private struct MarkdownText: View {
         }
     }
 
-    private func listItem(_ rawLine: String) -> Block? {
+    private static func listItem(_ rawLine: String) -> Block? {
         let leading = rawLine.prefix { $0 == " " || $0 == "\t" }.count
         let indent = leading / 2
         let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
@@ -3890,12 +3901,16 @@ private struct MarkdownText: View {
     }
 
     private func attributed(_ raw: String) -> AttributedString {
-        if let parsed = try? AttributedString(
+        if var parsed = try? AttributedString(
             markdown: raw,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace
             )
         ) {
+            for run in parsed.runs where run.inlinePresentationIntent?.contains(.code) == true {
+                parsed[run.range].font = .system(size: compact ? 11 : 14, design: .monospaced)
+                parsed[run.range].backgroundColor = Theme.surfaceSoft
+            }
             return parsed
         }
         return AttributedString(raw)

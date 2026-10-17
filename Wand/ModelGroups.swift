@@ -7,8 +7,10 @@ struct ModelGroup: Codable, Equatable, Identifiable {
     var provider: String
     var name: String
     var models: [String]
-    var builtIn: Bool { id == "openrouter-free" && provider == "pi" }
-    var selector: String { builtIn ? "wand-openrouter-free/auto" : "wand-model-group/" + provider + "/" + id }
+    var openRouterFree: Bool { id == "openrouter-free" && provider == "pi" }
+    var openCodeFree: Bool { id == "opencode-free" && provider == "opencode" }
+    var builtIn: Bool { openRouterFree || openCodeFree }
+    var selector: String { openRouterFree ? "wand-openrouter-free/auto" : "wand-model-group/" + provider + "/" + id }
     var body: [String: Any] { ["id": id, "provider": provider, "name": name.trimmingCharacters(in: .whitespacesAndNewlines), "models": models] }
 }
 
@@ -20,7 +22,8 @@ func modelGroupValidation(_ groups: [ModelGroup]) -> String? {
         let name = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 40, !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return "分组名称需为1–40个字符" }
         guard identities.insert(group.provider + "/" + group.id).inserted, names.insert(group.provider + "/" + name).inserted else { return "同一工具的分组标识或名称不能重复" }
-        if group.id == "openrouter-free", !group.builtIn || name != "免费分组" { return "免费分组的工具与名称不可修改" }
+        if (group.id == "openrouter-free" && (!group.openRouterFree || name != "免费分组"))
+            || (group.id == "opencode-free" && (!group.openCodeFree || name != "免费分组")) { return "免费分组的工具与名称不可修改" }
         if !group.builtIn, group.provider == "pi", name == "免费分组" { return "请直接调整内置免费分组" }
         guard (group.builtIn || !group.models.isEmpty), group.models.count <= (group.builtIn ? 128 : 32), Set(group.models).count == group.models.count else { return "组内需有1–32个不重复的模型" }
         for model in group.models {
@@ -28,18 +31,20 @@ func modelGroupValidation(_ groups: [ModelGroup]) -> String? {
                   !model.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.union(.controlCharacters).contains($0) }),
                   model != "default", model != "wand-openrouter-free/auto", !model.hasPrefix("wand-model-group/"), model != "wand-auto-assign/auto" else { return "组内只能使用具体模型 ID，不能嵌套分组" }
             if model.hasPrefix("wand-openrouter-free/"), group.provider != "pi" { return "免费模型只属于 Pi" }
-            if group.builtIn, !model.hasPrefix("wand-openrouter-free/") { return "免费分组只能包含免费池模型" }
+            if (group.openRouterFree && !model.hasPrefix("wand-openrouter-free/"))
+                || (group.openCodeFree && (model.range(of: #"^opencode/[a-z0-9][a-z0-9._-]*$"#, options: .regularExpression) == nil
+                    || ["opencode/default", "opencode/auto"].contains(model))) { return "免费分组只能包含对应免费池模型" }
         }
     }
     for provider in WandProvider.allCases where groups.filter({ !$0.builtIn && $0.provider == provider.rawValue }).count > 32 { return "每个工具最多32个分组" }
     return nil
 }
 func modelGroupsDraft(_ saved: [ModelGroup], catalog: ModelsResponse) -> [ModelGroup] {
-    let free = saved.first { $0.builtIn }
+    let free = saved.first { $0.openRouterFree }
     let ids = catalog.freeModels.map(\.id)
     var seen = Set<String>()
     let ordered = ((free?.models.filter { ids.contains($0) } ?? []) + ids).filter { seen.insert($0).inserted }
-    return saved.filter { !$0.builtIn } + (catalog.modelGroupsSupported ? [ModelGroup(id: "openrouter-free", provider: "pi", name: "免费分组", models: ordered)] : [])
+    return saved.filter { !$0.openRouterFree } + (catalog.modelGroupsSupported ? [ModelGroup(id: "openrouter-free", provider: "pi", name: "免费分组", models: ordered)] : [])
 }
 
 @MainActor

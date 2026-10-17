@@ -32,7 +32,7 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     private var receivedFinalResult = false
     private var server: ServerSpeechRecorder?
 
-    private let audioEngine = AVAudioEngine()
+    private let hardware = WandSpeechAudioHardware()
     /// 所有 AVAudioSession / audioEngine 调用都走这条串行队列，序列化消除竞争、
     /// 且把 setActive/start 的阻塞挡在主线程之外。
     private let audioQueue = WandSpeechAudio.queue
@@ -53,12 +53,12 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     deinit {
         let server = server
         Task { @MainActor in server?.cancel() }
-        let engine = audioEngine
+        let hardware = hardware
         let request = request
         let task = task
         audioQueue.async {
             Self.teardownAudioPipeline(
-                engine: engine,
+                hardware: hardware,
                 request: request,
                 task: task,
                 cancelTask: true
@@ -248,7 +248,8 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playAndRecord, mode: .measurement, options: sessionOptions)
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
-                let input = self.audioEngine.inputNode
+                self.hardware.sessionActive = true
+                let input = self.hardware.inputForRecording()
                 let format = input.outputFormat(forBus: 0)
                 guard format.sampleRate > 0 else {
                     self.failStart(generation: myGeneration, message: "无法访问麦克风音频", onError: onError)
@@ -259,8 +260,8 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
                     // request 是本轮不可变对象；不跨音频线程读取 self.request，避免清理竞态。
                     request.append(buffer)
                 }
-                self.audioEngine.prepare()
-                try self.audioEngine.start()
+                self.hardware.engine.prepare()
+                try self.hardware.engine.start()
             } catch {
                 self.failStart(generation: myGeneration,
                                message: "启动录音失败：\(error.localizedDescription)",
@@ -356,10 +357,10 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
         task: SFSpeechRecognitionTask?,
         cancelTask: Bool
     ) {
-        let engine = audioEngine
+        let hardware = hardware
         audioQueue.async {
             Self.teardownAudioPipeline(
-                engine: engine,
+                hardware: hardware,
                 request: request,
                 task: task,
                 cancelTask: cancelTask
@@ -368,19 +369,15 @@ final class SpeechRecognizerService: NSObject, ObservableObject {
     }
 
     private nonisolated static func teardownAudioPipeline(
-        engine: AVAudioEngine,
+        hardware: WandSpeechAudioHardware,
         request: SFSpeechAudioBufferRecognitionRequest?,
         task: SFSpeechRecognitionTask?,
         cancelTask: Bool
     ) {
-        if engine.isRunning { engine.stop() }
-        engine.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
-        if cancelTask { task?.cancel() }
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
+        hardware.stop {
+            request?.endAudio()
+            if cancelTask { task?.cancel() }
+        }
     }
 
     private func cleanup(cancelTask: Bool) {

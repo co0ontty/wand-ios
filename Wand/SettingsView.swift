@@ -8,6 +8,7 @@ struct SettingsView: View {
     let token: String?
 
     @EnvironmentObject private var store: ServerStore
+    @EnvironmentObject private var appUpdater: AppUpdateController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
@@ -27,10 +28,9 @@ struct SettingsView: View {
     @State private var logExportEmpty = false
     @State private var showRenameServer = false
     @State private var serverNameDraft = ""
-    @State private var iosUpdate: IosIpaUpdateInfo?
-    @State private var iosUpdateChecking = false
-    @State private var iosUpdateError: String?
-    @State private var confirmUnsignedInstall = false
+    private var iosUpdate: IosIpaUpdateInfo? { appUpdater.info }
+    private var iosUpdateChecking: Bool { appUpdater.checking }
+    private var iosUpdateError: String? { appUpdater.error }
     @State private var showModelGroups = false
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
@@ -66,7 +66,7 @@ struct SettingsView: View {
         .task {
             serverVersion = (try? await api.serverConfig())?.currentVersion
             await refreshNotificationStatus()
-            await checkIosUpdate()
+            await appUpdater.check()
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
@@ -101,12 +101,6 @@ struct SettingsView: View {
             Button("好", role: .cancel) {}
         } message: {
             Text("打开会话、收发消息或复现问题后再导出，才能捕获到有用的上下文。")
-        }
-        .alert("IPA 尚未签名", isPresented: $confirmUnsignedInstall) {
-            Button("查看安装页") { openIosUpdate() }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("当前包尚不能通过系统安装器安装。可在安装页查看原因和可用方式。")
         }
         .alert("服务器名称", isPresented: $showRenameServer) {
             TextField("留空使用地址", text: $serverNameDraft)
@@ -387,13 +381,21 @@ struct SettingsView: View {
                 }
             }
             .padding(.vertical, 4)
-            if iosUpdate?.updateAvailable == true {
-                Button {
-                    requestIosInstall()
-                } label: {
-                    Label(iosUpdate?.otaReadyValue == true ? "安装更新" : "打开安装页", systemImage: "arrow.down.app")
-                        .font(.wand(size: 15))
+            if appUpdater.installURL != nil {
+                Button { appUpdater.install() } label: {
+                    ZStack {
+                        Label("安装更新", systemImage: "arrow.down.app")
+                            .opacity(appUpdater.opening ? 0 : 1)
+                        if appUpdater.opening { ProgressView() }
+                    }
+                    .font(.wand(size: 15))
+                    .frame(minHeight: 44)
                 }
+                .disabled(appUpdater.opening)
+            }
+            if appUpdater.handoffMessage != nil, appUpdater.installPageURL != nil {
+                Button("打开安装页") { appUpdater.openInstallPage() }
+                    .disabled(appUpdater.opening)
             }
             Button {
                 Task { await checkIosUpdate() }
@@ -401,7 +403,7 @@ struct SettingsView: View {
                 Label("检查更新", systemImage: "arrow.clockwise")
                     .font(.wand(size: 15))
             }
-            .disabled(iosUpdateChecking)
+            .disabled(iosUpdateChecking || appUpdater.opening)
         } header: {
             Text("应用与更新")
         } footer: {
@@ -421,56 +423,18 @@ struct SettingsView: View {
 
     private var iosUpdateSubtitle: String {
         if let error = iosUpdateError { return error }
-        return "当前 \(appVersion)"
+        return appUpdater.handoffMessage ?? "当前 \(appVersion)"
     }
 
     private var iosUpdateFooter: String {
         if iosUpdate?.updateAvailable == true, iosUpdate?.otaReadyValue != true {
             return "已检测到新包，但还不能直接安装。请使用 HTTPS 连接，并由服务端提供已签名的安装包。"
         }
-        return "签发后的 IPA 会通过系统安装器覆盖更新，无需第三方分发站。未签名包仍可用 SideStore / AltStore 安装。"
-    }
-
-    private var marketingVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        return "连接成功、回到前台及前台使用期间会自动检查更新。发现可安装版本后，点提示并在系统中确认即可，无需连接电脑。"
     }
 
     private func checkIosUpdate() async {
-        guard !iosUpdateChecking else { return }
-        iosUpdateChecking = true
-        iosUpdateError = nil
-        defer { iosUpdateChecking = false }
-        do {
-            iosUpdate = try await api.iosIpaUpdate(currentVersion: marketingVersion)
-        } catch {
-            iosUpdateError = error.localizedDescription
-        }
-    }
-
-    private func requestIosInstall() {
-        guard iosUpdate?.updateAvailable == true else { return }
-        if iosUpdate?.signedValue != true || iosUpdate?.otaReadyValue != true {
-            confirmUnsignedInstall = true
-            return
-        }
-        openIosUpdate()
-    }
-
-    private func openIosUpdate() {
-        guard let info = iosUpdate else { return }
-        if info.otaReadyValue, let raw = info.installUrl, let url = URL(string: raw) {
-            UIApplication.shared.open(url)
-            return
-        }
-        if let url = resolvedUpdateURL(info.installPageUrl) ?? resolvedUpdateURL("/ios/install") {
-            UIApplication.shared.open(url)
-        }
-    }
-
-    private func resolvedUpdateURL(_ raw: String?) -> URL? {
-        guard let raw, !raw.isEmpty else { return nil }
-        if let url = URL(string: raw), url.scheme != nil { return url }
-        return URL(string: raw, relativeTo: serverURL)?.absoluteURL
+        await appUpdater.check(manual: true)
     }
 
     /// 拼最近 5 分钟日志写临时文件并弹系统分享面板；窗口内没有日志时给出提示。

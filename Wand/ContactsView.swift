@@ -20,6 +20,31 @@ struct ContactMorphButton: View {
     }
 }
 
+/// The complete conversation target excludes only the independent profile avatar.
+struct ContactConversationLabel: View {
+    let name: String
+    let subtitle: String
+    let busy: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name).font(.subheadline.weight(.semibold))
+                if !subtitle.isEmpty {
+                    Text(subtitle).font(.caption).foregroundStyle(Theme.textSecondary)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            ZStack {
+                ProgressView().opacity(busy ? 1 : 0)
+                Image(systemName: "chevron.right").font(.caption)
+                    .foregroundStyle(Theme.textSecondary).opacity(busy ? 0 : 1)
+            }.frame(width: 24, height: 24).accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+}
+
 struct ContactsView: View {
     let api: WandAPI
     @ObservedObject var store: ContactsStore
@@ -199,16 +224,11 @@ struct ContactsView: View {
                         else { store.openEmployee(employee.id, onOpen: onOpenSession) }
                     }
                 } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(employee.name).font(.subheadline.weight(.semibold))
-                        if !employee.displayTags.isEmpty { Text(employee.displayTags.joined(separator: " · ")).font(.caption).foregroundStyle(Theme.textSecondary) }
-                    }.frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                    ContactConversationLabel(name: employee.name,
+                        subtitle: employee.displayTags.joined(separator: " · "),
+                        busy: store.busyContact == key)
                 }.buttonStyle(.plain).disabled(store.busy || store.unconfirmedActions.contains(key))
-                    .accessibilityLabel("新建员工对话：\(employee.name)")
-                ZStack {
-                    ProgressView().opacity(store.busyContact == key ? 1 : 0)
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textSecondary).opacity(store.busyContact == key ? 0 : 1)
-                }.frame(width: 24, height: 24)
+                    .accessibilityLabel("进入员工对话：\(employee.name)")
             }
             if let error = store.rowErrors[key] {
                 if store.unconfirmedActions.contains(key) { uncertainty(key) }
@@ -238,16 +258,11 @@ struct ContactsView: View {
                     if let onTeamConversation { onTeamConversation(team.id) }
                     else { store.openTeam(team.id, onOpen: onOpenRun) }
                 } } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(team.name).font(.subheadline.weight(.semibold))
-                        Text("\(team.members.count)位成员 · 开新群聊").font(.caption).foregroundStyle(Theme.textSecondary)
-                    }.frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                    ContactConversationLabel(name: team.name,
+                        subtitle: "\(team.members.count)位成员 · 开新群聊",
+                        busy: store.busyContact == key)
                 }.buttonStyle(.plain).disabled(store.busy || store.unconfirmedActions.contains(key))
                     .accessibilityLabel("新建团队群聊：\(team.name)")
-                ZStack {
-                    ProgressView().opacity(store.busyContact == key ? 1 : 0)
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textSecondary).opacity(store.busyContact == key ? 0 : 1)
-                }.frame(width: 24, height: 24)
             }
             if let error = store.rowErrors[key] {
                 if store.unconfirmedActions.contains(key) { uncertainty(key) }

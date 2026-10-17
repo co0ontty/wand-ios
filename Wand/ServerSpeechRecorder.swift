@@ -3,6 +3,37 @@ import Foundation
 
 enum WandSpeechAudio { static let queue = DispatchQueue(label: "com.wand.voice.audio") }
 
+/// Queue-owned hardware. Cleanup must never ask AVAudioEngine to create an input
+/// node on behalf of a recorder that has never acquired the microphone.
+final class WandSpeechAudioHardware: @unchecked Sendable {
+    let engine = AVAudioEngine()
+    private var capturedInput: AVAudioInputNode?
+    var sessionActive = false
+    var hasInputNode: Bool { capturedInput != nil }
+
+    func inputForRecording() -> AVAudioInputNode {
+        dispatchPrecondition(condition: .onQueue(WandSpeechAudio.queue))
+        if let capturedInput { return capturedInput }
+        let node = engine.inputNode
+        capturedInput = node
+        return node
+    }
+
+    func stop(beforeDeactivation finish: () -> Void = {}) {
+        dispatchPrecondition(condition: .onQueue(WandSpeechAudio.queue))
+        if let input = capturedInput {
+            if engine.isRunning { engine.stop() }
+            input.removeTap(onBus: 0)
+            capturedInput = nil
+        }
+        finish()
+        if sessionActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            sessionActive = false
+        }
+    }
+}
+
 enum SpeechRecognitionMode: String {
     case local, server
     static let storageKey = "wand.voiceRecognitionMode"
@@ -96,7 +127,7 @@ private final class ServerSpeechAudioBuffer: @unchecked Sendable {
 /// Public methods/callbacks run on main; AVAudioSession/engine work is serialized off main.
 @MainActor
 final class ServerSpeechRecorder {
-    private let engine = AVAudioEngine()
+    private let hardware = WandSpeechAudioHardware()
     private let queue = WandSpeechAudio.queue
     private var audio: ServerSpeechAudioBuffer?
     private var request: Task<Void, Never>?
@@ -110,8 +141,8 @@ final class ServerSpeechRecorder {
 
     deinit {
         request?.cancel(); limit?.cancel()
-        let engine = engine
-        queue.async { Self.stop(engine) }
+        let hardware = hardware
+        queue.async { hardware.stop() }
     }
     func start(api: WandAPI, state: @escaping (Bool, Bool) -> Void, onError: @escaping (String) -> Void) {
         cancel()
@@ -135,13 +166,15 @@ final class ServerSpeechRecorder {
         }
     }
     private func begin(generation captured: Int) {
-        let engine = engine
+        let hardware = hardware
         queue.async { [weak self] in
             do {
+                let engine = hardware.engine
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
-                let node = engine.inputNode, format = node.outputFormat(forBus: 0)
+                hardware.sessionActive = true
+                let node = hardware.inputForRecording(), format = node.outputFormat(forBus: 0)
                 guard format.sampleRate > 0, let audio = ServerSpeechAudioBuffer(source: format) else {
                     throw NSError(domain: "WandSpeech", code: 2, userInfo: [NSLocalizedDescriptionKey: "麦克风音频格式不可用"])
                 }
@@ -166,9 +199,9 @@ final class ServerSpeechRecorder {
         guard recording, let audio, api != nil else { cancel(); return }
         recording = false; stateHandler?(false, true)
         let captured = generation
-        let engine = engine
+        let hardware = hardware
         queue.async { [weak self] in
-            Self.stop(engine)
+            hardware.stop()
             let result = Result { try audio.wav() }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == captured, let api = self.api else { return }
@@ -199,12 +232,7 @@ final class ServerSpeechRecorder {
         request?.cancel(); request = nil; limit?.cancel(); limit = nil
         audio = nil; api = nil; errorHandler = nil
         stateHandler?(false, false); stateHandler = nil
-        let engine = engine
-        queue.async { Self.stop(engine) }
-    }
-    private nonisolated static func stop(_ engine: AVAudioEngine) {
-        if engine.isRunning { engine.stop() }
-        engine.inputNode.removeTap(onBus: 0)
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        let hardware = hardware
+        queue.async { hardware.stop() }
     }
 }

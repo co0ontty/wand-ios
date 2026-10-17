@@ -94,6 +94,7 @@
 		F6000000000000000000AC06 /* AlignmentParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC06 /* AlignmentParityTests.swift */; };
 		E7000000000000000000AC01 /* WorkspaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC01 /* WorkspaceModels.swift */; };
 		E7000000000000000000AC02 /* WorkspaceAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC02 /* WorkspaceAPI.swift */; };
+		E7000000000000000000AC11 /* ConversationOrganization.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC11 /* ConversationOrganization.swift */; };
 		E7000000000000000000AC03 /* WorkspaceLayoutReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC03 /* WorkspaceLayoutReconciler.swift */; };
 		E7000000000000000000AC04 /* WorkspaceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC04 /* WorkspaceStore.swift */; };
 		E7000000000000000000AC05 /* WorkspaceListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7000000000000000000BC05 /* WorkspaceListView.swift */; };
@@ -111,6 +112,14 @@
 		F1000000000000000000AC04 /* HomeParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC04 /* HomeParityTests.swift */; };
 		F1000000000000000000AC05 /* ComposerToolParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC05 /* ComposerToolParityTests.swift */; };
 		F1000000000000000000AC11 /* SubagentDispatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC11 /* SubagentDispatchTests.swift */; };
+		F8010000000000000000AC01 /* ClientFeedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8010000000000000000BC01 /* ClientFeedback.swift */; };
+		F8020000000000000000AC01 /* ClientFeedbackTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8020000000000000000BC01 /* ClientFeedbackTransport.swift */; };
+		F8030000000000000000AC01 /* TaskComments.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8030000000000000000BC01 /* TaskComments.swift */; };
+		F8040000000000000000AC01 /* ClientFeedbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8040000000000000000BC01 /* ClientFeedbackTests.swift */; };
+		F8050000000000000000AC01 /* TaskCommentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8050000000000000000BC01 /* TaskCommentsTests.swift */; };
+		F8060000000000000000AC01 /* ClientFeedbackTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8060000000000000000BC01 /* ClientFeedbackTransportTests.swift */; };
+		AB1600000000000000000001 /* AppUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1600000000000000000003 /* AppUpdate.swift */; };
+		AB1600000000000000000002 /* AppUpdateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1600000000000000000004 /* AppUpdateTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -232,6 +241,7 @@
 		F6000000000000000000BC06 /* AlignmentParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlignmentParityTests.swift; sourceTree = "<group>"; };
 		E7000000000000000000BC01 /* WorkspaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceModels.swift; sourceTree = "<group>"; };
 		E7000000000000000000BC02 /* WorkspaceAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceAPI.swift; sourceTree = "<group>"; };
+		E7000000000000000000BC11 /* ConversationOrganization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationOrganization.swift; sourceTree = "<group>"; };
 		E7000000000000000000BC03 /* WorkspaceLayoutReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceLayoutReconciler.swift; sourceTree = "<group>"; };
 		E7000000000000000000BC04 /* WorkspaceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceStore.swift; sourceTree = "<group>"; };
 		E7000000000000000000BC05 /* WorkspaceListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceListView.swift; sourceTree = "<group>"; };
@@ -250,6 +260,14 @@
 		F1000000000000000000BC04 /* HomeParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeParityTests.swift; sourceTree = "<group>"; };
 		F1000000000000000000BC05 /* ComposerToolParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerToolParityTests.swift; sourceTree = "<group>"; };
 		F1000000000000000000BC11 /* SubagentDispatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubagentDispatchTests.swift; sourceTree = "<group>"; };
+		F8010000000000000000BC01 /* ClientFeedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedback.swift; sourceTree = "<group>"; };
+		F8020000000000000000BC01 /* ClientFeedbackTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedbackTransport.swift; sourceTree = "<group>"; };
+		F8030000000000000000BC01 /* TaskComments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskComments.swift; sourceTree = "<group>"; };
+		F8040000000000000000BC01 /* ClientFeedbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedbackTests.swift; sourceTree = "<group>"; };
+		F8050000000000000000BC01 /* TaskCommentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCommentsTests.swift; sourceTree = "<group>"; };
+		F8060000000000000000BC01 /* ClientFeedbackTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedbackTransportTests.swift; sourceTree = "<group>"; };
+		AB1600000000000000000003 /* AppUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdate.swift; sourceTree = "<group>"; };
+		AB1600000000000000000004 /* AppUpdateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -302,8 +320,12 @@
 				A100000000000000000000CB /* WandRemoteImage.swift */,
 				A100000000000000000000BA /* WandAuth.swift */,
 				A100000000000000000000BB /* Theme.swift */,
+				AB1600000000000000000003 /* AppUpdate.swift */,
 				A1000000000000000000BC01 /* WandModels.swift */,
 				A1000000000000000000BC02 /* WandAPI.swift */,
+				F8030000000000000000BC01 /* TaskComments.swift */,
+				F8020000000000000000BC01 /* ClientFeedbackTransport.swift */,
+				F8010000000000000000BC01 /* ClientFeedback.swift */,
 				A1000000000000000000BC03 /* WandSocket.swift */,
 				FA2000000000000000000002 /* NativeTerminal.swift */,
 				FA2000000000000000000007 /* JetBrainsMono-Regular.ttf */,
@@ -365,6 +387,7 @@
 				F6000000000000000000BC05 /* ServerFileLink.swift */,
 				E7000000000000000000BC01 /* WorkspaceModels.swift */,
 				E7000000000000000000BC02 /* WorkspaceAPI.swift */,
+				E7000000000000000000BC11 /* ConversationOrganization.swift */,
 				E7000000000000000000BC03 /* WorkspaceLayoutReconciler.swift */,
 				E7000000000000000000BC04 /* WorkspaceStore.swift */,
 				E7000000000000000000BC05 /* WorkspaceListView.swift */,
@@ -411,12 +434,16 @@
 				FA2000000000000000000011 /* RemainingParityTests.swift */,
 				FA2000000000000000000013 /* InstalledNativeTerminalTests.swift */,
 				FA3000000000000000000005 /* LiveActivityExperienceTests.swift */,
+				AB1600000000000000000004 /* AppUpdateTests.swift */,
 				C3000000000000000000BC01 /* WandProtocolTests.swift */,
 				C3000000000000000000BC02 /* ContactsTests.swift */,
 				F6000000000000000000BC06 /* AlignmentParityTests.swift */,
 				E7000000000000000000BC08 /* WorkspaceTests.swift */,
 				E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */,
 				D5010000000000000000BC01 /* TaskBoardTests.swift */,
+				F8060000000000000000BC01 /* ClientFeedbackTransportTests.swift */,
+				F8050000000000000000BC01 /* TaskCommentsTests.swift */,
+				F8040000000000000000BC01 /* ClientFeedbackTests.swift */,
 			);
 			path = WandTests;
 			sourceTree = "<group>";
@@ -589,8 +616,12 @@
 				A100000000000000000000CA /* WandRemoteImage.swift in Sources */,
 				A100000000000000000000AA /* WandAuth.swift in Sources */,
 				A100000000000000000000AB /* Theme.swift in Sources */,
+				AB1600000000000000000001 /* AppUpdate.swift in Sources */,
 				A1000000000000000000AC01 /* WandModels.swift in Sources */,
 				A1000000000000000000AC02 /* WandAPI.swift in Sources */,
+				F8030000000000000000AC01 /* TaskComments.swift in Sources */,
+				F8020000000000000000AC01 /* ClientFeedbackTransport.swift in Sources */,
+				F8010000000000000000AC01 /* ClientFeedback.swift in Sources */,
 				A1000000000000000000AC03 /* WandSocket.swift in Sources */,
 				FA2000000000000000000001 /* NativeTerminal.swift in Sources */,
 				A1000000000000000000AC04 /* ChatStore.swift in Sources */,
@@ -649,6 +680,7 @@
 				F6000000000000000000AC05 /* ServerFileLink.swift in Sources */,
 				E7000000000000000000AC01 /* WorkspaceModels.swift in Sources */,
 				E7000000000000000000AC02 /* WorkspaceAPI.swift in Sources */,
+				E7000000000000000000AC11 /* ConversationOrganization.swift in Sources */,
 				E7000000000000000000AC03 /* WorkspaceLayoutReconciler.swift in Sources */,
 				E7000000000000000000AC04 /* WorkspaceStore.swift in Sources */,
 				E7000000000000000000AC05 /* WorkspaceListView.swift in Sources */,
@@ -683,12 +715,16 @@
 				FA2000000000000000000010 /* RemainingParityTests.swift in Sources */,
 				FA2000000000000000000012 /* InstalledNativeTerminalTests.swift in Sources */,
 				FA3000000000000000000004 /* LiveActivityExperienceTests.swift in Sources */,
+				AB1600000000000000000002 /* AppUpdateTests.swift in Sources */,
 				C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */,
 				C3000000000000000000AC02 /* ContactsTests.swift in Sources */,
 				F6000000000000000000AC06 /* AlignmentParityTests.swift in Sources */,
 				E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */,
 				E8000000000000000000AC01 /* WorkspaceWorktreeTests.swift in Sources */,
 				D5010000000000000000AC01 /* TaskBoardTests.swift in Sources */,
+				F8060000000000000000AC01 /* ClientFeedbackTransportTests.swift in Sources */,
+				F8050000000000000000AC01 /* TaskCommentsTests.swift in Sources */,
+				F8040000000000000000AC01 /* ClientFeedbackTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

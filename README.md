@@ -18,7 +18,7 @@ Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权
 
 验证：`WandTests/CurrentAndroidParityTests.swift` 覆盖协议、竞态和原生渲染。安装服务只读验收必须显式提供私密测试输入，常规 CI 不访问用户服务；凭据不进入构建参数、环境变量值、仓库或附件。离线语音按用户要求不移植；系统语音保持本轮其他工作真实选择。未签名 IPA与无连接真机是当前验收边界，不能因此宣称已完成签名真机验收或所有平台实现完全相同。
 
-核心目标：**不充钱买 Apple Developer 账号（$99/年）也能把它装进自己的 iPhone。**
+支持付费 Apple Developer 的 Ad Hoc 签名与自建服务器更新，同时保留免费 Apple ID 侧载用途。付费签名与一次配置说明见 [ADHOC.md](ADHOC.md)。
 
 ## 约定
 
@@ -29,13 +29,22 @@ Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权
 
 ## 客户端更新
 
-设置页会请求公开接口 `GET /api/ios-ipa-update?currentVersion=`。有新包时打开系统 `itms-services` 安装器（或 `/ios/install` 落地页），**不会**在 App 内静默装包。
+`AppUpdateController` 在连接成功、回到前台和前台每5分钟请求公开接口 `GET /api/ios-ipa-update?currentVersion=`，发现同应用身份的可安装签名包后显示更新横幅，设置页共用同一状态并保留手动检查。点击后打开系统 `itms-services` 安装器，**需要用户确认，不会静默装包**；后台不承诺持续轮询或实时推送。
 
-- 签发后的 IPA 放到服务器 `~/.wand/ios/`，客户端即可检查并覆盖安装。
+- 已配置本机 Ad Hoc 时正常 `IPA_DIST_DIR="$HOME/.wand/ios" ./build.sh` 自动归档、签名、校验、发布并切换服务器选择器。升级须保持同团队/Bundle ID；首次改用新身份请用 Safari 的 `/ios/install` 安装，不要先删旧App。
 - 未签名包只能被检查到；系统安装会失败，仍可用 SideStore / AltStore / Sideloadly。
 - 网页版关于页的「安装」走同一套 OTA 协议。
 
 ---
+
+## 错误反馈与任务评论
+
+- 更新检查/安装器打开失败、API 5xx 与关键 WebSocket 错误通过当前连接的 `POST /api/feedback/client` 尽力上报，沿用端点认证；仅 HTTPS 或精确 loopback HTTP，禁止反馈请求重定向。远端明文 HTTP 不发送诊断。
+- 保留原始错误消息与 NSError domain/code、失败原因及底层错误摘要，过滤 token/cookie 等凭据，不采集请求/响应正文、聊天或环境。只有错误自身携带的真实堆栈才上传；普通 NSError 无原始栈时省略，绝不用当前线程栈冒充。姓名由服务端读取个人名称，不从设备获取。
+- 上报独立于业务，无重试/重放，绝对 5 秒截止，最多 2 个并发、每分钟 10 条、相同错误 5 分钟去重；取消不报。iOS 系统托管安装没有结果回调，只能确认安装器是否打开，不能据此判断安装成功/失败。
+- 任务详情在有内容时原位只读展示最近评论；旧服务端评论接口 404 视为空，切换任务后的迟到响应不能覆盖当前任务。
+
+无需设备安装/启动的定点单测：`bash scripts/test-feedback.sh`。Release 构建仍使用 `CODE_SIGNING_ALLOWED=NO IPA_DIST_DIR="$HOME/.wand/ios" ./build.sh`，产物未签名，不代表可 OTA 安装。
 
 ## 免费安装方案调研（不需要付费 Apple 账号）
 

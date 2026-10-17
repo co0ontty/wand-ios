@@ -119,13 +119,17 @@ struct WorkspaceListView: View {
     @State private var archiveError: String?
     /// 收起/展开是位移类动效：系统减少动效时退化为瞬时（与 Theme 其它组件同一口径）。
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var collapsedArchivedTaskIds = Set<String>()
     @State private var renameDirectoryBusy = false
+    @State private var conversationOrganizationTarget: TaskDirectoryGroup?
+    @State private var conversationOrganizationControllers: [String: ConversationOrganizationController] = [:]
 
     @State private var reviewTarget: Workspace?
     @State private var moveSessionTarget: WorkspaceSessionSummary?
     @State private var toastMessage: String?
     @State private var searchQuery = ""
+    private var searchingWorkspaces: Bool { !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     @FocusState private var searchFocused: Bool
     @State private var attentionOnly = false
     @AppStorage("wand.homeFold.recent") private var recentFoldRaw = HomeFoldMode.expand.rawValue
@@ -206,10 +210,14 @@ struct WorkspaceListView: View {
                 requestNewTask.wrappedValue = false
             }
             .onChange(of: isSelecting) { _, selecting in
+                conversationOrganizationTarget = nil
                 if !selecting { clearManagedSelection() }
             }
+            .onChange(of: searchQuery) { _, _ in conversationOrganizationTarget = nil }
+            .onChange(of: attentionOnly) { _, _ in conversationOrganizationTarget = nil }
             .onChange(of: recentFoldRaw) { _, _ in temporaryExpandedRecent.removeAll() }
             .onChange(of: workspaceFoldRaw) { _, _ in
+                conversationOrganizationTarget = nil
                 temporaryExpandedWorkspaces.removeAll()
                 temporaryCollapsedTasks.removeAll()
                 temporaryCollapsedLoose.removeAll()
@@ -524,6 +532,7 @@ struct WorkspaceListView: View {
     private func presentAfterSwipe(_ action: @escaping () -> Void) {
         renameTarget = nil
         renameDirectoryTarget = nil
+        conversationOrganizationTarget = nil
         pendingConfirm = nil
         confirmError = nil
         DispatchQueue.main.async(execute: action)
@@ -531,6 +540,27 @@ struct WorkspaceListView: View {
 
     private func presentConfirm(_ confirm: TaskListConfirm) {
         presentAfterSwipe { pendingConfirm = confirm }
+    }
+
+    private func presentConversationOrganization(_ group: TaskDirectoryGroup) {
+        guard let target = group.conversationOrganizationTarget else {
+            showToast("此目录没有可用的工作区范围")
+            return
+        }
+        if conversationOrganizationControllers[group.id]?.target != target {
+            conversationOrganizationControllers[group.id]?.stopPolling()
+            conversationOrganizationControllers[group.id] = ConversationOrganizationController(
+                api: api, target: target, onFinished: { [store] in
+                    await store.loadTaskGroups(force: true)
+                    await store.loadWorkspaceIndex()
+                }
+            )
+        }
+        if conversationOrganizationTarget?.id == group.id {
+            conversationOrganizationTarget = nil
+        } else {
+            presentAfterSwipe { conversationOrganizationTarget = group }
+        }
     }
 
     private var renameDirectoryPresented: Binding<Bool> {
@@ -613,7 +643,7 @@ struct WorkspaceListView: View {
             }
             let visible = HomePresentation.visibleGroups(
                 TaskListPresentation.orderedDirectoryGroups(store.taskGroups),
-                query: searchQuery, attentionOnly: attentionOnly)
+                query: searchQuery, attentionOnly: attentionOnly, employees: employees)
             if hidesHomeChrome && isSelecting {
                 homeManageBar(visible: visible)
             }
@@ -666,7 +696,9 @@ struct WorkspaceListView: View {
             }
         }
         .listStyle(.plain)
+        .animation(reduceMotion ? nil : WandMotion.stateSwap, value: conversationOrganizationTarget?.id)
         .refreshable {
+            conversationOrganizationTarget = nil
             await store.loadTaskGroups(force: true)
             await store.loadWorkspaceIndex()
         }
@@ -678,7 +710,7 @@ struct WorkspaceListView: View {
 
     private var modalVisible: Bool {
         newTaskSheetPresented || reviewTarget != nil || moveSessionTarget != nil
-            || renameTarget != nil || renameDirectoryTarget != nil || pendingConfirm != nil
+            || renameTarget != nil || renameDirectoryTarget != nil || conversationOrganizationTarget != nil || pendingConfirm != nil
     }
 
     private var creationBusy: Bool { workspaceCreateBusy || terminalCreateBusy || terminalCreateUnconfirmed }
@@ -722,13 +754,13 @@ struct WorkspaceListView: View {
     }
 
     @ViewBuilder private func recentConversationRows(_ visible: [TaskDirectoryGroup]) -> some View {
-        let groups = HomePresentation.recentGroups(store.taskGroups, employees: employees, teams: teams)
-        let fold = HomeFoldMode(rawValue: recentFoldRaw) ?? .expand
+        let groups = HomePresentation.recentGroups(store.taskGroups, employees: employees, teams: teams, limit: .max)
+        let fold: HomeFoldMode = searchingWorkspaces ? .expand : (HomeFoldMode(rawValue: recentFoldRaw) ?? .expand)
         ForEach(groups) { group in
             let titleMatches = HomePresentation.matches(searchQuery, [group.title])
             let matching = group.conversations.filter {
-                (titleMatches || HomePresentation.matches(searchQuery, HomePresentation.sessionFields($0.session)
-                    + [$0.task?.name, $0.group.workspaceName, $0.group.workspaceCwd]))
+                (titleMatches || HomePresentation.matches(searchQuery, HomePresentation.sessionFields($0.session, employees: employees)
+                    + [group.title, $0.task?.name, $0.task?.cwd, $0.group.workspaceName, $0.group.workspaceCwd]))
                 && (!attentionOnly || HomePresentation.pulse($0.session) == .needsYou)
             }
             let groupFold = HomePresentation.recentGroupFold(
@@ -911,12 +943,14 @@ struct WorkspaceListView: View {
             }
         } label: {
             Label("已归档会话 \(sessions.count)", systemImage: "archivebox")
-                .font(.footnote).foregroundColor(Theme.textMuted)
-        }.buttonStyle(.plain).listRowSeparator(.hidden).listRowBackground(Theme.background)
+                .font(.footnote).foregroundColor(Theme.textSecondary)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).workspaceTreeRow(.session)
         if expanded {
             ForEach(sessions) { session in
                 standaloneSessionRow(session, workspace: workspace(from: group))
-                    .listRowSeparator(.hidden).listRowBackground(Theme.background)
+                    .workspaceTreeRow(.session)
             }
         }
     }
@@ -1016,13 +1050,25 @@ struct WorkspaceListView: View {
 
     @ViewBuilder
     private func taskGroupSection(_ group: TaskDirectoryGroup) -> some View {
-        let fold = HomePresentation.recentGroupFold(workspaceFold,
+        let fold = searchingWorkspaces ? .expand : HomePresentation.recentGroupFold(workspaceFold,
             temporarilyExpanded: temporaryExpandedWorkspaces.contains(group.id))
-        let expanded = isSelecting || (fold != .collapse &&
+        let expanded = searchingWorkspaces || isSelecting || (fold != .collapse &&
             (temporaryExpandedWorkspaces.contains(group.id) || !collapsedTaskGroups.contains(group.id)))
         taskGroupHeader(group, expanded: expanded)
+            .padding(.top, 12)
+            .workspaceTreeRow(.directory)
+            .id("workspace-directory-" + group.id)
+        if conversationOrganizationTarget?.id == group.id, let controller = conversationOrganizationControllers[group.id] {
+            ConversationOrganizationPanel(
+                group: group,
+                onClose: { conversationOrganizationTarget = nil },
+                controller: controller
+            )
+            .id("organization-" + group.id + group.workspaceCwd)
+            .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
             .listRowBackground(Theme.background)
             .listRowSeparator(.hidden)
+        }
         if expanded {
             ForEach(TaskListPresentation.orderedTaskSummaries(group.tasks).filter {
                 fold != .running || !HomePresentation.sessions($0.sessions, fold: .running).isEmpty
@@ -1034,8 +1080,7 @@ struct WorkspaceListView: View {
                     .font(.footnote)
                     .foregroundColor(Theme.textMuted)
                     .padding(.vertical, 10)
-                    .listRowBackground(Theme.background)
-                    .listRowSeparator(.hidden)
+                    .workspaceTreeRow(.task)
             }
             if !group.standaloneSessions.isEmpty {
                 standaloneSessionSection(group, fold: fold)
@@ -1045,7 +1090,7 @@ struct WorkspaceListView: View {
 
     @ViewBuilder
     private func standaloneSessionSection(_ group: TaskDirectoryGroup, fold: HomeFoldMode) -> some View {
-        let expanded = !(temporaryExpandedWorkspaces.contains(group.id)
+        let expanded = searchingWorkspaces || !(temporaryExpandedWorkspaces.contains(group.id)
             ? temporaryCollapsedLoose.contains(group.id) : collapsedLooseGroups.contains(group.id))
         Button {
             toggleCollapsedLooseGroup(group.id)
@@ -1057,18 +1102,17 @@ struct WorkspaceListView: View {
                 Spacer(minLength: 6)
                 treeDisclosureCaret(expanded: expanded)
             }
-            .padding(.vertical, 3)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(expanded ? "收起未分组会话" : "展开未分组会话")
-        .listRowBackground(Theme.background)
-        .listRowSeparator(.hidden)
+        .workspaceTreeRow(.task)
         if expanded {
             let split = WorkspaceSessionSummary.splitArchived(HomePresentation.sessions(group.standaloneSessions, fold: fold))
             ForEach(split.active) { session in
                 standaloneSessionRow(session, workspace: workspace(from: group))
-                    .listRowBackground(Theme.background)
-                    .listRowSeparator(.hidden)
+                    .workspaceTreeRow(.session)
             }
             if !attentionOnly && fold != .running && !split.archived.isEmpty {
                 archivedLooseSessions(split.archived, group: group)
@@ -1081,32 +1125,17 @@ struct WorkspaceListView: View {
             Button {
                 toggleCollapsedTaskGroup(group.id)
             } label: {
-              HStack(spacing: 9) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(Theme.brand)
-                .frame(width: 30, height: 30)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Theme.brandSoft)
-                )
-            HStack(spacing: 7) {
-                Text(group.workspaceName.isEmpty ? "任务目录" : group.workspaceName)
-                    .font(.wand(size: 14, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(1)
-                if TaskListPresentation.hasLiveActivity(group) {
-                    Circle()
-                        .fill(Theme.success)
-                        .frame(width: 7, height: 7)
+                HStack(spacing: 8) {
+                    WorkspaceDirectoryLabel(group: group)
+                    treeDisclosureCaret(expanded: expanded)
                 }
-            }
-            Spacer(minLength: 6)
-            treeDisclosureCaret(expanded: expanded)
-              }.contentShape(Rectangle())
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(expanded ? "收起目录" : "展开目录")
+            .accessibilityLabel("\(expanded ? "收起" : "展开")目录 \(group.workspaceName)")
+            .accessibilityValue(group.isGlobal ? "未归属工作区" : group.workspaceCwd)
+            .accessibilityIdentifier("workspace-toggle-" + group.id)
             if group.tasks.contains(where: { $0.worktree != nil }) {
                 worktreeBadge(workspace(from: group))
             }
@@ -1119,15 +1148,14 @@ struct WorkspaceListView: View {
                 Image(systemName: "plus")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundColor(Theme.brand)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(Theme.brandSoft))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(isSelecting)
             .opacity(isSelecting ? 0.35 : 1)
             .accessibilityLabel("在 \(group.workspaceName) 新建任务")
         }
-        .padding(.horizontal, 4)
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("目录 \(group.workspaceName)，\(group.tasks.count) 个任务")
@@ -1137,6 +1165,11 @@ struct WorkspaceListView: View {
             Button("下移工作区") { store.moveWorkspaceGroup(group.id, delta: 1) }
                 .disabled(store.taskGroups.last?.id == group.id)
             // 全局（未归属）组不参与改名，合成目录与真实工作区走各自接口；删除只留给真实工作区。
+            Button {
+                presentConversationOrganization(group)
+            } label: {
+                Label("根据会话内容自动分组", systemImage: "wand.and.stars")
+            }
             if !group.isGlobal {
                 Button {
                     renameDirectoryDraft = group.workspaceName
@@ -1227,16 +1260,14 @@ struct WorkspaceListView: View {
 
     @ViewBuilder
     private func taskRows(_ summary: WorkspaceTaskSummary, group: TaskDirectoryGroup, fold: HomeFoldMode) -> some View {
-        let expanded = (isSelecting || fold != .collapse) && TaskListPresentation.isTaskSessionsExpanded(
+        let expanded = searchingWorkspaces || ((isSelecting || fold != .collapse) && TaskListPresentation.isTaskSessionsExpanded(
             userCollapsed: taskIsCollapsed(summary.id, in: group.id),
             sessionCount: summary.listedSessionCount,
             isOnlyTask: group.tasks.count == 1
-        )
+        ))
         let workspace = workspace(for: summary, group: group)
         taskSummaryRow(summary, group: group)
-            .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: 2, trailing: 12))
-            .listRowBackground(Theme.background)
-            .listRowSeparator(.hidden)
+            .workspaceTreeRow(.task)
             .opacity(summary.status == "done" ? 0.76 : 1)
 
         if expanded {
@@ -1246,25 +1277,19 @@ struct WorkspaceListView: View {
                 Text("还没有终端。点右侧「＋」新建。")
                     .font(.footnote)
                     .foregroundColor(Theme.textMuted)
-                    .padding(.leading, 8)
                     .padding(.vertical, 6)
-                    .listRowBackground(Theme.background)
-                    .listRowSeparator(.hidden)
+                    .workspaceTreeRow(.session)
             } else {
                 ForEach(Array(split.active.enumerated()), id: \.element.id) { index, session in
                     taskOwnedSessionRow(session, summary: summary, workspace: workspace, index: index)
-                        .listRowInsets(EdgeInsets(top: 1, leading: 28, bottom: 1, trailing: 12))
-                        .listRowBackground(Theme.background)
-                        .listRowSeparator(.hidden)
+                        .workspaceTreeRow(.session)
                 }
                 if summary.listedSessionCount > summary.sessions.count {
                     Text("列表仅显示 \(summary.sessions.count)/\(summary.listedSessionCount) 个会话，打开任务可查看全部。")
                         .font(.caption)
                         .foregroundColor(Theme.textMuted)
-                        .padding(.leading, 8)
                         .padding(.vertical, 6)
-                        .listRowBackground(Theme.background)
-                        .listRowSeparator(.hidden)
+                        .workspaceTreeRow(.session)
                 }
                 if !attentionOnly && fold != .running {
                     archivedSessionsFold(split.archived, summary: summary, workspace: workspace)
@@ -1283,7 +1308,10 @@ struct WorkspaceListView: View {
         )
         let workspace = workspace(for: summary, group: group)
         let task = summary.asTask()
-        return HStack(spacing: 8) {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+            : AnyLayout(HStackLayout(spacing: 8))
+        return layout {
             taskSummaryTitle(summary, workspace: workspace, task: task)
 
             if summary.status == "done" {
@@ -1293,11 +1321,13 @@ struct WorkspaceListView: View {
                     .padding(.trailing, 4)
             }
 
-            if canCollapseSessions {
-                taskSummaryDisclosureButton(summary, expanded: expanded)
+            HStack(spacing: 8) {
+                if dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
+                if canCollapseSessions {
+                    taskSummaryDisclosureButton(summary, expanded: expanded)
+                }
+                taskSummaryNewSessionButton(summary, workspace: workspace, task: task)
             }
-
-            taskSummaryNewSessionButton(summary, workspace: workspace, task: task)
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 6)
@@ -1305,9 +1335,8 @@ struct WorkspaceListView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill((isSelecting ? selectedTaskIds.contains(summary.id) : selected) ? Theme.brandSoft : Color.clear)
         )
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("任务 \(summary.name)")
-        .accessibilityAddTraits(.isButton)
         .contextMenu { taskSummaryContextMenu(summary, workspace: workspace, task: task) }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             taskSummarySwipeActions(summary, task: task)
@@ -1336,14 +1365,32 @@ struct WorkspaceListView: View {
                     .foregroundColor(Theme.success)
                     .frame(width: 14, height: 18)
             }
-            Text(summary.name)
-                .font(.wand(size: 15, weight: selected || (isSelecting && isSelected) ? .semibold : .medium))
-                .foregroundColor(Theme.textPrimary)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-            Spacer(minLength: 4)
+            if !isSelecting && !summary.isIsolated {
+                Image(systemName: "checklist")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 18)
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(summary.name)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(selected || (isSelecting && isSelected) ? Theme.textPrimary : Theme.textSecondary)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    .accessibilityIdentifier("task-name-" + summary.id)
+                Text(HomePresentation.sessionSummary(summary.sessions, total: summary.listedSessionCount))
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
         }
+        .frame(minHeight: 44)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier("task-open-" + summary.id)
         .onTapGesture {
             if isSelecting {
                 toggleSelectedTask(summary.id)
@@ -1366,17 +1413,14 @@ struct WorkspaceListView: View {
         Button {
             toggleCollapsedTask(summary.id)
         } label: {
-            HStack(spacing: 2) {
-                Text("\(summary.listedSessionCount)")
-                    .font(.wand(size: 11, weight: .semibold))
-                    .monospacedDigit()
-                    .foregroundColor(Theme.textMuted)
-                treeDisclosureCaret(expanded: expanded)
-            }
+            treeDisclosureCaret(expanded: expanded)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(isSelecting)
-        .accessibilityLabel(expanded ? "收起终端" : "展开终端")
+        .accessibilityLabel("\(expanded ? "收起" : "展开")任务 \(summary.name) 的会话")
+        .accessibilityIdentifier("task-toggle-" + summary.id)
     }
 
     private func taskSummaryNewSessionButton(
@@ -1391,7 +1435,8 @@ struct WorkspaceListView: View {
             Image(systemName: "plus")
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(Theme.brand)
-                .frame(width: 22, height: 22)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(isSelecting)
@@ -1493,37 +1538,12 @@ struct WorkspaceListView: View {
                     .foregroundColor(selectedSessionIds.contains(session.id) ? Theme.brand : Theme.textMuted)
                     .frame(width: 22, height: 22)
             }
-            BrandLogo(provider: session.provider ?? "terminal", color: selected ? Theme.brand : Theme.textSecondary)
-                .frame(width: 14, height: 14)
-                .frame(width: 22, height: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                    .font(.wand(size: 13, weight: selected ? .semibold : .medium))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(1)
-                if session.sessionKind == "pty" {
-                    Text("终端")
-                        .font(.wand(size: 10))
-                        .foregroundColor(Theme.textMuted)
-                }
-            }
-            Spacer(minLength: 0)
-            if session.isJustCompleted {
-                // 完成但还没被明确打开看过；纯展示态，不改 runner 生命周期。
-                Text("刚完成")
-                    .font(.wand(size: 10, weight: .medium))
-                    .foregroundColor(Theme.success)
-                    .help("已完成，还没查看")
-                    .accessibilityLabel("刚完成，还没查看")
-            }
+            WorkspaceSessionLabel(session: session, title: label, selected: selected)
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 8)
+        .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(selected ? Theme.brand.opacity(0.10) : Color.clear)
-        )
+        .frame(minHeight: 44)
+        .background(selected ? Theme.brandSoft : Color.clear, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
         .onTapGesture {
             if isSelecting {
@@ -1538,6 +1558,7 @@ struct WorkspaceListView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("会话 \(label)")
+        .accessibilityIdentifier("session-open-" + session.id)
         .accessibilityAddTraits(.isButton)
         .contextMenu {
             Button {
@@ -1592,8 +1613,7 @@ struct WorkspaceListView: View {
                         Spacer(minLength: 0)
                     }
                     .foregroundColor(Theme.textMuted)
-                    .padding(.leading, 8)
-                    .padding(.vertical, 6)
+                    .frame(minHeight: 44)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -1605,8 +1625,7 @@ struct WorkspaceListView: View {
                     }
                 }
             }
-            .listRowBackground(Theme.background)
-            .listRowSeparator(.hidden)
+            .workspaceTreeRow(.session)
             .animation(reduceMotion ? nil : WandMotion.stateSwap,
                        value: collapsedArchivedTaskIds)
         }
@@ -1758,41 +1777,14 @@ struct WorkspaceListView: View {
                     .foregroundColor(selectedSessionIds.contains(session.id) ? Theme.brand : Theme.textMuted)
                     .frame(width: 22, height: 22)
             }
-            ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Theme.surface)
-                BrandLogo(
-                    provider: session.provider ?? "terminal",
-                    color: Theme.textSecondary
-                )
-                .frame(width: 17, height: 17)
-            }
-            .frame(width: 30, height: 30)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(TaskListPresentation.listSessionLabel(
-                    title: session.title,
-                    providerLabel: session.providerLabel,
-                    cwd: session.cwd,
-                    index: 0
-                ))
-                    .font(.wand(size: 14, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(1)
-                Text(session.providerLabel)
-                    .font(.wand(size: 10))
-                    .foregroundColor(Theme.textMuted)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 4)
-            Circle()
-                .fill(["running", "thinking"].contains(session.activityStatus) ? Theme.success : Theme.textMuted.opacity(0.5))
-                .frame(width: 7, height: 7)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(Theme.textMuted)
+            WorkspaceSessionLabel(session: session, title: TaskListPresentation.listSessionLabel(
+                title: session.title, providerLabel: session.providerLabel, cwd: session.cwd, index: 0
+            ), selected: selectedSessionId == session.id)
         }
-        .padding(.leading, 14)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(minHeight: 44)
+        .background(selectedSessionId == session.id ? Theme.brandSoft : Color.clear, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
         .onTapGesture {
             if isSelecting {
@@ -1807,6 +1799,7 @@ struct WorkspaceListView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("会话 \(session.title ?? session.providerLabel)")
+        .accessibilityIdentifier("session-open-" + session.id)
         .accessibilityAddTraits(.isButton)
         .contextMenu {
             Button {

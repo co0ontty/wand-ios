@@ -363,6 +363,46 @@ final class ContactsTests: XCTestCase {
             XCTAssertTrue(contactCreationNeedsReview(attempted: true, error: error))
         }
     }
+    /// External idb driver taps the real directory's name, whitespace, arrow and avatar.
+    /// Kept opt-in so ordinary CI never waits for manual input or touches a live server.
+    func testDirectoryTouchTargets() async throws {
+        guard ProcessInfo.processInfo.environment["WAND_DIRECTORY_TOUCH_TEST"] == "1" else {
+            throw XCTSkip("Requires the isolated simulator idb touch driver")
+        }
+        let service = ContactDirectoryStub()
+        service.people = [try decode(SiliconEmployee.self, #"{"id":"touch-employee","name":"点按测试","avatar":"cat:2"}"#)]
+        service.groups = [try decode(ContactTeam.self, #"{"id":"touch-team","name":"团队点按测试","members":[]}"#)]
+        let store = ContactsStore(service: service)
+        let employee = expectation(description: "name, whitespace and arrow open employee")
+        employee.expectedFulfillmentCount = 3
+        employee.assertForOverFulfill = true
+        let team = expectation(description: "name, whitespace and arrow open team")
+        team.expectedFulfillmentCount = 3
+        team.assertForOverFulfill = true
+        var employeeCalls = 0, teamCalls = 0
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
+        window.rootViewController = UIHostingController(rootView:
+            ContactsView(api: api, store: store, onBack: {}, onOpenSession: { _ in XCTFail("Must use stable IM identity") },
+                onOpenRun: { _ in XCTFail("Must use team conversation callback") },
+                onOpenConversation: { id in
+                    XCTAssertEqual(id, ConversationStore.employeeID("touch-employee"))
+                    employeeCalls += 1; employee.fulfill()
+                }, onTeamConversation: { id in
+                    XCTAssertEqual(id, "touch-team")
+                    teamCalls += 1; team.fulfill()
+                }, embedded: true))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        await fulfillment(of: [employee, team], timeout: 90)
+        // Driver also opens the independent profile avatar after the six conversation taps.
+        try await Task.sleep(for: .seconds(5))
+        XCTAssertEqual(employeeCalls, 3)
+        XCTAssertEqual(teamCalls, 3)
+        XCTAssertEqual(service.creations, 0, "Touching stable IM routes must not create legacy sessions")
+    }
+
     func testHomeDockFitsNarrowSidebarAndFeedbackKeepsFixedSize() {
         for width: CGFloat in [280, 320, 768] {
             let dock = UIHostingController(rootView: HomeMenuPill(mode: .sessions, onMode: { _ in }, onContacts: {}))

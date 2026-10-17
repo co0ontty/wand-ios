@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 macOS 上构建 Wand iOS 壳，产出一个【未签名】的 .ipa。
+# 在 macOS 上构建 Wand iOS 客户端。本机配置 Ad Hoc 后默认签名，否则产出未签名 IPA。
 #
 # 为什么不签名：免费 Apple ID 方案下，签名是在【安装时】由 sideload 工具
 # （AltStore / SideStore / Sideloadly）用你自己的 Apple ID 现场完成的——它会
@@ -14,6 +14,18 @@
 #   dist/wand-v<version>.ipa   （未签名，拖进 AltStore/Sideloadly 即可）
 
 set -euo pipefail
+
+# Trusted, local-only signing opt-in. Explicit CODE_SIGNING_ALLOWED=NO retains the sideload build.
+SIGNING_CONFIG="${WAND_IOS_SIGNING_CONFIG:-$HOME/.config/wand-build/ios-adhoc.env}"
+if [[ -f "$SIGNING_CONFIG" ]]; then
+  source "$SIGNING_CONFIG"
+elif [[ -n "${WAND_IOS_SIGNING_CONFIG:-}" ]]; then
+  echo "iOS signing configuration not found: $SIGNING_CONFIG" >&2
+  exit 1
+fi
+if [[ "${CODE_SIGNING_ALLOWED:-}" != NO && ( -n "${IOS_APP_PROFILE:-}" || -n "${IOS_WIDGET_PROFILE:-}" || -n "${IOS_TARGET_UDID:-}" ) ]]; then
+  exec bash "$(dirname "$0")/build-adhoc.sh" "$@"
+fi
 
 # Local opt-in storage policy; unconfigured machines and CI retain normal paths.
 NATIVE_BUILD_ENV="${WAND_NATIVE_BUILD_ENV:-$HOME/.config/wand-build/environment.sh}"

@@ -16,7 +16,7 @@ final class HomeParityTests: XCTestCase {
             #"{"id":"s","employeeId":"real-id","employeeAvatar":"cat:2"}"#
         ])], employees: [], teams: []).first)
         XCTAssertEqual(group.employeeId, "real-id")
-        XCTAssertFalse(HomePresentation.recentGroupShowsHeader(group, sectionFold: .expand, visibleConversationCount: 1))
+        XCTAssertTrue(HomePresentation.recentGroupShowsHeader(group, sectionFold: .expand, visibleConversationCount: 1))
         XCTAssertTrue(HomePresentation.recentGroupShowsHeader(group, sectionFold: .running, visibleConversationCount: 0))
         XCTAssertTrue(HomePresentation.recentGroupShowsHeader(group, sectionFold: .collapse, visibleConversationCount: 1))
     }
@@ -58,6 +58,9 @@ final class HomeParityTests: XCTestCase {
         XCTAssertEqual(groups.filter { $0.kind == .employee }.count, 8)
         XCTAssertEqual(groups.first { $0.kind == .pty }?.conversations.map(\.id), ["old-pty"])
         XCTAssertEqual(groups.last?.kind, .blankTerminal)
+        // 工作区首页（对齐 Web 侧栏与安卓）传全量、不限八条：员工展开的是完整会话列表。
+        let full = HomePresentation.recentGroups([try group(sessions)], employees: [], teams: [], limit: .max)
+        XCTAssertEqual(full.filter { $0.kind == .employee }.count, 12)
     }
 
     func testRecentIdentitySurvivesRenameAndDefinitionDeletion() throws {
@@ -121,6 +124,57 @@ final class HomeParityTests: XCTestCase {
         XCTAssertEqual(draft.normalizedCwd, "/work")
         draft.name = "Wand\n项目"
         XCTAssertNotNil(draft.validationError)
+    }
+
+    func testActivityUsesRuntimeFlagsAndForegroundCommandNotProcessLiveness() throws {
+        for json in [
+            #"{"id":"busy","status":"idle","ptyBusy":true}"#,
+            #"{"id":"flight","status":"idle","sessionKind":"structured","inFlight":true}"#,
+            #"{"id":"thinking","status":"thinking"}"#,
+            #"{"id":"shell","sessionKind":"pty","status":"running","ptyCommandRunning":true}"#
+        ] {
+            let session = try summary(json)
+            XCTAssertEqual(HomePresentation.pulse(session), .running)
+            XCTAssertTrue(HomePresentation.isActive(session))
+        }
+        for json in [
+            #"{"id":"prompt","sessionKind":"pty","status":"running"}"#,
+            #"{"id":"exited","sessionKind":"pty","status":"exited","ptyCommandRunning":true}"#,
+            #"{"id":"archived","inFlight":true,"archived":true}"#
+        ] {
+            XCTAssertFalse(HomePresentation.isActive(try summary(json)))
+        }
+    }
+
+    func testSearchUsesCurrentEmployeeNameAndCrossFieldTerms() throws {
+        let source = try group([#"{"id":"active","employeeId":"e","employeeName":"旧名","title":"修复目录","sessionKind":"structured","inFlight":true}"#,
+                                #"{"id":"other","title":"其他"}"#])
+        let person = try decode(SiliconEmployee.self, #"{"id":"e","name":"新名","avatar":""}"#)
+        let result = HomePresentation.visibleGroups([source], query: "Wand 新名 修复", attentionOnly: false, employees: [person])
+        XCTAssertEqual(result.first?.standaloneSessions.map(\.id), ["active"])
+        XCTAssertEqual(source.standaloneSessions.count, 2)
+        XCTAssertEqual(HomePresentation.sessions(result.first?.standaloneSessions ?? [], fold: .running).map(\.id), ["active"])
+        XCTAssertTrue(HomePresentation.visibleGroups([source], query: "新名 missing", attentionOnly: false, employees: [person]).isEmpty)
+    }
+
+    func testInstalledWorkspaceProjectionWhenExplicitSnapshotIsProvided() throws {
+        let path = "/tmp/wand-mobile-workspace-projection.json"
+        guard FileManager.default.fileExists(atPath: path) else { throw XCTSkip("Requires explicit read-only installed-service snapshot") }
+        let source = try TaskGroupsPage.decode(from: Data(contentsOf: URL(fileURLWithPath: path))).groups
+        let all = HomePresentation.conversations(source)
+        let active = all.filter { $0.session.inFlight == true || $0.session.ptyBusy == true }
+        XCTAssertFalse(active.isEmpty)
+        let groups = HomePresentation.recentGroups(source, employees: [], teams: [], limit: .max)
+        for item in active {
+            XCTAssertTrue(HomePresentation.isActive(item.session))
+            let identity = try XCTUnwrap(groups.first { $0.id == HomePresentation.identity(item.session).0 })
+            XCTAssertTrue(HomePresentation.recentGroupShowsHeader(identity, sectionFold: .expand, visibleConversationCount: 1))
+            XCTAssertTrue(identity.conversations.contains { $0.id == item.id })
+            let query = [item.group.workspaceName, item.session.employeeName].compactMap { $0 }.joined(separator: " ")
+            let directory = HomePresentation.visibleGroups(source, query: query, attentionOnly: false)
+            XCTAssertTrue(HomePresentation.conversations(directory).contains { $0.id == item.id })
+        }
+        print("Installed workspace projection: \(all.count) sessions, \(active.count) executing verified")
     }
 
     private func summary(_ json: String) throws -> WorkspaceSessionSummary { try decode(WorkspaceSessionSummary.self, json) }

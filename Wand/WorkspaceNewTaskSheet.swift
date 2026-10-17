@@ -65,6 +65,11 @@ struct WorkspaceNewTaskSheet: View {
                         Text("任务是工作区内的分组，与任务看板同步，不会创建磁盘子目录。")
                             .font(.footnote)
                             .foregroundColor(Theme.textSecondary)
+                        if creating {
+                            HStack { ProgressView(); Text("正在创建任务，请稍候…") }
+                        } else if let submissionHint {
+                            Text(submissionHint).font(.footnote).foregroundStyle(Theme.textSecondary)
+                        }
                         nameCard
                         directoryCard
                         createModeCard
@@ -78,7 +83,6 @@ struct WorkspaceNewTaskSheet: View {
                             if subject == nil { cliCard }
                         }
                         advancedCard
-                        if let errorMessage { errorBanner(errorMessage) }
                         if store.taskCreationUnconfirmed {
                             Text("任务创建结果未确认，请先刷新并核对任务列表。").font(.caption).foregroundStyle(Theme.danger)
                             Button("我已核对，开始新的创建操作") { store.acknowledgeUnconfirmedTaskCreation(); errorMessage = nil }
@@ -86,7 +90,13 @@ struct WorkspaceNewTaskSheet: View {
                         }
                     }
                     .padding(16)
-                }.disabled(creating)
+                }
+                .disabled(creating)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if let errorMessage {
+                        errorBanner(errorMessage).padding(.horizontal, 16).padding(.top, 8)
+                    }
+                }
             }
             .navigationTitle("新建任务")
             .navigationBarTitleDisplayMode(.inline)
@@ -165,14 +175,24 @@ struct WorkspaceNewTaskSheet: View {
         return trimmedPrompt.isEmpty ? nil : trimmedPrompt
     }
 
-    private var canSubmit: Bool {
-        guard !creating, !store.taskCreationUnconfirmed, !trimmedDirectory.isEmpty, trimmedName.count <= 80 else { return false }
+    private var submissionHint: String? {
+        if store.taskCreationUnconfirmed { return "创建结果未确认，请先核对任务列表，勿重复创建。" }
+        if trimmedDirectory.isEmpty { return "请选择工作目录后创建任务。" }
+        if trimmedName.count > 80 { return "任务名称不能超过 80 个字符。" }
         if startFirstSession, let subject {
-            if subject.type == "employee", !employees.contains(where: { $0.id == subject.id && !$0.archived && !$0.agents.isEmpty }) { return false }
-            if subject.type == "team", (!teamAllowed || trimmedPrompt.isEmpty || !teams.contains(where: { $0.id == subject.id })) { return false }
+            if subject.type == "employee", !employees.contains(where: { $0.id == subject.id && !$0.archived && !$0.agents.isEmpty }) {
+                return "所选员工当前不可用，请重新选择执行主体。"
+            }
+            if subject.type == "team" {
+                if !teamAllowed || !teams.contains(where: { $0.id == subject.id }) { return "请为团队选择有效的工作区和执行主体。" }
+                if trimmedPrompt.isEmpty { return "请填写交给团队的任务描述。" }
+            }
         }
-        return !trimmedName.isEmpty || taskPrompt != nil
+        if trimmedName.isEmpty && taskPrompt == nil { return "请填写任务名称或首个会话的提示词。" }
+        return nil
     }
+
+    private var canSubmit: Bool { !creating && submissionHint == nil }
 
     private var boundProjectID: String? {
         selectedWorkspaceId ?? (matchingProjects.count == 1 ? matchingProjects.first?.workspaceId : nil)

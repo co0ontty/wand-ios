@@ -1,6 +1,41 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Presentation only: never infer missing data from an empty filtered projection.
+enum ConversationListEmptyState: Equatable {
+    case empty, search, filtered, historyOnly
+    static func resolve(query: String, totalCount: Int, defaultFilter: Bool) -> Self {
+        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .search }
+        if !defaultFilter { return .filtered }
+        return totalCount > 0 ? .historyOnly : .empty
+    }
+    var title: String {
+        switch self {
+        case .empty: return "还没有对话"
+        case .search: return "未找到匹配的对话"
+        case .filtered: return "此筛选下暂无对话"
+        case .historyOnly: return "当前没有活跃对话"
+        }
+    }
+    var explanation: String {
+        switch self {
+        case .empty: return "从通讯录选择员工开始对话，或用右上角加号新建群聊。"
+        case .search: return "没有匹配当前关键词的对话或任务。清空搜索即可恢复当前列表。"
+        case .filtered: return "可以切换其他分类，或查看全部对话。"
+        case .historyOnly: return "已解散群聊仍保留在历史筛选中。"
+        }
+    }
+    var actionTitle: String {
+        switch self {
+        case .empty: return "新建群聊"
+        case .search: return "清空搜索"
+        case .filtered: return "查看全部对话"
+        case .historyOnly: return "查看已解散"
+        }
+    }
+    var symbol: String { self == .search ? "magnifyingglass" : self == .historyOnly ? "archivebox" : "bubble.left.and.bubble.right" }
+}
+
 struct ConversationListView: View {
     @ObservedObject var store: ConversationStore
     let onSelect: (String) -> Void
@@ -19,8 +54,20 @@ struct ConversationListView: View {
     @Environment(\.accessibilityReduceMotion) private var reduced
     private var creationOpen: Bool { creating || store.creatingPresetID != nil }
     private var rows: [ConversationInstance] {
-        store.items.filter { tier.contains($0) && (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query)
-            || $0.preview.localizedCaseInsensitiveContains(query) || $0.tasks.contains { $0.task.title.localizedCaseInsensitiveContains(query) }) }
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return store.items.filter { tier.contains($0) && (term.isEmpty || $0.title.localizedCaseInsensitiveContains(term)
+            || $0.preview.localizedCaseInsensitiveContains(term) || $0.tasks.contains { $0.task.title.localizedCaseInsensitiveContains(term) }) }
+    }
+    private var emptyState: ConversationListEmptyState {
+        .resolve(query: query, totalCount: store.items.count, defaultFilter: tier == .all)
+    }
+    private func recoverEmptyList() {
+        switch emptyState {
+        case .empty: creating = true; searchFocused = false
+        case .search: query = ""; searchFocused = searching
+        case .filtered: query = ""; tier = .all; searchFocused = false
+        case .historyOnly: tier = .dissolved; searchFocused = false
+        }
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -36,7 +83,10 @@ struct ConversationListView: View {
             List(selection: $selected) {
                 if store.loading && store.items.isEmpty { ProgressView().frame(maxWidth: .infinity).listRowBackground(Color.clear) }
                 if let error = store.error {
-                    Text(error).font(.caption).foregroundStyle(Theme.danger).listRowBackground(Color.clear)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(error).font(.caption).foregroundStyle(Theme.danger)
+                        Button("重试加载对话") { Task { await store.refresh() } }.frame(minHeight: 44)
+                    }.listRowBackground(Color.clear)
                 }
                 if !store.pendingRequests.isEmpty {
                     Section("未确认请求") {
@@ -63,7 +113,15 @@ struct ConversationListView: View {
                             Button("删除", role: .destructive) { deleteIDs = [item.id] }
                         }
                 }
-                if rows.isEmpty && !store.loading { Text("暂无对话").foregroundStyle(Theme.textSecondary).listRowBackground(Color.clear) }
+                if rows.isEmpty && !store.loading && store.error == nil {
+                    ContentUnavailableView {
+                        Label(emptyState.title, systemImage: emptyState.symbol)
+                    } description: {
+                        Text(emptyState.explanation)
+                    } actions: {
+                        Button(emptyState.actionTitle, action: recoverEmptyList).frame(minHeight: 44)
+                    }.listRowBackground(Color.clear).listRowSeparator(.hidden)
+                }
             }
             .listStyle(.plain).scrollContentBackground(.hidden)
             .environment(\.editMode, .constant(selecting ? .active : .inactive))
@@ -244,6 +302,7 @@ struct ConversationDetailView: View {
     @AppStorage(CatComposerSide.preferenceKey) private var sideRaw = CatComposerSide.left.rawValue
     @State private var dragOffset: CGFloat = 0
     @State private var files = false
+    @StateObject private var messageLinks = ServerFileLinkController()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var members = false
@@ -273,23 +332,45 @@ struct ConversationDetailView: View {
                         Spacer(); Button("查看全部") { store.filters[id] = nil }
                     }.padding(10).background(Theme.surface)
                 }
-                messageList(detail).clipped().onTapGesture { composerFocus.collapse() }
+                messageList(detail).clipped()
+                    .overlay {
+                        if messages.isEmpty {
+                            ContentUnavailableView(
+                                (store.filters[id] ?? "").isEmpty ? "还没有消息" : "此任务暂无消息",
+                                systemImage: "bubble.left.and.bubble.right",
+                                description: Text(detail.dissolvedAt == nil ? "消息会显示在这里，你也可以直接开始沟通。" : "群聊已解散，恢复后可继续沟通。"))
+                        }
+                    }
+                    .onTapGesture { composerFocus.collapse() }
                 ConversationComposerView(id: id, store: store, detail: detail, target: store.targets[id], focus: composerFocus, voice: voice, onEmployee: onEmployee)
                     .id(store.draftKey(id, target: store.targets[id]))
                     .padding(.bottom, keyboard.lift)
             } else {
                 Spacer()
                 if let error = store.error { Text(error).foregroundStyle(Theme.danger); Button("重试") { Task { await store.load(id) } } }
-                else { ProgressView() }
+                else { ProgressView("正在加载对话…") }
                 Spacer()
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.top, ChatTopLayout.clearance(compact: verticalSizeClass == .compact))
         .background(Theme.background)
         .navigationTitle("").navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .navigationBar)
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .overlay(alignment: .top) { navigation }
+        .environment(\.chatAPI, store.api)
+        .environment(\.serverFileLinkController, messageLinks)
+        .sheet(item: $messageLinks.previewItem, onDismiss: { messageLinks.dismissPreview(); composerFocus.resume("message-file") }) {
+            ServerFilePreviewView(item: $0)
+        }
+        .alert(item: $messageLinks.failure) { failure in
+            Alert(title: Text("文件下载失败"), message: Text(failure.message), dismissButton: .default(Text("好")))
+        }
+        .onChange(of: messageLinks.isDownloading) { _, downloading in
+            if downloading { composerFocus.borrow("message-file") }
+            else if messageLinks.previewItem == nil { composerFocus.resume("message-file") }
+        }
         .sheet(isPresented: $files, onDismiss: { composerFocus.resume("files") }) {
             NavigationStack {
                 List {
@@ -303,7 +384,7 @@ struct ConversationDetailView: View {
             }
         }
         .task(id: id) { store.select(id); await store.load(id) }
-        .onDisappear { inviting = false; voice.finish(cancelled: true); composerFocus.collapse() }
+        .onDisappear { inviting = false; voice.finish(cancelled: true); composerFocus.collapse(); messageLinks.cancel() }
         .animation(reduced ? nil : WandMotion.stateSwap, value: members)
         .animation(reduced ? nil : WandMotion.stateSwap, value: tasks)
         .animation(reduced ? nil : WandMotion.stateSwap, value: inviting)
@@ -350,10 +431,20 @@ struct ConversationDetailView: View {
                 }.padding(12).frame(maxWidth: 760).frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom)
+            .defaultScrollAnchor(scrollPinned ? .bottom : nil, for: .sizeChanges)
             .onScrollPhaseChange { _, phase in userScrolling = phase == .interacting || phase == .decelerating }
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 geometry.contentSize.height <= geometry.containerSize.height || geometry.contentSize.height - geometry.visibleRect.maxY < 40
-            } action: { _, atBottom in if userScrolling || atBottom { scrollPinned = atBottom } }
+            } action: { _, atBottom in if userScrolling { scrollPinned = atBottom } }
+            // A keyboard/composer resize does not change the message revision. Re-anchor
+            // after the new viewport is laid out, but never while reading older messages.
+            .onScrollGeometryChange(for: CGSize.self) { geometry in
+                CGSize(width: geometry.containerSize.width, height: geometry.containerSize.height)
+            } action: { old, new in
+                if old != new, scrollPinned, !userScrolling {
+                    proxy.scrollTo("im-tail", anchor: .bottom)
+                }
+            }
             .onChange(of: messages.map(\.renderRevision)) { _, _ in
                 if scrollPinned { proxy.scrollTo("im-tail", anchor: .bottom) }
             }
@@ -381,7 +472,10 @@ struct ConversationDetailView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(link.title).font(.headline)
                 Text(message.taskPreview?.label ?? "准备中").font(.caption).foregroundStyle(Theme.textSecondary)
-                ScrollView { Text(message.taskPreview?.text.isEmpty == false ? message.taskPreview!.text : "等待任务输出").font(.subheadline).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }.frame(height: 152).clipped()
+                ScrollView {
+                    MarkdownText(text: message.taskPreview?.text.isEmpty == false ? message.taskPreview!.text : "等待任务输出")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(height: 152).clipped()
                 Button("查看任务") { store.openTask(link, preview: message.taskPreview); onOpenConversation(link.conversationId) }.disabled(message.taskPreview?.status == "unavailable")
             }.padding(12).frame(maxWidth: 420).frame(height: 232).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
         } else if let file = message.reportFile {
@@ -434,8 +528,8 @@ private struct ConversationReplyCard: View {
     private var text: String { message.sessionPreview?.text ?? "" }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(text.isEmpty ? "等待会话输出" : text).font(.body)
-                .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+            MarkdownText(text: text.isEmpty ? "等待会话输出" : text)
+                .frame(maxWidth: .infinity, alignment: .leading)
             HStack {
                 Text(message.sessionPreview?.label ?? "准备中").font(.caption).foregroundStyle(Theme.textSecondary)
                 Spacer(minLength: 8)

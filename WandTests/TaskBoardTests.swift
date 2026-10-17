@@ -1,8 +1,36 @@
 import Foundation
 import XCTest
+import SwiftUI
 @testable import Wand
 
 final class TaskBoardTests: XCTestCase {
+    @MainActor
+    func testCreateFromPresentedSheet() async throws {
+        guard let raw = ProcessInfo.processInfo.environment["WAND_CREATE_TOUCH_URL"],
+              let url = URL(string: raw), url.host == "127.0.0.1" else {
+            throw XCTSkip("Requires isolated local fixture and simulator touch driver")
+        }
+        let api = WandAPI(baseURL: url, token: nil)
+        let store = WorkspaceStore(api: api, serverID: "create-touch-fixture")
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: TaskBoardView(api: api, workspaceStore: store, onOpenSession: { _ in }))
+        window.windowLevel = .alert + 1
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        for _ in 0..<90 {
+            try await Task.sleep(for: .seconds(1))
+            let (data, _) = try await URLSession.shared.data(from: url.appendingPathComponent("probe"))
+            let state = try JSONSerialization.jsonObject(with: data) as? [String: Int]
+            if state?["verified"] == 1 {
+                XCTAssertEqual(state?["creates"], 1)
+                XCTAssertEqual(state?["attempts"], 2)
+                return
+            }
+        }
+        XCTFail("Tapping create in the presented form did not submit exactly one request")
+    }
+
     func testBoardTaskDecodesWorkspaceTaskBindingAndTerminalLabels() throws {
         // 看板卡片靠 workspaceTaskId 才能带着任务上下文打开会话。
         let bound = try JSONDecoder().decode(
@@ -110,6 +138,43 @@ final class TaskBoardTests: XCTestCase {
         XCTAssertEqual(wandBoardEffortLabel("deep"), "深入")
     }
 
+    func testUnassignedBoardGroupsProjectSearchAndCanonicalFilters() throws {
+        let json = """
+        [
+          {"workspaceId":"ws-a","workspaceName":"自定义目录","workspaceCwd":"/repo/a/","tasks":[],"standaloneSessions":[
+            {"id":"a-1","title":"修 iOS 看板","provider":"claude","status":"running","cwd":"/repo/a"},
+            {"id":"archived","title":"已归档","archived":true,"cwd":"/repo/a"},
+            {"id":"team","title":"团队聊天","teamChat":{"runId":"run-1"},"cwd":"/repo/a"},
+            {"id":"employee","title":"员工执行","employeeId":"e-1","employeeName":"员工虎妞","cwd":"/repo/a"},
+            {"id":"formal-s","title":"重复","cwd":"/repo/a"}
+          ]},
+          {"workspaceId":"cwd:/repo/b","workspaceName":"别的自定义名","workspaceCwd":"/repo/b","synthetic":true,"tasks":[],"standaloneSessions":[{"id":"b-1","title":"修 Android","cwd":"/repo/b"}]},
+          {"workspaceId":"wand-global","workspaceName":"全局","workspaceCwd":"/scratch","global":true,"tasks":[],"standaloneSessions":[{"id":"global-1","title":"全局会话","cwd":"/scratch"}]}
+        ]
+        """
+        let groups = try JSONDecoder().decode([TaskDirectoryGroup].self, from: Data(json.utf8))
+        let all = wandBoardUnassignedGroups(groups: groups, formalSessionIDs: ["formal-s"])
+        XCTAssertEqual(all.map(\.id), ["ws-a", "cwd:/repo/b", "wand-global"])
+        XCTAssertEqual(all[0].title, "自定义目录 - 未分组任务")
+        XCTAssertEqual(all[0].sessions.map(\.id), ["a-1", "employee"])
+        XCTAssertFalse(all.flatMap(\.sessions).contains { $0.id == "archived" || $0.id == "team" || $0.id == "formal-s" })
+        XCTAssertEqual(wandBoardUnassignedGroups(groups: groups, formalSessionIDs: [], workspaceID: "cwd:/repo/b").first?.sessions.map(\.id), ["b-1"])
+        XCTAssertEqual(wandBoardUnassignedGroups(groups: groups, formalSessionIDs: [], query: "员工虎妞").flatMap(\.sessions).map(\.id), ["employee"])
+        XCTAssertEqual(wandBoardUnassignedGroups(groups: groups, formalSessionIDs: ["formal-s"], query: "repo/a").first?.sessions.map(\.id), ["a-1", "employee"])
+    }
+
+
+    func testUnassignedGroupsKeepWorkStepsAndRemoveNewTaskMembership() throws {
+        let data = Data(#"[{"workspaceId":"a","workspaceName":"wand","workspaceCwd":"/repo","tasks":[],"standaloneSessions":[{"id":"step","teamStep":{"runId":"run","memberName":"成员"}},{"id":"bound","workspaceTaskId":"task"},{"id":"work","employeeId":"e","employeeName":"虎妞"}]},{"workspaceId":"b","workspaceName":"同目录另项目","workspaceCwd":"/repo","tasks":[],"standaloneSessions":[{"id":"other"}]}]"#.utf8)
+        let groups = try JSONDecoder().decode([TaskDirectoryGroup].self, from: data)
+        let initial = wandBoardUnassignedGroups(groups: groups, formalSessionIDs: [], workspaceID: "a")
+        XCTAssertEqual(initial.first?.title, "wand - 未分组任务")
+        XCTAssertEqual(initial.flatMap(\.sessions).map(\.id), ["step", "work"])
+        XCTAssertEqual(wandBoardUnassignedGroups(groups: groups, formalSessionIDs: [], query: "虎妞").flatMap(\.sessions).map(\.id), ["work"])
+        XCTAssertTrue(wandBoardUnassignedGroups(groups: groups, formalSessionIDs: ["step", "work"], workspaceID: "a").isEmpty,
+                      "归类进入正式任务后默认组消失，不创建空的持久卡片")
+        XCTAssertEqual(wandBoardUnassignedGroups(groups: groups, formalSessionIDs: [], query: "未分组任务").count, 2)
+    }
 
     /// 空白终端会话的 provider 是空串：必须落进「终端」(session) 分组，否则看板详情只会
     /// 渲染「默认执行参数 · 尚无关联会话」，会话行的「移动会话到其他任务」按钮永远拿不到。

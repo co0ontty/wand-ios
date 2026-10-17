@@ -6,7 +6,133 @@ import XCTest
 import SwiftTerm
 @testable import Wand
 
+@MainActor
+private final class OrganizationAPIStub: ConversationOrganizationAPI {
+    var previews = 0
+    var starts = 0
+    var tokenReads = 0
+    var reads = 0
+    var failStart = false
+    var activeJobId: String?
+    var previewSessionCount = 2
+    var nextJob: ConversationOrganizationJob
+    var capturedTarget: ConversationOrganizationTarget?
+    var capturedMode: ConversationOrganizationMode?
+
+    init(status: String = "completed") {
+        let result = ConversationOrganizationResult(ok: true, foundSessions: 2, eligibleSessions: 2, skippedManualSessions: 0, skippedSessions: 0, analyzedSessions: 2, createdTasks: [], reusedTasks: [], updatedTasks: [], movedSessions: [], unassignedSessions: [], refused: [], unchanged: nil, cancelled: nil, error: nil)
+        nextJob = ConversationOrganizationJob(id: "original-job", status: status, stage: "分析中", processedSessions: 0, totalSessions: 2, modelRequests: 0, result: result, logSessionId: nil, error: nil)
+    }
+    func prepareConversationOrganization(target: ConversationOrganizationTarget, mode: ConversationOrganizationMode) async throws -> ConversationOrganizationPreview {
+        previews += 1
+        capturedTarget = target
+        capturedMode = mode
+        return ConversationOrganizationPreview(token: "original-token", sessionCount: previewSessionCount, manualSessionCount: 1, skippedSessionCount: 0, existingTaskCount: 0, contentCharacters: 120, estimatedModelRequests: 3, unchanged: false, activeJobId: activeJobId)
+    }
+    func startConversationOrganization(token: String, force: Bool) async throws -> ConversationOrganizationJob {
+        starts += 1
+        XCTAssertEqual(token, "original-token")
+        if failStart { throw WandAPI.APIError.network("unknown acceptance") }
+        return nextJob
+    }
+    func conversationOrganizationJobByToken(_ token: String) async throws -> ConversationOrganizationJob {
+        tokenReads += 1
+        XCTAssertEqual(token, "original-token")
+        return nextJob
+    }
+    func conversationOrganizationJob(id: String) async throws -> ConversationOrganizationJob {
+        reads += 1
+        XCTAssertEqual(id, "original-job")
+        return nextJob
+    }
+    func cancelConversationOrganization(id: String) async throws -> ConversationOrganizationJob { nextJob }
+}
+
 final class WandProtocolTests: XCTestCase {
+    @MainActor
+    private func organizationPhase(_ controller: ConversationOrganizationController, _ target: ConversationOrganizationController.Phase, action: () -> Void) async {
+        let ready = expectation(description: "organization phase \(target)")
+        let subscription = controller.$phase.dropFirst().filter { $0 == target }.prefix(1).sink { _ in ready.fulfill() }
+        action()
+        await fulfillment(of: [ready], timeout: 3)
+        withExtendedLifetime(subscription) {}
+    }
+
+    @MainActor
+    func testOrganizationUnknownStartCanOnlyQueryOriginalToken() async {
+        let api = OrganizationAPIStub()
+        api.failStart = true
+        var refreshes = 0
+        let controller = ConversationOrganizationController(api: api, target: .directory(cwd: "/work/repo"), onFinished: { refreshes += 1 })
+        await organizationPhase(controller, .prepared) { controller.previewScope() }
+        XCTAssertEqual(api.capturedTarget, .directory(cwd: "/work/repo"))
+        XCTAssertEqual(api.capturedMode, .auto)
+        XCTAssertEqual(api.starts, 0)
+        await organizationPhase(controller, .error) { controller.confirm(); controller.confirm() }
+        XCTAssertTrue(controller.needsRecheck)
+        controller.setMode(.all)
+        controller.reset()
+        XCTAssertTrue(controller.needsRecheck)
+        controller.previewScope()
+        controller.confirm()
+        XCTAssertEqual(api.previews, 1)
+        XCTAssertEqual(api.starts, 1)
+        XCTAssertEqual(controller.mode, .auto)
+        await organizationPhase(controller, .done) { controller.recheck() }
+        XCTAssertEqual(api.tokenReads, 1)
+        XCTAssertEqual(api.starts, 1)
+        XCTAssertEqual(refreshes, 1)
+    }
+
+    @MainActor
+    func testOrganizationEmptyDefaultRangeCanAdjustToAllWithoutStartingModels() async {
+        let api = OrganizationAPIStub()
+        api.previewSessionCount = 0
+        let controller = ConversationOrganizationController(api: api, target: .workspace(id: "selected"))
+        await organizationPhase(controller, .done) { controller.previewScope() }
+        XCTAssertTrue(controller.canAdjustScope)
+        XCTAssertTrue(controller.feedback.contains("跳过 1 个人工任务"))
+        controller.reset()
+        controller.setMode(.all)
+        api.previewSessionCount = 1
+        await organizationPhase(controller, .prepared) { controller.previewScope() }
+        XCTAssertEqual(api.capturedMode, .all)
+        XCTAssertEqual(api.starts, 0)
+    }
+
+    @MainActor
+    func testOrganizationActiveJobIsReusedAndCanResumeAfterClosingPanel() async {
+        let api = OrganizationAPIStub(status: "running")
+        api.activeJobId = "original-job"
+        let controller = ConversationOrganizationController(api: api, target: .workspace(id: "selected"))
+        await organizationPhase(controller, .running) { controller.previewScope() }
+        XCTAssertEqual(api.starts, 0)
+        XCTAssertEqual(api.reads, 1)
+        controller.stopPolling()
+        XCTAssertEqual(controller.phase, .error)
+        XCTAssertTrue(controller.needsRecheck)
+        api.nextJob = OrganizationAPIStub().nextJob
+        await organizationPhase(controller, .done) { controller.recheck() }
+        XCTAssertEqual(api.starts, 0)
+        XCTAssertEqual(api.reads, 2)
+    }
+
+    func testConversationOrganizationTargetsKeepDirectoryScope() throws {
+        let project = try decode(TaskDirectoryGroup.self, from: #"{"workspaceId":"workspace-1","workspaceName":"项目","workspaceCwd":"/work/project","synthetic":false,"global":false,"tasks":[],"standaloneSessions":[]}"#)
+        XCTAssertEqual(project.conversationOrganizationTarget, .workspace(id: "workspace-1"))
+        XCTAssertEqual(project.conversationOrganizationTarget?.body["kind"] as? String, "workspace")
+        XCTAssertNil(project.conversationOrganizationTarget?.body["cwd"])
+
+        let synthetic = try decode(TaskDirectoryGroup.self, from: #"{"workspaceId":"synthetic:/work/other","workspaceName":"其他目录","workspaceCwd":"/work/other/","synthetic":true,"tasks":[],"standaloneSessions":[]}"#)
+        XCTAssertEqual(synthetic.conversationOrganizationTarget, .directory(cwd: "/work/other"))
+        XCTAssertEqual(synthetic.conversationOrganizationTarget?.body["kind"] as? String, "directory")
+        XCTAssertEqual(synthetic.conversationOrganizationTarget?.body["cwd"] as? String, "/work/other")
+
+        let global = try decode(TaskDirectoryGroup.self, from: #"{"workspaceId":"wand-global","workspaceName":"全局","workspaceCwd":"/scratch","global":true,"tasks":[],"standaloneSessions":[]}"#)
+        XCTAssertEqual(global.conversationOrganizationTarget, .workspace(id: "wand-global"))
+        XCTAssertNotEqual(global.conversationOrganizationTarget?.body["kind"] as? String, "all")
+    }
+
     func testStructuredInputAlwaysRequestsImmediateReceipt() {
         let body = structuredInputRequest(input: "next message")
         XCTAssertEqual(body["input"] as? String, "next message")
@@ -1481,8 +1607,23 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(
             collectSubagentActivities(messages: staleMessages, isResponding: true)
                 .first(where: { $0.id == "running" })?.state,
-            .completed
+            .unknown
         )
+    }
+
+    func testQoderReceiptIsUnknownUntilCorrelatedNativeTerminalResult() {
+        let meta = SubagentMeta(taskId: "qoder-call", agentType: "general-purpose", taskDescription: "Inspect")
+        let receipt = ContentBlock.toolResult(toolUseId: "qoder-call", text: "Async agent launched successfully.\nagentId: native-a", isError: false, truncated: false, images: [], subagent: meta)
+        let messages = [ConversationTurn(role: "assistant", content: [receipt])]
+        for responding in [false, true] {
+            XCTAssertEqual(collectSubagentActivities(messages: messages, isResponding: responding).first?.state, .unknown)
+        }
+        let done = ContentBlock.toolResult(toolUseId: "qoder-call", text: "原生子任务通知：已完成。", isError: false, truncated: false, images: [], subagent: meta)
+        let completed = messages + [ConversationTurn(role: "assistant", content: [done])]
+        XCTAssertEqual(collectSubagentActivities(messages: completed, isResponding: false).count, 1)
+        XCTAssertEqual(collectSubagentActivities(messages: completed, isResponding: false).first?.state, .completed)
+        let failed = ContentBlock.toolResult(toolUseId: "qoder-call", text: "原生子任务通知：执行失败。", isError: true, truncated: false, images: [], subagent: meta)
+        XCTAssertEqual(collectSubagentActivities(messages: messages + [ConversationTurn(role: "assistant", content: [failed])], isResponding: false).first?.state, .failed)
     }
 
     func testParentTranscriptFiltersSubagentBlocks() {

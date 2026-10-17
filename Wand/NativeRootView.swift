@@ -41,6 +41,7 @@ enum HomeListMode: String, Equatable {
 struct NativeRootView: View {
     let profile: ServerProfile
     @State private var endpointAPI: WandAPI
+    @StateObject private var appUpdater: AppUpdateController
 
     @EnvironmentObject private var store: ServerStore
     @State private var phase: Phase = .authenticating
@@ -104,6 +105,12 @@ struct NativeRootView: View {
         self.profile = profile
         let endpointAPI = WandAPI(baseURL: profile.baseURL, token: profile.token)
         _endpointAPI = State(initialValue: endpointAPI)
+        _appUpdater = StateObject(wrappedValue: AppUpdateController(
+            currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0",
+            bundleID: Bundle.main.bundleIdentifier ?? "",
+            fetch: { try await endpointAPI.iosIpaUpdate(currentVersion: $0) },
+            report: { endpointAPI.reportClientFeedback(event: "update_failed", feature: "app_update", error: $0) }
+        ))
         _contactsStore = StateObject(wrappedValue: ContactsStore(service: endpointAPI))
         _conversations = StateObject(wrappedValue: ConversationStore(api: endpointAPI))
         _workspaceStore = StateObject(wrappedValue: WorkspaceStore(
@@ -139,6 +146,8 @@ struct NativeRootView: View {
             sidebar: { sidebarContent },
             detail: { marker in contactDestination(marker) }
         )
+        .safeAreaInset(edge: .top, spacing: 0) { AppUpdateBanner(updater: appUpdater) }
+        .animation(WandMotion.disclosure, value: appUpdater.promptVersion)
         .fullScreenCover(isPresented: $showMissions) {
             MissionsView(
                 api: api,
@@ -151,6 +160,7 @@ struct NativeRootView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(serverURL: serverURL, token: token)
                 .environmentObject(store)
+                .environmentObject(appUpdater)
         }
         .fullScreenCover(isPresented: $presentVoiceCall) {
             VoiceCallLaunchView(api: api, serverID: serverID)
@@ -167,6 +177,9 @@ struct NativeRootView: View {
             }
         }
         .onAppear { authenticate() }
+        .onChange(of: scenePhase) { _, value in
+            appUpdater.setActive(value == .active && phase == .ready)
+        }
         .onChange(of: workspaceStore.taskGroups) { _, groups in
             syncSelectedWorkspaceTaskMetadata(groups)
         }
@@ -256,7 +269,7 @@ struct NativeRootView: View {
             ConversationDetailView(id: String(marker.dropFirst("wand:conversation:".count)), store: conversations,
                 onOpenSession: openWorkspaceStandaloneSession, onOpenConversation: openConversation,
                 onEmployee: { selectedContactEmployeeID = $0 })
-                .id(marker).toolbar(.visible, for: .navigationBar)
+                .id(marker)
         } else if marker == "wand:contacts" {
             ContactsView(api: api, store: contactsStore, onBack: {
                 guard !contactsStore.busy else { return }
@@ -276,7 +289,8 @@ struct NativeRootView: View {
                 })
                 .id(marker)
         } else {
-            detailContent.toolbar(.visible, for: .navigationBar)
+            // Each destination owns its chrome: chat uses floating controls, PTY/workspace use the system bar.
+            detailContent
         }
     }
 
@@ -650,7 +664,7 @@ struct NativeRootView: View {
                             .fill(Theme.brand)
                     )
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(installingUpdate ? "正在更新服务端" : "发现新版本")
+                    Text(installingUpdate ? "正在更新服务端" : "服务端有新版本")
                         .font(.wand(size: 14, weight: .semibold))
                         .foregroundColor(Theme.textPrimary)
                     Text(updateError ?? updateBannerMessage ?? (canManageSettings ? "点击下方按钮一键更新" : "请到网页版或本机终端更新服务端"))
@@ -1083,6 +1097,7 @@ struct NativeRootView: View {
         authenticationRetryTask = nil
         authenticationRetryAttempt = 0
         phase = .ready
+        appUpdater.setActive(scenePhase == .active)
         conversations.start()
         startSystemSocket(generation: generation)
         refreshServerUpdateInfo(generation: generation)
@@ -1199,6 +1214,7 @@ struct NativeRootView: View {
     }
 
     private func invalidateLifecycle() {
+        appUpdater.setActive(false)
         lifecycleGeneration &+= 1
         authenticationTask?.cancel()
         authenticationTask = nil

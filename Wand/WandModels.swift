@@ -857,11 +857,17 @@ extension ContentBlock {
     }
 }
 
+/// Qoder's native launch acknowledgement is not a terminal tool result.
+func isQoderDispatchReceipt(_ text: String) -> Bool {
+    text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Async agent launched successfully.\n")
+}
+
 struct SubagentActivity {
     enum State: Equatable {
         case running
         case completed
         case failed
+        case unknown
     }
 
     let id: String
@@ -880,9 +886,15 @@ func collectSubagentActivities(
         var lastSeenTurnIndex: Int
         var completed = false
         var failed = false
+        var receipt = false
     }
 
-    let lastUserTurnIndex = messages.lastIndex { $0.role == "user" } ?? -1
+    let lastUserTurnIndex = messages.lastIndex { turn in
+        turn.role == "user" && turn.content.contains { block in
+            if case .text(let text, let subagent) = block { return subagent == nil && !text.isEmpty }
+            return false
+        }
+    } ?? -1
     var activities: [String: PendingActivity] = [:]
     var orderedIDs: [String] = []
 
@@ -907,8 +919,9 @@ func collectSubagentActivities(
             activity.meta = meta
             activity.blocks.append(block)
             activity.lastSeenTurnIndex = turnIndex
-            if case .toolResult(let toolUseID, _, let isError, _, _, _, _) = block, toolUseID == taskID {
-                activity.completed = true
+            if case .toolResult(let toolUseID, let text, let isError, _, _, _, _) = block, toolUseID == taskID {
+                activity.receipt = !isError && isQoderDispatchReceipt(text)
+                activity.completed = !activity.receipt
                 activity.failed = isError
             }
             activities[taskID] = activity
@@ -918,12 +931,14 @@ func collectSubagentActivities(
     return orderedIDs.compactMap { taskID in
         guard let activity = activities[taskID] else { return nil }
         let state: SubagentActivity.State
-        if activity.completed {
+        if activity.receipt {
+            state = .unknown
+        } else if activity.completed {
             state = activity.failed ? .failed : .completed
         } else if isResponding && activity.lastSeenTurnIndex > lastUserTurnIndex {
             state = .running
         } else {
-            state = .completed
+            state = .unknown
         }
         return SubagentActivity(
             id: taskID,
@@ -1684,7 +1699,7 @@ struct IosIpaUpdateInfo: Decodable {
     var signedValue: Bool { signed == true }
 }
 
-/// 服务端自身 npm 包更新状态。iOS App 不能自更新，但可以提示并触发服务端更新。
+/// 服务端自身 npm 包更新状态；与 iOS 客户端的 Ad Hoc 更新独立。
 struct ServerUpdateInfo: Equatable {
     var current: String
     var latest: String

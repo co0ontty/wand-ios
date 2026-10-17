@@ -36,6 +36,17 @@ struct HomeRecentGroup: Identifiable {
 }
 
 enum HomePresentation {
+    static func sessionSummary(_ sessions: [WorkspaceSessionSummary], total: Int? = nil) -> String {
+        var seen = Set<String>()
+        let unique = sessions.filter { seen.insert($0.id).inserted }
+        var parts = ["\(total ?? unique.count) 个会话"]
+        let running = unique.filter { pulse($0) == .running }.count
+        let needsYou = unique.filter { pulse($0) == .needsYou }.count
+        if running > 0 { parts.append("\(running) 在跑") }
+        if needsYou > 0 { parts.append("\(needsYou) 等你") }
+        return parts.joined(separator: " · ")
+    }
+
     static func statusLabel(_ status: String) -> String {
         switch status {
         case "running", "thinking": return "在跑"
@@ -145,17 +156,13 @@ enum HomePresentation {
         temporarilyExpanded ? .expand : sectionFold
     }
 
-    /// 展开档下只有多会话员工组、团队和终端需要一级标题；单会话员工直接就是会话行。
-    /// 收起/在跑档仍保留标题，作为临时展开入口，即使当前组没有命中在跑筛选。
+    /// 身份头不随会话数量与筛选变化；单会话员工也保留一级标题。
     static func recentGroupShowsHeader(
         _ group: HomeRecentGroup,
         sectionFold: HomeFoldMode,
         visibleConversationCount: Int
     ) -> Bool {
-        [.team, .pty, .blankTerminal].contains(group.kind)
-            || group.conversations.count > 1
-            || sectionFold != .expand
-            || visibleConversationCount == 0
+        !group.conversations.isEmpty || [.pty, .blankTerminal].contains(group.kind)
     }
 
     static func recentGroupExpandsContent(_ fold: HomeFoldMode, visibleConversationCount: Int) -> Bool {
@@ -167,20 +174,20 @@ enum HomePresentation {
         return fold == .running ? sessions.filter(isActive) : sessions
     }
 
-    static func visibleGroups(_ groups: [TaskDirectoryGroup], query: String, attentionOnly: Bool) -> [TaskDirectoryGroup] {
+    static func visibleGroups(_ groups: [TaskDirectoryGroup], query: String, attentionOnly: Bool, employees: [SiliconEmployee] = []) -> [TaskDirectoryGroup] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return groups.compactMap { group in
             let directoryMatches = matches(query, [group.workspaceName, group.workspaceCwd])
             let tasks = group.tasks.compactMap { task -> WorkspaceTaskSummary? in
-                let wholeTask = directoryMatches || matches(query, [task.name, task.cwd])
+                let wholeTask = directoryMatches || matches(query, [group.workspaceName, group.workspaceCwd, task.name, task.cwd])
                 let kept = task.sessions.filter {
-                    (!attentionOnly || pulse($0) == .needsYou) && (wholeTask || matches(query, sessionFields($0)))
+                    (!attentionOnly || pulse($0) == .needsYou) && (wholeTask || matches(query, sessionFields($0, employees: employees) + [group.workspaceName, group.workspaceCwd, task.name, task.cwd]))
                 }
                 guard !kept.isEmpty || (!attentionOnly && wholeTask) else { return nil }
                 return replacing(task, sessions: kept)
             }
             let loose = group.standaloneSessions.filter {
-                (!attentionOnly || pulse($0) == .needsYou) && (directoryMatches || matches(query, sessionFields($0)))
+                (!attentionOnly || pulse($0) == .needsYou) && (directoryMatches || matches(query, sessionFields($0, employees: employees) + [group.workspaceName, group.workspaceCwd]))
             }
             guard !tasks.isEmpty || !loose.isEmpty || (!attentionOnly && directoryMatches) else { return nil }
             return group.replacing(tasks: tasks, standaloneSessions: loose)
@@ -189,11 +196,15 @@ enum HomePresentation {
 
     static func matches(_ query: String, _ fields: [String?]) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return query.isEmpty || fields.compactMap { $0 }.contains { $0.localizedCaseInsensitiveContains(query) }
+        let text = fields.compactMap { $0 }.joined(separator: " ")
+        return query.split(whereSeparator: { $0.isWhitespace }).allSatisfy {
+            text.localizedCaseInsensitiveContains(String($0))
+        }
     }
 
-    static func sessionFields(_ session: WorkspaceSessionSummary) -> [String?] {
-        [session.title, session.cwd, session.providerLabel, session.employeeName, session.teamChat?.teamName,
+    static func sessionFields(_ session: WorkspaceSessionSummary, employees: [SiliconEmployee] = []) -> [String?] {
+        [session.title, session.cwd, session.providerLabel, session.employeeName,
+         employees.first { $0.id == session.employeeId }?.name, session.teamChat?.teamName,
          session.teamStep?.title, session.teamStep?.memberName, session.teamStep?.teamName]
     }
 

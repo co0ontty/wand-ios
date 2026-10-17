@@ -118,6 +118,7 @@ private struct PtySessionView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(showsNavigationChrome ? .visible : .automatic, for: .navigationBar)
         .toolbar {
             if showsNavigationChrome {
                 ToolbarItem(placement: .principal) { titleStatus }

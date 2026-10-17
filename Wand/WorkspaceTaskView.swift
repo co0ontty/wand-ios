@@ -121,6 +121,7 @@ struct WorkspaceTaskView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 workspaceNavigationTitle

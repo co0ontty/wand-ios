@@ -5,7 +5,7 @@ import UIKit
 
 /// 这些后缀的文件被认为是可内联预览的图片。和 src/web-ui/browser/utils.ts 的
 /// IMAGE_PATH_RE 与服务端 server.ts 的 IMAGE_EXTS 保持一致。SVG 可能无法解码成
-/// UIImage——那没关系，加载失败会优雅隐藏。
+/// UIImage；无法解码时显示明确失败与重试，不让图片无解释地消失。
 private let imageExtensions: Set<String> = [
     "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "ico", "heic", "heif",
 ]
@@ -41,8 +41,9 @@ func parseUserAttachmentMessage(_ text: String) -> ParsedUserMessage {
         return ParsedUserMessage(attachmentPaths: [], body: text)
     }
     let afterHead = leading.dropFirst(prefixHead.count)
-    // 找到匹配的结束标记 "]\n"（最先出现的 "]" 后跟换行）。
-    guard let closeRange = afterHead.range(of: "]\n") else {
+    // 纯附件消息会在提交时 trim 掉最后的换行；与 Android 一样允许 ] 位于末尾。
+    let finalBracket = afterHead.hasSuffix("]") ? afterHead.index(before: afterHead.endIndex)..<afterHead.endIndex : nil
+    guard let closeRange = afterHead.range(of: "]\n") ?? finalBracket else {
         return ParsedUserMessage(attachmentPaths: [], body: text)
     }
     let pathsBlock = String(afterHead[afterHead.startIndex..<closeRange.lowerBound])
@@ -65,6 +66,14 @@ func buildAttachmentPrompt(_ attachments: [UploadedFile], body: String) -> Strin
 }
 
 // MARK: - 远程图片加载视图
+
+func wandImageHTTPFailureMessage(statusCode: Int) -> String {
+    switch statusCode {
+    case 401, 403: return "没有图片访问权限，请核对连接。"
+    case 404: return "图片未找到，请核对消息来源。"
+    default: return "图片暂时无法加载（\(statusCode)）。"
+    }
+}
 
 private final class WandRemoteImageSessionHandle: ObservableObject {
     let baseURL: URL
@@ -89,17 +98,24 @@ struct WandRemoteImage<Placeholder: View>: View {
     /// an old view value after reset therefore cannot recreate the endpoint pool entry.
     @StateObject private var endpointSession: WandRemoteImageSessionHandle
     @State private var image: UIImage?
-    @State private var failed = false
+    @State private var failure: String?
+    @State private var retry = 0
+    private let directSource: Bool
+    private let onAvailabilityChanged: ((Bool) -> Void)?
 
     init(
         baseURL: URL,
         path: String,
         contentMode: ContentMode = .fit,
+        directSource: Bool = false,
+        onAvailabilityChanged: ((Bool) -> Void)? = nil,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) {
         self.baseURL = baseURL
         self.path = path
         self.contentMode = contentMode
+        self.directSource = directSource
+        self.onAvailabilityChanged = onAvailabilityChanged
         self.placeholder = placeholder
         _endpointSession = StateObject(
             wrappedValue: WandRemoteImageSessionHandle(baseURL: baseURL)
@@ -111,26 +127,41 @@ struct WandRemoteImage<Placeholder: View>: View {
     }
 
     var body: some View {
-        Group {
+        // A real container exists before the first response. Empty conditional Groups
+        // have no loading content on which SwiftUI can anchor their task/layout.
+        ZStack {
             if let image {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
-            } else if failed {
-                placeholder()
+            } else if let failure {
+                Button { retry += 1 } label: {
+                    VStack(spacing: 4) {
+                        Label(failure, systemImage: "exclamationmark.triangle")
+                            .font(.caption).multilineTextAlignment(.center)
+                        Text("重试加载图片").font(.caption2.weight(.semibold))
+                    }.padding(8).frame(maxWidth: .infinity, minHeight: 64)
+                }.buttonStyle(.plain).accessibilityLabel(failure + "，重试加载图片")
             } else {
-                placeholder()
+                placeholder().accessibilityLabel("正在加载图片")
             }
         }
-        .task(id: "\(baseURL.absoluteString)\u{0}\(path)") {
+        .task(id: "\(baseURL.absoluteString)\u{0}\(path)\u{0}\(directSource)\u{0}\(retry)") {
             image = nil
-            failed = false
+            failure = nil
+            onAvailabilityChanged?(false)
             await load()
         }
     }
 
     private var requestURL: URL? {
-        WandEndpoint.url(
+        if directSource {
+            guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL,
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.user == nil, url.password == nil else { return nil }
+            return url
+        }
+        return WandEndpoint.url(
             baseURL: baseURL,
             route: "/api/file-raw",
             queryItems: [URLQueryItem(name: "path", value: path)]
@@ -140,66 +171,76 @@ struct WandRemoteImage<Placeholder: View>: View {
     private func load() async {
         let sessionHandle = endpointSession.value
         guard endpointSession.baseURL == baseURL, !sessionHandle.isRetired else {
-            failed = true
+            failure = "连接已变化，请重新打开图片。"
             return
         }
-        let cacheKey = "\(sessionHandle.resourceCacheNamespace)|\(baseURL.absoluteString)|\(path)" as NSString
+        if directSource, path.hasPrefix("data:") {
+            guard path.lowercased().hasPrefix("data:image/"),
+                  let comma = path.firstIndex(of: ","),
+                  path[..<comma].lowercased().contains(";base64"),
+                  let data = Data(base64Encoded: String(path[path.index(after: comma)...])),
+                  let decoded = UIImage(data: data) else {
+                failure = "图片格式不支持或内容无效。"
+                return
+            }
+            guard !Task.isCancelled, !sessionHandle.isRetired else { return }
+            image = decoded; onAvailabilityChanged?(true)
+            return
+        }
+        let cacheKey = "\(sessionHandle.resourceCacheNamespace)|\(baseURL.absoluteString)|\(directSource)|\(path)" as NSString
         if let cached = Self.cache.object(forKey: cacheKey) {
-            image = cached
+            guard !Task.isCancelled else { return }
+            image = cached; onAvailabilityChanged?(true)
             return
         }
         guard let url = requestURL else {
-            failed = true
+            failure = "图片地址不可用，请核对消息来源。"
             return
         }
         var request = URLRequest(url: url)
         request.cachePolicy = .returnCacheDataElseLoad
         do {
             let (data, response) = try await sessionHandle.session.data(for: request)
-            guard !sessionHandle.isRetired else {
-                failed = true
-                return
-            }
+            guard !Task.isCancelled, !sessionHandle.isRetired else { return }
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                failed = true
+                failure = wandImageHTTPFailureMessage(statusCode: http.statusCode)
                 return
             }
             guard let decoded = UIImage(data: data) else {
-                failed = true
+                failure = "图片格式不支持或内容无效。"
                 return
             }
             let pixelBytes = Int(decoded.size.width * decoded.scale)
                 * Int(decoded.size.height * decoded.scale) * 4
             Self.cache.setObject(decoded, forKey: cacheKey, cost: pixelBytes)
-            if !Task.isCancelled {
-                image = decoded
+            if !Task.isCancelled, !sessionHandle.isRetired {
+                image = decoded; onAvailabilityChanged?(true)
             }
         } catch {
-            if !Task.isCancelled {
-                failed = true
+            if !Task.isCancelled, !sessionHandle.isRetired {
+                failure = "图片加载失败，请检查连接后重试。"
             }
         }
     }
 }
 
 extension WandRemoteImage where Placeholder == AnyView {
-    /// 默认占位：一个柔和的加载方块（图片未到 / 失败时显示）。
-    init(baseURL: URL, path: String, contentMode: ContentMode = .fit) {
-        self.init(baseURL: baseURL, path: path, contentMode: contentMode) {
+    /// 默认加载占位；失败由共享反馈显示原因和重试。
+    init(baseURL: URL, path: String, contentMode: ContentMode = .fit,
+         directSource: Bool = false, onAvailabilityChanged: ((Bool) -> Void)? = nil) {
+        self.init(baseURL: baseURL, path: path, contentMode: contentMode,
+                  directSource: directSource, onAvailabilityChanged: onAvailabilityChanged) {
             AnyView(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Theme.surface)
-                    .overlay(
-                        Image(systemName: "photo")
-                            .font(.system(size: 20))
-                            .foregroundColor(Theme.textSecondary.opacity(0.5))
-                    )
+                    .overlay { ProgressView("加载图片…").font(.caption) }
+                    .frame(minWidth: 96, minHeight: 64)
             )
         }
     }
 }
 
-/// 进程内图片缓存（按绝对路径键）。
+/// 进程内图片缓存（连接资源命名空间 + 端点 + 来源类型/路径）。
 enum WandImageCache {
     static let shared: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
@@ -213,85 +254,31 @@ enum WandImageCache {
 
 // MARK: - 缩略图（聊天里的内联图片）
 
-/// 工具结果内联图片缩略图：服务端取图 URL（/api/sessions/…/tool-images/…，按 baseURL 补全）
-/// 或 data URI。只读缩略图，对齐网页 `inline-tool-image`；加载失败整块不占位。
+/// 工具图片与上传附件共享端点认证、缓存隔离、加载/失败反馈及重试。
 struct WandToolImageThumbnail: View {
     let baseURL: URL
     let source: String
     var maxWidth: CGFloat = 240
     var maxHeight: CGFloat = 200
-
-    @StateObject private var endpointSession: WandRemoteImageSessionHandle
-    @State private var image: UIImage?
-    @State private var failed = false
-
-    init(baseURL: URL, source: String, maxWidth: CGFloat = 240, maxHeight: CGFloat = 200) {
-        self.baseURL = baseURL
-        self.source = source
-        self.maxWidth = maxWidth
-        self.maxHeight = maxHeight
-        _endpointSession = StateObject(wrappedValue: WandRemoteImageSessionHandle(baseURL: baseURL))
-    }
+    @State private var ready = false
+    @State private var showFullScreen = false
 
     var body: some View {
-        Group {
-            if failed {
-                EmptyView()
-            } else if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: maxWidth, maxHeight: maxHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Theme.border, lineWidth: 1)
-                    )
+        WandRemoteImage(baseURL: baseURL, path: source, directSource: true,
+                        onAvailabilityChanged: { ready = $0 })
+            .frame(maxWidth: maxWidth, maxHeight: maxHeight)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.border, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .onTapGesture { if ready { showFullScreen = true } }
+            .accessibilityElement(children: ready ? .ignore : .contain)
+            .accessibilityLabel("工具返回图片")
+            .accessibilityValue(ready ? "已加载，可查看大图" : "正在加载或等待重试")
+            .accessibilityAddTraits(ready ? .isButton : [])
+            .accessibilityAction { if ready { showFullScreen = true } }
+            .fullScreenCover(isPresented: $showFullScreen) {
+                WandImageViewer(baseURL: baseURL, path: source, isPresented: $showFullScreen, directSource: true)
             }
-        }
-        .task(id: source) { await load() }
-    }
-
-    private func load() async {
-        image = nil
-        failed = false
-        if source.hasPrefix("data:") {
-            guard let comma = source.firstIndex(of: ","),
-                  let data = Data(base64Encoded: String(source[source.index(after: comma)...])),
-                  let decoded = UIImage(data: data) else {
-                failed = true
-                return
-            }
-            image = decoded
-            return
-        }
-        let cacheKey = "\(baseURL.absoluteString)|\(source)" as NSString
-        if let cached = WandImageCache.shared.object(forKey: cacheKey) {
-            image = cached
-            return
-        }
-        guard let url = URL(string: source, relativeTo: baseURL)?.absoluteURL else {
-            failed = true
-            return
-        }
-        let handle = endpointSession.value
-        var request = URLRequest(url: url)
-        request.cachePolicy = .returnCacheDataElseLoad
-        do {
-            let (data, response) = try await handle.session.data(for: request)
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                failed = true
-                return
-            }
-            guard let decoded = UIImage(data: data) else {
-                failed = true
-                return
-            }
-            WandImageCache.shared.setObject(decoded, forKey: cacheKey)
-            if !Task.isCancelled { image = decoded }
-        } catch {
-            if !Task.isCancelled { failed = true }
-        }
     }
 }
 
@@ -389,6 +376,8 @@ struct WandImageViewer: View {
     let baseURL: URL
     let path: String
     @Binding var isPresented: Bool
+    var directSource = false
+    @Environment(\.accessibilityReduceMotion) private var reduced
 
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
@@ -399,8 +388,8 @@ struct WandImageViewer: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            WandRemoteImage(baseURL: baseURL, path: path, contentMode: .fit) {
-                AnyView(ProgressView().tint(.white))
+            WandRemoteImage(baseURL: baseURL, path: path, contentMode: .fit, directSource: directSource) {
+                AnyView(ProgressView("加载图片…").tint(.white).foregroundStyle(.white))
             }
             .scaleEffect(scale)
             .offset(offset)
@@ -412,7 +401,7 @@ struct WandImageViewer: View {
                     .onEnded { _ in
                         lastScale = scale
                         if scale <= 1 {
-                            withAnimation(WandMotion.disclosure) {
+                            withAnimation(reduced ? nil : WandMotion.disclosure) {
                                 scale = 1
                                 lastScale = 1
                                 offset = .zero
@@ -435,7 +424,7 @@ struct WandImageViewer: View {
                         if scale <= 1,
                            translation.height > 90,
                            abs(translation.height) > abs(translation.width) {
-                            withAnimation(WandMotion.scroll) {
+                            withAnimation(reduced ? nil : WandMotion.scroll) {
                                 offset.height += 80
                             }
                             isPresented = false
@@ -445,7 +434,7 @@ struct WandImageViewer: View {
                     }
             )
             .onTapGesture(count: 2) {
-                withAnimation(WandMotion.disclosure) {
+                withAnimation(reduced ? nil : WandMotion.disclosure) {
                     if scale > 1 {
                         scale = 1; lastScale = 1; offset = .zero; lastOffset = .zero
                     } else {
@@ -463,9 +452,9 @@ struct WandImageViewer: View {
                         Image(systemName: "xmark")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(.white)
-                            .padding(12)
-                            .background(Circle().fill(Color.white.opacity(0.18)))
-                    }
+                            .frame(width: 44, height: 44)
+                            .background(Circle().fill(Color.black.opacity(0.6)))
+                    }.accessibilityLabel("关闭图片预览")
                     .padding(.trailing, 18)
                     .padding(.top, 12)
                 }
@@ -473,5 +462,6 @@ struct WandImageViewer: View {
             }
         }
         .statusBarHidden(true)
+        .preferredColorScheme(.dark)
     }
 }
