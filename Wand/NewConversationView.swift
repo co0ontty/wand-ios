@@ -344,23 +344,6 @@ struct NewConversationView: View {
                         .padding(14)
                         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-                        if sessionKind != "shell" {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("消息")
-                                .font(.wand(size: 14, weight: .semibold))
-                                .foregroundStyle(Theme.textPrimary)
-                            TextEditor(text: $pendingDraft.text)
-                                .focused($focused)
-                                .scrollContentBackground(.hidden)
-                                .frame(minHeight: 150)
-                                .padding(8)
-                                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                .accessibilityLabel("输入要处理的内容")
-                                .disabled(creating)
-                            stagedAttachmentPreview
-                            attachmentActions
-                        }
-                        }
                     }
                     .padding(16)
                     .disabled(creating)
@@ -451,13 +434,12 @@ struct NewConversationView: View {
                 pendingAttachmentRevision = stagedAttachments.stagedInputRevision
             }
             .task { await loadConfiguration() }
-            .onChange(of: pendingDraft.textRevision) { _, _ in
-                pendingDraftRevision &+= 1
+            .onChange(of: pendingDraft.textRevision) { _, revision in
+                pendingDraftRevision = revision
                 if !creating { clearFrozenDraft() }
             }
             .onChange(of: stagedAttachments.stagedInputRevision) { _, revision in
                 pendingAttachmentRevision = revision
-                pendingDraftRevision &+= 1
                 if !creating { clearFrozenDraft() }
             }
             .onDisappear {
@@ -655,7 +637,7 @@ struct NewConversationView: View {
     }
 
     private func clearPendingDraft(textRevision: Int, attachmentRevision: Int, sourceText: String) {
-        guard pendingDraft.textRevision == textRevision,
+        guard pendingDraftRevision == textRevision,
               pendingDraft.text == sourceText,
               stagedAttachments.stagedInputRevision == attachmentRevision else { return }
         pendingDraft.text = ""

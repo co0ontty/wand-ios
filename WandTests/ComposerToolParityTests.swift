@@ -55,6 +55,43 @@ final class ComposerToolParityTests: XCTestCase {
     }
 
     @MainActor
+    func testStagedUploadAcceptsNewBatchForSameSession() async throws {
+        let controller = ComposerAttachmentController(sessionId: UUID().uuidString, api: api)
+        var calls = 0
+        for name in ["first", "second"] {
+            controller.stageFileSelection(.success([URL(fileURLWithPath: "/tmp/" + name)]), cleanupAfterUpload: false)
+            try await controller.uploadStaged(to: "accepted") { _, _, started in
+                calls += 1
+                started()
+                return [self.file("/work/" + name)]
+            }
+        }
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(controller.attachments.map(\.savedPath), ["/work/first", "/work/second"])
+    }
+
+    @MainActor
+    func testLateStagedUploadCannotRestoreRemovedAttachment() async throws {
+        let pendingID = UUID().uuidString
+        let controller = ComposerAttachmentController(sessionId: pendingID, api: api)
+        controller.stageFileSelection(.success([URL(fileURLWithPath: "/tmp/first")]), cleanupAfterUpload: false)
+        do {
+            try await controller.uploadStaged(to: "late") { _, _, started in
+                started()
+                controller.removeStaged(at: 0)
+                return [self.file("/work/removed")]
+            }
+            XCTFail("Removed selection must not be adopted")
+        } catch is CancellationError {} catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertTrue(controller.attachments.isEmpty)
+        XCTAssertEqual(controller.stagedAttachmentCount, 0)
+        let key = "wand.pending-upload.v1." + ServerProfiles.stableID(for: api.baseURL) + "." + pendingID
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    @MainActor
     func testStagedUploadDefiniteRejectionAndLocalFailureCanRetry() async throws {
         let controller = ComposerAttachmentController(sessionId: UUID().uuidString, api: api)
         controller.stageFileSelection(.success([URL(fileURLWithPath: "/tmp/first")]), cleanupAfterUpload: false)
