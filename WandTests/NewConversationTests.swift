@@ -113,22 +113,49 @@ final class NewConversationTests: XCTestCase {
     }
 
     @MainActor
-    func testAcceptedSessionCannotBeCreatedAgain() async throws {
+    func testUnknownSessionWithTaskIDCannotBeAcknowledgedIntoRetry() async {
         let (coordinator, defaults, suite) = makeCoordinator()
         defer { defaults.removePersistentDomain(forName: suite) }
-        let accepted = try decodeSnapshot(id: "accepted-once")
-        var attempts = 0
+        coordinator.markTaskAccepted("accepted-task")
+        _ = await coordinator.create { () async throws -> SessionSnapshot in
+            throw UnknownSessionDeliveryError(sessionID: "uncertain-session", cause: WandAPI.APIError.network("timeout"))
+        }
 
-        let first = await coordinator.create { accepted }
-        XCTAssertEqual(first?.id, accepted.id)
-        let duplicate = await coordinator.create {
+        coordinator.acknowledgeDeliveryUnknown(confirmedChecked: true)
+        var attempts = 0
+        let retry = await coordinator.create {
+            attempts += 1
+            return try self.decodeSnapshot(id: "duplicate")
+        }
+
+        XCTAssertNil(retry)
+        XCTAssertEqual(attempts, 0)
+        XCTAssertEqual(coordinator.unknownOperation, .session)
+        XCTAssertEqual(coordinator.unknownSessionID, "uncertain-session")
+        if case .deliveryUnknown = coordinator.phase { } else { XCTFail("Unknown session delivery must stay locked") }
+    }
+
+    @MainActor
+    func testAbandonAcceptedSessionKeepsSessionAccepted() async throws {
+        let (coordinator, defaults, suite) = makeCoordinator()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        coordinator.markTaskAccepted("accepted-task")
+        let accepted = try decodeSnapshot(id: "accepted-once")
+        _ = await coordinator.create { accepted }
+
+        coordinator.abandonAcceptedSession(sessionID: accepted.id)
+
+        XCTAssertEqual(coordinator.phase, .accepted(sessionID: accepted.id, taskID: "accepted-task"))
+        let reopened = NewConversationCoordinator(storageKey: "wand.new-conversation.unknown.test", defaults: defaults)
+        XCTAssertEqual(reopened.phase, .accepted(sessionID: accepted.id, taskID: "accepted-task"))
+        var attempts = 0
+        let duplicate = await reopened.create {
             attempts += 1
             return try self.decodeSnapshot(id: "duplicate")
         }
 
         XCTAssertNil(duplicate)
         XCTAssertEqual(attempts, 0)
-        XCTAssertEqual(coordinator.phase, .accepted(sessionID: accepted.id, taskID: nil))
     }
 
     @MainActor

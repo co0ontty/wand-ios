@@ -508,6 +508,7 @@ struct NativeRootView: View {
                         TaskBoardView(
                             api: api,
                             workspaceStore: workspaceStore,
+                            creationServerID: profile.connectionIdentity,
                             onOpenSession: openSessionFromMissions,
                             onOpenBoundSession: openBoardBoundSession,
                             onOpenTeamRun: openTeamRun,
@@ -517,6 +518,7 @@ struct NativeRootView: View {
                         WorkspaceListView(
                             store: workspaceStore,
                             api: api,
+                            creationServerID: profile.connectionIdentity,
                             serverDisplayName: profile.displayName,
                             selectedTaskId: selectedWorkspaceTask?.task.id,
                             selectedSessionId: selectedSessionID,

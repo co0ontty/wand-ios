@@ -95,12 +95,7 @@ final class NewConversationCoordinator: ObservableObject {
 
     func abandonAcceptedSession(sessionID: String) {
         guard case .accepted(let acceptedID, let taskID) = phase, acceptedID == sessionID else { return }
-        if let taskID {
-            phase = .taskAccepted(taskID: taskID)
-            persist(phase)
-        } else {
-            keepAcceptedSessionForResume(sessionID)
-        }
+        persist(.accepted(sessionID: acceptedID, taskID: taskID))
     }
 
     private func keepAcceptedSessionForResume(_ sessionID: String) {
@@ -122,7 +117,7 @@ final class NewConversationCoordinator: ObservableObject {
 
     func acknowledgeDeliveryUnknown(confirmedChecked: Bool) {
         guard confirmedChecked, case .deliveryUnknown = phase,
-              taskWasAccepted, let acceptedTaskID else { return }
+              unknownOperation == .task, taskWasAccepted, let acceptedTaskID else { return }
         unknownOperation = nil
         unknownSessionID = nil
         unknownTaskID = nil

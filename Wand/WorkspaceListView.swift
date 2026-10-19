@@ -356,7 +356,8 @@ struct WorkspaceListView: View {
                             if let taskId = snapshot.workspaceTaskId,
                                let summary = store.taskGroups.flatMap(\.tasks).first(where: { $0.id == taskId }) {
                                 let group = store.taskGroups.first { $0.tasks.contains(where: { $0.id == taskId }) }
-                                let workspace = group.map { workspace(for: summary, group: $0) }
+                                let workspace = store.workspaces.first(where: { $0.id == summary.workspaceId })
+                                    ?? group.map { workspace(for: summary, group: $0) }
                                     ?? Workspace(id: summary.workspaceId, name: newTaskSheetWorkspaceName, cwd: summary.cwd, defaultProvider: nil, layout: nil, createdAt: "", lastOpenedAt: nil)
                                 showToast("已创建任务「\(summary.name)」并启动会话")
                                 if let onOpenTaskSession {
