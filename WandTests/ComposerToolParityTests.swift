@@ -111,7 +111,7 @@ final class ComposerToolParityTests: XCTestCase {
             }
             XCTFail("Changed input must not adopt the stale result")
         } catch is CancellationError {}
-        XCTAssertTrue(controller.attachments.isEmpty)
+        XCTAssertEqual(controller.attachments.map(\.savedPath), ["/work/accepted"])
         XCTAssertEqual(controller.stagedAttachmentCount, 1)
         XCTAssertEqual(controller.stagedAttachments.map(\.name), ["new"])
         let revision = controller.stagedInputRevision
@@ -121,7 +121,7 @@ final class ComposerToolParityTests: XCTestCase {
             return [self.file("/work/new")]
         }
         XCTAssertEqual(controller.stagedInputRevision, revision)
-        XCTAssertEqual(controller.attachments.map(\.savedPath), ["/work/new"])
+        XCTAssertEqual(controller.attachments.map(\.savedPath), ["/work/accepted", "/work/new"])
     }
 
     @MainActor

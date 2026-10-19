@@ -680,7 +680,7 @@ final class ComposerAttachmentController: ObservableObject {
         }
         guard !stagedFiles.isEmpty else { return }
         let batch = stagedFiles
-        let batchIDs = Set(stagedAttachments.map(\.id))
+        let batchIDs = stagedAttachments.map(\.id)
         let uploadGeneration = stagedGeneration
         let uploaded: [UploadedFile]
         var requestStarted = false
@@ -706,7 +706,12 @@ final class ComposerAttachmentController: ObservableObject {
         persistUncertainStagedSessions()
         let canAdopt = active && !Task.isCancelled
         let sourceUnchanged = stagedGeneration == uploadGeneration
-        if canAdopt && sourceUnchanged { appendUploaded(uploaded) }
+        let remainingIDs = Set(stagedAttachments.map(\.id))
+        if canAdopt {
+            appendUploaded(zip(batchIDs, uploaded).compactMap { id, file in
+                remainingIDs.contains(id) ? file : nil
+            })
+        }
         // A successful receipt settles this batch even when its selections changed.
         // Remove by identity so later selections are neither cleared nor uploaded again.
         for index in stagedAttachments.indices.reversed() where batchIDs.contains(stagedAttachments[index].id) {
