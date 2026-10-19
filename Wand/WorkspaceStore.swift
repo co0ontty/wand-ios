@@ -23,7 +23,10 @@ protocol WorkspaceServing: AnyObject {
         target: WorkspaceSessionTarget,
         binding: WorkspaceBinding,
         kind: WorkspaceSessionKind,
-        prompt: String?
+        prompt: String?,
+        mode: String?,
+        model: String?,
+        thinkingEffort: String?
     ) async throws -> SessionSnapshot
     func createWorkspaceEmployeeTaskWindow(employeeID: String, binding: WorkspaceBinding, prompt: String?) async throws -> SessionSnapshot
     func getSession(id: String, blockBudget: Int) async throws -> SessionSnapshot
@@ -42,13 +45,17 @@ protocol WorkspaceServing: AnyObject {
         baseRef: String?,
         worktree: Bool?,
         cwd: String?,
-        description: String?
+        description: String?,
+        parentTaskId: String?,
+        creationRequestId: String?
     ) async throws -> WorkspaceTaskCreation
     func createStandaloneTask(
         name: String,
         cwd: String?,
         worktree: Bool?,
-        description: String?
+        description: String?,
+        parentTaskId: String?,
+        creationRequestId: String?
     ) async throws -> WorkspaceTaskCreation
     func listTaskGroups() async throws -> [TaskDirectoryGroup]
     func saveWorkspaceGroupOrder(_ ids: [String]) async throws
@@ -84,7 +91,10 @@ extension WorkspaceServing {
             target: target,
             binding: binding,
             kind: kind,
-            prompt: nil
+            prompt: nil,
+            mode: nil,
+            model: nil,
+            thinkingEffort: nil
         )
     }
 }
@@ -164,6 +174,8 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var creationError: String?
     @Published private(set) var unconfirmedWindowTasks = Set<String>()
     @Published private(set) var taskCreationUnconfirmed = false
+    /// Unknown creation text stays in this endpoint owner's memory, never preferences.
+    @Published private(set) var unconfirmedCreationPrompt: String?
 
     let serverID: String
     private let api: WorkspaceServing
@@ -422,7 +434,9 @@ final class WorkspaceStore: ObservableObject {
             baseRef: nil,
             worktree: nil,
             cwd: nil,
-            description: nil
+            description: nil,
+            parentTaskId: nil,
+            creationRequestId: nil
         )
         var refreshed: [WorkspaceTask] = []
         do {
@@ -530,13 +544,15 @@ final class WorkspaceStore: ObservableObject {
         directory: String,
         worktree: Bool?,
         workspaceId: String? = nil,
-        description: String? = nil
+        description: String? = nil,
+        parentTaskId: String? = nil
     ) async throws -> (workspace: Workspace, creation: WorkspaceTaskCreation) {
         guard !taskCreationUnconfirmed else { throw WandAPI.APIError.network("任务创建结果未确认，请先核对任务列表。") }
         let normalized = normalizeWorkspaceDirectory(directory)
-        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "未命名任务"
-            : name
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty || description?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            throw WandAPI.APIError.network("任务名称不能为空。")
+        }
         let creation: WorkspaceTaskCreation
         let workspace: Workspace
         do {
@@ -547,7 +563,9 @@ final class WorkspaceStore: ObservableObject {
                 baseRef: nil,
                 worktree: worktree,
                 cwd: normalized.isEmpty ? nil : normalized,
-                description: description
+                description: description,
+                parentTaskId: parentTaskId,
+                creationRequestId: nil
             )
             workspace = existing
         } else {
@@ -555,7 +573,9 @@ final class WorkspaceStore: ObservableObject {
                 name: normalizedName,
                 cwd: normalized.isEmpty ? nil : normalized,
                 worktree: normalized.isEmpty ? false : worktree,
-                description: description
+                description: description,
+                parentTaskId: parentTaskId,
+                creationRequestId: nil
             )
             workspace = workspaces.first(where: { $0.id == creation.workspaceId })
                 ?? Workspace(
@@ -569,7 +589,7 @@ final class WorkspaceStore: ObservableObject {
                 )
         }
         } catch {
-            if contactCreationNeedsReview(attempted: true, error: error) { taskCreationUnconfirmed = true }
+            if contactCreationNeedsReview(attempted: true, error: error) { markUnconfirmedTaskCreation(prompt: description) }
             throw error
         }
         tasksByWorkspace[workspace.id] = (tasksByWorkspace[workspace.id] ?? []) + [WorkspaceTask(
@@ -964,19 +984,9 @@ final class WorkspaceStore: ObservableObject {
         provider: WorkspaceSessionTarget? = nil,
         kind: WorkspaceSessionKind? = nil
     ) {
-        // 本地选择必须无条件跟着走：只把「不覆盖服务端默认 CLI」的限制放在下面写偏好那一步，
-        // 否则「空白终端」在目标选择器里永远选不中（对齐 Android 的 newTaskTarget = option）。
         if let provider { selectedTarget = provider }
         if let kind { selectedKind = kind }
         if selectedTarget == .wandAgent { selectedKind = .structured }
-        Task {
-            guard let api = api as? WandAPI else { return }
-            try? await api.updateCreationDefaults(
-                defaultProvider: provider?.provider?.rawValue,
-                defaultSessionKind: provider == .wandAgent ? "structured" : kind?.rawValue,
-                defaultEngine: provider == .wandAgent ? "sdk" : provider == .pi ? "cli" : nil
-            )
-        }
     }
 
     func presentTargetPicker() {
@@ -992,7 +1002,11 @@ final class WorkspaceStore: ObservableObject {
         creationError = nil
     }
 
-    func acknowledgeUnconfirmedTaskCreation() { taskCreationUnconfirmed = false }
+    func markUnconfirmedTaskCreation(prompt: String? = nil) {
+        taskCreationUnconfirmed = true
+        if let prompt { unconfirmedCreationPrompt = prompt }
+    }
+    func acknowledgeUnconfirmedTaskCreation() { taskCreationUnconfirmed = false; unconfirmedCreationPrompt = nil }
     func markUnconfirmedWindow(taskID: String) { unconfirmedWindowTasks.insert(taskID) }
     func acknowledgeUnconfirmedWindow(taskID: String) { unconfirmedWindowTasks.remove(taskID); creationError = nil }
     func contactEmployeesForPicker() async throws -> [SiliconEmployee] {
@@ -1089,7 +1103,10 @@ final class WorkspaceStore: ObservableObject {
         target: WorkspaceSessionTarget,
         kind: WorkspaceSessionKind,
         prompt: String?,
-        employeeID: String? = nil
+        employeeID: String? = nil,
+        mode: String? = nil,
+        model: String? = nil,
+        thinkingEffort: String? = nil
     ) async throws -> SessionSnapshot {
         guard !unconfirmedWindowTasks.contains(taskId) else { throw WandAPI.APIError.network("会话创建结果未确认，请先核对任务会话。") }
         let detail = try await api.getWorkspaceTask(taskId: taskId)
@@ -1103,12 +1120,22 @@ final class WorkspaceStore: ObservableObject {
         if let employeeID {
             snapshot = try await api.createWorkspaceEmployeeTaskWindow(employeeID: employeeID, binding: binding, prompt: prompt)
         } else {
-            snapshot = try await api.createWorkspaceTaskWindow(target: target, binding: binding, kind: target == .shell ? .pty : kind, prompt: prompt)
+            snapshot = try await api.createWorkspaceTaskWindow(
+                target: target,
+                binding: binding,
+                kind: target == .shell ? .pty : kind,
+                prompt: prompt,
+                mode: target == .shell ? nil : mode,
+                model: target == .shell ? nil : model,
+                thinkingEffort: target == .shell ? nil : thinkingEffort
+            )
         }
         } catch {
             if contactCreationNeedsReview(attempted: true, error: error) { markUnconfirmedWindow(taskID: taskId) }
             throw error
         }
+        // 接受会话回执后，即使布局/刷新失败也禁止盲目重试创建。
+        markUnconfirmedWindow(taskID: taskId)
         // 新会话要成为任务里的活动窗口，否则打开任务看到的还是旧窗口（对齐 Android 的
         // addSessionWindow(activate: true)）；布局写失败不影响会话已创建的事实。
         let refreshed = (try? await api.getWorkspaceTask(taskId: taskId)) ?? detail
@@ -1125,6 +1152,7 @@ final class WorkspaceStore: ObservableObject {
         scheduleAutoSelectSession(taskId: taskId, sessionId: snapshot.id)
         invalidateTaskGroupsLoad()
         await loadTaskGroups(force: true)
+        acknowledgeUnconfirmedWindow(taskID: taskId)
         return snapshot
     }
 

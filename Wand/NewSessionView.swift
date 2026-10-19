@@ -68,7 +68,6 @@ struct NewSessionView: View {
     let api: WandAPI
     let hostServerID: String
     let initialCwd: String?
-    var voiceCallOnly = false
     let onCreated: (SessionSnapshot, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -104,7 +103,6 @@ struct NewSessionView: View {
     /// Provider -> 用户在本页触碰过的模型。空字符串表示显式恢复
     /// Provider 默认；缺少 key 表示不改服务端现值。保留跨 Provider 待保存值，
     /// 避免快速切换时后一次 debounce 丢掉前一个 Provider 的模型选择。
-    @State private var pendingModelDefaults: [String: String] = [:]
     @State private var thinkingEffort = "off"
     @State private var firstMessage = ""
     @State private var creating = false
@@ -115,10 +113,6 @@ struct NewSessionView: View {
     @State private var errorMessage: String?
     @State private var showBrowser = false
     @State private var showModelPicker = false
-    /// 选择变化的 debounce 所有者；真正开始的 HTTP mutation 由 endpoint queue 接管，
-    /// 不会随下一次选择的 debounce 取消。
-    @State private var defaultsSaveTask: Task<Void, Never>?
-    @State private var didLoadDefaults = false
     @State private var didLoadModels = false
     @State private var bootstrapState = BootstrapState.loading
     @State private var bootstrapGeneration = 0
@@ -128,13 +122,11 @@ struct NewSessionView: View {
         api: WandAPI,
         hostServerID: String,
         initialCwd: String? = nil,
-        voiceCallOnly: Bool = false,
         onCreated: @escaping (SessionSnapshot, String) -> Void
     ) {
         self.api = api
         self.hostServerID = hostServerID
         self.initialCwd = initialCwd
-        self.voiceCallOnly = voiceCallOnly
         self.onCreated = onCreated
         _selectedServerID = State(initialValue: hostServerID)
         _cwd = State(initialValue: initialCwd ?? "")
@@ -239,7 +231,7 @@ struct NewSessionView: View {
                 WandAmbientBackground()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        if serverStore.profiles.count > 1 && !voiceCallOnly {
+                        if serverStore.profiles.count > 1 {
                             sectionHeader("服务器")
                             Picker("服务器", selection: $selectedServerID) {
                                 ForEach(serverStore.profiles) { profile in
@@ -252,9 +244,6 @@ struct NewSessionView: View {
                             .padding(.vertical, 10)
                             .wandInputSurface(focused: false)
                             .onChange(of: selectedServerID) { _, newServerID in
-                                defaultsSaveTask?.cancel()
-                                defaultsSaveTask = nil
-                                pendingModelDefaults.removeAll()
                                 cwd = newServerID == hostServerID ? (initialCwd ?? "") : ""
                                 contactSubject = nil; contactEmployees = []; contactsError = nil
                                 Task { await bootstrap() }
@@ -262,20 +251,15 @@ struct NewSessionView: View {
                             fieldHint("配置、目录和会话都会从所选服务器读取，认证信息彼此隔离。")
                         }
 
-                        if !voiceCallOnly {
-                            sectionHeader("会话类型")
-                            Picker("会话类型", selection: $sessionKind) {
-                                ForEach(SessionKind.allCases) { kind in
-                                    Text(kind.title).tag(kind)
-                                }
+                        sectionHeader("会话类型")
+                        Picker("会话类型", selection: $sessionKind) {
+                            ForEach(SessionKind.allCases) { kind in
+                                Text(kind.title).tag(kind)
                             }
-                            .pickerStyle(.segmented)
-                            .onChange(of: sessionKind) { _, newKind in
-                                if newKind != .structured { contactSubject = nil }
-                                if newKind.preferenceValue != nil {
-                                    scheduleDefaultsSave()
-                                }
-                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: sessionKind) { _, newKind in
+                            if newKind != .structured { contactSubject = nil }
                         }
                         fieldHint(Self.sessionKindHint(provider: provider, kind: sessionKind))
 
@@ -290,7 +274,6 @@ struct NewSessionView: View {
                                 if let tool = WandAgentTool(rawValue: id) {
                                     provider = tool.provider.rawValue; selectedEngine = tool.engine
                                     if tool.structuredOnly { sessionKind = .structured }
-                                    scheduleDefaultsSave()
                                 }
                             })) {
                                 ForEach(WandAgentTool.allCases.filter { sessionKind == .structured || !$0.structuredOnly }) { Text($0.title).tag($0.rawValue) }
@@ -299,9 +282,8 @@ struct NewSessionView: View {
                             .onChange(of: provider) { _, newProvider in
                                 modelSelectionRevision &+= 1
                                 mode = supportedMode(mode, provider: newProvider)
-                                selectedModel = pendingModelDefaults[WandProvider.normalize(newProvider)] ?? ""
+                                selectedModel = ""
                                 normalizeThinkingEffortIfNeeded()
-                                scheduleDefaultsSave()
                             }
 
                             sectionHeader("模型与思考")
@@ -348,7 +330,7 @@ struct NewSessionView: View {
                         if sessionKind == .shell {
                             fieldHint("创建后会直接进入可输入命令的空白终端，不启动任何 AI CLI。")
                         } else {
-                            if !voiceCallOnly { sectionHeader("首条消息（可选）"); firstMessageCard }
+                            sectionHeader("首条消息（可选）"); firstMessageCard
                         }
 
                         if let errorMessage { errorBanner(errorMessage) }
@@ -383,7 +365,7 @@ struct NewSessionView: View {
                 }
             }
             .dismissKeyboardOnTap()
-            .navigationTitle(voiceCallOnly ? "选择通话员工与目录" : "新建会话")
+            .navigationTitle("新建会话")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -438,18 +420,14 @@ struct NewSessionView: View {
         .interactiveDismissDisabled(creating)
         .wandKeyboardShortcuts(newSessionKeyboardShortcuts)
         .onChange(of: thinkingEffort) { _, _ in
-            scheduleDefaultsSave()
         }
         .onChange(of: mode) { _, _ in
-            scheduleDefaultsSave()
         }
         .task {
             await bootstrap()
         }
         .onDisappear {
             bootstrapGeneration &+= 1
-            defaultsSaveTask?.cancel()
-            defaultsSaveTask = nil
         }
     }
 
@@ -504,14 +482,10 @@ struct NewSessionView: View {
     /// `/api/config` 是本页所有默认值和创建请求的根。它失败时保留明确错误状态，
     /// 不能用一套本地猜测值继续创建；模型目录和最近路径则按服务端一致行为独立容错。
     private func bootstrap() async {
-        defaultsSaveTask?.cancel()
-        defaultsSaveTask = nil
-        pendingModelDefaults.removeAll()
         bootstrapGeneration &+= 1
         modelCatalogRevision &+= 1
         let generation = bootstrapGeneration
         bootstrapState = .loading
-        didLoadDefaults = false
         didLoadModels = false
         errorMessage = nil
         availableModels = []
@@ -534,7 +508,7 @@ struct NewSessionView: View {
 
             provider = WandProvider(normalizing: config.defaultProvider).rawValue
             selectedEngine = provider == "pi" ? config.defaultEngine : nil
-            sessionKind = !voiceCallOnly && config.defaultSessionKind == SessionKind.pty.rawValue && selectedEngine != "sdk" ? .pty : .structured
+            sessionKind = config.defaultSessionKind == SessionKind.pty.rawValue && selectedEngine != "sdk" ? .pty : .structured
             mode = supportedMode(config.resolvedDefaultMode, provider: provider)
             serverDefaultModels = ProviderDefaultModels(
                 claude: config.defaultModelId(for: WandProvider.claude.rawValue),
@@ -564,15 +538,11 @@ struct NewSessionView: View {
                 }
             }
 
-            // Provider / 类型 / 模式 / 模型偏好已完成 hydration；从这里开始才允许
-            // 即时保存与创建，避免失败的配置请求产生半套默认值。
+            // All server-provided defaults and contacts are now loaded; only this session uses selections.
             await loadContacts()
             guard !Task.isCancelled, generation == bootstrapGeneration else { return }
-            didLoadDefaults = true
             bootstrapState = .ready
-            if normalizedThinkingEffort {
-                scheduleDefaultsSave()
-            }
+            _ = normalizedThinkingEffort
         } catch {
             guard !Task.isCancelled, generation == bootstrapGeneration else { return }
             bootstrapState = .failed("无法读取服务器配置：\(error.localizedDescription)")
@@ -764,9 +734,7 @@ struct NewSessionView: View {
     private func selectModel(_ model: String) {
         modelSelectionRevision &+= 1
         selectedModel = model
-        pendingModelDefaults[selectedProvider.rawValue] = model
         normalizeThinkingEffortIfNeeded()
-        scheduleDefaultsSave()
     }
 
     /// 读取服务端当前持久化目录。CLI 探测由服务端的自动或管理员刷新完成。
@@ -1052,117 +1020,10 @@ struct NewSessionView: View {
 
     private var canCreate: Bool {
         bootstrapReady && !cwd.trimmingCharacters(in: .whitespaces).isEmpty && !creating &&
-        (!voiceCallOnly || (contactSubject?.type == "employee" && sessionKind == .structured)) &&
         !unconfirmedCreations.contains(selectedServerID) &&
         (contactSubject == nil || (sessionKind == .structured && contactEmployees.contains {
             $0.id == contactSubject?.id && !$0.archived && !$0.agents.isEmpty
         }))
-    }
-
-    /// 保存当前完整选择而不是单字段补丁。快速输入只取消尚未入队的 debounce；已开始
-    /// 的 HTTP 写入会完成，后续快照再按 endpoint FIFO 执行，保证最终选择最后提交。
-    private func scheduleDefaultsSave() {
-        guard didLoadDefaults, !creating, sessionKind != .shell, contactSubject == nil else { return }
-        let values = currentDefaults
-        let api = targetAPI
-        defaultsSaveTask?.cancel()
-        defaultsSaveTask = Task {
-            do {
-                try await Task.sleep(nanoseconds: 250_000_000)
-                try Task.checkCancellation()
-                try await NewSessionEndpointMutationQueue.shared.run(endpointID: values.serverID) {
-                    try await persistDefaults(values, using: api)
-                }
-                try Task.checkCancellation()
-                if selectedServerID == values.serverID {
-                    commitPersistedDefaults(values)
-                }
-            } catch is CancellationError {
-                // 快速连续选择时的正常合并路径。
-            } catch {
-                // WandAPI 会把 URLSession 的取消包装成 network error；任务本身的取消
-                // 仍可辨认，不能把正常 debounce 当成失败提示给用户。
-                if !Task.isCancelled {
-                    errorMessage = error.localizedDescription
-                }
-            }
-        }
-    }
-
-    private struct DefaultsSnapshot {
-        let serverID: String
-        let provider: String
-        let sessionKind: String?
-        let engine: String?
-        let mode: String
-        let modelUpdates: [String: String]
-        let thinkingEffort: String
-    }
-
-    private var currentDefaults: DefaultsSnapshot {
-        let normalizedProvider = selectedProvider.rawValue
-        return DefaultsSnapshot(
-            serverID: selectedServerID,
-            provider: normalizedProvider,
-            sessionKind: sessionKind.preferenceValue,
-            engine: selectedEngine,
-            mode: supportedMode(mode, provider: normalizedProvider),
-            modelUpdates: pendingModelDefaults,
-            thinkingEffort: thinkingEffort
-        )
-    }
-
-    private func persistDefaults(_ values: DefaultsSnapshot, using api: WandAPI) async throws {
-        // 通用默认项一次写入；模型按 Provider 单独写，使 defaultModels 的
-        // 部分更新语义与 Android/Web 保持一致。
-        try await api.updateNewSessionDefaults(
-            mode: values.mode,
-            model: nil,
-            provider: values.provider,
-            thinkingEffort: values.thinkingEffort,
-            defaultProvider: values.provider,
-            defaultSessionKind: values.sessionKind,
-            defaultEngine: values.engine
-        )
-        for provider in values.modelUpdates.keys.sorted() {
-            try Task.checkCancellation()
-            guard let model = values.modelUpdates[provider] else { continue }
-            // 空字符串会明确下发，表示恢复该 Provider 默认模型。
-            try await api.updateNewSessionDefaults(model: model, provider: provider)
-        }
-    }
-
-    /// 只清理与该次快照仍一致的 pending 值；若请求期间用户又选了
-    /// 新模型，新值会继续留待下一次保存。同步本地默认供切回 Provider 时立即显示。
-    private func commitPersistedDefaults(_ values: DefaultsSnapshot) {
-        guard selectedServerID == values.serverID else { return }
-        var claude = serverDefaultModels.claude
-        var codex = serverDefaultModels.codex
-        var opencode = serverDefaultModels.opencode
-        var grok = serverDefaultModels.grok
-        var qoder = serverDefaultModels.qoder
-        var pi = serverDefaultModels.pi
-        for (provider, model) in values.modelUpdates {
-            switch WandProvider(normalizing: provider) {
-            case .claude: claude = model
-            case .codex: codex = model
-            case .opencode: opencode = model
-            case .grok: grok = model
-            case .qoder: qoder = model
-            case .pi: pi = model
-            }
-            if pendingModelDefaults[provider] == model {
-                pendingModelDefaults.removeValue(forKey: provider)
-            }
-        }
-        serverDefaultModels = ProviderDefaultModels(
-            claude: claude,
-            codex: codex,
-            opencode: opencode,
-            grok: grok,
-            qoder: qoder,
-            pi: pi
-        )
     }
 
     private func loadContacts() async {
@@ -1185,53 +1046,37 @@ struct NewSessionView: View {
         let prompt = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         let kind = sessionKind
         let employeeID = kind == .structured && contactSubject?.type == "employee" ? contactSubject?.id : nil
-        let defaults = currentDefaults
-        let effectiveMode = defaults.mode
-        let effectiveModel = selectedModelForRequest
+        let target: WorkspaceSessionTarget = selectedEngine == "sdk" && provider == "pi" ? .wandAgent : WorkspaceSessionTarget(rawValue: provider) ?? .claude
         let targetServerID = selectedServerID
         let api = targetAPI
-        defaultsSaveTask?.cancel()
-        defaultsSaveTask = nil
+        let model = selectedModelForRequest
+        let mode = supportedMode(self.mode, provider: provider)
+        let engine = selectedEngine
+        let thinking = thinkingEffort
         Task {
             var creationAttempted = false
             do {
-                let snapshot = try await NewSessionEndpointMutationQueue.shared.run(
-                    endpointID: targetServerID
-                ) {
-                    switch kind {
-                    case .shell:
-                        creationAttempted = true
-                        return try await api.createShellSession(cwd: path)
-                    case .structured:
-                        if let employeeID {
-                            creationAttempted = true
-                            return try await api.createContactEmployeeSession(employeeID: employeeID, cwd: path, prompt: prompt.isEmpty ? nil : prompt)
-                        }
-                        try await persistDefaults(defaults, using: api)
-                        creationAttempted = true
-                        return try await api.createStructuredSession(
-                            provider: defaults.provider,
-                            cwd: path,
-                            mode: effectiveMode,
-                            model: effectiveModel,
-                            thinkingEffort: defaults.thinkingEffort,
-                            prompt: prompt.isEmpty ? nil : prompt,
-                            engine: defaults.engine
-                        )
-                    case .pty:
-                        try await persistDefaults(defaults, using: api)
-                        creationAttempted = true
-                        return try await api.createPtySession(
-                            provider: defaults.provider,
-                            cwd: path,
-                            mode: effectiveMode,
-                            model: effectiveModel,
-                            thinkingEffort: defaults.thinkingEffort,
-                            initialInput: prompt.isEmpty ? nil : prompt
+                let snapshot = try await NewSessionEndpointMutationQueue.shared.run(endpointID: targetServerID) {
+                    creationAttempted = true
+                    if let employeeID {
+                        return try await api.createSession(
+                            kind: "structured", cwd: path, prompt: prompt.isEmpty ? nil : prompt,
+                            engine: engine, employeeId: employeeID
                         )
                     }
+                    return try await api.createSession(
+                        kind: target == .shell ? "pty" : kind.rawValue,
+                        provider: target.provider?.rawValue,
+                        cwd: path,
+                        mode: target == .shell ? nil : mode,
+                        model: target == .shell ? nil : model,
+                        thinkingEffort: target == .shell ? nil : thinking,
+                        prompt: kind == .structured && target != .shell && !prompt.isEmpty ? prompt : nil,
+                        initialInput: kind == .pty && !prompt.isEmpty ? prompt : nil,
+                        engine: engine,
+                        shell: target == .shell
+                    )
                 }
-                if kind != .shell && employeeID == nil { commitPersistedDefaults(defaults) }
                 creating = false
                 onCreated(snapshot, targetServerID)
             } catch {

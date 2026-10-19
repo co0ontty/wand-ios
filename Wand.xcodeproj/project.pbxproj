@@ -7,10 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		FB4100000000000000000020 /* VoiceCallTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000021 /* VoiceCallTests.swift */; };
+		FB4100000000000000000020 /* ChatComposerCatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000021 /* ChatComposerCatTests.swift */; };
 		FB4100000000000000000010 /* PlushScene in Resources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000011 /* PlushScene */; };
 		FB4100000000000000000005 /* ChatDesignPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000006 /* ChatDesignPreview.swift */; };
-		FB4100000000000000000003 /* VoiceCall.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000004 /* VoiceCall.swift */; };
 		FB4100000000000000000001 /* SharedPlushScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000002 /* SharedPlushScene.swift */; };
 		FA3000000000000000000004 /* LiveActivityExperienceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000005 /* LiveActivityExperienceTests.swift */; };
 		FA3000000000000000000001 /* SessionActivityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000002 /* SessionActivityViews.swift */; };
@@ -69,8 +68,6 @@
 		B2000000000000000000AC03 /* SessionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC03 /* SessionActivityAttributes.swift */; };
 		B2000000000000000000AC04 /* SessionLiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC04 /* SessionLiveActivityController.swift */; };
 		B2000000000000000000AC07 /* QuickActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC07 /* QuickActions.swift */; };
-		B2000000000000000000AC08 /* SpeechRecognizerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC08 /* SpeechRecognizerService.swift */; };
-		C91053504545434800000001 /* ServerSpeechRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C91053504545434800000002 /* ServerSpeechRecorder.swift */; };
 		B2000000000000000000AC09 /* SessionNotificationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC09 /* SessionNotificationController.swift */; };
 		B2000000000000000000AC13 /* SessionActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC03 /* SessionActivityAttributes.swift */; };
 		B2000000000000000000AC05 /* WandWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000000000000000000BC05 /* WandWidgetsBundle.swift */; };
@@ -115,11 +112,15 @@
 		F8010000000000000000AC01 /* ClientFeedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8010000000000000000BC01 /* ClientFeedback.swift */; };
 		F8020000000000000000AC01 /* ClientFeedbackTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8020000000000000000BC01 /* ClientFeedbackTransport.swift */; };
 		F8030000000000000000AC01 /* TaskComments.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8030000000000000000BC01 /* TaskComments.swift */; };
+		F8030000000000000000AC02 /* TaskCommentComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8030000000000000000BC02 /* TaskCommentComposer.swift */; };
 		F8040000000000000000AC01 /* ClientFeedbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8040000000000000000BC01 /* ClientFeedbackTests.swift */; };
 		F8050000000000000000AC01 /* TaskCommentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8050000000000000000BC01 /* TaskCommentsTests.swift */; };
 		F8060000000000000000AC01 /* ClientFeedbackTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8060000000000000000BC01 /* ClientFeedbackTransportTests.swift */; };
 		AB1600000000000000000001 /* AppUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1600000000000000000003 /* AppUpdate.swift */; };
 		AB1600000000000000000002 /* AppUpdateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1600000000000000000004 /* AppUpdateTests.swift */; };
+		AC1700000000000000000001 /* NewConversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1700000000000000000002 /* NewConversation.swift */; };
+		AC1700000000000000000003 /* NewConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1700000000000000000004 /* NewConversationView.swift */; };
+		AC1700000000000000000005 /* NewConversationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1700000000000000000006 /* NewConversationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -154,10 +155,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		FB4100000000000000000021 /* VoiceCallTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCallTests.swift; sourceTree = "<group>"; };
+		FB4100000000000000000021 /* ChatComposerCatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatComposerCatTests.swift; sourceTree = "<group>"; };
 		FB4100000000000000000011 /* PlushScene */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PlushScene; sourceTree = "<group>"; };
 		FB4100000000000000000006 /* ChatDesignPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDesignPreview.swift; sourceTree = "<group>"; };
-		FB4100000000000000000004 /* VoiceCall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCall.swift; sourceTree = "<group>"; };
 		FB4100000000000000000002 /* SharedPlushScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedPlushScene.swift; sourceTree = "<group>"; };
 		FA3000000000000000000005 /* LiveActivityExperienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityExperienceTests.swift; sourceTree = "<group>"; };
 		FA3000000000000000000002 /* SessionActivityViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActivityViews.swift; sourceTree = "<group>"; };
@@ -203,6 +203,9 @@
 		A1000000000000000000BC10 /* SessionTimeFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTimeFormatting.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC05 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC07 /* NewSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionView.swift; sourceTree = "<group>"; };
+		AC1700000000000000000002 /* NewConversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewConversation.swift; sourceTree = "<group>"; };
+		AC1700000000000000000004 /* NewConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewConversationView.swift; sourceTree = "<group>"; };
+		AC1700000000000000000006 /* NewConversationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewConversationTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC08 /* NativeRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRootView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC09 /* GitQuickCommitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitQuickCommitView.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC0A /* KeyboardObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardObserver.swift; sourceTree = "<group>"; };
@@ -213,8 +216,6 @@
 		B2000000000000000000BC03 /* SessionActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActivityAttributes.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC04 /* SessionLiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLiveActivityController.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC07 /* QuickActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActions.swift; sourceTree = "<group>"; };
-		B2000000000000000000BC08 /* SpeechRecognizerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRecognizerService.swift; sourceTree = "<group>"; };
-		C91053504545434800000002 /* ServerSpeechRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSpeechRecorder.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC09 /* SessionNotificationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotificationController.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC0A /* LocalNetworkPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNetworkPermission.swift; sourceTree = "<group>"; };
 		B2000000000000000000BC05 /* WandWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandWidgetsBundle.swift; sourceTree = "<group>"; };
@@ -263,6 +264,7 @@
 		F8010000000000000000BC01 /* ClientFeedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedback.swift; sourceTree = "<group>"; };
 		F8020000000000000000BC01 /* ClientFeedbackTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedbackTransport.swift; sourceTree = "<group>"; };
 		F8030000000000000000BC01 /* TaskComments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskComments.swift; sourceTree = "<group>"; };
+		F8030000000000000000BC02 /* TaskCommentComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCommentComposer.swift; sourceTree = "<group>"; };
 		F8040000000000000000BC01 /* ClientFeedbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedbackTests.swift; sourceTree = "<group>"; };
 		F8050000000000000000BC01 /* TaskCommentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCommentsTests.swift; sourceTree = "<group>"; };
 		F8060000000000000000BC01 /* ClientFeedbackTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedbackTransportTests.swift; sourceTree = "<group>"; };
@@ -324,6 +326,7 @@
 				A1000000000000000000BC01 /* WandModels.swift */,
 				A1000000000000000000BC02 /* WandAPI.swift */,
 				F8030000000000000000BC01 /* TaskComments.swift */,
+				F8030000000000000000BC02 /* TaskCommentComposer.swift */,
 				F8020000000000000000BC01 /* ClientFeedbackTransport.swift */,
 				F8010000000000000000BC01 /* ClientFeedback.swift */,
 				A1000000000000000000BC03 /* WandSocket.swift */,
@@ -346,7 +349,6 @@
 				A1000000000000000000BC05 /* ChatView.swift */,
 				FB4100000000000000000011 /* PlushScene */,
 				FB4100000000000000000006 /* ChatDesignPreview.swift */,
-				FB4100000000000000000004 /* VoiceCall.swift */,
 				FB4100000000000000000002 /* SharedPlushScene.swift */,
 				FA1000000000000000000B10 /* ChatActivityTimeline.swift */,
 				FA1000000000000000000B07 /* PiResources.swift */,
@@ -359,6 +361,8 @@
 				FA1000000000000000000B03 /* ConversationStore.swift */,
 				FA1000000000000000000B04 /* ConversationViews.swift */,
 				A1000000000000000000BC07 /* NewSessionView.swift */,
+					AC1700000000000000000002 /* NewConversation.swift */,
+					AC1700000000000000000004 /* NewConversationView.swift */,
 				A1000000000000000000BC08 /* NativeRootView.swift */,
 				A1000000000000000000BC09 /* GitQuickCommitView.swift */,
 				A1000000000000000000BC0A /* KeyboardObserver.swift */,
@@ -370,8 +374,6 @@
 				FA3000000000000000000002 /* SessionActivityViews.swift */,
 				B2000000000000000000BC04 /* SessionLiveActivityController.swift */,
 				B2000000000000000000BC07 /* QuickActions.swift */,
-				B2000000000000000000BC08 /* SpeechRecognizerService.swift */,
-				C91053504545434800000002 /* ServerSpeechRecorder.swift */,
 				B2000000000000000000BC09 /* SessionNotificationController.swift */,
 				B2000000000000000000BC0A /* LocalNetworkPermission.swift */,
 				D4000000000000000000BC01 /* MissionsModels.swift */,
@@ -427,10 +429,11 @@
 			isa = PBXGroup;
 			children = (
 				F1000000000000000000BC05 /* ComposerToolParityTests.swift */,
+					AC1700000000000000000006 /* NewConversationTests.swift */,
 				F1000000000000000000BC11 /* SubagentDispatchTests.swift */,
 				F1000000000000000000BC04 /* HomeParityTests.swift */,
 				FA1000000000000000000B11 /* CurrentAndroidParityTests.swift */,
-				FB4100000000000000000021 /* VoiceCallTests.swift */,
+				FB4100000000000000000021 /* ChatComposerCatTests.swift */,
 				FA2000000000000000000011 /* RemainingParityTests.swift */,
 				FA2000000000000000000013 /* InstalledNativeTerminalTests.swift */,
 				FA3000000000000000000005 /* LiveActivityExperienceTests.swift */,
@@ -620,6 +623,7 @@
 				A1000000000000000000AC01 /* WandModels.swift in Sources */,
 				A1000000000000000000AC02 /* WandAPI.swift in Sources */,
 				F8030000000000000000AC01 /* TaskComments.swift in Sources */,
+				F8030000000000000000AC02 /* TaskCommentComposer.swift in Sources */,
 				F8020000000000000000AC01 /* ClientFeedbackTransport.swift in Sources */,
 				F8010000000000000000AC01 /* ClientFeedback.swift in Sources */,
 				A1000000000000000000AC03 /* WandSocket.swift in Sources */,
@@ -639,7 +643,6 @@
 				A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */,
 				A1000000000000000000AC05 /* ChatView.swift in Sources */,
 				FB4100000000000000000005 /* ChatDesignPreview.swift in Sources */,
-				FB4100000000000000000003 /* VoiceCall.swift in Sources */,
 				FB4100000000000000000001 /* SharedPlushScene.swift in Sources */,
 				FA1000000000000000000A10 /* ChatActivityTimeline.swift in Sources */,
 				FA1000000000000000000A07 /* PiResources.swift in Sources */,
@@ -652,6 +655,8 @@
 				FA1000000000000000000A03 /* ConversationStore.swift in Sources */,
 				FA1000000000000000000A04 /* ConversationViews.swift in Sources */,
 				A1000000000000000000AC07 /* NewSessionView.swift in Sources */,
+					AC1700000000000000000001 /* NewConversation.swift in Sources */,
+					AC1700000000000000000003 /* NewConversationView.swift in Sources */,
 				A1000000000000000000AC08 /* NativeRootView.swift in Sources */,
 				A1000000000000000000AC09 /* GitQuickCommitView.swift in Sources */,
 				A1000000000000000000AC0A /* KeyboardObserver.swift in Sources */,
@@ -663,8 +668,6 @@
 				FA3000000000000000000001 /* SessionActivityViews.swift in Sources */,
 				B2000000000000000000AC04 /* SessionLiveActivityController.swift in Sources */,
 				B2000000000000000000AC07 /* QuickActions.swift in Sources */,
-				B2000000000000000000AC08 /* SpeechRecognizerService.swift in Sources */,
-				C91053504545434800000001 /* ServerSpeechRecorder.swift in Sources */,
 				B2000000000000000000AC09 /* SessionNotificationController.swift in Sources */,
 				B2000000000000000000AC0A /* LocalNetworkPermission.swift in Sources */,
 				D4000000000000000000AC01 /* MissionsModels.swift in Sources */,
@@ -708,10 +711,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				F1000000000000000000AC05 /* ComposerToolParityTests.swift in Sources */,
+				AC1700000000000000000005 /* NewConversationTests.swift in Sources */,
 				F1000000000000000000AC11 /* SubagentDispatchTests.swift in Sources */,
 				F1000000000000000000AC04 /* HomeParityTests.swift in Sources */,
 				FA1000000000000000000A11 /* CurrentAndroidParityTests.swift in Sources */,
-				FB4100000000000000000020 /* VoiceCallTests.swift in Sources */,
+				FB4100000000000000000020 /* ChatComposerCatTests.swift in Sources */,
 				FA2000000000000000000010 /* RemainingParityTests.swift in Sources */,
 				FA2000000000000000000012 /* InstalledNativeTerminalTests.swift in Sources */,
 				FA3000000000000000000004 /* LiveActivityExperienceTests.swift in Sources */,

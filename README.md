@@ -13,10 +13,10 @@ Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权
 - `SessionCapabilities.swift` 区分 Pi CLI 与 Wand Agent（SDK）；创建、切换、员工候选、工作区与任务派发使用真实 provider + engine。`PiResources.swift` 按服务端实际能力配置 Skills / MCP、锁定、自动资源与 CodeMode；`ModelGroups.swift` 在管理认证后按原配置 CAS 保存分组，不把付费模型放进免费池。
 - `TeamDispatch.swift` 先建议、再人工确认项目和名单开工，未知启动不重复执行。工作区顺序支持原生拖放、键盘/无障碍可用的上移/下移与保存重试。
 - `NativeTerminal.swift` 使用固定 SwiftTerm 1.18.0、与 Android 同源 JetBrains Mono/ANSI 调色板；回放 Render checkpoint 的有序数据/resize，消费后 ACK，重连不重发输入。原生 IME、选择/复制/粘贴、50%–200%四分之一档缩放；远端 OSC52 不能读写剪贴板。
-- `SessionActivityViews.swift` 与 WidgetKit 共用布局；灵动岛区分运行/后台收尾/等待输入/权限/失败/停止/完成与过期状态，多会话可精确链接，计时取服务端本轮锚点。完成停留12秒、失败30秒，标题/详情标记 privacySensitive，状态载荷有4KB预算保护。
+- `SessionActivityViews.swift` 与 WidgetKit 共用布局；灵动岛区分运行/后台收尾/等待输入/权限/失败/停止/完成与过期状态，多会话可精确链接，计时取服务端本轮锚点。完成停留12秒、失败30秒，标题/详情标记 privacySensitive，状态载荷有4KB预算保护。**信息密度约定**：展开态状态胶囊已说明「待授权/等你回复/已完成」，详情行不再复述，只显示真实在做的事；待授权时优先显示 escalation 的 scope+target（要授权什么）；计时器有界（`59:59` 后转 `1h02`、超 99 小时为 `99h+`），不会长到挤掉状态；已完成但仍在保留期的兄弟会话不再单独占一行。
 - `ChatActivityTimeline.swift` 独立持有只读工具/思考时间线：稳定身份、真实时间排序、空思考轮过滤、唯一运行标记、按需调用详情、上翻不抢阅读位置；自动展开网络偏好位于设置。主界面灰白蓝 token 对齐当前 Android，终端保留两端共同的暖深色。
 
-验证：`WandTests/CurrentAndroidParityTests.swift` 覆盖协议、竞态和原生渲染。安装服务只读验收必须显式提供私密测试输入，常规 CI 不访问用户服务；凭据不进入构建参数、环境变量值、仓库或附件。离线语音按用户要求不移植；系统语音保持本轮其他工作真实选择。未签名 IPA与无连接真机是当前验收边界，不能因此宣称已完成签名真机验收或所有平台实现完全相同。
+验证：`WandTests/CurrentAndroidParityTests.swift` 覆盖协议、竞态和原生渲染。安装服务只读验收必须显式提供私密测试输入，常规 CI 不访问用户服务；凭据不进入构建参数、环境变量值、仓库或附件。未签名 IPA与无连接真机是当前验收边界，不能因此宣称已完成签名真机验收或所有平台实现完全相同。
 
 支持付费 Apple Developer 的 Ad Hoc 签名与自建服务器更新，同时保留免费 Apple ID 侧载用途。付费签名与一次配置说明见 [ADHOC.md](ADHOC.md)。
 
@@ -29,7 +29,7 @@ Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权
 
 ## 客户端更新
 
-`AppUpdateController` 在连接成功、回到前台和前台每5分钟请求公开接口 `GET /api/ios-ipa-update?currentVersion=`，发现同应用身份的可安装签名包后显示更新横幅，设置页共用同一状态并保留手动检查。点击后打开系统 `itms-services` 安装器，**需要用户确认，不会静默装包**；后台不承诺持续轮询或实时推送。
+`AppUpdateController` 在连接成功、回到前台和前台每5分钟请求公开接口 `GET /api/ios-ipa-update?currentVersion=`，发现同应用身份的可安装签名包后显示更新横幅，设置页共用同一状态并保留手动检查。点击「安装更新」直接跳转服务端 `/ios/install` 安装页，由浏览器发起 `itms-services` 交接（iOS 26+ 从 App 内直接交接会等待本 App 退出而卡住）；仅无合法安装页时回退 App 内交接。**需要用户确认，不会静默装包**；后台不承诺持续轮询或实时推送。
 
 - 已配置本机 Ad Hoc 时正常 `IPA_DIST_DIR="$HOME/.wand/ios" ./build.sh` 自动归档、签名、校验、发布并切换服务器选择器。升级须保持同团队/Bundle ID；首次改用新身份请用 Safari 的 `/ios/install` 安装，不要先删旧App。
 - 未签名包只能被检查到；系统安装会失败，仍可用 SideStore / AltStore / Sideloadly。
@@ -44,7 +44,22 @@ Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权
 - 上报独立于业务，无重试/重放，绝对 5 秒截止，最多 2 个并发、每分钟 10 条、相同错误 5 分钟去重；取消不报。iOS 系统托管安装没有结果回调，只能确认安装器是否打开，不能据此判断安装成功/失败。
 - 任务详情在有内容时原位只读展示最近评论；旧服务端评论接口 404 视为空，切换任务后的迟到响应不能覆盖当前任务。
 
-无需设备安装/启动的定点单测：`bash scripts/test-feedback.sh`。Release 构建仍使用 `CODE_SIGNING_ALLOWED=NO IPA_DIST_DIR="$HOME/.wand/ios" ./build.sh`，产物未签名，不代表可 OTA 安装。
+无需设备安装/启动的定点单测：`bash scripts/test-feedback.sh`。
+
+模拟器 XCTest 统一用 `./scripts/run-tests.sh [测试过滤]`，不要各处手拼 `xcodebuild`：
+
+```bash
+./scripts/run-tests.sh                                   # 全部 WandTests
+./scripts/run-tests.sh WandTests/FocusComposerTests       # 单个测试类
+./scripts/run-tests.sh FocusComposerTests/testExpandedEditorUsesFullWidthForEmptySingleAndMultilineDrafts
+BUILD_ONLY=1 ./scripts/run-tests.sh                      # 只编译测试 target，不需要模拟器
+SIMULATOR_ID=<udid> ./scripts/run-tests.sh               # 指定模拟器
+DERIVED_DATA=/path ./scripts/run-tests.sh                # 自定义派生数据
+```
+
+脚本固定传 `-parallel-testing-enabled NO`：`Wand.xcscheme` 的 `parallelizable` 已是 `NO`，但命令行参数能重新打开并行，那样 xcodebuild 会克隆多个模拟器把整机 CPU/IO 打满（曾实测克隆 5 个、约 1086 个模拟器子进程、load average 877）。脚本先 `build-for-testing` 再 `test-without-building`，编译失败立即退出、不复用旧产物；模拟器设备集不可用时编译仍会完成并明确报错，不会假装测试通过。
+
+Release 构建遵循上方本机 Ad Hoc 签名配置；未配置签名时产物未签名，不代表可 OTA 安装。
 
 ## 免费安装方案调研（不需要付费 Apple 账号）
 
@@ -166,9 +181,8 @@ ios/
     ├── ConnectView.swift      # 连接界面（连接码 / 地址 + 最近连接）
     ├── NativeRootView.swift   # 原生根视图：token 登录引导 + 列表导航
     ├── SessionListView.swift  # 会话列表（/api/sessions 轮询 + 下拉刷新 + 滑动删除）
-    ├── ChatView.swift         # 聊天视图：消息块渲染 + 原生输入栏（含按住说话）+ 权限审批卡片
+    ├── ChatView.swift         # 聊天视图：消息块渲染 + 原生输入栏+ 权限审批卡片
     ├── ChatStore.swift        # 单会话状态机：WS 订阅、增量合流、发送/停止/权限决策
-    ├── SpeechRecognizerService.swift # 按住说话：AVAudioEngine + SFSpeechRecognizer 端侧优先转写
     ├── NewSessionView.swift   # 新建会话（Claude/Codex/OpenCode / 最近路径 / 类型与模式）
     ├── WandAPI.swift          # REST 客户端（401 自动用 appToken 重登重试）
     ├── WandSocket.swift       # /ws 客户端：seq 间隙 resync、心跳看门狗、退避重连
@@ -206,7 +220,6 @@ ios/
 - **ATS**：`NSAllowsArbitraryLoads = true`，因为要连局域网 HTTP 地址和自签名 HTTPS。
 - **本地网络权限**：`NSLocalNetworkUsageDescription`；应用完成启动后主动用无数据 UDP connect 触发一次授权检查，局域网连接失败时提供 App 设置入口。
 - **切换服务器入口**：iOS 没有菜单栏，连接后在右上角放一个低调的半透明悬浮按钮，点击弹出切换面板（macOS 是用菜单 + 通知，二者共用 `.wandRequestSwitchServer` 通知）。
-- **按住说话（服务端 / 客户端本地识别）**：设置 → 语音输入选择识别方式，默认保留本地。按住录音 → 松手把文字**追加**进原草稿 → 上滑取消；修改输入、切会话或离开后迟到转写不覆盖新输入。本地模式强制系统 `SFSpeechRecognizer.requiresOnDeviceRecognition`，语言候选为系统语言 → zh-CN → en-US；缺少端侧模型时报错，不自动转 Apple 在线识别。服务端模式由 `ServerSpeechRecorder` 只请求麦克风权限，录制最多 60 秒，设备转换为 16 kHz 单声道 PCM16 WAV，松手后经当前 endpoint 的认证 URLSession 上传 Wand 服务器离线转写；服务器需要先安装 whisper.cpp、启用并下载模型，说明见主仓 `docs/server-speech.md`。识别中可取消，不写音频或转写到日志；无需额外 entitlement，免费账号自签不受影响。
 - **bundle id**：`com.wand.app`，与 macOS 端一致。免费签名时工具可能会改写它，不影响使用。
 - **entitlements**：刻意**不带**特殊 entitlements（推送 / App Groups 等），保持最干净，最大化兼容免费账号签名——带了反而可能签名失败。
 
@@ -221,5 +234,5 @@ Release 不包含这个入口。凭据不放进启动参数、环境变量、日
 
 ## 注意
 
-- 客户端更新检查：`GET /api/ios-ipa-update`；安装走 `itms-services` + `/ios/manifest.plist`。不要在 App 内自己解包安装 IPA。
+- 客户端更新检查：`GET /api/ios-ipa-update`；安装经 `/ios/install` 页面发起 `itms-services` + `/ios/manifest.plist`。不要在 App 内自己解包安装 IPA。
 - 不要随意更换 bundle id 或签名身份的预期：用同一工具、同一 Apple ID 续签才能平滑升级；换了就要先删旧 App 再装。

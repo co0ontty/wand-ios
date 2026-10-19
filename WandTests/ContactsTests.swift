@@ -50,11 +50,29 @@ final class ContactsTests: XCTestCase {
         XCTAssertTrue(try employee(system: "wand-ops").builtin)
         XCTAssertFalse(try employee().builtin)
     }
-    func testBuiltinEmployeeMutationContainsOnlyCandidates() throws {
+    func testSystemSessionLimitDecodeDraftValidationAndPayload() throws {
+        for limit: Any in [NSNull(), 0, 25, 10000] {
+            let data = try JSONSerialization.data(withJSONObject: ["id": "e_wand_ops", "systemKey": "wand-ops", "systemSessionLimit": limit])
+            let employee = try JSONDecoder().decode(SiliconEmployee.self, from: data)
+            let draft = EmployeeDraft(employee)
+            XCTAssertEqual(draft.systemSessionLimit, limit as? Int)
+            for builtin in [true, false] {
+                XCTAssertEqual(draft.body(builtin: builtin)["systemSessionLimit"] as? Int, limit as? Int)
+            }
+        }
+        var draft = EmployeeDraft()
+        for value in ["-1", "1.5", "10001", "999999999999999999999999", "abc"] {
+            draft.systemSessionLimitInput = value
+            XCTAssertNotNil(draft.validationError(builtin: true))
+        }
+        draft.systemSessionLimitInput = ""
+        XCTAssertTrue(draft.body(builtin: true)["systemSessionLimit"] is NSNull)
+    }
+    func testBuiltinEmployeeMutationContainsOnlyCandidatesAndRetention() throws {
         var draft = EmployeeDraft(try employee(system: "wand-default"))
         draft.name = "not a permitted rename"; draft.prompt = "never submit a locked field"
         let body = draft.body(builtin: true)
-        XCTAssertEqual(Set(body.keys), ["agents"])
+        XCTAssertEqual(Set(body.keys), ["agents", "systemSessionLimit"])
         XCTAssertNil(draft.validationError(builtin: true))
         let agents = try XCTUnwrap(body["agents"] as? [[String: Any]])
         XCTAssertEqual(agents[0]["kind"] as? String, "structured")
@@ -108,6 +126,52 @@ final class ContactsTests: XCTestCase {
         XCTAssertEqual(encoded["role"] as? String, "verify")
         XCTAssertEqual(encoded["avatar"] as? String, "cat:3")
         XCTAssertNil(encoded["agent"])
+    }
+    func testAndroidTeamTemplatesHaveEditableValidMembersAndUniqueIdentities() throws {
+        XCTAssertEqual(ContactTeamTemplate.allCases.map(\.rawValue), ["dev", "bugfix", "research", "blank"])
+        for template in ContactTeamTemplate.allCases {
+            var candidate = ContactCandidate(); candidate.provider = "pi"; candidate.engine = "sdk"
+            var draft = template.draft(agent: candidate)
+            XCTAssertEqual(draft.members.count, [.dev, .research].contains(template) ? 3 : 2)
+            XCTAssertEqual(draft.members.filter(\.isLeader).count, 1)
+            XCTAssertEqual(Set(draft.members.map(\.id)).count, draft.members.count)
+            XCTAssertTrue(draft.members.allSatisfy { $0.agents == [candidate] && $0.employeeId == nil })
+            if template == .blank { XCTAssertEqual(draft.name, ""); draft.name = "自建团队" }
+            XCTAssertNil(draft.validationError, template.id)
+            XCTAssertTrue(Set(draft.members.map(\.id)).isDisjoint(with: template.draft().members.map(\.id)))
+        }
+    }
+    func testMemberRemovalMatchesAndroidMinimumAndReassignsOnlyMissingLeader() {
+        let members = ContactTeamTemplate.dev.draft().members
+        let removed = contactTeamRemovingMember(members, at: 0)
+        XCTAssertEqual(removed.count, 2); XCTAssertTrue(removed[0].isLeader)
+        XCTAssertEqual(contactTeamRemovingMember(removed, at: 0), removed)
+        XCTAssertEqual(contactTeamRemovingMember(members, at: 100), members)
+    }
+    func testInvitationRejectsInvalidCandidatesFullTeamsAndStaleReplacement() throws {
+        var person = try employee()
+        let members = ContactTeamTemplate.blank.draft().members
+        person.agents = []
+        XCTAssertNotNil(contactEmployeeInviteError(person, members: members, replacingID: nil))
+        person = try employee()
+        person.agents.append(person.agents[0])
+        XCTAssertNotNil(contactEmployeeInviteError(person, members: members, replacingID: nil))
+        person = try employee()
+        XCTAssertNotNil(contactEmployeeInviteError(person, members: members, replacingID: "missing"))
+        let full = (0..<8).map { ContactTeamMember(name: "成员\($0)", duty: "", leader: $0 == 0) }
+        XCTAssertNotNil(contactEmployeeInviteError(person, members: full, replacingID: nil))
+        XCTAssertNil(contactEmployeeInviteError(person, members: full, replacingID: full[0].id))
+    }
+    func testAvatarUploadDownsamplesAndRejectsInvalidData() throws {
+        XCTAssertNil(contactAvatarDataURL(Data("not an image".utf8)))
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 600, height: 300)).image { context in
+            UIColor.blue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 600, height: 300))
+        }
+        let value = try XCTUnwrap(contactAvatarDataURL(try XCTUnwrap(image.pngData())))
+        let jpeg = try XCTUnwrap(Data(base64Encoded: String(value.split(separator: ",")[1])))
+        let result = try XCTUnwrap(UIImage(data: jpeg))
+        XCTAssertLessThanOrEqual(max(result.size.width, result.size.height), 128)
+        XCTAssertLessThanOrEqual(jpeg.count, 60 * 1024)
     }
     func testTeamDraftRequiresUniqueLeaderAndRetainsMemberIds() throws {
         var draft = ContactTeamDraft()
@@ -330,13 +394,17 @@ final class ContactsTests: XCTestCase {
         service.newDetail = try runDetail(id: "r2", updated: "2026-10-02T00:00:00.000Z")
         await model.refresh(); XCTAssertEqual(model.currentRunID, "r2"); XCTAssertEqual(model.detail?.run.id, "r2")
     }
-    func testEmployeeSessionRequestPinsRealTaskIdentityAndImmediateAckWithoutCliOverrides() {
-        let body = contactEmployeeSessionBody(employeeID: "e1", cwd: "/repo", workspaceID: "w1", workspaceTaskID: "wt1", prompt: " Work ")
-        XCTAssertEqual(Set(body.keys), ["employeeId", "cwd", "workspaceId", "workspaceTaskId", "prompt", "respondImmediately"])
-        XCTAssertEqual(body["prompt"] as? String, "Work"); XCTAssertEqual(body["respondImmediately"] as? Bool, true)
-        XCTAssertNil(body["provider"]); XCTAssertNil(body["runner"]); XCTAssertNil(body["systemPrompt"])
-        let blank = contactEmployeeSessionBody(employeeID: "e1", cwd: "/repo", workspaceTaskID: "wt1")
-        XCTAssertNil(blank["prompt"]); XCTAssertNil(blank["respondImmediately"])
+    func testEmployeeSessionCreationUsesUnifiedEndpointWithoutCliOverrides() throws {
+        let request = workspaceTaskWindowRequest(
+            target: .claude,
+            binding: WorkspaceBinding(workspaceId: "w1", workspaceTaskId: "wt1", cwd: "/repo"),
+            kind: .structured,
+            prompt: "Work"
+        )
+        XCTAssertEqual(request.path, "/api/sessions")
+        XCTAssertEqual(request.body["kind"], .string("structured"))
+        XCTAssertNil(request.body["respondImmediately"])
+        XCTAssertNil(request.body["systemPrompt"])
     }
     func testTaskSubjectDispatchUsesAtomicServerOwnerAndNeverRequestsPty() throws {
         let subject = ContactExecutionSubject(type: "employee", id: "e1")
@@ -363,6 +431,20 @@ final class ContactsTests: XCTestCase {
             XCTAssertTrue(contactCreationNeedsReview(attempted: true, error: error))
         }
     }
+    func testConversationExecutionOverrideKeepsToolIdentityAndNeverTargetsTaskRuns() {
+        let piCLI = ConversationExecutionPreference(provider: "pi", engine: "cli", model: "model-cli", thinkingEffort: "off")
+        let wandAgent = ConversationExecutionPreference(provider: "pi", engine: "sdk", model: "model-sdk", thinkingEffort: "pi:high")
+        XCTAssertEqual(WandAgentTool(provider: piCLI.provider, engine: piCLI.engine), .pi)
+        XCTAssertEqual(WandAgentTool(provider: wandAgent.provider, engine: wandAgent.engine), .wandAgent)
+        let talk = conversationMessageBody(input: "work", target: nil, cwd: nil, executionPreference: wandAgent)
+        XCTAssertEqual(talk["executionPreference"] as? [String: Any] as? NSDictionary,
+                       ["provider": "pi", "engine": "sdk", "model": "model-sdk", "thinkingEffort": "pi:high"] as NSDictionary)
+        let task = ConversationTarget(taskId: "task", runId: "run")
+        let targeted = conversationMessageBody(input: "work", target: task, cwd: nil, executionPreference: wandAgent)
+        XCTAssertNil(targeted["executionPreference"])
+        XCTAssertEqual(targeted["target"] as? [String: String], ["taskId": "task", "runId": "run"])
+    }
+
     /// External idb driver taps the real directory's name, whitespace, arrow and avatar.
     /// Kept opt-in so ordinary CI never waits for manual input or touches a live server.
     func testDirectoryTouchTargets() async throws {

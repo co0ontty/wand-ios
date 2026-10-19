@@ -13,7 +13,7 @@ final class InstalledNativeTerminalTests: XCTestCase {
         let data = try Data(contentsOf: URL(fileURLWithPath: path)); XCTAssertLessThan(data.count, 16384)
         let profile = try JSONDecoder().decode(Profile.self, from: data)
         let api = WandAPI(baseURL: try XCTUnwrap(URL(string: profile.baseUrl)), token: profile.token)
-        let session = try await api.createShellSession(cwd: profile.cwd)
+        let session = try await api.createSession(kind: "pty", cwd: profile.cwd, shell: true)
         XCTAssertFalse(session.id.isEmpty); XCTAssertFalse(session.isStructured)
         let store = PtyTerminalStore(sessionId: session.id, api: api, defaults: UserDefaults(suiteName: "NativePTYAcceptance." + UUID().uuidString)!)
         store.start()

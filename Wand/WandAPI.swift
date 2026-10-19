@@ -188,26 +188,6 @@ final class WandAPI: SessionInputTransport {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
-    // MARK: - 语音（复用当前 endpoint 的认证与 URLSession；音频与转写不写日志）
-
-    func speechStatus() async throws -> ServerSpeechStatus {
-        try await request(ServerSpeechStatus.self, method: "GET", path: "/api/speech/status")
-    }
-    func transcribeSpeech(_ wav: Data) async throws -> String {
-        var request = try makeRequest(method: "POST", path: "/api/speech/transcribe", body: nil, timeout: 125)
-        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
-        request.httpBody = wav
-        let (data, response) = try await performAuthenticated(request, method: "POST", path: "/api/speech/transcribe")
-        guard (200...299).contains(response.statusCode) else {
-            let error = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-            throw APIError.server(status: response.statusCode, message: error ?? "服务端语音识别失败")
-        }
-        guard let result = try? JSONDecoder().decode(ServerSpeechResult.self, from: data), result.text.count <= 8000 else {
-            throw APIError.network("语音转写响应无效")
-        }
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     // MARK: - 会话
 
     /// 服务端统一分页会话列表。旧服务端没有该路由时才退回多 Provider 本地合并。
@@ -376,26 +356,20 @@ final class WandAPI: SessionInputTransport {
         )
     }
 
+    func setSessionEmployee(id: String, employeeID: String) async throws -> SessionSnapshot {
+        let result = try await request(SessionSnapshot.self, method: "POST",
+            path: "/api/sessions/" + percentEncodePathComponent(id) + "/employee", body: ["employeeId": employeeID])
+        guard result.id == id, result.isStructured, result.employeeId == employeeID else {
+            throw APIError.network("员工切换回执身份不一致")
+        }
+        return result
+    }
+
     func setSessionDirectory(id: String, cwd: String) async throws -> SessionSnapshot {
         try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions/" + percentEncodePathComponent(id) + "/directory", body: ["cwd": cwd])
     }
 
-    func optimizePrompt(id: String, prompt: String) async throws -> String {
-        struct Response: Decodable { let optimized: String }
-        let response = try await request(
-            Response.self,
-            method: "POST",
-            path: "/api/optimize-prompt",
-            body: ["sessionId": id, "text": prompt],
-            timeout: 160
-        )
-        guard !response.optimized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw APIError.network("优化结果为空，请保留原输入后重试。")
-        }
-        return response.optimized
-    }
 
-    @discardableResult
     func setModel(id: String, model: String?) async throws -> SessionSnapshot {
         try await request(
             SessionSnapshot.self,
@@ -425,7 +399,7 @@ final class WandAPI: SessionInputTransport {
         )
     }
 
-    func uploadAttachments(id: String, urls: [URL]) async throws -> [UploadedFile] {
+    func uploadAttachments(id: String, urls: [URL], onRequestStarted: () -> Void = {}) async throws -> [UploadedFile] {
         let boundary = "WandBoundary-\(UUID().uuidString)"
         var body = Data()
         for url in urls.prefix(5) {
@@ -451,6 +425,7 @@ final class WandAPI: SessionInputTransport {
         req.timeoutInterval = 60
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.httpBody = body
+        onRequestStarted()
         let (data, http) = try await performAuthenticated(
             req,
             method: "POST",
@@ -547,11 +522,12 @@ final class WandAPI: SessionInputTransport {
 
     /// 清空全部排队消息。
     @discardableResult
-    func clearQueued(id: String) async throws -> SessionSnapshot {
+    func clearQueued(id: String, expectedQueue: [String]) async throws -> SessionSnapshot {
         try await request(
             SessionSnapshot.self,
             method: "DELETE",
-            path: "/api/structured-sessions/\(id)/queued"
+            path: "/api/structured-sessions/\(id)/queued",
+            body: ["expectedQueue": expectedQueue]
         )
     }
 
@@ -665,66 +641,57 @@ final class WandAPI: SessionInputTransport {
 
     // MARK: - 新建会话
 
-    /// 结构化会话（非 PTY）：POST /api/structured-sessions。
+    /// 统一会话创建：kind 必填；shell 是无 provider 的 PTY 登录终端。
     @discardableResult
-    func createStructuredSession(
-        provider: String,
+    func createSession(
+        kind: String,
+        provider: String? = nil,
         cwd: String,
-        mode: String?,
-        model: String?,
-        thinkingEffort: String?,
-        prompt: String?,
-        engine: String? = nil
+        mode: String? = nil,
+        model: String? = nil,
+        thinkingEffort: String? = nil,
+        prompt: String? = nil,
+        initialInput: String? = nil,
+        engine: String? = nil,
+        shell: Bool = false,
+        runner: String? = nil,
+        workspaceId: String? = nil,
+        workspaceTaskId: String? = nil,
+        employeeId: String? = nil,
+        overrideCli: Bool = false,
+        creationRequestId: String? = nil,
+        timeout: TimeInterval = 30
     ) async throws -> SessionSnapshot {
-        let normalizedProvider = WandProvider(normalizing: provider)
-        var body: [String: Any] = [
-            "provider": normalizedProvider.rawValue,
-            "runner": normalizedProvider.structuredRunner,
-            "cwd": cwd,
-        ]
+        guard kind == "structured" || kind == "pty" else {
+            throw APIError.network("会话类型无效。")
+        }
+        guard !shell || kind == "pty" else {
+            throw APIError.network("Shell 会话必须使用 PTY 类型。")
+        }
+        var body: [String: Any] = ["kind": kind, "cwd": cwd]
+        if shell {
+            body["shell"] = true
+        } else if let provider {
+            let normalized = WandProvider(normalizing: provider)
+            body["provider"] = normalized.rawValue
+            if kind == "structured" {
+                body["runner"] = runner ?? normalized.structuredRunner
+            } else {
+                body["command"] = normalized == .qoder ? "qodercli" : normalized.rawValue
+            }
+        }
         if let mode, !mode.isEmpty { body["mode"] = mode }
         if let model, !model.isEmpty { body["model"] = model }
         if let thinkingEffort, !thinkingEffort.isEmpty { body["thinkingEffort"] = thinkingEffort }
         if let prompt, !prompt.isEmpty { body["prompt"] = prompt }
-        if let engine { body["engine"] = engine }
-        return try await request(
-            SessionSnapshot.self,
-            method: "POST",
-            path: "/api/structured-sessions",
-            body: body,
-            timeout: 180
-        )
-    }
-
-    /// PTY 会话：POST /api/commands。Qoder 的 provider ID 与可执行命令名称不同。
-    @discardableResult
-    func createPtySession(
-        provider: String,
-        cwd: String,
-        mode: String?,
-        model: String?,
-        thinkingEffort: String?,
-        initialInput: String?
-    ) async throws -> SessionSnapshot {
-        let normalizedProvider = WandProvider(normalizing: provider).rawValue
-        let command = normalizedProvider == WandProvider.qoder.rawValue ? "qodercli" : normalizedProvider
-        var body: [String: Any] = ["command": command, "provider": normalizedProvider, "cwd": cwd]
-        if let mode, !mode.isEmpty { body["mode"] = mode }
-        if let model, !model.isEmpty { body["model"] = model }
-        if let thinkingEffort, !thinkingEffort.isEmpty { body["thinkingEffort"] = thinkingEffort }
         if let initialInput, !initialInput.isEmpty { body["initialInput"] = initialInput }
-        return try await request(SessionSnapshot.self, method: "POST", path: "/api/commands", body: body)
-    }
-
-    /// 空白终端：仅启动服务端配置的交互式登录 Shell，不运行任何 Provider CLI。
-    @discardableResult
-    func createShellSession(cwd: String) async throws -> SessionSnapshot {
-        try await request(
-            SessionSnapshot.self,
-            method: "POST",
-            path: "/api/commands",
-            body: ["shell": true, "cwd": cwd]
-        )
+        if let engine { body["engine"] = engine }
+        if let workspaceId, !workspaceId.isEmpty { body["workspaceId"] = workspaceId }
+        if let workspaceTaskId, !workspaceTaskId.isEmpty { body["workspaceTaskId"] = workspaceTaskId }
+        if let employeeId, !employeeId.isEmpty { body["employeeId"] = employeeId }
+        if overrideCli { body["overrideCli"] = true }
+        if let creationRequestId, !creationRequestId.isEmpty { body["creationRequestId"] = creationRequestId }
+        return try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions", body: body, timeout: timeout)
     }
 
     // MARK: - Git 快速提交
@@ -889,6 +856,14 @@ final class WandAPI: SessionInputTransport {
     }
 
     // MARK: - 任务管理
+
+    func postBoardTaskComment(id: String, requestId: String, body: String, employeeId: String?, sourceCommentId: String?) async throws -> WandTaskComment {
+        struct Response: Decodable { let comment: WandTaskComment }
+        var payload: [String: Any] = ["requestId": requestId, "body": body]
+        if let employeeId { payload["employeeId"] = employeeId }
+        if let sourceCommentId { payload["sourceCommentId"] = sourceCommentId }
+        return try await request(Response.self, method: "POST", path: "/api/wand-tasks/\(percentEncodePathComponent(id))/comments", body: payload).comment
+    }
 
     func boardTaskComments(id: String) async throws -> [WandTaskComment] {
         do {

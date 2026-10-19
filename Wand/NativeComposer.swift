@@ -3,13 +3,51 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// Shared in-place attachment controls; the trigger never changes identity or size.
+struct ComposerAddButton: View {
+    let expanded: Bool
+    let uploading: Bool
+    let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduced
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Image(systemName: "plus").opacity(expanded || uploading ? 0 : 1)
+                    .rotationEffect(.degrees(reduced || !expanded ? 0 : -45))
+                Image(systemName: "xmark").opacity(expanded && !uploading ? 1 : 0)
+                    .rotationEffect(.degrees(reduced || expanded ? 0 : 45))
+                ProgressView().controlSize(.small).opacity(uploading ? 1 : 0).accessibilityHidden(!uploading)
+            }.font(.system(size: 18, weight: .medium))
+                .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
+                .contentShape(Rectangle())
+        }.buttonStyle(WandQuietButtonStyle(tint: Theme.textSecondary)).disabled(uploading)
+            .accessibilityLabel(expanded ? "收起操作" : "添加附件与操作")
+            .animation(reduced ? nil : WandMotion.stateSwap, value: expanded)
+    }
+}
+
+struct ComposerAttachmentPanel<Extra: View>: View {
+    let onPhoto: () -> Void
+    let onFile: () -> Void
+    @ViewBuilder let extra: () -> Extra
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Button("照片", systemImage: "photo", action: onPhoto).frame(maxWidth: .infinity, minHeight: 44)
+                Button("文件", systemImage: "doc", action: onFile).frame(maxWidth: .infinity, minHeight: 44)
+            }
+            extra()
+        }.padding(8).buttonStyle(WandQuietButtonStyle())
+            .background(Theme.elevated, in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
 enum ComposerMetrics {
     static let actionVisualSize: CGFloat = 34
     static let actionTouchSize: CGFloat = 48
     static let actionSpacing: CGFloat = 0
-    /// Chat expands naturally; the full draft editor handles longer documents.
+    /// Maximum height for non-chat composer surfaces; chat uses composerMaximumInputHeight.
     static let expandedInputMaxHeight: CGFloat = 180
-    static let voiceCancelDistance: CGFloat = 60
 }
 
 enum ComposerSendPhase: Equatable {
@@ -22,79 +60,49 @@ func catComposerExpanded(editing: Bool, focused: Bool, keyboard: Bool, failed: B
 }
 
 struct CatInputPressState {
-    static let holdDelay: TimeInterval = 0.3
-    private(set) var holding = false
     private(set) var moved = false
-    private(set) var attempted = false
-    private(set) var cancelling = false
     private(set) var dragX: CGFloat = 0
     private(set) var dragging = false
     mutating func move(x: CGFloat, y: CGFloat) {
-        if holding { cancelling = y < -ComposerMetrics.voiceCancelDistance }
-        else if abs(x) + abs(y) > 12 {
+        if abs(x) + abs(y) > 12 {
             moved = true; dragging = abs(x) > abs(y); dragX = x
         }
     }
-    mutating func beginHold() -> Bool {
-        guard !moved, !attempted else { return false }
-        attempted = true; holding = true
-        return true
-    }
-    enum End: Equatable { case tap, voice(cancelled: Bool), drag(CGFloat), none }
+    enum End: Equatable { case tap, drag(CGFloat), none }
     mutating func end() -> End {
-        let result: End = holding ? .voice(cancelled: cancelling) : dragging ? .drag(dragX) : moved || attempted ? .none : .tap
+        let result: End = dragging ? .drag(dragX) : moved ? .none : .tap
         self = Self()
         return result
     }
 }
 
-/// One recognizer arbitrates short press and hold. Permission callbacks never own the pointer.
+/// One recognizer arbitrates tap and horizontal drag of the top companion.
 struct CatInputGesture: ViewModifier {
     let onTap: () -> Void
-    let onHold: () -> Void
-    let onMove: (Bool) -> Void
-    let onRelease: (Bool) -> Void
     var onDrag: (CGFloat) -> Void = { _ in }
     var onDrop: (CGFloat) -> Void = { _ in }
+    var identityName: String? = nil
     @State private var pointer = CatInputPressState()
-    @State private var work: DispatchWorkItem?
     func body(content: Content) -> some View {
         content.contentShape(Rectangle()).gesture(DragGesture(minimumDistance: 0)
             .onChanged { value in
                 pointer.move(x: value.translation.width, y: value.translation.height)
-                if pointer.moved { work?.cancel(); work = nil }
-                if work == nil && !pointer.holding && !pointer.moved && !pointer.attempted {
-                    let pending = DispatchWorkItem {
-                        work = nil
-                        if pointer.beginHold() { onHold() }
-                    }
-                    work = pending
-                    DispatchQueue.main.asyncAfter(deadline: .now() + CatInputPressState.holdDelay, execute: pending)
-                }
-                if pointer.holding { onMove(pointer.cancelling) }
-                else if pointer.dragging { onDrag(pointer.dragX) }
+                if pointer.dragging { onDrag(pointer.dragX) }
             }.onEnded { _ in
-                work?.cancel(); work = nil
                 switch pointer.end() {
                 case .tap: onTap()
-                case .voice(let cancelled): onRelease(cancelled)
                 case .drag(let x): onDrop(x)
                 case .none: break
                 }
             })
             .accessibilityElement().accessibilityAddTraits(.isButton)
-            .accessibilityLabel("发消息，或按住说话")
-            .accessibilityHint("轻点打字；按住300毫秒说话，上滑取消，松手后编辑草稿")
+            .accessibilityLabel(identityName.map { $0 + "，发消息" } ?? "发消息")
+            .accessibilityHint("轻点打字")
             .accessibilityAction { onTap() }
-            .accessibilityAction(named: "开始语音输入") { onHold() }
-            .accessibilityAction(named: "结束语音，填入草稿") { onRelease(false) }
-            .accessibilityAction(named: "取消语音输入") { onRelease(true) }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in cancel() }
             .onDisappear { cancel() }
     }
     private func cancel() {
-        work?.cancel(); work = nil
-        if pointer.holding { onRelease(true) }
         pointer = CatInputPressState()
         onDrag(0)
     }
@@ -238,82 +246,6 @@ struct NativeComposerActionButton: View {
     }
 }
 
-/// Shared hold-to-talk control. Keyboard/speech callbacks remain bound to the starting draft revision.
-struct ComposerVoiceControl: View {
-    @ObservedObject var draft: ComposerDraftState
-    @ObservedObject var speech: SpeechRecognizerService
-    var inputSurface = false
-    var onTap: (() -> Void)? = nil
-    var onPressChanged: (Bool, Bool) -> Void = { _, _ in }
-    let notice: (String) -> Void
-    @State private var work: DispatchWorkItem?
-    @State private var pressed = false
-    @State private var canceling = false
-    @State private var pointerMoved = false
-    @State private var attempted = false
-    @State private var revision = 0
-    @State private var lifecycle = 0
-    @Environment(\.accessibilityReduceMotion) private var reduced
-    var body: some View {
-        Group {
-            if inputSurface { Color.clear }
-            else {
-                ZStack {
-                    Image(systemName: "mic").opacity(pressed || speech.isRecording || speech.isProcessing ? 0 : 1)
-                    Image(systemName: "stop.circle").opacity(pressed || speech.isRecording || speech.isProcessing ? 1 : 0)
-                }.font(.body).frame(width: 44, height: 44)
-            }
-        }.contentShape(Rectangle())
-            .animation(reduced ? nil : WandMotion.stateSwap, value: pressed || speech.isRecording || speech.isProcessing)
-            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                if work == nil && !pressed && !pointerMoved && !attempted {
-                    let pending = DispatchWorkItem { work = nil; attempted = true; begin() }; work = pending
-                    DispatchQueue.main.asyncAfter(deadline: .now() + WandMotion.voiceHoldDelay, execute: pending)
-                }
-                if !pressed && abs(value.translation.width) + abs(value.translation.height) > 12 {
-                    work?.cancel(); work = nil; pointerMoved = true
-                }
-                if pressed {
-                    canceling = value.translation.height < -ComposerMetrics.voiceCancelDistance
-                    onPressChanged(true, canceling)
-                }
-            }.onEnded { _ in
-                attempted = false
-                if pointerMoved && !pressed { pointerMoved = false; return }
-                pointerMoved = false
-                if let work {
-                    work.cancel(); self.work = nil
-                    if let onTap { onTap() } else { notice("按住说话，上滑取消") }
-                    return
-                }
-                if pressed { finish(cancelled: canceling) }
-            })
-            .accessibilityElement().accessibilityAddTraits(.isButton).accessibilityLabel(inputSurface ? "发消息或按住说话" : "语音输入")
-            .accessibilityValue(canceling ? "松开取消" : speech.isProcessing ? "识别中" : speech.isRecording ? "正在录音" : "轻点打字，长按说话")
-            .accessibilityAction { if let onTap { onTap() } else if speech.isProcessing { finish(cancelled: true) } else if speech.isRecording { finish(cancelled: false) } else { begin() } }
-            .accessibilityAction(named: "语音输入") { if speech.isRecording { finish(cancelled: false) } else { begin() } }
-            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-                work?.cancel(); work = nil; pointerMoved = false; attempted = false
-                if pressed || speech.isRecording || speech.isProcessing { finish(cancelled: true) }
-            }
-            .onDisappear {
-                work?.cancel(); work = nil; pointerMoved = false; attempted = false
-                if pressed { speech.stop(cancelled: true) }
-                pressed = false; canceling = false; onPressChanged(false, false)
-            }
-    }
-    private func begin() {
-        revision = draft.textRevision; lifecycle = draft.lifecycleRevision; pressed = true; canceling = false
-        onPressChanged(true, false)
-        speech.start(api: draft.speechAPI) { notice($0); pressed = false; canceling = false; onPressChanged(false, false) }
-    }
-    private func finish(cancelled: Bool) {
-        pressed = false; canceling = false; onPressChanged(false, false)
-        let capturedRevision = revision, capturedLifecycle = lifecycle
-        speech.stop(cancelled: cancelled) { draft.appendVoice($0, ifUnchangedSince: capturedRevision, lifecycle: capturedLifecycle) }
-    }
-}
-
 struct ComposerInputHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
@@ -417,35 +349,8 @@ struct FloatingChatControls<Actions: View>: View {
     }
 }
 
-/// Full-height editing uses the same draft binding: dismissing never commits, sends or clears it.
-struct ComposerDraftEditor: View {
-    @Binding var text: String
-    let onCompositionChange: (Bool) -> Void
-    var onPasteImages: (([(data: Data, name: String?, mimeType: String?)]) -> Void)? = nil
-    @Environment(\.dismiss) private var dismiss
-    @State private var focused = true
-    var body: some View {
-        NavigationStack {
-            GeometryReader { geometry in
-                IMEAwareComposerTextView(text: $text, placeholder: "输入消息", isFocused: focused,
-                    maximumHeight: max(100, geometry.size.height - 32), submitOnReturn: false,
-                    onPasteImages: onPasteImages, onFocusChange: { focused = $0 },
-                    onCompositionChange: onCompositionChange, onSubmit: {}, onHeightChange: { _ in })
-                    .padding(16)
-            }
-            .background(Theme.surface).navigationTitle("编辑消息").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { focused = false; dismiss() } } }
-        }
-    }
-}
-
 func composerMaximumInputHeight(compact: Bool, keyboardVisible: Bool) -> CGFloat {
     compact ? (keyboardVisible ? 44 : 88) : (keyboardVisible ? 96 : 112)
-}
-
-func composerOffersExpandedEditor(text: String, measuredHeight: CGFloat,
-                                 maximumHeight: CGFloat = ComposerMetrics.expandedInputMaxHeight) -> Bool {
-    text.count >= 240 || text.filter { $0 == "\n" }.count >= 5 || measuredHeight >= maximumHeight - 2
 }
 
 func composerUsesRestingSurface(acknowledged: Bool, focused: Bool, hasDraft: Bool,
@@ -455,25 +360,8 @@ func composerUsesRestingSurface(acknowledged: Bool, focused: Bool, hasDraft: Boo
         phase != .failed && phase != .sending && !unconfirmed
 }
 
-func composerShouldExpand(focused: Bool, voiceMode: Bool, contentNeedsSpace: Bool = false) -> Bool {
-    // Holding the idle input must not move the trigger by revealing a keyboard toolbar.
+func composerShouldExpand(focused: Bool, contentNeedsSpace: Bool = false) -> Bool {
     focused || contentNeedsSpace
-}
-
-func composerHoldToTalkEligible(text: String, focused: Bool, keyboardVisible: Bool) -> Bool {
-    text.isEmpty && !focused && !keyboardVisible
-}
-
-func appendingVoiceTranscript(_ transcript: String, to draft: String) -> String {
-    let transcript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !transcript.isEmpty else { return draft }
-
-    var draft = draft
-    while let last = draft.unicodeScalars.last,
-          CharacterSet.whitespacesAndNewlines.contains(last) {
-        draft.unicodeScalars.removeLast()
-    }
-    return draft.isEmpty ? transcript : draft + " " + transcript
 }
 
 struct ComposerDraftSubmission {
@@ -485,6 +373,8 @@ struct ComposerDraftSubmission {
 
 /// One session-owned in-memory buffer; pages only bind/project it. Retain content
 /// until a receipt, and never persist an uncertain submission or clear newer input.
+enum QueueRecoveryPhase { case retrieving, ready, rejected, unconfirmed }
+
 @MainActor
 final class ComposerDraftState: ObservableObject {
     private let storageKey: String
@@ -533,9 +423,6 @@ final class ComposerDraftState: ObservableObject {
             sendFeedback = nil
         }
     }
-    @Published private(set) var isOptimizing = false
-    @Published private(set) var optimizationMessage: String?
-    private var optimizationTask: Task<Void, Never>?
     @Published var text = "" {
         didSet {
             textRevision += 1
@@ -543,13 +430,36 @@ final class ComposerDraftState: ObservableObject {
         }
     }
     private(set) var textRevision = 0
+    private var pendingInitialSend = false
+    private var initialSendClaimed = false
     let attachments: ComposerAttachmentController
-    private(set) var speechAPI: WandAPI
-    func bind(api: WandAPI) { speechAPI = api; attachments.bind(api: api) }
+    func bind(api: WandAPI) { attachments.bind(api: api) }
+
+    func requestInitialSend() { pendingInitialSend = true; initialSendClaimed = false }
+
+    /// Atomically adopts the pending page's revision only when this destination is untouched.
+    func adoptInitialDraft(text sourceText: String, expectedSourceRevision: Int, expectedText: String,
+                           attachments newAttachments: [UploadedFile] = []) -> Bool {
+        guard !retired, text.isEmpty, textRevision == 0, expectedSourceRevision >= 0,
+              attachments.attachments.isEmpty, sourceText == expectedText else { return false }
+        text = sourceText
+        attachments.attachments = newAttachments
+        return true
+    }
+
+    func claimInitialSend() -> Bool {
+        guard pendingInitialSend, !initialSendClaimed else { return false }
+        initialSendClaimed = true
+        return true
+    }
+
+    func finishInitialSend() {
+        pendingInitialSend = false
+        initialSendClaimed = false
+    }
 
     init(sessionId: String, api: WandAPI, defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        self.speechAPI = api
         storageKey = "wand.composer.v1." + ServerProfiles.stableID(for: api.baseURL) + "." + sessionId
         attachments = ComposerAttachmentController(sessionId: sessionId, api: api)
         if let saved = defaults.data(forKey: storageKey),
@@ -577,44 +487,66 @@ final class ComposerDraftState: ObservableObject {
         active = false
         lifecycleRevision += 1
         attachments.deactivate()
-        optimizationTask?.cancel()
-        optimizationTask = nil
-        isOptimizing = false
     }
 
     func retire() {
         retired = true
         deactivate()
         sendFeedbackTask?.cancel()
+        queueRecoveryText = nil; queueRecoveryPhase = nil; queueRetrievalPending = false
         text = ""
         attachments.attachments = []
+        attachments.discardStaged()
     }
 
-    var canEvict: Bool { !active && sendPhase != .sending && unconfirmedInput == nil }
+    @Published private(set) var queueRetrievalPending = false
+    @Published private(set) var queueRecoveryText: String?
+    @Published private(set) var queueRecoveryPhase: QueueRecoveryPhase?
+    private var queueRetrievalRevision = 0
+    private var queueRetrievalLifecycle = 0
 
-    func optimize(operation: @escaping (String) async throws -> String) {
-        let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard active, !isOptimizing, !attachments.isUploading, !prompt.isEmpty else { return }
-        let revision = textRevision
-        let lifecycle = lifecycleRevision
-        isOptimizing = true
-        optimizationMessage = nil
-        optimizationTask = Task { [weak self] in
-            guard let self else { return }
-            defer { if lifecycleRevision == lifecycle { isOptimizing = false } }
-            do {
-                let optimized = try await operation(prompt)
-                guard !Task.isCancelled, active, lifecycleRevision == lifecycle else { return }
-                if applyOptimized(optimized, revision: revision, lifecycle: lifecycle) {
-                    optimizationMessage = "提示词已优化"
-                } else {
-                    optimizationMessage = "输入已更新，保留当前内容"
-                }
-            } catch {
-                guard !Task.isCancelled, active, lifecycleRevision == lifecycle else { return }
-                optimizationMessage = error.localizedDescription
-            }
+    /// Keep the source until DELETE acknowledges. Existing/new typing is never
+    /// changed by a late receipt; adoption is explicit, matching Android ChatComposer.
+    func beginQueueRetrieval(_ source: String) -> Bool {
+        guard !retired, !queueRetrievalPending, queueRecoveryText == nil, sendPhase != .sending else { return false }
+        queueRetrievalRevision = textRevision
+        queueRetrievalLifecycle = lifecycleRevision
+        queueRetrievalPending = true
+        queueRecoveryPhase = .retrieving
+        queueRecoveryText = source
+        return true
+    }
+
+    func finishQueueRetrieval(confirmed: Bool, rejected: Bool = false) {
+        guard queueRetrievalPending else { return }
+        queueRetrievalPending = false
+        guard !retired else { queueRecoveryText = nil; queueRecoveryPhase = nil; return }
+        queueRecoveryPhase = confirmed ? .ready : rejected ? .rejected : .unconfirmed
+        if confirmed, active, text.isEmpty, textRevision == queueRetrievalRevision,
+           lifecycleRevision == queueRetrievalLifecycle {
+            _ = restoreQueuedOriginal()
         }
+    }
+
+    @discardableResult
+    func restoreQueuedOriginal(confirmedNotExecuted: Bool = false) -> Bool {
+        guard active, !retired, sendPhase != .sending, let source = queueRecoveryText,
+              queueRecoveryPhase == .ready || (queueRecoveryPhase == .unconfirmed && confirmedNotExecuted) else { return false }
+        text = text.isEmpty ? source : text + "\n\n" + source
+        queueRecoveryText = nil
+        queueRecoveryPhase = nil
+        return true
+    }
+
+    func dismissQueueRecovery() {
+        guard !queueRetrievalPending else { return }
+        queueRecoveryText = nil
+        queueRecoveryPhase = nil
+    }
+
+    var canEvict: Bool {
+        !active && sendPhase != .sending && unconfirmedInput == nil && queueRecoveryText == nil
+            && attachments.stagedAttachmentCount == 0
     }
 
     func submitted(_ submission: ComposerDraftSubmission) {
@@ -659,17 +591,11 @@ final class ComposerDraftState: ObservableObject {
         rejected(submission)
     }
 
-    func applyOptimized(_ text: String, revision: Int, lifecycle: Int) -> Bool {
-        guard active, textRevision == revision, lifecycleRevision == lifecycle else { return false }
-        self.text = text
-        return true
-    }
+}
 
-    func appendVoice(_ transcript: String, ifUnchangedSince startedRevision: Int, lifecycle: Int? = nil) {
-        guard active, lifecycle == nil || lifecycle == lifecycleRevision, textRevision == startedRevision,
-              !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        text = appendingVoiceTranscript(transcript, to: text)
-    }
+struct StagedComposerAttachment: Identifiable, Equatable {
+    let id = UUID()
+    let name: String
 }
 
 @MainActor
@@ -679,9 +605,18 @@ final class ComposerAttachmentController: ObservableObject {
     @Published private(set) var isUploading = false
     @Published var attachments: [UploadedFile] = [] { didSet { onChange?() } }
     var onChange: (() -> Void)?
+    @Published private(set) var stagedRevision = 0
+    @Published private(set) var stagedInputRevision = 0
     private var active = true
     private var generation = 0
     private var uploadTask: Task<Void, Never>?
+    private var stagedFiles: [(url: URL, cleanup: Bool)] = []
+    private var stagedGeneration = 0
+    private var uncertainStagedSessions = Set<String>()
+    private var stagedUploadStorageKey: String {
+        "wand.pending-upload.v1." + ServerProfiles.stableID(for: api.baseURL) + "." + sessionId
+    }
+    private(set) var stagedAttachments: [StagedComposerAttachment] = []
 
     func activate() { active = true }
     func deactivate() {
@@ -715,16 +650,122 @@ final class ComposerAttachmentController: ObservableObject {
         pasteIntoPty = handler
     }
 
+    /// Keep local selections staged until a real session is available.
+    func stageFileSelection(_ result: Result<[URL], Error>, cleanupAfterUpload: Bool) {
+        guard case .success(let urls) = result, !urls.isEmpty else {
+            if case .failure(let error) = result { showToast(error.localizedDescription) }
+            return
+        }
+        let remaining = 5 - attachments.count - stagedFiles.count
+        guard remaining > 0 else {
+            showToast("最多添加 5 个附件，请先移除已有附件")
+            if cleanupAfterUpload { urls.forEach { try? FileManager.default.removeItem(at: $0) } }
+            return
+        }
+        let selected = Array(urls.prefix(remaining))
+        stagedFiles += selected.map { ($0, cleanupAfterUpload) }
+        stagedAttachments += selected.map { StagedComposerAttachment(name: $0.lastPathComponent) }
+        if cleanupAfterUpload { urls.dropFirst(remaining).forEach { try? FileManager.default.removeItem(at: $0) } }
+        stagedGeneration &+= 1
+        stagedInputRevision &+= 1
+        stagedRevision &+= 1
+        showToast("已添加 \(selected.count) 个附件，发送时上传")
+    }
+
+    func uploadStaged(to sessionID: String,
+                      using upload: ((String, [URL], () -> Void) async throws -> [UploadedFile])? = nil) async throws {
+        uncertainStagedSessions.formUnion(UserDefaults.standard.stringArray(forKey: stagedUploadStorageKey) ?? [])
+        guard !uncertainStagedSessions.contains(sessionID) else {
+            throw WandAPI.APIError.network("附件上传结果未知；为避免重复上传，请先在会话中核对附件。")
+        }
+        guard !stagedFiles.isEmpty else { return }
+        let batch = stagedFiles
+        let uploadGeneration = stagedGeneration
+        let uploaded: [UploadedFile]
+        var requestStarted = false
+        do {
+            let onRequestStarted = {
+                requestStarted = true
+                self.uncertainStagedSessions.insert(sessionID)
+                self.persistUncertainStagedSessions()
+            }
+            if let upload {
+                uploaded = try await upload(sessionID, batch.map(\.url), onRequestStarted)
+            } else {
+                uploaded = try await api.uploadAttachments(id: sessionID, urls: batch.map(\.url), onRequestStarted: onRequestStarted)
+            }
+        } catch {
+            if !requestStarted || isDefiniteInputRejection(error) {
+                uncertainStagedSessions.remove(sessionID)
+                persistUncertainStagedSessions()
+            }
+            throw error
+        }
+        guard active, stagedGeneration == uploadGeneration, !Task.isCancelled else {
+            throw CancellationError()
+        }
+        appendUploaded(uploaded)
+        stagedFiles.removeFirst(batch.count)
+        stagedAttachments.removeFirst(batch.count)
+        uncertainStagedSessions.remove(sessionID)
+        persistUncertainStagedSessions()
+        stagedRevision &+= 1
+        for item in batch where item.cleanup { try? FileManager.default.removeItem(at: item.url) }
+    }
+
+    private func persistUncertainStagedSessions() {
+        if uncertainStagedSessions.isEmpty {
+            UserDefaults.standard.removeObject(forKey: stagedUploadStorageKey)
+        } else {
+            UserDefaults.standard.set(Array(uncertainStagedSessions), forKey: stagedUploadStorageKey)
+        }
+    }
+
+    private func appendUploaded(_ uploaded: [UploadedFile]) {
+        var seen = Set(attachments.map(\.savedPath))
+        attachments += uploaded.filter { seen.insert($0.savedPath).inserted }.prefix(max(0, 5 - attachments.count))
+    }
+
     func remove(_ file: UploadedFile) {
         attachments.removeAll { $0.savedPath == file.savedPath }
     }
 
+    func removeStaged(at index: Int) {
+        guard stagedFiles.indices.contains(index), stagedAttachments.indices.contains(index) else { return }
+        let item = stagedFiles.remove(at: index)
+        stagedAttachments.remove(at: index)
+        if item.cleanup { try? FileManager.default.removeItem(at: item.url) }
+        stagedGeneration &+= 1
+        stagedInputRevision &+= 1
+        stagedRevision &+= 1
+        showToast("已移除附件")
+    }
+
+    func discardStaged() {
+        stagedGeneration &+= 1
+        stagedInputRevision &+= 1
+        for item in stagedFiles where item.cleanup { try? FileManager.default.removeItem(at: item.url) }
+        stagedFiles.removeAll()
+        stagedAttachments.removeAll()
+        stagedRevision &+= 1
+    }
+
+    var stagedAttachmentCount: Int { stagedFiles.count }
+
     func handleFileSelection(_ result: Result<[URL], Error>) {
-        handleSelection(result, cleanupAfterUpload: false)
+        if sessionId.hasPrefix("pending-new-conversation:") {
+            stageFileSelection(result, cleanupAfterUpload: false)
+        } else {
+            handleSelection(result, cleanupAfterUpload: false)
+        }
     }
 
     func handlePhotoSelection(_ result: Result<[URL], Error>) {
-        handleSelection(result, cleanupAfterUpload: true)
+        if sessionId.hasPrefix("pending-new-conversation:") {
+            stageFileSelection(result, cleanupAfterUpload: true)
+        } else {
+            handleSelection(result, cleanupAfterUpload: true)
+        }
     }
 
     func handlePastedImageData(_ items: [(data: Data, name: String?, mimeType: String?)]) {
@@ -743,7 +784,11 @@ final class ComposerAttachmentController: ObservableObject {
             showToast(error.localizedDescription)
             return
         }
-        upload(urls, cleanupAfterUpload: true, preferPtyPaste: true)
+        if sessionId.hasPrefix("pending-new-conversation:") {
+            stageFileSelection(.success(urls), cleanupAfterUpload: true)
+        } else {
+            upload(urls, cleanupAfterUpload: true, preferPtyPaste: true)
+        }
     }
 
     private func handleSelection(_ result: Result<[URL], Error>, cleanupAfterUpload: Bool) {
@@ -1017,12 +1062,13 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         textView.tintColor = UIColor(Theme.brand)
 
         let composing = textView.markedTextRange != nil
-        context.coordinator.publishComposition(composing)
+        // Composition is published by UIKit's marked-text/delegate events, never by
+        // polling during a SwiftUI update (which would re-enter the current render).
         if composerShouldApplyExternalText(text, current: textView.text ?? "", isComposing: composing) {
             let selected = textView.selectedRange
             context.coordinator.isApplyingBinding = true
+            defer { context.coordinator.isApplyingBinding = false }
             textView.text = text
-            context.coordinator.isApplyingBinding = false
             let maxLocation = (text as NSString).length
             let location = min(selected.location, maxLocation)
             let length = min(selected.length, maxLocation - location)
@@ -1032,21 +1078,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         }
 
         context.coordinator.reportHeight(for: textView)
-        let coordinator = context.coordinator
-        if composerShouldRequestFocus(isFocused: isFocused, isFirstResponder: textView.isFirstResponder) {
-            // 不能只调一次 becomeFirstResponder：抽屉转场动画中段、或从
-            // WKWebView 手里抢 first responder 时，单次调用会静默失败，
-            // 键盘永远弹不出来。交给带重试的聚焦（见 Coordinator）。
-            coordinator.requestFocus(textView)
-        } else if composerShouldResignFocus(
-            isFocused: isFocused,
-            wasFocused: coordinator.lastKnownFocused,
-            isFirstResponder: textView.isFirstResponder
-        ) {
-            coordinator.cancelFocusRetry()
-            textView.resignFirstResponder()
-        }
-        coordinator.lastKnownFocused = isFocused
+        context.coordinator.reconcileFocus(textView)
     }
 
     static func dismantleUIView(_ textView: ComposerUITextView, coordinator: Coordinator) {
@@ -1060,6 +1092,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         var parent: IMEAwareComposerTextView
         var isApplyingBinding = false
         var lastKnownFocused = false
+        private var focusRevision = 0
         private var lastReportedHeight: CGFloat = 0
         private var lastComposing = false
         /// 带重试的聚焦任务列表：覆盖抽屉 .move 转场（~0.22s）、WKWebView 让出
@@ -1071,14 +1104,40 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
             self.parent = parent
         }
 
+        func reconcileFocus(_ textView: UITextView) {
+            if parent.isFocused != lastKnownFocused {
+                // No draft, session identifier or keyboard contents enter diagnostics.
+                wlog("composer", parent.isFocused ? "请求展开输入并聚焦" : "请求释放输入焦点")
+            }
+            if composerShouldRequestFocus(isFocused: parent.isFocused, isFirstResponder: textView.isFirstResponder) {
+                requestFocus(textView)
+            } else if !parent.isFocused, lastKnownFocused {
+                // Both directions cross the same transaction boundary. resignFirstResponder
+                // synchronously emits delegate AND keyboard notifications; doing it inside
+                // updateUIView makes focus/KeyboardObserver publish during SwiftUI layout.
+                // Cancel a pending focus even when UIKit has not become responder yet.
+                cancelFocusRetry()
+                let revision = focusRevision
+                let work = DispatchWorkItem { [weak self, weak textView] in
+                    guard let self, let textView, self.focusRevision == revision,
+                          !self.parent.isFocused, textView.isFirstResponder else { return }
+                    textView.resignFirstResponder()
+                }
+                focusRetryWorks.append(work)
+                DispatchQueue.main.async(execute: work)
+            }
+            lastKnownFocused = parent.isFocused
+        }
+
         /// 在多个时间点上反复尝试成为 first responder，直到成功、外部取消聚焦
         /// （isFocused 变 false）或视图脱离窗口为止。幂等：重复调用会先取消旧批次。
         func requestFocus(_ textView: UITextView) {
             cancelFocusRetry()
+            let revision = focusRevision
             for delay in Self.focusRetryDelays {
                 let work = DispatchWorkItem { [weak self, weak textView] in
                     guard let self, let textView else { return }
-                    guard self.parent.isFocused, textView.window != nil else { return }
+                    guard self.focusRevision == revision, self.parent.isFocused, textView.window != nil else { return }
                     guard !textView.isFirstResponder else { return }
                     textView.becomeFirstResponder()
                 }
@@ -1088,23 +1147,26 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         }
 
         func cancelFocusRetry() {
+            focusRevision += 1
             for work in focusRetryWorks { work.cancel() }
             focusRetryWorks.removeAll()
         }
 
         func publishComposition(_ active: Bool) {
-            guard active != lastComposing else { return }
+            guard !isApplyingBinding, active != lastComposing else { return }
             lastComposing = active
             parent.onCompositionChange(active)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
+            wlog("composer", "原生输入已获得焦点")
             if !parent.isFocused {
                 parent.onFocusChange(true)
             }
         }
 
         func textViewDidEndEditing(_ textView: UITextView) {
+            wlog("composer", "原生输入已释放焦点")
             publishComposition(false)
             if parent.isFocused {
                 parent.onFocusChange(false)

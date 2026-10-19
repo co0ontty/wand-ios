@@ -1,5 +1,4 @@
 import SwiftUI
-import Combine
 
 /// Presentation state only. Drafts, attachments and delivery stay with their existing owners.
 @MainActor final class ComposerFocusController: ObservableObject {
@@ -28,21 +27,24 @@ import Combine
 }
 
 /// The text view stays mounted, including while the small capsule hides its editing area.
-struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Settings: View>: View {
+struct FocusComposerSurface<Editor: View, Add: View, Send: View, Settings: View>: View {
     let expanded: Bool
     let hasDraft: Bool
     let onFocus: () -> Void
     @ViewBuilder let editor: () -> Editor
     @ViewBuilder let add: () -> Add
-    @ViewBuilder let voice: () -> Voice
     @ViewBuilder let send: () -> Send
     @ViewBuilder let settings: () -> Settings
     var actionCount = 0
+    var accessory: AnyView? = nil
     @Environment(\.accessibilityReduceMotion) private var reduced
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            capsule.padding(.trailing, expanded ? 0 : actionInset)
-            if actionCount > 0 { send().frame(width: actionWidth, height: 48) }
+        VStack(spacing: 4) {
+            if let accessory { accessory }
+            ZStack(alignment: .bottomTrailing) {
+                capsule
+                if actionCount > 0 { send().frame(width: actionWidth, height: 48).padding(.trailing, 4) }
+            }
         }.padding(.horizontal, 12).padding(.bottom, 6)
     }
     private var capsule: some View {
@@ -50,7 +52,7 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
             editor().padding(.horizontal, 12).padding(.top, expanded ? 10 : 0)
                 .frame(height: expanded ? nil : 0).clipped()
                 .opacity(expanded ? 1 : 0).allowsHitTesting(expanded).accessibilityHidden(!expanded)
-            ComposerCapsuleToolbarLayout(expanded: expanded, actionInset: expanded ? actionInset : 0) {
+            ComposerCapsuleToolbarLayout(expanded: expanded, actionInset: actionInset) {
                 add()
                 settings().frame(maxWidth: expanded ? .infinity : nil)
                     .frame(width: expanded ? nil : 0, height: expanded ? nil : 0).clipped()
@@ -63,12 +65,11 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
                     }.buttonStyle(.plain).accessibilityLabel(hasDraft ? "编辑未发送草稿及附件" : "展开文字输入")
                         .frame(height: expanded ? 0 : nil).clipped()
                         .opacity(expanded ? 0 : 1).allowsHitTesting(!expanded).accessibilityHidden(expanded)
-                voice()
             }.padding(.horizontal, 4)
         }
         .foregroundStyle(Theme.textSecondary)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: expanded ? 20 : 26))
-        .overlay(RoundedRectangle(cornerRadius: expanded ? 20 : 26).stroke(Theme.border, lineWidth: 0.8))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: expanded ? 20 : 24))
+        .overlay(RoundedRectangle(cornerRadius: expanded ? 20 : 24).stroke(Theme.border, lineWidth: 0.8))
         // The editor uses full width; only the bottom toolbar reserves the send slot.
         .frame(maxWidth: .infinity)
         .animation(reduced ? nil : WandMotion.disclosure, value: expanded)
@@ -77,32 +78,63 @@ struct FocusComposerSurface<Editor: View, Add: View, Voice: View, Send: View, Se
     private var actionInset: CGFloat { actionCount > 0 ? actionWidth + 4 : 0 }
 }
 
+/// Pure slot resolution for the capsule toolbar, independent of SwiftUI's subview storage.
+///
+/// The settings slot is a `@ViewBuilder` branch. An empty branch (for example
+/// `settings: { EmptyView() }`) collapses to zero subviews, so slots must follow the real
+/// child count — indexing `subviews[2]` unconditionally traps in `LayoutSubviews.subscript`.
+struct ComposerCapsuleSlots: Equatable {
+    let add: Int
+    let settings: Int?
+    let prompt: Int
+    /// `nil` when there is no prompt lane to place (fewer than two real children).
+    init?(childCount: Int) {
+        guard childCount >= 2 else { return nil }
+        let hasSettings = childCount >= 3
+        add = 0
+        settings = hasSettings ? 1 : nil
+        prompt = hasSettings ? 2 : 1
+    }
+}
+
 /// Native layout changes placement without replacing the editor or settings sheet owner.
 private struct ComposerCapsuleToolbarLayout: Layout {
     let expanded: Bool
     let actionInset: CGFloat
     private let touch: CGFloat = 48
-    private func metrics(width: CGFloat, subviews: Subviews) -> (settingsWidth: CGFloat, settingsHeight: CGFloat, rowHeight: CGFloat, stacked: Bool) {
-        let stacked = expanded && width - actionInset < touch * 5
-        let settingsWidth = stacked ? width : max(0, width - actionInset - touch * 2)
-        let settingsHeight = expanded ? subviews[1].sizeThatFits(ProposedViewSize(width: settingsWidth, height: nil)).height : 0
-        return (settingsWidth, stacked ? settingsHeight : 0, max(touch, stacked ? 0 : settingsHeight), stacked)
+
+    private struct Metrics {
+        let settingsWidth: CGFloat
+        let settingsHeight: CGFloat
+        let rowHeight: CGFloat
+        let stacked: Bool
     }
+    private func metrics(width: CGFloat, slots: ComposerCapsuleSlots?, subviews: Subviews) -> Metrics {
+        let stacked = expanded && width - actionInset < touch * 4
+        let settingsWidth = stacked ? width : max(0, width - actionInset - touch)
+        let settingsHeight = expanded
+            ? slots.flatMap { $0.settings.map { subviews[$0] } }?
+                .sizeThatFits(ProposedViewSize(width: settingsWidth, height: nil)).height ?? 0 : 0
+        return Metrics(settingsWidth: settingsWidth, settingsHeight: stacked ? settingsHeight : 0,
+            rowHeight: max(touch, stacked ? 0 : settingsHeight), stacked: stacked)
+    }
+
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let width = proposal.width ?? 320
-        let layout = metrics(width: width, subviews: subviews)
+        let layout = metrics(width: width, slots: ComposerCapsuleSlots(childCount: subviews.count), subviews: subviews)
         return CGSize(width: width, height: layout.settingsHeight + layout.rowHeight)
     }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let layout = metrics(width: bounds.width, subviews: subviews)
+        guard let slots = ComposerCapsuleSlots(childCount: subviews.count) else { return }
+        let layout = metrics(width: bounds.width, slots: slots, subviews: subviews)
         let y = bounds.minY + layout.settingsHeight + (layout.rowHeight - touch) / 2
-        subviews[0].place(at: CGPoint(x: bounds.minX, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: touch, height: touch))
-        subviews[1].place(at: CGPoint(x: bounds.minX + (layout.stacked ? 0 : touch), y: bounds.minY + (layout.stacked ? 0 : (layout.rowHeight - touch) / 2)),
-            anchor: .topLeading, proposal: ProposedViewSize(width: expanded ? layout.settingsWidth : 0, height: expanded ? touch : 0))
-        subviews[2].place(at: CGPoint(x: bounds.minX + touch, y: y), anchor: .topLeading,
-            proposal: ProposedViewSize(width: expanded ? 0 : max(0, bounds.width - touch * 2), height: expanded ? 0 : touch))
-        subviews[3].place(at: CGPoint(x: bounds.minX + (layout.stacked ? touch : bounds.width - actionInset - touch), y: y),
-            anchor: .topLeading, proposal: ProposedViewSize(width: touch, height: touch))
+        subviews[slots.add].place(at: CGPoint(x: bounds.minX, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: touch, height: touch))
+        if let settings = slots.settings {
+            subviews[settings].place(at: CGPoint(x: bounds.minX + (layout.stacked ? 0 : touch), y: bounds.minY + (layout.stacked ? 0 : (layout.rowHeight - touch) / 2)),
+                anchor: .topLeading, proposal: ProposedViewSize(width: expanded ? layout.settingsWidth : 0, height: expanded ? touch : 0))
+        }
+        subviews[slots.prompt].place(at: CGPoint(x: bounds.minX + touch, y: y), anchor: .topLeading,
+            proposal: ProposedViewSize(width: expanded ? 0 : max(0, bounds.width - touch - actionInset), height: expanded ? 0 : touch))
     }
 }
 
@@ -125,17 +157,57 @@ enum ChatTopLayout {
     }
 }
 
+/// Shared scalable metrics keep identity text and the reading viewport in agreement.
+struct ChatIdentityLayoutMetrics: DynamicProperty {
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @ScaledMetric(relativeTo: .caption) var titleLine: CGFloat = 15
+    @ScaledMetric(relativeTo: .caption2) var statusLine: CGFloat = 14
+    init() {}
+    var compact: Bool { verticalSizeClass == .compact }
+    var faceSize: CGFloat { compact ? 48 : 56 }
+    var textHeight: CGFloat { titleLine * 2 + 2 + statusLine }
+    var clearance: CGFloat { max(ChatTopLayout.controlsClearance, compact ? textHeight + 8 : 4 + faceSize + 4 + textHeight + 4) }
+}
+
 struct TopChatCompanion<Face: View>: View {
     var side: CatComposerSide = .left
     var dragOffset: CGFloat = 0
+    var title: String? = nil
+    var status: String = ""
     @ViewBuilder let face: (CGFloat) -> Face
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    private var identityMetrics = ChatIdentityLayoutMetrics()
     var body: some View {
         GeometryReader { area in
-            let size: CGFloat = verticalSizeClass == .compact ? 48 : 88
-            face(size).frame(width: size, height: size)
-                .position(x: topCompanionCenter(width: area.size.width, size: size, side: side, drag: dragOffset), y: size / 2 + 4)
-        }.frame(height: ChatTopLayout.clearance(compact: verticalSizeClass == .compact))
+            let size: CGFloat = title == nil ? (verticalSizeClass == .compact ? 48 : 88) : identityMetrics.faceSize
+            let footprint = title != nil && identityMetrics.compact ? max(48, area.size.width - 180) : size
+            let center = topCompanionCenter(width: area.size.width, size: footprint, side: side, drag: dragOffset)
+            if title != nil && identityMetrics.compact {
+                HStack(spacing: 8) {
+                    face(size).frame(width: size, height: size)
+                    identityText.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(width: max(48, area.size.width - 180), height: identityMetrics.clearance)
+                    .position(x: center, y: identityMetrics.clearance / 2)
+            } else {
+                face(size).frame(width: size, height: size).position(x: center, y: size / 2 + 4)
+                if title != nil {
+                    identityText.frame(width: max(48, min(center - 16, area.size.width - 16 - center) * 2))
+                        .position(x: center, y: 4 + size + 4 + identityMetrics.textHeight / 2)
+                }
+            }
+        }.frame(height: title == nil ? ChatTopLayout.clearance(compact: verticalSizeClass == .compact) : identityMetrics.clearance)
+    }
+    private var identityText: some View {
+        VStack(alignment: identityMetrics.compact ? .leading : .center, spacing: 2) {
+            Text(title ?? "当前会话").font(.caption.weight(.semibold)).foregroundStyle(Theme.textPrimary)
+                .lineLimit(2).truncationMode(.tail).multilineTextAlignment(identityMetrics.compact ? .leading : .center)
+                .frame(maxWidth: .infinity, alignment: identityMetrics.compact ? .leading : .center)
+                .frame(height: identityMetrics.titleLine * 2)
+            Text(status).font(.caption2).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                .frame(height: identityMetrics.statusLine)
+        }.frame(height: identityMetrics.textHeight).allowsHitTesting(false)
+            .accessibilityElement(children: .ignore).accessibilityLabel((title ?? "当前会话") + "，" + status)
+            .accessibilityIdentifier("chat-visible-identity")
     }
 }
 
@@ -181,47 +253,6 @@ struct ComposerSettingsStrip: View {
     private func setting(_ label: String, symbol: String? = nil, accessibility: String, action: @escaping () -> Void) -> some View {
         Button(action: action) { ComposerSettingLabel(title: label, symbol: symbol) }
             .accessibilityLabel(accessibility).accessibilityHint("打开完整选项")
-    }
-}
-
-/// One voice owner for the top companion and microphone; both write only to the captured draft.
-@MainActor final class DraftVoiceController: ObservableObject {
-    let speech = SpeechRecognizerService()
-    @Published private(set) var holding = false
-    @Published var cancelling = false
-    @Published var notice: String?
-    private var observation: AnyCancellable?
-    private var draft: ComposerDraftState?
-    private weak var focus: ComposerFocusController?
-    private var revision = 0
-    private var lifecycle = 0
-    init() { observation = speech.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() } }
-    func begin(draft: ComposerDraftState, focus: ComposerFocusController) {
-        guard !holding, !speech.isProcessing, !speech.isRecording, draft.sendPhase != .sending, !draft.attachments.isUploading else { return }
-        self.draft = draft; self.focus = focus; revision = draft.textRevision; lifecycle = draft.lifecycleRevision
-        holding = true; cancelling = false; notice = nil
-        focus.borrow("voice", open: focus.editing)
-        speech.start(api: draft.speechAPI) { [weak self] message in
-            guard let self else { return }; notice = message; holding = false; cancelling = false; focus.resume("voice")
-        }
-    }
-    func finish(cancelled: Bool) {
-        guard holding || speech.isRecording || speech.isProcessing else { return }
-        holding = false; cancelling = false
-        let captured = draft, revision = revision, lifecycle = lifecycle
-        speech.stop(cancelled: cancelled) { [weak self] text in
-            guard let self else { return }
-            captured?.appendVoice(text, ifUnchangedSince: revision, lifecycle: lifecycle)
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { notice = "没有听到声音，草稿已保留" }
-            focus?.resume("voice")
-        }
-        if cancelled { notice = "已取消，草稿保留"; focus?.resume("voice") }
-        else if !speech.isProcessing { focus?.resume("voice") }
-    }
-    func gesture(draft: ComposerDraftState, focus: ComposerFocusController,
-                 onDrag: @escaping (CGFloat) -> Void = { _ in }, onDrop: @escaping (CGFloat) -> Void = { _ in }) -> CatInputGesture {
-        CatInputGesture(onTap: { focus.focus() }, onHold: { self.begin(draft: draft, focus: focus) },
-            onMove: { self.cancelling = $0 }, onRelease: { self.finish(cancelled: $0) }, onDrag: onDrag, onDrop: onDrop)
     }
 }
 

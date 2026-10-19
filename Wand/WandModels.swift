@@ -1030,6 +1030,7 @@ struct SessionSnapshot: Decodable, Identifiable {
     let claudeSessionId: String?
     var workspaceId: String?
     let workspaceTaskId: String?
+    var creationRequestId: String? = nil
     let messages: [ConversationTurn]?
     /// 窗口化：messages 是完整历史的「最近一窗」，messageOffset = 首条的绝对下标，
     /// messageTotal = 完整 turn 数。更早的消息按需翻页（GET /api/sessions/:id/messages）。
@@ -1124,9 +1125,10 @@ struct ToolContentResponse: Decodable {
     let input: [String: JSONValue]
     let images: [String]
     let projection: ToolProjection?
+    let resultAvailable: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case content, input
+        case content, input, pending, resultAvailable
         case toolUseId = "tool_use_id"
         case isError = "is_error"
     }
@@ -1134,6 +1136,8 @@ struct ToolContentResponse: Decodable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         toolUseId = (try? container.decode(String.self, forKey: .toolUseId)) ?? ""
+        resultAvailable = (try? container.decode(Bool.self, forKey: .resultAvailable))
+            ?? !((try? container.decode(Bool.self, forKey: .pending)) ?? false)
         isError = (try? container.decode(Bool.self, forKey: .isError)) ?? false
         let content = (try? container.decode(JSONValue.self, forKey: .content)) ?? .null
         input = (try? container.decode([String: JSONValue].self, forKey: .input)) ?? [:]

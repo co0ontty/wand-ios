@@ -64,9 +64,9 @@ final class TeamDispatchStore: ObservableObject {
     private var noteRevision = 0
     private var visible = false
     private var visibilityRevision = 0
-    init(service: any TeamDispatchService, baseURL: URL, defaults: UserDefaults = .standard) {
+    init(service: any TeamDispatchService, baseURL: URL, defaults: UserDefaults = .standard, scope: String = "contacts") {
         self.service = service; self.defaults = defaults
-        key = "wand.teamDispatchPending." + ServerProfiles.stableID(for: baseURL)
+        key = "wand.teamDispatchPending." + ServerProfiles.stableID(for: baseURL) + (scope == "contacts" ? "" : "." + scope)
         uncertain = defaults.bool(forKey: key)
         acceptedRunID = defaults.string(forKey: key + ".accepted")
     }
@@ -121,10 +121,34 @@ final class TeamDispatchStore: ObservableObject {
 final class TeamDispatchStoreCache {
     static let shared = TeamDispatchStoreCache()
     private var stores: [String: TeamDispatchStore] = [:]
-    func store(api: WandAPI) -> TeamDispatchStore {
-        let key = ServerProfiles.stableID(for: api.baseURL)
+    func store(api: WandAPI, scope: String = "contacts") -> TeamDispatchStore {
+        let key = ServerProfiles.stableID(for: api.baseURL) + ":" + scope
         if let store = stores[key] { store.bind(service: api); return store }
-        let store = TeamDispatchStore(service: api, baseURL: api.baseURL); stores[key] = store; return store
+        let store = TeamDispatchStore(service: api, baseURL: api.baseURL, scope: scope); stores[key] = store; return store
+    }
+}
+
+/// Shared selection projection: both entry points use the same owner and actions,
+/// with distinct scopes so opening New Task cannot overwrite Contacts' draft/run.
+struct TeamDispatchRoster: View {
+    @ObservedObject var store: TeamDispatchStore
+    var body: some View {
+        if let plan = store.plan {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("评估 \(plan.considered) 人 · 未纳入 \(plan.omitted) 人，概率仅作参考").font(.caption).foregroundStyle(Theme.textSecondary)
+                ForEach(plan.members + plan.bench) { member in
+                    Toggle(isOn: Binding(get: { store.selection.members.contains { $0.id == member.id } }, set: { _ in store.selection.toggle(member) })) {
+                        VStack(alignment: .leading) {
+                            Text(member.name + " · " + member.probabilityLabel)
+                            Text(member.duty).font(.caption).foregroundStyle(Theme.textSecondary)
+                        }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }.toggleStyle(.button).disabled(store.phase == .sending)
+                }
+                Picker("负责人", selection: $store.selection.leaderID) {
+                    ForEach(store.selection.members) { Text($0.name).tag($0.id) }
+                }.disabled(store.phase == .sending)
+            }
+        }
     }
 }
 
@@ -146,15 +170,7 @@ struct TeamDispatchPanel: View {
                 Text("选择项目").tag(""); ForEach(contactProjectCandidates(projects)) { Text($0.name).tag($0.id) }
             }.disabled(store.phase == .sending)
             Stepper("建议最多 \(store.maxMembers) 位员工", value: $store.maxMembers, in: 2...8).disabled(store.phase == .sending)
-            if let plan = store.plan {
-                Text("评估 \(plan.considered) 人 · 未纳入 \(plan.omitted) 人，概率仅作参考").font(.caption).foregroundStyle(Theme.textSecondary)
-                ForEach(plan.members + plan.bench) { member in
-                    Toggle(isOn: Binding(get: { store.selection.members.contains { $0.id == member.id } }, set: { _ in store.selection.toggle(member) })) {
-                        VStack(alignment: .leading) { Text(member.name + " · " + member.probabilityLabel); Text(member.duty).font(.caption).foregroundStyle(Theme.textSecondary) }
-                    }.disabled(store.phase == .sending)
-                }
-                Picker("负责人", selection: $store.selection.leaderID) { ForEach(store.selection.members) { Text($0.name).tag($0.id) } }.disabled(store.phase == .sending)
-            }
+            TeamDispatchRoster(store: store)
             if let message = store.message { Text(message).font(.caption).foregroundStyle(store.phase == .failed ? Theme.danger : Theme.textSecondary) }
             HStack {
                 if store.uncertain { Button("已核对记录，开始新派工") { confirmNew = true } }

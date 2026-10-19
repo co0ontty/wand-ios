@@ -32,7 +32,9 @@ struct SessionLiveActivityWidget: Widget {
             } minimal: {
                 ActivityMinimalStatus(state: context.state, isStale: context.isStale)
             }
-            .contentMargins(.all, ActivityLayout.inset, for: .expanded)
+            // The system already insets the expanded island; only horizontal breathing room is
+            // added here so the card never grows taller than its content needs.
+            .contentMargins(.horizontal, ActivityLayout.expandedInset, for: .expanded)
             .widgetURL(context.state.destinationURL)
             .keylineTint(context.isStale ? .gray : ActivityPresentation.tint(context.state.aggregateStateRaw))
         }

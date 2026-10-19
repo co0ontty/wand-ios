@@ -31,6 +31,18 @@ final class TaskBoardTests: XCTestCase {
         XCTFail("Tapping create in the presented form did not submit exactly one request")
     }
 
+    func testBoardTaskCreationUsesPendingConversationAndRetainsWorkspaceContext() throws {
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Wand/TaskBoardView.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("NewConversationView("))
+        XCTAssertTrue(source.contains("initialCreateTask: true"))
+        XCTAssertTrue(source.contains("initialCwd: createCwd"))
+        XCTAssertTrue(source.contains("workspaceID: createWorkspaceID"))
+        XCTAssertTrue(source.contains("onOpenBoundSession"))
+        XCTAssertFalse(source.contains("api.createBoardTask("))
+    }
+
     func testBoardTaskDecodesWorkspaceTaskBindingAndTerminalLabels() throws {
         // 看板卡片靠 workspaceTaskId 才能带着任务上下文打开会话。
         let bound = try JSONDecoder().decode(

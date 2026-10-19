@@ -1,6 +1,74 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import Combine
+import UIKit
+
+/// 从左向右的横向滑动返回上一页，不再切到相邻会话。
+/// 只认领导边缘，避免抢水平滚动的代码块、表格和终端选区。
+func sessionSwipeShouldGoBack(
+    startX: CGFloat,
+    translation: CGSize,
+    minimumDistance: CGFloat = 72,
+    maximumStartX: CGFloat = 48
+) -> Bool {
+    guard startX >= 0, startX <= maximumStartX else { return false }
+    guard translation.width >= minimumDistance else { return false }
+    return abs(translation.width) > abs(translation.height)
+}
+
+/// 会话页隐藏导航栏后，系统返回手势仍要弹出上一页。
+/// 终端滚动不得抢领导边缘；这里不切换会话。
+struct SessionBackSwipeEnabler: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> SessionBackSwipeController {
+        SessionBackSwipeController()
+    }
+    func updateUIViewController(_ controller: SessionBackSwipeController, context: Context) {}
+}
+
+final class SessionBackSwipeController: UIViewController, UIGestureRecognizerDelegate {
+    private weak var previousDelegate: UIGestureRecognizerDelegate?
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.isUserInteractionEnabled = false
+        view.isAccessibilityElement = false
+        view.backgroundColor = .clear
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        enableBackSwipe()
+        // 终端表面可能晚一拍挂上，补一次即可，不在每次布局里扫整棵视图。
+        DispatchQueue.main.async { [weak self] in self?.enableBackSwipe() }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        guard let pop = navigationController?.interactivePopGestureRecognizer, pop.delegate === self else { return }
+        pop.delegate = previousDelegate
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        (navigationController?.viewControllers.count ?? 0) > 1
+    }
+
+    private func enableBackSwipe() {
+        guard let pop = navigationController?.interactivePopGestureRecognizer else { return }
+        if pop.delegate !== self {
+            if previousDelegate == nil { previousDelegate = pop.delegate }
+            pop.delegate = self
+        }
+        pop.isEnabled = true
+        if let root = navigationController?.view { yieldScrollPans(in: root, to: pop) }
+    }
+
+    private func yieldScrollPans(in view: UIView, to pop: UIGestureRecognizer) {
+        if let scroll = view as? UIScrollView {
+            scroll.panGestureRecognizer.require(toFail: pop)
+        }
+        view.subviews.forEach { yieldScrollPans(in: $0, to: pop) }
+    }
+}
 
 /// 同一详情打开流程尚未稳定前，不允许第二次请求改写 selection。
 /// 选中另一会话但没有动画中的打开操作时（例如 iPad 双栏）仍然允许切换。
@@ -49,23 +117,18 @@ private struct PtySessionView: View {
     @StateObject private var store: ChatStore
     @StateObject private var terminal: PtyTerminalStore
     @StateObject private var keyboard = KeyboardObserver()
-    @StateObject private var speech = SpeechRecognizerService()
     @StateObject private var composerDraft: ComposerDraftState
-    @State private var voiceDraftRevision = 0
-    @State private var voiceDraftLifecycle = 0
     private var draft: String { composerDraft.text }
     @State private var showStopConfirm = false
     @State private var showQuickCommit = false
     @StateObject private var attachments: ComposerAttachmentController
-    @State private var voicePressed = false
-    @State private var voiceCanceling = false
     @State private var draftNeedsExpanded = false
     @State private var composerInputHeight: CGFloat = 32
     @State private var composerIsComposing = false
     /// 底部快捷栏左上角的拉手控制：折叠时只露出快捷键栏，展开时在快捷键栏上方
-    /// 滑出输入抽屉（文本框 + 发送 + 语音 + 附件）。默认折叠，给终端留出最大可视区。
+    /// 滑出输入抽屉（文本框 + 发送 + 附件）。默认折叠，给终端留出最大可视区。
     @State private var inputDrawerOpen = false
-    @State private var voiceHoldWork: DispatchWorkItem?
+    @State private var composerActionsOpen = false
     @State private var gitStatus: GitStatusResult?
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
     @StateObject private var sessionFiles: SessionFilesStore
@@ -116,6 +179,7 @@ private struct PtySessionView: View {
                 }
             }
         }
+        .background { SessionBackSwipeEnabler().allowsHitTesting(false) }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(showsNavigationChrome ? .visible : .automatic, for: .navigationBar)
@@ -174,7 +238,7 @@ private struct PtySessionView: View {
                 try await activeStore.pasteUploadedPathsIntoPty(files)
             }
             terminal.terminal.provider = session.provider
-            terminal.terminal.onTerminalFocus = { inputFocused = false; inputDrawerOpen = false }
+            terminal.terminal.onTerminalFocus = { composerActionsOpen = false; inputFocused = false; inputDrawerOpen = false }
             terminal.terminal.onPasteImages = attachments.handlePastedImageData
             terminal.start()
             refreshGitStatus()
@@ -194,11 +258,6 @@ private struct PtySessionView: View {
             terminal.shutdown()
             terminal.terminal.onTerminalFocus = nil
             terminal.terminal.onPasteImages = nil
-            voiceHoldWork?.cancel()
-            voiceHoldWork = nil
-            speech.stop(cancelled: true)
-            voicePressed = false
-            voiceCanceling = false
             inputDrawerOpen = false
             inputFocused = false
             composerInputHeight = 32
@@ -374,11 +433,6 @@ private struct PtySessionView: View {
 
     private func bottomBar(maximumInputHeight: CGFloat) -> some View {
         VStack(spacing: 0) {
-            if voicePressed || speech.isProcessing {
-                voiceBubble
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 6)
-            }
             if inputDrawerOpen {
                 inputBar(maximumHeight: maximumInputHeight)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -472,6 +526,7 @@ private struct PtySessionView: View {
     }
 
     private func toggleInputDrawer() {
+        composerActionsOpen = false
         let opening = !inputDrawerOpen
         inputDrawerOpen = opening
         if opening {
@@ -508,12 +563,19 @@ private struct PtySessionView: View {
     private var inputExpanded: Bool {
         composerShouldExpand(
             focused: inputFocused,
-            voiceMode: voicePressed,
             contentNeedsSpace: draftNeedsExpanded || !attachments.attachments.isEmpty
         )
     }
 
     private func inputBar(maximumHeight: CGFloat) -> some View {
+        VStack(spacing: 4) {
+            if composerActionsOpen {
+                ComposerAttachmentPanel(onPhoto: {
+                    composerActionsOpen = false; attachments.showPhotoPicker = true
+                }, onFile: {
+                    composerActionsOpen = false; attachments.showFileImporter = true
+                }) { EmptyView() }
+            }
         NativeComposerShell(
             expanded: inputExpanded,
             focused: inputFocused,
@@ -532,6 +594,12 @@ private struct PtySessionView: View {
                 }
             }
         )
+        }
+        .onChange(of: inputDrawerOpen) { _, open in if !open { composerActionsOpen = false } }
+        .onKeyPress(.escape) {
+            if composerActionsOpen { composerActionsOpen = false; return .handled }
+            return .ignored
+        }
         .confirmationDialog(
             "确定要停止当前正在运行的任务吗？",
             isPresented: $showStopConfirm,
@@ -543,37 +611,9 @@ private struct PtySessionView: View {
     }
 
     private var composerActionsMenu: some View {
-        Menu {
-            Button {
-                attachments.showPhotoPicker = true
-            } label: {
-                Label("从相册选择", systemImage: "photo.on.rectangle")
-            }
-            .disabled(attachments.isUploading)
-
-            Button {
-                attachments.showFileImporter = true
-            } label: {
-                Label("从文件选择", systemImage: "paperclip")
-            }
-            .disabled(attachments.isUploading)
-        } label: {
-            if attachments.isUploading {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(Theme.textSecondary)
-                    .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-            } else {
-                Image(systemName: "plus")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
-                    .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-                    .contentShape(Rectangle())
-            }
+        ComposerAddButton(expanded: composerActionsOpen, uploading: attachments.isUploading) {
+            composerActionsOpen.toggle()
         }
-        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-        .buttonStyle(.plain)
-        .accessibilityLabel("更多操作")
     }
 
     private func ptyTextField(maximumHeight: CGFloat) -> some View {
@@ -608,12 +648,6 @@ private struct PtySessionView: View {
                     draftNeedsExpanded = !draft.isEmpty && height > 36
                 }
             )
-            .overlay {
-                if composerHoldToTalkEligible(text: draft, focused: inputFocused, keyboardVisible: keyboard.isVisible) {
-                    ComposerVoiceControl(draft: composerDraft, speech: speech, inputSurface: true, onTap: focusNativeInput,
-                        onPressChanged: { voicePressed = $0; voiceCanceling = $1 }) { store.toast = $0 }
-                }
-            }
             .wandSubmitOnHardwareReturn(isEnabled: { keyboardShortcutsActive && canSend }, perform: sendDraft)
             // 高度只约束 UITextView 本体，padding 不能吃掉已经测好的可视行。
             .frame(height: inputExpanded ? max(32, composerInputHeight) : 34)
@@ -623,20 +657,6 @@ private struct PtySessionView: View {
             .contentShape(Rectangle())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var composerVoiceButton: some View {
-        Image(systemName: voicePressed ? "waveform" : "mic")
-            .font(.system(size: 18, weight: .semibold))
-            .foregroundColor(voiceCanceling ? Theme.danger : (voicePressed ? Theme.brand : Theme.textSecondary))
-            .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-            .background(Circle().fill(Theme.surface.opacity(0.92)))
-            .overlay(Circle().stroke(Theme.border.opacity(0.5), lineWidth: 0.8))
-            .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-            .contentShape(Circle())
-            .gesture(voiceTapOrHoldGesture(onTap: { inputFocused = true }))
-            .accessibilityLabel("语音输入")
-            .accessibilityValue(voicePressed ? "正在录音" : "长按录音")
     }
 
     private var terminalChip: some View {
@@ -658,7 +678,6 @@ private struct PtySessionView: View {
         if store.isResponding && canSend {
             stopButtonSecondary
         }
-        composerVoiceButton
         sendButton
     }
 
@@ -690,47 +709,11 @@ private struct PtySessionView: View {
     }
 
     private var ptyComposerPlaceholder: String {
-        if voicePressed {
-            return voiceCanceling ? "松开取消" : "松开结束 · 上滑取消"
-        }
-        if composerHoldToTalkEligible(text: draft, focused: inputFocused, keyboardVisible: keyboard.isVisible) { return "发消息或按住说话" }
         return "编辑草稿，点击 ↑ 发送"
     }
 
-    private var voiceBubble: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: voiceCanceling ? "xmark.circle.fill" : "waveform.circle.fill")
-                    .font(.system(size: 16))
-                    .foregroundColor(voiceCanceling ? Theme.danger : Theme.brand)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(voiceCanceling ? "松开取消" : (speech.isProcessing ? "服务端识别中…" : speech.transcript.isEmpty ? "正在聆听…" : speech.transcript))
-                        .font(.wand(size: 14, weight: .medium))
-                        .foregroundColor(voiceCanceling ? Theme.danger : Theme.textPrimary)
-                        .lineLimit(3)
-                    Text(speech.usingServer ? "服务端识别" : "端侧识别")
-                        .font(.wand(size: 11))
-                        .foregroundColor(Theme.textSecondary)
-                }
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.surface.opacity(0.94))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke((voiceCanceling ? Theme.danger : Theme.brand).opacity(0.22), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.08), radius: 10, x: 0, y: 4)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
-
     private var canSend: Bool {
-        !store.inputSending && !composerDraft.isOptimizing && !attachments.isUploading && composerDraftIsSendable(
+        !store.inputSending && !attachments.isUploading && composerDraftIsSendable(
             draft,
             hasAttachments: !attachments.attachments.isEmpty,
             isComposing: composerIsComposing
@@ -739,6 +722,7 @@ private struct PtySessionView: View {
 
     private func sendDraft() {
         guard canSend else { return }
+        composerActionsOpen = false
         let submission = composerDraft.submission()
         composerDraft.submitted(submission)
         Task {
@@ -761,58 +745,6 @@ private struct PtySessionView: View {
             } catch {
                 store.toast = error.localizedDescription
             }
-        }
-    }
-
-    private static let voiceCancelThreshold: CGFloat = 60
-    private static let voiceHoldThreshold: TimeInterval = 0.18
-
-    private func voiceTapOrHoldGesture(onTap: @escaping () -> Void) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                if voiceHoldWork == nil && !voicePressed {
-                    let work = DispatchWorkItem {
-                        voiceHoldWork = nil
-                        startVoiceRecording()
-                    }
-                    voiceHoldWork = work
-                    DispatchQueue.main.asyncAfter(
-                        deadline: .now() + Self.voiceHoldThreshold,
-                        execute: work
-                    )
-                }
-                if voicePressed {
-                    voiceCanceling = value.translation.height < -Self.voiceCancelThreshold
-                }
-            }
-            .onEnded { _ in
-                if let work = voiceHoldWork {
-                    work.cancel()
-                    voiceHoldWork = nil
-                    onTap()
-                    return
-                }
-                let cancelled = voiceCanceling
-                voicePressed = false
-                voiceCanceling = false
-                let revision = voiceDraftRevision
-                let lifecycle = voiceDraftLifecycle
-                speech.stop(cancelled: cancelled) { text in
-                    composerDraft.appendVoice(text, ifUnchangedSince: revision, lifecycle: lifecycle)
-                }
-            }
-    }
-
-    private func startVoiceRecording() {
-        guard !voicePressed else { return }
-        voiceDraftRevision = composerDraft.textRevision
-        voiceDraftLifecycle = composerDraft.lifecycleRevision
-        voicePressed = true
-        voiceCanceling = false
-        speech.start(api: api) { message in
-            store.toast = message
-            voicePressed = false
-            voiceCanceling = false
         }
     }
 

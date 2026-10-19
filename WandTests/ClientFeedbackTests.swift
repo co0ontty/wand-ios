@@ -81,7 +81,6 @@ final class ClientFeedbackTests: XCTestCase {
         XCTAssertEqual(ClientFeedbackReport.feature(path: "/api/ios-ipa-update"), "app_update")
         XCTAssertEqual(ClientFeedbackReport.feature(path: "/api/wand-tasks/private-id/comments"), "tasks")
         XCTAssertEqual(ClientFeedbackReport.feature(path: "/api/sessions/id/input"), "sessions")
-        XCTAssertEqual(ClientFeedbackReport.feature(path: "/api/speech/transcribe"), "speech")
         XCTAssertEqual(ClientFeedbackReport.feature(path: "/api/unknown/token-looking-path"), "api")
     }
 
@@ -91,7 +90,6 @@ final class ClientFeedbackTests: XCTestCase {
             "conversations": ["conversations"],
             "tasks": ["wand-tasks", "wand-task-agent-defaults", "tasks", "workspace-tasks", "workspaces", "wand-milestones", "missions", "scheduled-tasks"],
             "files": ["files", "upload", "directory", "session-files", "file-preview", "file-read", "file-write", "recent-paths"],
-            "speech": ["speech"],
             "settings": ["settings", "config", "user-profile", "auto-update", "update-channel"],
             "models": ["models", "model-groups", "local-models"],
             "authentication": ["login", "logout", "app-login", "session-check", "set-password"],

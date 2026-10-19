@@ -20,6 +20,12 @@ func chatRealtimeStartKind(active: Bool, started: Bool) -> ChatRealtimeStartKind
     return started ? .reconnect : .firstConnect
 }
 
+protocol QueueRetrievalTransport {
+    func deleteQueued(id: String, index: Int, expectedText: String) async throws -> SessionSnapshot
+}
+
+extension WandAPI: QueueRetrievalTransport {}
+
 /// 单个会话的状态机：拉取快照、订阅 WebSocket、合并增量推送、发送输入与权限决策。
 /// 合流规则对齐浏览器端 websocket.ts：
 ///   - init / messages 全量 → 直接替换
@@ -27,7 +33,11 @@ func chatRealtimeStartKind(active: Bool, started: Bool) -> ChatRealtimeStartKind
 ///   - chunk-only 事件是终端视图的，聊天视图直接忽略
 @MainActor
 final class ChatStore: ObservableObject {
-    @Published var messages: [ConversationTurn] = []
+    @Published var messages: [ConversationTurn] = [] {
+        didSet { messageRevision &+= 1 }
+    }
+    /// Changes only when message content commits, not on input/keyboard/scroll updates.
+    private(set) var messageRevision = 0
     @Published var isResponding = false
     @Published var status: String = "running"
     @Published var queuedMessages: [String] = []
@@ -65,6 +75,8 @@ final class ChatStore: ObservableObject {
     private var employeeDefinitionRevision = 0
     private var employeeDefinitionID: String?
     @Published private(set) var providerSwitching = false
+    @Published private(set) var targetChangeError: String?
+    @Published private(set) var targetChangeResult: String?
     @Published private(set) var directoryChanging = false
     @Published private(set) var directoryChangeError: String?
     @Published private(set) var pendingSettingsMutations = 0
@@ -90,6 +102,7 @@ final class ChatStore: ObservableObject {
     let api: WandAPI
     let composerDraft: ComposerDraftState
     private let inputTransport: any SessionInputTransport
+    private let queueRetrievalTransport: any QueueRetrievalTransport
     let serverID: String
     @Published private(set) var snapshot: SessionSnapshot?
     private let socket: WandSocket
@@ -105,7 +118,7 @@ final class ChatStore: ObservableObject {
     /// 每个 WS 状态事件都会前进；初始 REST 只能在此版本未变化时整体落地，
     /// 避免晚到的旧快照覆盖 init/output/status 已经发布的新状态。
     private var realtimeRevision = 0
-    private var queueMutationPending = false
+    @Published private(set) var queueMutationPending = false
     private var autoResumeAttempted = false
     /// 所有 PTY 输入共用一条尾队列。普通提交的文本和回车作为同一个 operation，
     /// 快捷键不能插进两者之间，连续点击也严格按用户操作顺序写入终端。
@@ -132,12 +145,14 @@ final class ChatStore: ObservableObject {
         sessionId: String,
         api: WandAPI,
         inputTransport: (any SessionInputTransport)? = nil,
-        drafts: SessionDraftStore? = nil
+        drafts: SessionDraftStore? = nil,
+        queueRetrievalTransport: (any QueueRetrievalTransport)? = nil
     ) {
         self.sessionId = sessionId
         self.api = api
         self.composerDraft = (drafts ?? .shared).draft(sessionId: sessionId, api: api)
         self.inputTransport = inputTransport ?? api
+        self.queueRetrievalTransport = queueRetrievalTransport ?? api
         self.serverID = ServerProfiles.stableID(for: api.baseURL)
         self.socket = WandSocket(baseURL: api.baseURL)
         // init/resync/全量快照也按块级窗口下发（与 REST getSession 的 blockBudget 对齐）。
@@ -637,7 +652,7 @@ final class ChatStore: ObservableObject {
                         for (key, value) in loaded.input { input[key] = value }
                     }
                     return .toolUse(id: id, name: name, description: description, input: input, subagent: subagent)
-                case .toolResult(let id, _, let isError, _, let images, let subagent, let projection) where id == loaded.toolUseId:
+                case .toolResult(let id, _, let isError, _, let images, let subagent, let projection) where id == loaded.toolUseId && loaded.resultAvailable:
                     return .toolResult(toolUseId: id, text: loaded.text, isError: loaded.isError || isError,
                         truncated: false, images: loaded.images.isEmpty ? images : loaded.images,
                         subagent: subagent, projection: mergingToolProjection(local: projection, incoming: loaded.projection))
@@ -1110,15 +1125,34 @@ final class ChatStore: ObservableObject {
     func switchProvider(_ provider: String, engine: String? = nil) {
         let tool = WandAgentTool(provider: provider, engine: engine)
         guard canSwitchProvider, snapshot?.agentTool != tool else { return }
-        providerSwitching = true
+        mutateExecutionTarget(tool: tool)
+    }
+
+    func chooseEmployee(_ employeeID: String) {
+        guard canSwitchProvider, !employeeID.isEmpty, snapshot?.employeeId != employeeID else { return }
+        mutateExecutionTarget(employeeID: employeeID)
+    }
+
+    private func mutateExecutionTarget(tool: WandAgentTool? = nil, employeeID: String? = nil) {
+        providerSwitching = true; targetChangeError = nil; targetChangeResult = nil
         let requestRevision = realtimeRevision
+        let previous = settingsMutationTail
         modelCatalogRevision += 1
-        Task { [weak self] in
+        let operation = Task { [weak self] in
             guard let self else { return }
             defer { providerSwitching = false }
             do {
-                if let settingsMutationTail { await settingsMutationTail.value }
-                let updated = try await api.setSessionProvider(id: sessionId, provider: provider, engine: tool.engine)
+                if let previous { await previous.value }
+                guard active, !Task.isCancelled else { return }
+                let updated: SessionSnapshot
+                if let employeeID { updated = try await api.setSessionEmployee(id: sessionId, employeeID: employeeID) }
+                else if let tool {
+                    updated = try await api.setSessionProvider(id: sessionId, provider: tool.provider.rawValue, engine: tool.engine)
+                    guard updated.id == sessionId, updated.isStructured, updated.agentTool == tool else {
+                        throw WandAPI.APIError.network("执行工具切换回执身份不一致")
+                    }
+                } else { return }
+                guard active, !Task.isCancelled else { return }
                 if realtimeRevision == requestRevision { apply(snapshot: updated) }
                 else {
                     let previousCompletion = snapshot?.completionRevision ?? 0
@@ -1132,12 +1166,13 @@ final class ChatStore: ObservableObject {
                 defaultModel = nil
                 modelsLoaded = false
                 await loadModels()
+                targetChangeResult = "已切换为 " + (employeeID == nil ? updated.providerLabel : (updated.employeeName ?? "所选员工"))
                 socket.requestResync()
             } catch {
-                toast = error.localizedDescription
-                socket.requestResync()
+                if active { targetChangeError = error.localizedDescription; socket.requestResync() }
             }
         }
+        settingsMutationTail = operation
     }
 
     // MARK: - AskUserQuestion 交互（对齐 Web 端 __askSelect / __askSubmit）
@@ -1276,118 +1311,90 @@ final class ChatStore: ObservableObject {
         isStructured && status == "running" && isResponding
     }
 
-    func editQueued(index: Int, text: String) {
-        guard isStructured, !queueMutationPending, queuedMessages.indices.contains(index) else { return }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { toast = "排队消息不能为空。"; return }
-        let original = queuedMessages[index]
+    /// Do not optimistically remove or refill: an unknown DELETE may have succeeded.
+    /// Preserve its source in the session draft for explicit copying, never automatic retry.
+    func retrieveQueued(index: Int) async -> Bool {
+        guard isStructured, !queueMutationPending, !inputSending,
+              queuedMessages.indices.contains(index) else { return false }
+        let source = queuedMessages[index]
+        guard composerDraft.beginQueueRetrieval(source) else { return false }
+        let revision = realtimeRevision
+        queueMutationPending = true
+        defer { queueMutationPending = false }
+        do {
+            let receipt = try await queueRetrievalTransport.deleteQueued(id: sessionId, index: index, expectedText: source)
+            try applyQueueReceipt(receipt, revision: revision)
+            composerDraft.finishQueueRetrieval(confirmed: true)
+            return !composerDraft.retired
+        } catch {
+            let rejected = isDefiniteInputRejection(error)
+            composerDraft.finishQueueRetrieval(confirmed: false, rejected: rejected)
+            socket.requestResync()
+            toast = rejected ? error.localizedDescription : "未确认取回结果，请核对队列；原文已保留，可复制。" + error.localizedDescription
+            return false
+        }
+    }
+
+    private func applyQueueReceipt(_ snap: SessionSnapshot, revision: Int) throws {
+        guard snap.id == sessionId, let queue = snap.queuedMessages else {
+            throw WandAPI.APIError.network("队列确认无效，请核对最新状态")
+        }
+        if realtimeRevision == revision { queuedMessages = queue }
+        socket.requestResync()
+    }
+
+    /// Mutations wait for confirmation; an unknown result never restores an old queue.
+    func promoteQueued(index: Int) {
+        guard isStructured, !queueMutationPending, !composerDraft.queueRetrievalPending,
+              queuedMessages.indices.contains(index) else { return }
+        let picked = queuedMessages[index]
+        let revision = realtimeRevision
         queueMutationPending = true
         Task {
             defer { queueMutationPending = false }
             do {
-                let snapshot = try await api.editQueued(id: sessionId, index: index,
-                                                        expectedText: original, text: trimmed)
-                queuedMessages = snapshot.queuedMessages ?? []
-            } catch {
-                toast = error.localizedDescription
-            }
-        }
-    }
-
-    /// 立即发送第 index 条排队消息（乐观剥掉本地、失败回滚）。对齐 Web queueBarPromoteIndex。
-    func promoteQueued(index: Int) {
-        guard isStructured else { return }
-        guard !queueMutationPending else { return }
-        let queue = queuedMessages
-        guard index >= 0, index < queue.count else { return }
-        let picked = queue[index]
-        let requestRevision = realtimeRevision
-        let previous = queue
-        let next = Array(queue[..<index]) + Array(queue[(index + 1)...])
-        let inFlight = queueInFlight
-        queueMutationPending = true
-        queuedMessages = next
-        toast = inFlight ? "已请求中断当前回复，立即发送这条。" : "已立即发送这条消息。"
-        Task {
-            do {
                 let snap = try await api.promoteQueued(id: sessionId, index: index, expectedText: picked)
-                if realtimeRevision == requestRevision {
-                    apply(snapshot: snap)
-                } else {
-                    socket.requestResync()
-                }
+                try applyQueueReceipt(snap, revision: revision)
             } catch {
-                if realtimeRevision == requestRevision {
-                    queuedMessages = previous
-                } else {
-                    socket.requestResync()
-                }
+                socket.requestResync()
                 toast = error.localizedDescription
             }
-            queueMutationPending = false
         }
     }
 
-    /// 删除第 index 条排队消息（乐观剥掉本地、失败回滚）。
     func deleteQueued(index: Int) {
-        guard isStructured, !queueMutationPending else { return }
-        let queue = queuedMessages
-        guard index >= 0, index < queue.count else { return }
-        let picked = queue[index]
-        let requestRevision = realtimeRevision
-        let previous = queue
+        guard isStructured, !queueMutationPending, !composerDraft.queueRetrievalPending,
+              queuedMessages.indices.contains(index) else { return }
+        let picked = queuedMessages[index]
+        let revision = realtimeRevision
         queueMutationPending = true
-        queuedMessages = Array(queue[..<index]) + Array(queue[(index + 1)...])
         Task {
+            defer { queueMutationPending = false }
             do {
-                let snap = try await api.deleteQueued(
-                    id: sessionId,
-                    index: index,
-                    expectedText: picked
-                )
-                if realtimeRevision == requestRevision {
-                    apply(snapshot: snap)
-                } else {
-                    socket.requestResync()
-                }
+                let snap = try await api.deleteQueued(id: sessionId, index: index, expectedText: picked)
+                try applyQueueReceipt(snap, revision: revision)
             } catch {
-                if realtimeRevision == requestRevision {
-                    queuedMessages = previous
-                } else {
-                    socket.requestResync()
-                }
+                socket.requestResync()
                 toast = error.localizedDescription
             }
-            queueMutationPending = false
         }
     }
 
-    /// 清空全部排队消息（乐观清空、失败回滚）。
     func clearQueued() {
-        guard isStructured, !queueMutationPending else { return }
-        let requestRevision = realtimeRevision
-        let previous = queuedMessages
-        guard !previous.isEmpty else { return }
+        guard isStructured, !queueMutationPending, !composerDraft.queueRetrievalPending,
+              !queuedMessages.isEmpty else { return }
+        let expected = queuedMessages
+        let revision = realtimeRevision
         queueMutationPending = true
-        queuedMessages = []
         Task {
+            defer { queueMutationPending = false }
             do {
-                let snap = try await api.clearQueued(id: sessionId)
-                if realtimeRevision == requestRevision {
-                    apply(snapshot: snap)
-                } else {
-                    socket.requestResync()
-                }
-                toast = "已清空 \(previous.count) 条排队消息。"
+                let snap = try await api.clearQueued(id: sessionId, expectedQueue: expected)
+                try applyQueueReceipt(snap, revision: revision)
             } catch {
-                if realtimeRevision == requestRevision {
-                    queuedMessages = previous
-                } else {
-                    socket.requestResync()
-                }
+                socket.requestResync()
                 toast = error.localizedDescription
             }
-            queueMutationPending = false
         }
     }
 

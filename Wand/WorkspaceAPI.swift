@@ -21,36 +21,47 @@ struct WorkspaceTaskWindowRequest: Equatable {
     }
 }
 
-/// Pure request construction keeps provider-to-command mapping and workspace binding testable.
+/// Pure request construction keeps provider mapping, task binding, and the unified endpoint contract testable.
 /// `prompt` 是新建任务时顺手发出的第一条提示词：结构化会话走 `prompt`，PTY 走 `initialInput`。
 func workspaceTaskWindowRequest(
     target: WorkspaceSessionTarget,
     binding: WorkspaceBinding,
     kind: WorkspaceSessionKind = .structured,
-    prompt: String? = nil
+    prompt: String? = nil,
+    mode: String? = nil,
+    model: String? = nil,
+    thinkingEffort: String? = nil
 ) -> WorkspaceTaskWindowRequest {
+    // Wand Agent is an in-process structured harness, never a PTY CLI.
+    let sessionKind: WorkspaceSessionKind = target == .wandAgent ? .structured : kind
     var body: [String: WorkspaceRequestValue] = [
+        "kind": .string(target == .shell ? "pty" : sessionKind.rawValue),
         "cwd": .string(binding.cwd),
         "workspaceId": .string(binding.workspaceId),
         "workspaceTaskId": .string(binding.workspaceTaskId),
     ]
     let initialPrompt = prompt?.trimmingCharacters(in: .whitespacesAndNewlines)
     let promptValue = (initialPrompt?.isEmpty == false) ? initialPrompt : nil
+    if sessionKind == .structured, target != .shell {
+        if let mode, !mode.isEmpty { body["mode"] = .string(mode) }
+        if let model, !model.isEmpty { body["model"] = .string(model) }
+        if let thinkingEffort, !thinkingEffort.isEmpty { body["thinkingEffort"] = .string(thinkingEffort) }
+    }
     if let provider = target.provider {
         body["provider"] = .string(provider.rawValue)
-        if kind == .structured || target == .wandAgent {
+        if sessionKind == .structured {
             if target == .wandAgent { body["engine"] = .string("sdk") }
             else if target == .pi { body["engine"] = .string("cli") }
             if let promptValue { body["prompt"] = .string(promptValue) }
             body["runner"] = .string(provider.structuredRunner)
-            return WorkspaceTaskWindowRequest(path: "/api/structured-sessions", body: body)
+        } else {
+            body["command"] = .string(provider == .qoder ? "qodercli" : provider.rawValue)
+            if let promptValue { body["initialInput"] = .string(promptValue) }
         }
-        if let promptValue { body["initialInput"] = .string(promptValue) }
-        body["command"] = .string(provider == .qoder ? "qodercli" : provider.rawValue)
     } else {
         body["shell"] = .bool(true)
     }
-    return WorkspaceTaskWindowRequest(path: "/api/commands", body: body)
+    return WorkspaceTaskWindowRequest(path: "/api/sessions", body: body)
 }
 
 /// 目录组 / 任务 / 会话归属的写入路径：命中后其他屏要失效重取。
@@ -62,7 +73,7 @@ func changesTaskHierarchy(method: String, path: String) -> Bool {
     if route == "/api/tasks" || route.hasPrefix("/api/tasks/") || route.hasPrefix("/api/workspace-tasks/") { return true }
     if route == "/api/workspaces" || route.hasPrefix("/api/workspaces/") { return true }
     if route == "/api/wand-tasks" || route.hasPrefix("/api/wand-tasks/") { return true }
-    if route == "/api/commands" || route == "/api/structured-sessions" { return true }
+    if route == "/api/sessions" { return true }
     if route.hasPrefix("/api/sessions/") {
         return ["/archive", "/unarchive", "/provider", "/directory", "/completion/view"].contains { route.hasSuffix($0) }
             || route == "/api/sessions/batch-archive" || route == "/api/sessions/batch-delete"
@@ -79,8 +90,9 @@ func worktreeMergeAgentRequest(
     prompt: String
 ) -> WorkspaceTaskWindowRequest {
     WorkspaceTaskWindowRequest(
-        path: "/api/commands",
+        path: "/api/sessions",
         body: [
+            "kind": .string("pty"),
             "command": .string(provider == .qoder ? "qodercli" : provider.rawValue),
             "provider": .string(provider.rawValue),
             "cwd": .string(workspace.cwd),
@@ -131,9 +143,13 @@ func createWorkspaceTaskRequest(
     baseRef: String?,
     worktree: Bool? = nil,
     cwd: String? = nil,
-    description: String? = nil
+    description: String? = nil,
+    parentTaskId: String? = nil,
+    creationRequestId: String? = nil
 ) -> WorkspaceTaskWindowRequest {
     var body: [String: WorkspaceRequestValue] = ["name": .string(name)]
+    if let creationRequestId, !creationRequestId.isEmpty { body["creationRequestId"] = .string(creationRequestId) }
+    if let parentTaskId, !parentTaskId.isEmpty { body["parentTaskId"] = .string(parentTaskId) }
     if let baseRef, !baseRef.isEmpty {
         body["baseRef"] = .string(baseRef)
     }
@@ -158,9 +174,13 @@ func createStandaloneTaskRequest(
     name: String,
     cwd: String? = nil,
     worktree: Bool? = nil,
-    description: String? = nil
+    description: String? = nil,
+    parentTaskId: String? = nil,
+    creationRequestId: String? = nil
 ) -> WorkspaceTaskWindowRequest {
     var body: [String: WorkspaceRequestValue] = ["name": .string(name)]
+    if let creationRequestId, !creationRequestId.isEmpty { body["creationRequestId"] = .string(creationRequestId) }
+    if let parentTaskId, !parentTaskId.isEmpty { body["parentTaskId"] = .string(parentTaskId) }
     if let cwd, !cwd.isEmpty {
         body["cwd"] = .string(cwd)
     }
@@ -339,19 +359,27 @@ extension WandAPI {
         target: WorkspaceSessionTarget,
         binding: WorkspaceBinding,
         kind: WorkspaceSessionKind,
-        prompt: String? = nil
+        prompt: String? = nil,
+        mode: String? = nil,
+        model: String? = nil,
+        thinkingEffort: String? = nil
     ) async throws -> SessionSnapshot {
         let requestSpec = workspaceTaskWindowRequest(
             target: target,
             binding: binding,
             kind: kind,
-            prompt: prompt
+            prompt: prompt,
+            mode: mode,
+            model: model,
+            thinkingEffort: thinkingEffort
         )
+        let body = requestSpec.foundationBody
         return try await request(
             SessionSnapshot.self,
             method: "POST",
             path: requestSpec.path,
-            body: requestSpec.foundationBody
+            body: body,
+            timeout: kind == .structured && prompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? 180 : 30
         )
     }
 
@@ -403,7 +431,9 @@ extension WandAPI {
         baseRef: String? = nil,
         worktree: Bool? = nil,
         cwd: String? = nil,
-        description: String? = nil
+        description: String? = nil,
+        parentTaskId: String? = nil,
+        creationRequestId: String? = nil
     ) async throws -> WorkspaceTaskCreation {
         let requestSpec = createWorkspaceTaskRequest(
             workspaceId: workspaceId,
@@ -411,7 +441,9 @@ extension WandAPI {
             baseRef: baseRef,
             worktree: worktree,
             cwd: cwd,
-            description: description
+            description: description,
+            parentTaskId: parentTaskId,
+            creationRequestId: creationRequestId
         )
         return try await request(
             WorkspaceTaskCreation.self,
@@ -425,13 +457,17 @@ extension WandAPI {
         name: String,
         cwd: String? = nil,
         worktree: Bool? = nil,
-        description: String? = nil
+        description: String? = nil,
+        parentTaskId: String? = nil,
+        creationRequestId: String? = nil
     ) async throws -> WorkspaceTaskCreation {
         let requestSpec = createStandaloneTaskRequest(
             name: name,
             cwd: cwd,
             worktree: worktree,
-            description: description
+            description: description,
+            parentTaskId: parentTaskId,
+            creationRequestId: creationRequestId
         )
         return try await request(
             WorkspaceTaskCreation.self,

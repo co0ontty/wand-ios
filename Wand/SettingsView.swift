@@ -14,11 +14,6 @@ struct SettingsView: View {
     @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
     @AppStorage(WandFeedback.storageKey) private var hapticEnabled = true
     @AppStorage("wand.trafficTimelineMode") private var trafficTimelineMode = "wifi"
-    @AppStorage(SpeechRecognitionMode.storageKey) private var speechModeRaw = SpeechRecognitionMode.local.rawValue
-    @State private var speechStatus: ServerSpeechStatus?
-    @State private var speechError: String?
-    @State private var speechChecking = false
-    @State private var speechGeneration = 0
 
     @State private var serverVersion: String?
     @State private var confirmDisconnect = false
@@ -40,7 +35,6 @@ struct SettingsView: View {
             Form {
                 settingsOverview
                 appearanceSection
-                voiceSection
                 featureSection
                 serverSection
                 Section("执行配置") { Button("模型分组") { showModelGroups = true } }
@@ -255,48 +249,6 @@ struct SettingsView: View {
         WandAppearanceMode.resolved(from: appearanceModeRaw)
     }
 
-    private var voiceSection: some View {
-        Section {
-            Picker("识别方式", selection: $speechModeRaw) {
-                Text("服务端识别").tag(SpeechRecognitionMode.server.rawValue)
-                Text("客户端本地识别").tag(SpeechRecognitionMode.local.rawValue)
-            }
-            if speechModeRaw == SpeechRecognitionMode.server.rawValue {
-                HStack {
-                    Label("当前 Wand 服务器", systemImage: "server.rack")
-                    Spacer()
-                    if speechChecking { ProgressView() }
-                }
-                Text(speechError ?? speechStatus?.reason ?? (speechStatus?.ready == true
-                    ? "已就绪 · Whisper \(speechStatus?.settings.model ?? "") · \(speechStatus?.runtime.backend.uppercased() ?? "")" : "尚未读取状态"))
-                    .font(.subheadline).foregroundStyle(speechError != nil || speechStatus?.ready == false ? Theme.danger : Theme.textSecondary)
-                Button("刷新语音状态") { Task { await refreshSpeechStatus() } }.disabled(speechChecking)
-                Link("管理服务端语音模型", destination: WandEndpoint.url(baseURL: serverURL, route: "/settings") ?? serverURL)
-            } else {
-                Label("iOS 系统端侧听写", systemImage: "waveform")
-                Button("打开系统设置") { openSystemSettings() }
-            }
-        } header: {
-            Text("语音输入")
-        } footer: {
-            Text(speechModeRaw == SpeechRecognitionMode.server.rawValue
-                 ? "松手后将音频发送到当前 Wand 服务器离线识别，最长 60 秒。支持 CPU、Mac Metal 与可选 CUDA；启用和模型下载需要管理权限。"
-                 : "仅使用设备端侧听写，不上传音频，也不自动转 Apple 在线识别。当前语言的端侧模型不可用时，请下载听写模型或选择服务端识别。")
-        }
-        .task(id: speechModeRaw) { if speechModeRaw == SpeechRecognitionMode.server.rawValue { await refreshSpeechStatus() } }
-    }
-
-    private func refreshSpeechStatus() async {
-        speechGeneration += 1
-        let generation = speechGeneration
-        speechChecking = true; speechError = nil
-        do {
-            let next = try await api.speechStatus()
-            if generation == speechGeneration && !Task.isCancelled { speechStatus = next }
-        } catch { if generation == speechGeneration && !Task.isCancelled { speechError = error.localizedDescription } }
-        if generation == speechGeneration { speechChecking = false }
-    }
-
     private var featureSection: some View {
         Section {
             Toggle("回复完成 / 等待授权通知", isOn: $store.notificationsEnabled)
@@ -430,7 +382,7 @@ struct SettingsView: View {
         if iosUpdate?.updateAvailable == true, iosUpdate?.otaReadyValue != true {
             return "已检测到新包，但还不能直接安装。请使用 HTTPS 连接，并由服务端提供已签名的安装包。"
         }
-        return "连接成功、回到前台及前台使用期间会自动检查更新。发现可安装版本后，点提示并在系统中确认即可，无需连接电脑。"
+        return "连接成功、回到前台及前台使用期间会自动检查更新。发现可安装版本后，点“安装更新”会直接打开安装页，在页面确认即开始安装，无需连接电脑。"
     }
 
     private func checkIosUpdate() async {

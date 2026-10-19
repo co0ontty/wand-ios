@@ -28,7 +28,9 @@ struct WandApp: App {
         WindowGroup {
             Group {
 #if DEBUG
-            if ProcessInfo.processInfo.environment["WAND_DEBUG_CHAT_DESIGN"] == "1" {
+            if let scenario = mobileOperationParityScenario() {
+                MobileOperationParityPreview(scenario: scenario)
+            } else if ProcessInfo.processInfo.environment["WAND_DEBUG_CHAT_DESIGN"] == "1" {
                 ChatDesignPreview()
             } else {
                 appContent

@@ -7,6 +7,35 @@ struct ConversationTarget: Codable, Equatable {
     var body: [String: Any] { ["taskId": taskId, "runId": runId] }
 }
 
+struct ConversationExecutionPreference: Equatable {
+    let provider: String
+    let engine: String?
+    let model: String
+    let thinkingEffort: String
+
+    var body: [String: Any] {
+        var result: [String: Any] = [
+            "provider": provider,
+            "model": model,
+            "thinkingEffort": thinkingEffort,
+        ]
+        if let engine { result["engine"] = engine }
+        return result
+    }
+}
+
+func conversationMessageBody(
+    input: String,
+    target: ConversationTarget?,
+    cwd: String?,
+    executionPreference: ConversationExecutionPreference?
+) -> [String: Any] {
+    var body: [String: Any] = ["input": input, "target": target?.body ?? NSNull()]
+    if let cwd, !cwd.isEmpty { body["cwd"] = cwd }
+    if target == nil, let executionPreference { body["executionPreference"] = executionPreference.body }
+    return body
+}
+
 struct ConversationLink: Decodable {
     let conversationId: String
     let taskId: String
@@ -164,6 +193,20 @@ struct ConversationInstance: Decodable, Identifiable {
         deleting = try c.decodeIfPresent(Bool.self, forKey: .deleting) ?? false
     }
     var leader: ContactTeamMember? { team?.members.first { $0.isLeader } }
+    var identityStatus: String {
+        if deleting { return "正在删除对话" }
+        if dissolvedAt != nil { return "群聊已解散" }
+        if unavailableReason?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { return "当前对象暂不可用" }
+        let runs = tasks.flatMap(\.runs)
+        if runs.contains(where: { $0.status == "awaiting_approval" }) { return "等待你的确认" }
+        if runs.contains(where: { $0.status == "waiting_user" }) { return "等待你的回复" }
+        if runs.contains(where: { $0.status == "running" || $0.status == "starting" }) { return "任务执行中" }
+        if runs.max(by: { $0.updatedAt < $1.updatedAt })?.status == "failed" { return "最近一轮失败" }
+        if kind == "group" {
+            return team.map { "\($0.members.count) 位员工 · 可派发任务" } ?? "群聊 · 可派发任务"
+        }
+        return "可以继续对话"
+    }
 }
 
 struct ConversationReceipt: Decodable {
@@ -223,6 +266,24 @@ struct ConversationGroupDraft: Equatable {
         ["employeeIds": employeeIds.sorted(), "templateId": templateId, "excludedMemberIds": excludedMemberIds.sorted(),
          "leaderId": leaderId, "name": name, "duties": duties]
     }
+    mutating func selectEmployee(_ employeeID: String, selected: Bool, employees: [SiliconEmployee], presets: [ContactTeam]) {
+        let existing = members(employees: employees, presets: presets)
+        if selected {
+            employeeIds.insert(employeeID)
+            excludedMemberIds.remove(employeeID)
+            for member in presets.first(where: { $0.id == templateId })?.members ?? [] where member.employeeId == employeeID {
+                excludedMemberIds.remove(member.id)
+            }
+        } else {
+            employeeIds.remove(employeeID)
+            for member in existing where member.employeeId == employeeID || member.id == employeeID {
+                excludedMemberIds.insert(member.id)
+                if leaderId == member.id { leaderId = "" }
+            }
+            if leaderId == employeeID { leaderId = "" }
+        }
+    }
+
     func members(employees: [SiliconEmployee], presets: [ContactTeam]) -> [ContactTeamMember] {
         var members = presets.first { $0.id == templateId }?.members.filter { !excludedMemberIds.contains($0.id) } ?? []
         for employee in employees where employeeIds.contains(employee.id) && !members.contains(where: { $0.employeeId == employee.id }) {

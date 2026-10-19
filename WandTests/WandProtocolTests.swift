@@ -331,23 +331,6 @@ final class WandProtocolTests: XCTestCase {
     }
 
     @MainActor
-    func testComposerVoiceCommitsOnlyToTheRevisionAtRecordingStart() {
-        let buffer = ComposerDraftState(sessionId: "one", api: WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil))
-        buffer.text = "original"
-        let started = buffer.textRevision
-        buffer.appendVoice("  ", ifUnchangedSince: started)
-        XCTAssertEqual(buffer.textRevision, started)
-        buffer.appendVoice("voice", ifUnchangedSince: started)
-        XCTAssertEqual(buffer.text, "original voice")
-        buffer.appendVoice("late", ifUnchangedSince: started)
-        XCTAssertEqual(buffer.text, "original voice")
-        let beforeSend = buffer.textRevision
-        buffer.accepted(buffer.submission())
-        buffer.appendVoice("late after submit", ifUnchangedSince: beforeSend)
-        XCTAssertEqual(buffer.text, "")
-    }
-
-    @MainActor
     func testSessionDraftControllerDoesNotKeepItsStoreAlive() {
         let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
         var owner: ChatStore? = ChatStore(sessionId: "one", api: api)
@@ -399,7 +382,6 @@ final class WandProtocolTests: XCTestCase {
             let surface = FocusComposerSurface(expanded: expanded, hasDraft: true, onFocus: {},
                 editor: { Text("继续补充要求").frame(height: 34) },
                 add: { Color.clear.frame(width: 48, height: 48) },
-                voice: { Color.clear.frame(width: 48, height: 48) },
                 send: { Color.clear.frame(width: CGFloat(actionCount) * 48, height: 48) },
                 settings: { ComposerSettingsStrip(model: "provider/very-long-model-name", mode: "全权限", thinking: "超高",
                     onModel: {}, onMode: {}, onThinking: {}) }, actionCount: actionCount)
@@ -407,7 +389,9 @@ final class WandProtocolTests: XCTestCase {
             for width: CGFloat in [320, 390, 768] {
                 let fitted = host.sizeThatFits(in: CGSize(width: width, height: 600))
                 XCTAssertLessThanOrEqual(fitted.width, width + 1)
-                let narrowActions = width == 320 && actionCount > 0
+                // Without the removed voice slot, one action still fits at 320pt;
+                // only the dual-action toolbar needs a second row.
+                let narrowActions = width == 320 && actionCount == 2
                 XCTAssertEqual(fitted.height, expanded ? (narrowActions ? 146 : 98) : 54, accuracy: 1,
                     "Only a narrow toolbar adds a settings row; no remaining-screen spacer")
             }
@@ -688,14 +672,27 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertNotNil(entry.startedAt)
     }
 
-    func testSessionActivityPermissionDetailTakesPriorityOverTaskTitle() {
+    func testSessionActivityDetailPrefersRealTaskContentOverStatusEcho() {
         let entry = SessionActivityAttributes.SessionEntry(
             id: "permission", title: "授权", providerRaw: "claude",
-            stateRaw: "permission", taskTitle: "不应覆盖授权提示", queuedCount: 0
+            stateRaw: "permission", taskTitle: "确认项目目录的访问权限", queuedCount: 0
         )
 
-        XCTAssertEqual(entry.primaryDetail, "需要你的确认后继续")
+        // 状态胶囊已经写着「待授权」；详情行留给用户真正要看的内容，不再复述一遍。
+        XCTAssertEqual(entry.primaryDetail, "确认项目目录的访问权限")
+        XCTAssertEqual(entry.focusDetail, "确认项目目录的访问权限")
         XCTAssertEqual(entry.providerText, "Claude")
+        XCTAssertNil(
+            SessionActivityAttributes.SessionEntry(
+                id: "permission", title: "授权", providerRaw: "claude",
+                stateRaw: "permission", taskTitle: nil, queuedCount: 0
+            ).focusDetail
+        )
+        // 真正的权限请求（要授权什么）比任务标题更靠前：这才是用户要决策的东西。
+        var escalation = entry
+        escalation.pendingPrompt = "写入文件 · src/index.ts"
+        XCTAssertEqual(escalation.primaryDetail, "写入文件 · src/index.ts")
+        XCTAssertEqual(escalation.focusDetail, "写入文件 · src/index.ts")
     }
 
     func testSessionTopicFieldsDecodeAndDriveDisplayTitle() throws {
@@ -817,11 +814,10 @@ final class WandProtocolTests: XCTestCase {
         )
     }
 
-    func testComposerExpansionFollowsFocusVoiceOrContentHeight() {
-        XCTAssertFalse(composerShouldExpand(focused: false, voiceMode: false))
-        XCTAssertTrue(composerShouldExpand(focused: true, voiceMode: false))
-        XCTAssertFalse(composerShouldExpand(focused: false, voiceMode: true), "Holding the idle input must not move its touch target")
-        XCTAssertTrue(composerShouldExpand(focused: false, voiceMode: false, contentNeedsSpace: true))
+    func testComposerExpansionFollowsFocusOrContentHeight() {
+        XCTAssertFalse(composerShouldExpand(focused: false))
+        XCTAssertTrue(composerShouldExpand(focused: true))
+        XCTAssertTrue(composerShouldExpand(focused: false, contentNeedsSpace: true))
     }
 
     func testComposerIgnoresExternalTextWhileImeIsComposing() {
@@ -922,13 +918,6 @@ final class WandProtocolTests: XCTestCase {
             now: "2026-09-13T11:41:20Z"
         )
         XCTAssertEqual(enriched.last?.completedAt, "2026-09-13T11:41:20Z")
-    }
-
-    func testVoiceTranscriptAppendsNormalizedText() {
-        XCTAssertEqual(appendingVoiceTranscript("  新内容\n", to: "已有内容  "), "已有内容 新内容")
-        XCTAssertEqual(appendingVoiceTranscript("  \n", to: "已有内容"), "已有内容")
-        XCTAssertEqual(appendingVoiceTranscript("新内容", to: "  "), "新内容")
-        XCTAssertEqual(appendingVoiceTranscript("新内容", to: "  已有内容  "), "  已有内容 新内容")
     }
 
     func testWindowedMessagesReplacePrefixWhenIncomingLeadingTurnIsTruncated() {

@@ -206,7 +206,8 @@ final class WorkspaceWorktreeTests: XCTestCase {
             provider: .qoder,
             prompt: "合并任务书"
         )
-        XCTAssertEqual(request.path, "/api/commands")
+        XCTAssertEqual(request.path, "/api/sessions")
+        XCTAssertEqual(request.body["kind"], .string("pty"))
         XCTAssertEqual(request.body["command"], .string("qodercli"))
         XCTAssertEqual(request.body["provider"], .string("qoder"))
         XCTAssertEqual(request.body["cwd"], .string("/repo"))
@@ -668,7 +669,10 @@ private final class MockWorktreeMergeService: WorkspaceServing {
         target: WorkspaceSessionTarget,
         binding: WorkspaceBinding,
         kind: WorkspaceSessionKind,
-        prompt: String?
+        prompt: String?,
+        mode: String?,
+        model: String?,
+        thinkingEffort: String?
     ) async throws -> SessionSnapshot {
         throw MockError.unavailable
     }
@@ -723,7 +727,9 @@ private final class MockWorktreeMergeService: WorkspaceServing {
         baseRef: String?,
         worktree: Bool? = nil,
         cwd: String? = nil,
-        description: String? = nil
+        description: String? = nil,
+        parentTaskId: String? = nil,
+        creationRequestId: String? = nil
     ) async throws -> WorkspaceTaskCreation {
         createTaskRequests.append(
             CreateTaskRequest(workspaceId: workspaceId, name: name, baseRef: baseRef, worktree: worktree, cwd: cwd)
@@ -738,7 +744,9 @@ private final class MockWorktreeMergeService: WorkspaceServing {
         name: String,
         cwd: String?,
         worktree: Bool?,
-        description: String?
+        description: String?,
+        parentTaskId: String?,
+        creationRequestId: String?
     ) async throws -> WorkspaceTaskCreation {
         standaloneTaskRequests.append(StandaloneTaskRequest(name: name, cwd: cwd, worktree: worktree))
         let directory = cwd?.isEmpty == false ? cwd! : "/scratch"

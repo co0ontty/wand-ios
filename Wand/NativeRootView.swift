@@ -49,7 +49,6 @@ struct NativeRootView: View {
     @State private var showMissions = false
     @AppStorage(HomeListMode.storageKey) private var homeListModeRaw = HomeListMode.im.rawValue
     @State private var isSelectingHome = false
-    @State private var boardRefreshNonce = 0
     @State private var serverUpdate: ServerUpdateInfo?
     @State private var dismissedUpdateVersion: String?
     @State private var updateBannerMessage: String?
@@ -81,8 +80,12 @@ struct NativeRootView: View {
     /// 把 navigationDestination(isPresented:) 推进半截时再次改写 selection。
     @State private var openingSessionID: String?
     @State private var selectedWorkspaceTask: WorkspaceTaskSelection?
-    @State private var presentNewTask = false
-    @State private var presentVoiceCall = false
+    @State private var presentNewConversation = false
+    @State private var newConversationSession: SessionSnapshot?
+    @State private var pendingNewConversationCwd = ""
+    @State private var pendingNewConversationWorkspaceID: String?
+    @State private var pendingNewConversationTaskID: String?
+    @State private var initialNewConversationEmployeeID: String?
     @StateObject private var workspaceStore: WorkspaceStore
     @StateObject private var contactsStore: ContactsStore
     @StateObject private var conversations: ConversationStore
@@ -162,9 +165,24 @@ struct NativeRootView: View {
                 .environmentObject(store)
                 .environmentObject(appUpdater)
         }
-        .fullScreenCover(isPresented: $presentVoiceCall) {
-            VoiceCallLaunchView(api: api, serverID: serverID)
-                .environmentObject(store)
+        .sheet(isPresented: $presentNewConversation, onDismiss: {
+            if let snapshot = newConversationSession {
+                newConversationSession = nil
+                openCreatedConversation(snapshot)
+            }
+        }) {
+            NewConversationView(
+                api: api,
+                serverID: profile.connectionIdentity,
+                initialCwd: pendingNewConversationCwd,
+                workspaceID: pendingNewConversationWorkspaceID,
+                initialWorkspaceTaskID: pendingNewConversationTaskID,
+                initialEmployeeID: initialNewConversationEmployeeID
+            ) { snapshot in
+                newConversationSession = snapshot
+                presentNewConversation = false
+            }
+            .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: Binding(get: { selectedContactEmployeeID != nil }, set: { if !$0 { selectedContactEmployeeID = nil } })) {
             if let employeeID = selectedContactEmployeeID {
@@ -299,11 +317,15 @@ struct NativeRootView: View {
         return [
             WandKeyboardShortcutAction(
                 id: "new-task",
-                title: "新建任务",
+                title: "新建对话",
                 key: "n",
                 modifiers: .command
             ) {
-                presentNewTask = true
+                pendingNewConversationCwd = ""
+                pendingNewConversationWorkspaceID = nil
+                pendingNewConversationTaskID = nil
+                initialNewConversationEmployeeID = nil
+                presentNewConversation = true
             },
             WandKeyboardShortcutAction(
                 id: "show-settings",
@@ -450,24 +472,14 @@ struct NativeRootView: View {
                     if homeListMode == .sessions || showingBoard {
                     HomeOverviewBar(
                         serverDisplayName: profile.displayName,
-                        mode: homeListMode,
                         showNewTask: !showingBoard,
-                        canSelect: !showingBoard && !workspaceStore.taskGroups.isEmpty,
-                        onNewTask: { presentNewTask = true },
-                        onRefresh: {
-                            if showingBoard {
-                                boardRefreshNonce += 1
-                            } else {
-                                Task {
-                                    await workspaceStore.loadTaskGroups(force: true)
-                                    await workspaceStore.loadWorkspaceIndex()
-                                }
-                            }
+                        onNewTask: {
+                            pendingNewConversationCwd = ""
+                            pendingNewConversationWorkspaceID = nil
+                            pendingNewConversationTaskID = nil
+                            initialNewConversationEmployeeID = nil
+                            presentNewConversation = true
                         },
-                        onStartSelection: {
-                            isSelectingHome = true
-                        },
-                        onOpenMissions: { showMissions = true },
                         onOpenSettings: { showSettings = true },
                         onSwitchServer: {
                             NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
@@ -483,6 +495,13 @@ struct NativeRootView: View {
                     } else if homeListMode == .contacts {
                         ContactsView(api: api, store: contactsStore, onBack: { setHomeListMode(.im) },
                             onOpenSession: { snapshot in openWorkspaceStandaloneSession(snapshot.id) }, onOpenRun: openTeamRun,
+                            onNewConversation: { employeeID in
+                                pendingNewConversationCwd = ""
+                                pendingNewConversationWorkspaceID = nil
+                                pendingNewConversationTaskID = nil
+                                initialNewConversationEmployeeID = employeeID
+                                presentNewConversation = true
+                            },
                             onOpenConversation: openConversation, onTeamConversation: openPresetConversation, embedded: true)
                             .transition(.opacity)
                     } else if showingBoard {
@@ -492,8 +511,7 @@ struct NativeRootView: View {
                             onOpenSession: openSessionFromMissions,
                             onOpenBoundSession: openBoardBoundSession,
                             onOpenTeamRun: openTeamRun,
-                            embedded: true,
-                            refreshNonce: boardRefreshNonce
+                            embedded: true
                         )
                     } else {
                         WorkspaceListView(
@@ -550,11 +568,16 @@ struct NativeRootView: View {
                                 )
                             },
                             onRequestNewSession: { workspace, task in
+                                pendingNewConversationCwd = task.worktree?.path ?? workspace.cwd
+                                pendingNewConversationWorkspaceID = workspace.id
+                                pendingNewConversationTaskID = task.id
+                                initialNewConversationEmployeeID = nil
+                                presentNewConversation = true
                                 clearCompletionIntent()
                                 selectedSessionID = nil
                                 selectedSnapshot = nil
                                 selectedTaskSessionId = nil
-                                selectedTaskShowsPicker = true
+                                selectedTaskShowsPicker = false
                                 selectedWorkspaceTask = WorkspaceTaskSelection(
                                     workspace: workspace,
                                     task: task
@@ -575,7 +598,7 @@ struct NativeRootView: View {
                                     selectedWorkspaceTask = nil
                                 }
                             },
-                            requestNewTask: $presentNewTask,
+                            requestNewTask: Binding(get: { presentNewConversation }, set: { presentNewConversation = $0 }),
                             employees: homeEmployees,
                             teams: homeTeams,
                             onOpenTeamRun: { runId in
@@ -589,9 +612,6 @@ struct NativeRootView: View {
                 .animation(reducedMotion ? nil : WandMotion.stateSwap, value: homeListMode)
                 .safeAreaInset(edge: .bottom) {
                     HStack {
-                        Button { presentVoiceCall = true } label: {
-                            Image(systemName: "phone").frame(width: 48, height: 48)
-                        }.accessibilityLabel("语音通话，选择员工与工作目录")
                         Spacer(minLength: 8)
                         HomeMenuPill(mode: homeListMode, onMode: setHomeListMode) {
                             guard !contactsStore.busy, !homeMutationBusy else { return }
@@ -622,7 +642,14 @@ struct NativeRootView: View {
                 onExplicitOpen: openCompletionIntent,
                 onCompletionVisible: acknowledgeCompletionIfViewed,
                 onOpenTeamRun: openTeamRun,
-                onPickerRequestConsumed: { selectedTaskShowsPicker = false }
+                onPickerRequestConsumed: { selectedTaskShowsPicker = false },
+                onOpenParallel: { showMissions = true },
+                onOpenTaskBoard: { selectedWorkspaceTask = nil; setHomeListMode(.board) },
+                onOpenChat: { selectedWorkspaceTask = nil; setHomeListMode(.im) },
+                onSessionPresentationChanged: { id in
+                    guard selectedWorkspaceTask?.task.id == selection.task.id else { return }
+                    selectedTaskSessionId = id
+                }
             )
             .id(selection.task.id)
         } else if let session = selectedSnapshot {
@@ -752,7 +779,7 @@ struct NativeRootView: View {
         case .newSession:
             guard quickActions.consume(where: { $0 == pending }) != nil else { return }
             showTaskRoot()
-            presentNewTask = true
+            presentNewConversation = true
         case .openSession(let id, _):
             guard quickActionRequiresRootSessionRouting(
                 pending,
@@ -923,7 +950,22 @@ struct NativeRootView: View {
     }
 
     private var rootModalVisible: Bool {
-        showSettings || showMissions || presentNewTask || homeModalVisible || selectedContactEmployeeID != nil
+        showSettings || showMissions || presentNewConversation || homeModalVisible || selectedContactEmployeeID != nil
+    }
+
+    private func openCreatedConversation(_ snapshot: SessionSnapshot) {
+        pendingNewConversationCwd = ""
+        pendingNewConversationWorkspaceID = nil
+        pendingNewConversationTaskID = nil
+        selectedWorkspaceTask = nil
+        selectedConversationID = nil
+        selectedContactRunID = nil
+        selectedSessionID = snapshot.id
+        selectedSnapshot = snapshot
+        openingSessionID = nil
+        openCompletionIntent(snapshot.id)
+        SessionPresenceController.shared.sync(snapshot: snapshot, serverID: serverID)
+        Task { await workspaceStore.loadWorkspaceIndex() }
     }
 
     private func openConversation(_ id: String) {
@@ -1237,64 +1279,33 @@ struct NativeRootView: View {
 /// 对齐 Android HomeOverviewCard：服务器名 + 会话/任务模式芯片 + 新建 + 溢出菜单。
 private struct HomeOverviewBar: View {
     let serverDisplayName: String
-    let mode: HomeListMode
     let showNewTask: Bool
-    let canSelect: Bool
     let onNewTask: () -> Void
-    let onRefresh: () -> Void
-    let onStartSelection: () -> Void
-    let onOpenMissions: () -> Void
     let onOpenSettings: () -> Void
     let onSwitchServer: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(serverDisplayName.isEmpty ? "当前服务器" : serverDisplayName)
-                .font(.wand(size: 15, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
-                .lineLimit(1)
+            Button(action: onSwitchServer) {
+                HStack(spacing: 8) {
+                    WandBrandMark(size: 26)
+                    Text(serverDisplayName.isEmpty ? "当前服务器" : serverDisplayName)
+                        .font(.subheadline.weight(.semibold)).lineLimit(1)
+                }.frame(minHeight: 44).contentShape(Rectangle())
+            }.buttonStyle(WandQuietButtonStyle()).accessibilityLabel("切换服务器")
             Spacer(minLength: 8)
             if showNewTask {
                 Button(action: onNewTask) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(.white)
-                        .frame(width: 30, height: 30)
-                        .background(Circle().fill(Theme.brand))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("新建终端或任务")
+                    Image(systemName: "plus").frame(width: 44, height: 44)
+                }.buttonStyle(WandQuietButtonStyle()).accessibilityLabel("新建终端或任务")
             }
             Menu {
-                if canSelect {
-                    Button(action: onStartSelection) {
-                        Label("选择多项", systemImage: "checkmark.circle")
-                    }
-                }
-                Button(action: onRefresh) {
-                    Label(mode == .board ? "刷新任务" : "刷新会话", systemImage: "arrow.clockwise")
-                }
-                Button(action: onOpenMissions) {
-                    Label("并行任务", systemImage: "square.stack.3d.up")
-                }
-                Button(action: onOpenSettings) {
-                    Label("设置", systemImage: "gearshape")
-                }
-                Button(action: onSwitchServer) {
-                    Label("切换服务器", systemImage: "server.rack")
-                }
+                Button("设置", systemImage: "gearshape", action: onOpenSettings)
             } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
-            }
-            .accessibilityLabel("更多选项")
+                Image(systemName: "ellipsis").frame(width: 44, height: 44).contentShape(Rectangle())
+            }.accessibilityLabel("更多选项")
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 12).padding(.vertical, 4)
     }
 }
 
@@ -1333,7 +1344,8 @@ private struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
         NavigationSplitView {
             sidebar()
         } detail: {
-            detail(selection ?? parents.last)
+            NavigationStack { detail(selection ?? parents.last) }
+                .id(selection ?? parents.last)
         }
         .navigationSplitViewStyle(.balanced)
     }

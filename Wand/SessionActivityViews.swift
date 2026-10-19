@@ -4,6 +4,12 @@ import SwiftUI
 /// describe content rhythm only, shared by WidgetKit and the native layout tests.
 enum ActivityLayout {
     static let inset: CGFloat = 16
+    /// The system already reserves room around the expanded island, so its content only needs a
+    /// single rhythm; two stacked 16pt paddings pushed the card into the camera cutout.
+    static let expandedInset: CGFloat = 12
+    /// Secondary rows inside the island are read, not aimed at: 32pt keeps them tappable without
+    /// spending the height a full 44pt target would cost.
+    static let islandRow: CGFloat = 32
     static let group: CGFloat = 12
     static let related: CGFloat = 4
     static let identity: CGFloat = 18
@@ -35,6 +41,11 @@ enum ActivityPresentation {
     static func detail(_ entry: SessionActivityAttributes.SessionEntry, isStale: Bool) -> String {
         if isStale { return "打开 Wand 重新连接" }
         return entry.primaryDetail
+    }
+    /// Island variant: the capsule already carries the status, so this is nil unless there is
+    /// real task content worth a second line.
+    static func focusDetail(_ entry: SessionActivityAttributes.SessionEntry, isStale: Bool) -> String? {
+        isStale ? nil : entry.focusDetail
     }
 }
 
@@ -109,15 +120,35 @@ struct ActivityExpandedMetric: View {
     let state: SessionActivityAttributes.ContentState
     let isStale: Bool
     var body: some View {
+        // Duration stays a supporting fact: bounded text, and it only appears when a single session
+        // is running. Attention states and multi-session headers spend that width on the capsule.
         if !isStale, state.sessions.count == 1, let entry = state.primarySession,
            entry.isResponding, let started = entry.startedAt {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Circle().fill(ActivityPresentation.accent).frame(width: 5, height: 5)
-                Text(started, style: .timer).font(.caption.weight(.medium)).monospacedDigit()
-                    .foregroundStyle(ActivityPresentation.accent).lineLimit(1).frame(maxWidth: 72, alignment: .trailing)
+                ActivityElapsedLabel(startedAt: started)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(ActivityPresentation.accent)
+                    .frame(maxWidth: 58, alignment: .trailing)
             }.accessibilityLabel("本轮运行时长")
         } else {
             ActivityStateLabel(state: state, isStale: isStale)
+        }
+    }
+}
+
+/// Bounded elapsed time shared by the island and the lock screen. A raw `Text(style: .timer)`
+/// keeps growing (238:58:42) and steals width from the status next to it, so the system timer is
+/// only used while it still fits (`59:59`). Past an hour the bounded label takes over; the host
+/// refreshes content at least once a minute, so the switch lands on the next update.
+struct ActivityElapsedLabel: View {
+    let startedAt: Date
+    var body: some View {
+        let elapsed = Date().timeIntervalSince(startedAt)
+        if elapsed < 3_600 {
+            Text(startedAt, style: .timer).monospacedDigit().lineLimit(1)
+        } else {
+            Text(activityElapsedText(elapsed)).monospacedDigit().lineLimit(1)
         }
     }
 }
@@ -139,15 +170,24 @@ private struct ActivityPrimaryLink: View {
     let entry: SessionActivityAttributes.SessionEntry
     let isStale: Bool
     let compact: Bool
+    /// Island rows skip the duplicated status sentence: a title plus a capsule is the whole budget.
+    private var detail: String? {
+        compact
+            ? ActivityPresentation.focusDetail(entry, isStale: isStale)
+            : ActivityPresentation.detail(entry, isStale: isStale)
+    }
     var body: some View {
         Link(destination: entry.destinationURL) {
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: ActivityLayout.related) {
-                    Text(entry.title).font(.headline.weight(.semibold)).foregroundStyle(.white)
+                    Text(entry.title).font(compact ? .subheadline.weight(.semibold) : .headline.weight(.semibold))
+                        .foregroundStyle(.white)
                         .lineLimit(compact ? 1 : 2).fixedSize(horizontal: false, vertical: true).privacySensitive()
-                    Text(ActivityPresentation.detail(entry, isStale: isStale))
-                        .font(compact ? .caption : .subheadline).foregroundStyle(ActivityPresentation.quiet)
-                        .lineLimit(compact ? 1 : 2).fixedSize(horizontal: false, vertical: true).privacySensitive()
+                    if let detail {
+                        Text(detail)
+                            .font(compact ? .caption : .subheadline).foregroundStyle(ActivityPresentation.quiet)
+                            .lineLimit(compact ? 1 : 2).fixedSize(horizontal: false, vertical: true).privacySensitive()
+                    }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Color.white.opacity(0.36)).accessibilityHidden(true)
@@ -161,8 +201,8 @@ private struct ActivityOtherSessions: View {
     let state: SessionActivityAttributes.ContentState
     let isStale: Bool
     var body: some View {
-        if state.sessions.count > 1, let primary = state.primarySession {
-            let others = state.sessions.filter { !($0.id == primary.id && $0.serverID == primary.serverID) }
+        let others = state.activeSecondarySessions
+        if !others.isEmpty {
             HStack(spacing: 8) {
                 if let secondary = others.min(by: { $0.priority < $1.priority }) {
                     Link(destination: secondary.destinationURL) {
@@ -170,7 +210,13 @@ private struct ActivityOtherSessions: View {
                             Circle().fill(isStale ? ActivityPresentation.quiet : ActivityPresentation.tint(secondary.stateRaw))
                                 .frame(width: 5, height: 5)
                             Text(secondary.title).lineLimit(1).truncationMode(.middle).privacySensitive()
-                        }.frame(maxWidth: .infinity, alignment: .leading).frame(minHeight: ActivityLayout.touch)
+                            // One extra session keeps its own state; listing it without it looks identical
+                            // to the primary row and hides whether the other session is the one waiting.
+                            if secondary.needsAttention {
+                                Text(secondary.statusText).lineLimit(1)
+                                    .foregroundStyle(ActivityPresentation.tint(secondary.stateRaw))
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading).frame(minHeight: ActivityLayout.islandRow)
                     }.buttonStyle(.plain).foregroundStyle(ActivityPresentation.quiet)
                         .accessibilityLabel("另一个会话，\(secondary.title)，\(secondary.statusText)")
                 }
@@ -178,7 +224,7 @@ private struct ActivityOtherSessions: View {
                     HStack(spacing: 3) {
                         Text("全部 \(state.sessions.count)").monospacedDigit()
                         Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
-                    }.frame(minHeight: ActivityLayout.touch)
+                    }.frame(minHeight: ActivityLayout.islandRow)
                 }.buttonStyle(.plain).foregroundStyle(ActivityPresentation.accent)
                     .fixedSize(horizontal: true, vertical: false)
                     .accessibilityLabel("查看全部 \(state.sessions.count) 个会话")
@@ -195,7 +241,7 @@ struct ActivityExpandedSummary: View {
             if let primary = state.primarySession {
                 ActivityPrimaryLink(entry: primary, isStale: isStale, compact: true)
             }
-            if state.sessions.count > 1 {
+            if !state.activeSecondarySessions.isEmpty {
                 ActivityOtherSessions(state: state, isStale: isStale)
             }
         }.opacity(isStale ? 0.72 : 1)
@@ -213,7 +259,7 @@ struct ActivityLockScreenView: View {
                 ActivityPrimaryLink(entry: primary, isStale: isStale, compact: false)
                 metadata(primary)
             }
-            if state.sessions.count > 1 {
+            if !state.activeSecondarySessions.isEmpty {
                 Rectangle().fill(Color.white.opacity(0.1)).frame(height: 0.5).accessibilityHidden(true)
                 ActivityOtherSessions(state: state, isStale: isStale)
             }
@@ -245,7 +291,7 @@ struct ActivityLockScreenView: View {
             Text(entry.providerText).lineLimit(1)
             if entry.isResponding, !isStale, let started = entry.startedAt {
                 Text("·").accessibilityHidden(true)
-                Text(started, style: .timer).monospacedDigit().lineLimit(1)
+                ActivityElapsedLabel(startedAt: started)
             }
             if entry.queuedCount > 0 && !entry.isFinished {
                 Text("·").accessibilityHidden(true)

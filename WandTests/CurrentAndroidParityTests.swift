@@ -12,6 +12,8 @@ private func parityReceipt(_ state: String = "accepted", id: String = "req", con
 @MainActor
 private final class ConversationFake: ConversationService {
     var rows: [ConversationInstance] = []
+    var people: [SiliconEmployee] = []
+    var teams: [ContactTeam] = []
     var detail = try! parityDecode(ConversationInstance.self, #"{"id":"dm_e","kind":"dm","title":"员工"}"#)
     var posts: [(String, [String: Any])] = []
     var pending: [String] = []
@@ -21,8 +23,8 @@ private final class ConversationFake: ConversationService {
     var suspendPost = false
     var suspendLoads = false
     var loads: [CheckedContinuation<ConversationInstance, Error>] = []
-    func listContactEmployees() async throws -> [SiliconEmployee] { [] }
-    func listContactTeams() async throws -> [ContactTeam] { [] }
+    func listContactEmployees() async throws -> [SiliconEmployee] { people }
+    func listContactTeams() async throws -> [ContactTeam] { teams }
     func listWorkspaces() async throws -> [Workspace] { [] }
     func conversations() async throws -> [ConversationInstance] { rows }
     func conversation(_ id: String) async throws -> ConversationInstance {
@@ -196,6 +198,26 @@ private struct MessageImageReplayFixture: View {
     }
 }
 
+private struct AppleNamedIdentityFixture: View {
+    private var metrics = ChatIdentityLayoutMetrics()
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                Text("首条消息从身份与按钮下方开始。长姓名、当前状态和右侧操作分别可读，不靠打开菜单辨认对象。")
+                    .font(.body).padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            }.padding(.top, metrics.clearance).clipped()
+            Text("隔离布局夹具 · 不发送消息").font(.caption).padding(16)
+        }.background(Theme.background).overlay(alignment: .top) {
+            ZStack(alignment: .top) {
+                TopChatCompanion(title: "小试 · 相同头像的长名称项目协作负责人", status: "等待你的确认") { size in
+                    WorkingAvatar(id: "e_wand_default", name: "小试", avatar: "plush-cat:v1:silver", size: size)
+                }
+                FloatingChatControls(onBack: {}) { FloatingChatIcon(symbol: "folder"); FloatingChatIcon(symbol: "ellipsis") }
+            }
+        }
+    }
+}
+
 @MainActor
 final class CurrentAndroidParityTests: XCTestCase {
     private func settle(_ predicate: @escaping () -> Bool) async {
@@ -239,6 +261,15 @@ final class CurrentAndroidParityTests: XCTestCase {
         let d = defaults(), one = ConversationRequestLedger(baseURL: parityURL, defaults: d), two = ConversationRequestLedger(baseURL: URL(string: "http://127.0.0.1:10")!, defaults: d)
         let first = try await one.reserve(fingerprint: "a"), second = try await two.reserve(fingerprint: "a")
         XCTAssertNotEqual(first, second)
+    }
+    func testConversationMessagePreferenceIsExplicitAndNeverTargetsExistingRuns() {
+        let preference = ConversationExecutionPreference(provider: "pi", engine: "sdk", model: "model-x", thinkingEffort: "pi:high")
+        let body = conversationMessageBody(input: "work", target: nil, cwd: nil, executionPreference: preference)
+        XCTAssertEqual(body["executionPreference"] as? [String: Any] as? NSDictionary,
+                       ["provider": "pi", "engine": "sdk", "model": "model-x", "thinkingEffort": "pi:high"] as NSDictionary)
+        XCTAssertNil(conversationMessageBody(input: "work", target: nil, cwd: nil, executionPreference: nil)["executionPreference"])
+        let target = ConversationTarget(taskId: "task", runId: "run")
+        XCTAssertNil(conversationMessageBody(input: "work", target: target, cwd: nil, executionPreference: preference)["executionPreference"])
     }
     func testIMSendOwnsFrozenDraftAndAckCannotClearNewerInput() async throws {
         let fake = ConversationFake(); fake.suspendPost = true
@@ -309,6 +340,99 @@ final class CurrentAndroidParityTests: XCTestCase {
         let group = try parityDecode(ConversationInstance.self, #"{"id":"g","kind":"group","dissolvedAt":"now"}"#)
         XCTAssertTrue(ConversationListTier.dm.contains(dm)); XCTAssertFalse(ConversationListTier.all.contains(group)); XCTAssertTrue(ConversationListTier.dissolved.contains(group))
     }
+    func testToolCallsWithOnlyInputRemainInspectableDuringExecutionAndAfterMissingReceipt() {
+        let input: [String: JSONValue] = ["query": .string("fixture query")]
+        let running = ToolCallPresentation(name: "mcp__search", input: input, result: nil, sessionRunning: true)
+        XCTAssertTrue(running.hasBody); XCTAssertTrue(running.hasInput); XCTAssertEqual(running.state, .running)
+        let stopped = ToolCallPresentation(name: "mcp__search", input: input, result: nil, sessionRunning: false)
+        XCTAssertTrue(stopped.hasBody); XCTAssertEqual(stopped.state, .unreturned)
+        XCTAssertEqual(stopped.state.label, "未返回")
+        XCTAssertFalse(ToolCallPresentation(name: "empty", input: [:], result: nil, sessionRunning: false).hasBody)
+        XCTAssertFalse(ToolCallPresentation(name: "metadata", input: ["__wandToolPreview": .string("preview")], result: nil, sessionRunning: false).hasBody)
+    }
+    func testEmptyResultFailureAndTaskSnapshotAreDistinctFromPending() {
+        let empty = ToolResultInfo(toolUseId: "t", text: "", isError: false, truncated: false)
+        XCTAssertEqual(ToolCallPresentation(name: "tool", input: [:], result: empty, sessionRunning: true).state, .completed)
+        XCTAssertTrue(ToolCallPresentation(name: "tool", input: [:], result: empty, sessionRunning: false).hasBody)
+        let failed = ToolResultInfo(toolUseId: "t", text: "failed", isError: true, truncated: false)
+        XCTAssertEqual(ToolCallPresentation(name: "tool", input: [:], result: failed, sessionRunning: true).state, .failed)
+        let update = ToolCallPresentation(name: "provider_operation", input: ["__wandTasks": .array([])], result: nil, sessionRunning: true)
+        XCTAssertEqual(update.state, .completed, "Protocol task-list snapshots do not wait for a nonexistent result")
+        XCTAssertEqual(ToolCallPresentation(name: "TodoWrite", input: [:], result: nil, sessionRunning: true).state, .completed)
+        XCTAssertEqual(ToolCallPresentation(name: "tool", input: ["status": .string("done")], result: nil, sessionRunning: true).state, .running)
+    }
+    func testNewTaskDispatchDoesNotOverwriteContactsDraftAndKeepsSameScopedOwner() {
+        let cache = TeamDispatchStoreCache()
+        let contacts = cache.store(api: api())
+        let creation = cache.store(api: api(), scope: "new-task")
+        contacts.note = "保留通讯录原草稿"
+        creation.note = "新建任务的独立草稿"
+        XCTAssertFalse(contacts === creation)
+        XCTAssertTrue(creation === cache.store(api: api(), scope: "new-task"))
+        XCTAssertEqual(contacts.note, "保留通讯录原草稿")
+    }
+    func testUnknownCreationRecoveryBelongsToWorkspaceOwnerUntilExplicitAcknowledgement() {
+        let store = WorkspaceStore(api: api(), serverID: UUID().uuidString)
+        store.markUnconfirmedTaskCreation(prompt: "原始草稿，不自动重发")
+        XCTAssertTrue(store.taskCreationUnconfirmed)
+        XCTAssertEqual(store.unconfirmedCreationPrompt, "原始草稿，不自动重发")
+        store.markUnconfirmedTaskCreation()
+        XCTAssertEqual(store.unconfirmedCreationPrompt, "原始草稿，不自动重发")
+        store.acknowledgeUnconfirmedTaskCreation()
+        XCTAssertFalse(store.taskCreationUnconfirmed)
+        XCTAssertNil(store.unconfirmedCreationPrompt)
+    }
+    func testOfflineReplayUsesOneScenarioGateForAppAndStartupServices() {
+        for scenario in ["tools", "task", "new"] {
+            XCTAssertEqual(mobileOperationParityScenario(["WAND_DEBUG_MOBILE_PARITY": scenario]), scenario)
+        }
+        XCTAssertNil(mobileOperationParityScenario([:]))
+        XCTAssertNil(mobileOperationParityScenario(["WAND_DEBUG_MOBILE_PARITY": "unknown"]))
+    }
+    func testReadOnlyChoiceIsNotAnEnabledNoOp() {
+        XCTAssertTrue(SearchableChoiceItem(id: "active", label: "可选").enabled)
+        XCTAssertFalse(SearchableChoiceItem(id: "locked", label: "已固定", enabled: false).enabled)
+    }
+    func testActivityAutoExpansionRequiresLatestRunningGroupAndRespectsViewport() {
+        for newest in [false, true] { for running in [false, true] { for allowed in [false, true] {
+            XCTAssertEqual(activityShouldAutoExpand(newest: newest, running: running, timelineEnabled: allowed), newest && running && allowed)
+        } } }
+        XCTAssertEqual(activityPanelHeight(viewportHeight: 300), 120)
+        XCTAssertEqual(activityPanelHeight(viewportHeight: 600), 200)
+        XCTAssertEqual(activityPanelHeight(viewportHeight: 1200), 240)
+        XCTAssertEqual(activityPanelHeight(viewportHeight: 0), 240)
+    }
+    func testPendingFullToolFetchCannotFabricateSuccessOrEraseKnownResult() throws {
+        let pending = try parityDecode(ToolContentResponse.self, #"{"tool_use_id":"t","input":{"query":"full"},"content":"","pending":true,"resultAvailable":false}"#)
+        XCTAssertFalse(pending.resultAvailable)
+        let legacy = try parityDecode(ToolContentResponse.self, #"{"tool_use_id":"t","input":{},"content":""}"#)
+        XCTAssertTrue(legacy.resultAvailable, "Old servers without flags retain their documented result response")
+        let store = ChatStore(sessionId: UUID().uuidString, api: api(), drafts: SessionDraftStore())
+        defer { store.composerDraft.retire(); store.shutdown() }
+        store.messages = [try parityDecode(ConversationTurn.self, #"{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"lookup","input":{"query":"short"}},{"type":"tool_result","tool_use_id":"t","content":"keep known output"}]}"#)]
+        store.applyLoadedToolContent(pending)
+        guard case .toolResult(_, let text, _, _, _, _, _) = store.messages[0].content[1] else { return XCTFail("Keep the actual result") }
+        XCTAssertEqual(text, "keep known output")
+        guard case .toolUse(_, _, _, let input, _) = store.messages[0].content[0] else { return XCTFail("Keep invocation") }
+        XCTAssertEqual(input["query"]?.stringValue, "full")
+    }
+    func testTerminalShortcutOrderMatchesAndroidWithoutChangingBytes() {
+        XCTAssertEqual(TerminalShortcuts.defaults.map(\.id),
+            ["enter", "arrow-up", "tab", "escape", "ctrl-c", "shift-tab", "arrow-left", "arrow-right", "arrow-down"])
+        XCTAssertEqual(TerminalShortcuts.defaults.first?.bytes, "\r")
+        XCTAssertTrue(TerminalShortcuts.defaults.allSatisfy { !$0.bytes.isEmpty })
+    }
+    func testFilesBackNavigatesParentAndRootShortcutKeepsOwner() async {
+        let store = SessionFilesStore(service: FilesFake())
+        store.show(cwd: "/work")
+        store.requestDirectory("/work/nested")
+        store.requestBack()
+        XCTAssertEqual(store.directory, "/work"); XCTAssertTrue(store.open)
+        store.requestDirectory("/elsewhere")
+        store.requestDirectory(store.root)
+        XCTAssertEqual(store.directory, "/work"); XCTAssertTrue(store.open)
+        store.requestBack(); XCTAssertFalse(store.open)
+    }
     func testFilesAreEditableOnlyWithTextAndCASMetadata() {
         XCTAssertTrue(FilesFake().preview.canEdit)
         XCTAssertFalse(SessionFilePreview(path: "/a", name: "a", kind: "text", size: nil, mtime: nil, content: "x").canEdit)
@@ -357,7 +481,7 @@ final class CurrentAndroidParityTests: XCTestCase {
     }
     func testWorkspaceWandAgentAlwaysCreatesStructuredAndNeverPretendsToBePTY() {
         let request = workspaceTaskWindowRequest(target: .wandAgent, binding: WorkspaceBinding(workspaceId: "w", workspaceTaskId: "t", cwd: "/work"), kind: .pty)
-        XCTAssertEqual(request.path, "/api/structured-sessions"); XCTAssertEqual(request.body["provider"], .string("pi")); XCTAssertEqual(request.body["engine"], .string("sdk"))
+        XCTAssertEqual(request.path, "/api/sessions"); XCTAssertEqual(request.body["kind"], .string("structured")); XCTAssertEqual(request.body["provider"], .string("pi")); XCTAssertEqual(request.body["engine"], .string("sdk"))
     }
     func testDirectoryChangeRequiresBlankUnlockedUnboundSession() throws {
         let empty = try parityDecode(SessionSnapshot.self, #"{"id":"s","sessionKind":"structured","status":"idle"}"#)
@@ -521,6 +645,28 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertFalse(try source("NativeRootView.swift").contains(".toolbar(.visible, for: .navigationBar)"), "The navigation parent must not override chat's floating chrome")
         XCTAssertTrue(try source("SessionDestinationView.swift").contains(".toolbar(showsNavigationChrome ? .visible : .automatic, for: .navigationBar)"))
         XCTAssertTrue(try source("WorkspaceTaskView.swift").contains(".toolbar(.visible, for: .navigationBar)"))
+        for name in ["ChatView.swift", "SessionDestinationView.swift", "WorkspaceTaskView.swift", "ConversationViews.swift"] {
+            let page = try source(name)
+            XCTAssertFalse(page.contains("sessionStrip("), name)
+            XCTAssertFalse(page.contains("TaskSessionTabStrip"), name)
+            XCTAssertFalse(page.contains("taskSessionSwipeTarget"), name)
+        }
+        XCTAssertTrue(try source("ChatView.swift").contains("SessionBackSwipeEnabler()"))
+        XCTAssertTrue(try source("SessionDestinationView.swift").contains("SessionBackSwipeEnabler()"))
+        XCTAssertTrue(try source("ConversationViews.swift").contains("SessionBackSwipeEnabler()"))
+        XCTAssertTrue(sessionSwipeShouldGoBack(startX: 12, translation: CGSize(width: 88, height: 6)))
+        XCTAssertFalse(sessionSwipeShouldGoBack(startX: 12, translation: CGSize(width: -88, height: 6)))
+        XCTAssertFalse(sessionSwipeShouldGoBack(startX: 160, translation: CGSize(width: 88, height: 6)))
+        XCTAssertFalse(sessionSwipeShouldGoBack(startX: 12, translation: CGSize(width: 40, height: 90)))
+    }
+
+    func testWorkspaceTaskInlineSessionSelectionStaysSynchronizedAndSheetsBlockCompletionAck() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Wand/WorkspaceTaskView.swift"), encoding: .utf8)
+
+        XCTAssertTrue(source.contains(".onChange(of: store.visibleSessionID)"), "Direct store selection changes must update the inline session destination")
+        XCTAssertTrue(source.contains("syncPresentedSession(id)"), "The root task selection must stay aligned with the visible session")
+        XCTAssertTrue(source.contains("sessionSwitcherPresented || store.pickerPresented"), "The session switcher sheet must suppress completion acknowledgement")
     }
 
     func testInstalledOwnSessionMarkdownReadOnly() async throws {
@@ -611,26 +757,6 @@ final class CurrentAndroidParityTests: XCTestCase {
         window.isHidden = true; empty.shutdown()
     }
 
-    func testIdleSpeechDisposalDoesNotAcquireMicrophone() async {
-        var local: SpeechRecognizerService? = SpeechRecognizerService()
-        local?.stop(cancelled: true)
-        local = nil
-        var server: ServerSpeechRecorder? = ServerSpeechRecorder()
-        server?.cancel()
-        server = nil
-        let hardware = WandSpeechAudioHardware()
-        let drained = expectation(description: "idle audio cleanup drained without initializing input hardware")
-        WandSpeechAudio.queue.async {
-            var finalized = false
-            hardware.stop { finalized = true }
-            XCTAssertTrue(finalized)
-            XCTAssertFalse(hardware.hasInputNode)
-            XCTAssertFalse(hardware.sessionActive)
-            drained.fulfill()
-        }
-        await fulfillment(of: [drained], timeout: 3)
-    }
-
     func testColdConversationFillsViewportBeforeDetailArrives() {
         let store = ConversationStore(api: api(), service: ConversationFake(), drafts: SessionDraftStore(), defaults: defaults())
         let host = UIHostingController(rootView: ConversationDetailView(id: "dm_e", store: store,
@@ -713,6 +839,151 @@ final class CurrentAndroidParityTests: XCTestCase {
         await fulfillment(of: [finished], timeout: 150)
         XCTAssertEqual(store.items.map(\.id), ["dm_search", "group_search"])
         XCTAssertTrue(fake.posts.isEmpty, "Search recovery must not mutate/create conversations")
+    }
+
+    func testNativeGroupDraftToggleProjectsPresetSelectionWithoutDuplicates() throws {
+        let employees = try parityDecode([SiliconEmployee].self, #"[{"id":"e0","name":"员工零"},{"id":"e1","name":"员工一"}]"#)
+        let team = try parityDecode(ContactTeam.self, #"{"id":"preset","name":"预设","members":[{"id":"preset-member","employeeId":"e0","name":"员工零","isLeader":true}]}"#)
+        var draft = ConversationGroupDraft(); draft.templateId = team.id; draft.leaderId = "preset-member"
+        XCTAssertEqual(draft.members(employees: employees, presets: [team]).count, 1)
+        draft.selectEmployee("e0", selected: false, employees: employees, presets: [team])
+        XCTAssertTrue(draft.members(employees: employees, presets: [team]).isEmpty)
+        XCTAssertEqual(draft.leaderId, "")
+        draft.selectEmployee("e0", selected: true, employees: employees, presets: [team])
+        XCTAssertEqual(draft.members(employees: employees, presets: [team]).map(\.employeeId), ["e0"])
+        draft.selectEmployee("e1", selected: true, employees: employees, presets: [team])
+        XCTAssertEqual(draft.members(employees: employees, presets: [team]).count, 2)
+        draft.selectEmployee("e1", selected: false, employees: employees, presets: [team])
+        XCTAssertEqual(draft.members(employees: employees, presets: [team]).count, 1)
+    }
+
+    func testConversationIdentityStatusDoesNotResurrectHistoricalFailures() throws {
+        func instance(_ runs: [[String: Any]], extra: [String: Any] = [:]) throws -> ConversationInstance {
+            var value: [String: Any] = ["id": "header", "kind": "group", "title": "协作群", "tasks": [["task": ["id": "task"], "runs": runs]]]
+            value.merge(extra) { _, new in new }
+            return try JSONDecoder().decode(ConversationInstance.self, from: JSONSerialization.data(withJSONObject: value))
+        }
+        func run(_ status: String, _ time: String) -> [String: Any] {
+            ["id": status + time, "teamId": "team", "taskId": "task", "status": status, "updatedAt": time]
+        }
+        let history = [run("failed", "2026-10-16"), run("done", "2026-10-17")]
+        XCTAssertEqual(try instance(history).identityStatus, "群聊 · 可派发任务")
+        XCTAssertEqual(try instance(history + [run("waiting_user", "2026-10-18")]).identityStatus, "等待你的回复")
+        XCTAssertEqual(try instance([run("running", "2026-10-18")], extra: ["dissolvedAt": "2026-10-19"]).identityStatus, "群聊已解散")
+        XCTAssertEqual(try instance([], extra: ["unavailableReason": "拒绝访问"]).identityStatus, "当前对象暂不可用")
+        XCTAssertEqual(try instance([], extra: ["unavailableReason": " "]).identityStatus, "群聊 · 可派发任务")
+    }
+
+    func testAppleNamedChatHeaderNativeSnapshots() async throws {
+        guard ProcessInfo.processInfo.environment["WAND_APPLE_IDENTITY_SNAPSHOTS"] == "1" else { throw XCTSkip("Native identified header captures") }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        for (name, width, height, compact, dark, type) in [
+            ("phone-light", CGFloat(440), CGFloat(956), false, false, DynamicTypeSize.large),
+            ("phone-dark", 440, 956, false, true, DynamicTypeSize.large),
+            ("narrow-large", 320, 780, false, false, DynamicTypeSize.accessibility3),
+            ("landscape", 956, 440, true, false, DynamicTypeSize.large)
+        ] {
+            let window = UIWindow(windowScene: scene)
+            let root = AppleNamedIdentityFixture().environment(\.dynamicTypeSize, type)
+                .environment(\.verticalSizeClass, compact ? .compact : .regular).environment(\.colorScheme, dark ? .dark : .light)
+            let host = UIHostingController(rootView: root)
+            window.rootViewController = host; window.frame = CGRect(x: 0, y: 0, width: width, height: height)
+            window.makeKeyAndVisible(); host.view.frame = window.bounds
+            host.view.layoutIfNeeded(); try await Task.sleep(for: .milliseconds(300))
+            let image = UIGraphicsImageRenderer(size: host.view.bounds.size).image { _ in host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true) }
+            let a = XCTAttachment(image: image); a.name = "apple-b92-" + name; a.lifetime = .keepAlways; add(a)
+            window.isHidden = true
+        }
+    }
+
+    func testAppleConversationNativeMenuInteraction() async throws {
+        guard ProcessInfo.processInfo.environment["WAND_APPLE_ACTION_TOUCH"] == "1" else { throw XCTSkip("Owned native add-menu interaction fixture") }
+        let fake = ConversationFake()
+        fake.detail = try parityDecode(ConversationInstance.self, #"{"id":"menu-fixture","kind":"dm","title":"菜单验证员工"}"#)
+        fake.rows = [fake.detail]
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults()); await store.refresh()
+        let draft = store.composer(fake.detail.id, target: nil); draft.text = "retained-draft"
+        let finished = expectation(description: "native anchored menu and file-picker cancellation")
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: VStack(spacing: 0) {
+            HStack {
+                Text("原生加号操作验收夹具").font(.caption); Spacer()
+                Button("结束菜单验收") { finished.fulfill() }.frame(minHeight: 44)
+            }.padding(.horizontal, 12)
+            ConversationDetailView(id: fake.detail.id, store: store, onOpenSession: { _ in }, onOpenConversation: { _ in }, onEmployee: { _ in })
+        }.background(Theme.background))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; store.shutdown() }
+        await fulfillment(of: [finished], timeout: 180)
+        XCTAssertEqual(draft.text, "retained-draft more")
+        XCTAssertTrue(fake.posts.isEmpty)
+        XCTAssertTrue(draft.attachments.attachments.isEmpty)
+    }
+
+    func testAppleDesignGroupInteraction() async throws {
+        guard ProcessInfo.processInfo.environment["WAND_APPLE_DESIGN_TOUCH"] == "1" else {
+            throw XCTSkip("Owned native group-selection touch fixture")
+        }
+        let fake = ConversationFake()
+        fake.people = try (0..<10).map { try parityDecode(SiliconEmployee.self, "{\"id\":\"touch-e\($0)\",\"name\":\"员工\($0)\",\"duty\":\"实际协作职责\"}") }
+        fake.rows = try parityDecode([ConversationInstance].self, #"[{"id":"existing","kind":"dm","title":"已有对话","preview":"打开和取消建群后保留列表与草稿。"}]"#)
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults()); await store.refresh()
+        let finished = expectation(description: "group selection, cancel, reopen and retained draft driven")
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: VStack(spacing: 0) {
+            HStack {
+                Text("设计A原生交互夹具").font(.caption)
+                Spacer()
+                Button("结束验收") { finished.fulfill() }.frame(minHeight: 44)
+            }.padding(.horizontal, 12)
+            ConversationListView(store: store, onSelect: { _ in }, onEmployee: { _ in }, onSettings: {}, onSwitchServer: {})
+        }.background(Theme.background))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; store.shutdown() }
+        await fulfillment(of: [finished], timeout: 180)
+        XCTAssertEqual(store.groupDrafts["create"]?.employeeIds.count, 2)
+        XCTAssertEqual(store.groupDrafts["create"]?.name, "design-A")
+        XCTAssertTrue(fake.posts.isEmpty)
+    }
+
+    func testAppleDesignListAndGroupNativeSnapshots() async throws {
+        guard ProcessInfo.processInfo.environment["WAND_APPLE_DESIGN_SNAPSHOTS"] == "1" else {
+            throw XCTSkip("Opt-in real native appearance/dynamic-type captures")
+        }
+        let fake = ConversationFake()
+        fake.people = try (0..<10).map { try parityDecode(SiliconEmployee.self, "{\"id\":\"design-e\($0)\",\"name\":\"员工\($0) · 很长的身份名称\",\"duty\":\"负责实际项目协作与交付，保留全部职责和上下文\"}") }
+        fake.rows = try parityDecode([ConversationInstance].self, #"[{"id":"design-dm","kind":"dm","title":"当前员工的长对话名字与项目协作上下文","preview":"已有消息与附件保留，加载失败也不清空输入。"},{"id":"design-group","kind":"group","title":"协作小组","preview":"任务与对话层级清楚。"}]"#)
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults()); await store.refresh()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        for (name, width, height, dark, category) in [
+            ("phone-light", CGFloat(440), CGFloat(956), false, ContentSizeCategory.large),
+            ("phone-dark", 440, 956, true, ContentSizeCategory.large),
+            ("narrow-large", 320, 780, false, ContentSizeCategory.accessibilityExtraExtraLarge)
+        ] {
+            for group in [false, true] {
+                store.creatingPresetID = group ? "" : nil
+                let window = UIWindow(windowScene: scene)
+                let content = ConversationListView(store: store, onSelect: { _ in }, onEmployee: { _ in }, onSettings: {}, onSwitchServer: {})
+                    .environment(\.colorScheme, dark ? .dark : .light).environment(\.sizeCategory, category)
+                    .transaction { $0.disablesAnimations = true }
+                let host = UIHostingController(rootView: content)
+                window.rootViewController = host; window.frame = CGRect(x: 0, y: 0, width: width, height: height)
+                window.makeKeyAndVisible(); host.view.frame = window.bounds
+                host.traitOverrides.userInterfaceStyle = dark ? UIUserInterfaceStyle.dark : .light
+                host.traitOverrides.preferredContentSizeCategory = category == .large ? UIContentSizeCategory.large : .accessibilityExtraExtraLarge
+                host.traitOverrides.accessibilityContrast = category == .large ? .normal : .high
+                host.view.layoutIfNeeded(); try await Task.sleep(for: .milliseconds(250))
+                XCTAssertEqual(host.view.bounds.width, width, accuracy: 1)
+                XCTAssertEqual(host.view.bounds.height, height, accuracy: 1)
+                let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height)).image { _ in host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true) }
+                let attachment = XCTAttachment(image: image); attachment.name = "apple-a-" + name + (group ? "-group" : "-list"); attachment.lifetime = .keepAlways; add(attachment)
+                window.isHidden = true
+            }
+        }
+        store.shutdown()
+        XCTAssertTrue(fake.posts.isEmpty)
     }
 
     func testConversationListEmptyStatesDoNotConfuseSearchWithMissingData() {

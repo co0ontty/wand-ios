@@ -39,6 +39,7 @@ struct SiliconEmployee: Decodable, Identifiable, Equatable {
     let archivedAt: String?
     let createdAt: String
     var tags: [String]
+    var systemSessionLimit: Int?
     var archived: Bool { !(archivedAt ?? "").isEmpty }
     var builtin: Bool { !(systemKey ?? "").isEmpty }
     var displayTags: [String] {
@@ -48,7 +49,7 @@ struct SiliconEmployee: Decodable, Identifiable, Equatable {
         default: return tags
         }
     }
-    private enum CodingKeys: String, CodingKey { case id, name, duty, prompt, avatar, agents, systemKey, archivedAt, tags, createdAt }
+    private enum CodingKeys: String, CodingKey { case id, name, duty, prompt, avatar, agents, systemKey, archivedAt, tags, createdAt, systemSessionLimit }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
@@ -57,6 +58,7 @@ struct SiliconEmployee: Decodable, Identifiable, Equatable {
         prompt = try c.decodeIfPresent(String.self, forKey: .prompt) ?? ""
         avatar = try c.decodeIfPresent(String.self, forKey: .avatar) ?? ""
         agents = try c.decodeIfPresent([ContactCandidate].self, forKey: .agents) ?? []
+        systemSessionLimit = try c.decodeIfPresent(Int.self, forKey: .systemSessionLimit)
         systemKey = try c.decodeIfPresent(String.self, forKey: .systemKey)
         archivedAt = try c.decodeIfPresent(String.self, forKey: .archivedAt)
         tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
@@ -71,11 +73,14 @@ struct EmployeeDraft: Equatable {
     var avatar = ""
     var agents = [ContactCandidate()]
     var tagInput = ""
+    var systemSessionLimitInput = ""
+    var systemSessionLimit: Int? { Int(systemSessionLimitInput) }
     init() {}
     init(_ employee: SiliconEmployee) {
         name = employee.name; duty = employee.duty; prompt = employee.prompt
         avatar = employee.avatar; agents = employee.agents
         tagInput = employee.displayTags.joined(separator: "，")
+        systemSessionLimitInput = employee.systemSessionLimit.map(String.init) ?? ""
     }
     var tags: [String] {
         var seen = Set<String>()
@@ -84,6 +89,9 @@ struct EmployeeDraft: Equatable {
             .filter { !$0.isEmpty && seen.insert($0).inserted }
     }
     func validationError(builtin: Bool) -> String? {
+        if !systemSessionLimitInput.isEmpty && (systemSessionLimitInput.contains(where: { !$0.isASCII || !$0.isNumber }) || systemSessionLimit == nil || !(0...10000).contains(systemSessionLimit ?? -1)) {
+            return "系统调用历史保留上限必须是 0 到 10000 的整数；留空表示不限。"
+        }
         if !builtin {
             if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写员工名字。" }
             if name.utf16.count > 40 { return "员工名字不能超过40个字符。" }
@@ -96,11 +104,12 @@ struct EmployeeDraft: Equatable {
     }
     func body(builtin: Bool) -> [String: Any] {
         let candidates = agents.map { $0.body() }
-        if builtin { return ["agents": candidates] }
+        let retention: Any = systemSessionLimit.map { $0 as Any } ?? NSNull()
+        if builtin { return ["agents": candidates, "systemSessionLimit": retention] }
         return ["name": name.trimmingCharacters(in: .whitespacesAndNewlines),
                 "duty": duty.trimmingCharacters(in: .whitespacesAndNewlines),
                 "prompt": prompt.trimmingCharacters(in: .whitespacesAndNewlines),
-                "avatar": avatar, "tags": tags, "agents": candidates]
+                "avatar": avatar, "tags": tags, "agents": candidates, "systemSessionLimit": retention]
     }
 }
 
@@ -125,6 +134,11 @@ struct ContactTeamMember: Codable, Identifiable, Equatable {
     var role: String?
     var employeeId: String?
     private enum CodingKeys: String, CodingKey { case id, name, duty, agents, agent, isLeader, avatar, role, employeeId }
+    init(name: String, duty: String, leader: Bool, agent: ContactCandidate = ContactCandidate()) {
+        id = "m_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        self.name = name; self.duty = duty; agents = [agent]; isLeader = leader
+        avatar = ""; role = "any"; employeeId = nil
+    }
     init(employee: SiliconEmployee, leader: Bool) {
         id = "m_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(); name = employee.name; duty = ""
         agents = employee.agents; isLeader = leader; avatar = employee.avatar
@@ -174,6 +188,65 @@ struct ContactTeam: Decodable, Identifiable, Equatable {
         maxSteps = try c.decodeIfPresent(Int.self, forKey: .maxSteps) ?? 30
         createdAt = try c.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
     }
+}
+
+/// Same four local starting points as Android AI_TEAM_TEMPLATES; no creation API
+/// is called until the user saves the editable draft.
+enum ContactTeamTemplate: String, CaseIterable, Identifiable {
+    case dev, bugfix, research, blank
+    var id: String { rawValue }
+    var name: String {
+        switch self {
+        case .dev: return "开发三人组"
+        case .bugfix: return "修 Bug 二人组"
+        case .research: return "调研加评审"
+        case .blank: return "空白团队"
+        }
+    }
+    var summary: String {
+        switch self {
+        case .dev: return "负责人拆解与验收，一人实现，一人审查"
+        case .bugfix: return "负责人定位与验证，一人修复"
+        case .research: return "两人并行调研不同方向，负责人汇总"
+        case .blank: return "一位负责人加一位成员，自己写职责"
+        }
+    }
+    func draft(agent: ContactCandidate = ContactCandidate()) -> ContactTeamDraft {
+        var result = ContactTeamDraft()
+        result.name = self == .blank ? "" : name
+        result.description = summary
+        let members: [(String, String)]
+        switch self {
+        case .dev:
+            result.instructions = "审查者只读代码，问题写进报告，由负责人决定是否返工。"
+            members = [("负责人", "拆解任务、分派步骤，审阅报告并决定下一步或完成。"),
+                       ("实现者", "按步骤改代码并自测，报告写清改动与验证方式。"),
+                       ("审查者", "审查改动与测试，指出问题和风险，不直接修改。")]
+        case .bugfix:
+            result.instructions = "先复现再修，修复附上验证步骤。"
+            members = [("负责人", "复现并定位根因，写清修改范围，修完后验证。"),
+                       ("修复者", "按定位修改代码，补回归测试，报告附验证输出。")]
+        case .research:
+            result.instructions = "调研员可同时开始，只读不改文件。"
+            members = [("负责人", "拆出互不重叠的调研方向，汇总结论给出建议。"),
+                       ("调研员甲", "按分派的方向调研，结论附出处。"),
+                       ("调研员乙", "按分派的方向调研，结论附出处。")]
+        case .blank:
+            members = [("负责人", ""), ("成员", "")]
+        }
+        result.members = members.enumerated().map { index, member in
+            ContactTeamMember(name: member.0, duty: member.1, leader: index == 0, agent: agent)
+        }
+        return result
+    }
+}
+
+func contactTeamRemovingMember(_ members: [ContactTeamMember], at index: Int) -> [ContactTeamMember] {
+    guard members.count > 2, members.indices.contains(index) else { return members }
+    var result = members
+    result.remove(at: index)
+    if !result.contains(where: \.isLeader) { result[0].isLeader = true }
+    return result
 }
 
 struct ContactTeamDraft: Equatable {
@@ -372,8 +445,11 @@ private func contactTimeKey(_ value: String) -> String {
 }
 
 func contactEmployeeInviteError(_ employee: SiliconEmployee, members: [ContactTeamMember], replacingID: String?) -> String? {
-    if employee.archived { return "员工已归档" }
-    if employee.agents.isEmpty { return "员工没有执行候选" }
+    if employee.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "员工身份不可用" }
+    if employee.archived { return "员工已归档，请先在通讯录恢复" }
+    if contactCandidateError(employee.agents) != nil { return "员工没有有效的结构化候选" }
+    if let replacingID, !members.contains(where: { $0.id == replacingID }) { return "成员已变更，请重新选择" }
+    if replacingID == nil && members.count >= 8 { return "团队成员已达上限" }
     if members.contains(where: { $0.id != replacingID && $0.employeeId == employee.id }) { return "已在团队中" }
     if members.contains(where: { $0.id != replacingID && $0.name.lowercased() == employee.name.lowercased() }) { return "团队已有同名成员" }
     return nil
@@ -497,17 +573,6 @@ struct ContactExecutionSubject: Codable, Equatable, Hashable {
     let id: String
     var isCLI: Bool { type == "cli" }
     func jsonObject() -> [String: Any] { ["type": type, "id": id] }
-}
-
-func contactEmployeeSessionBody(employeeID: String, cwd: String, workspaceID: String? = nil,
-                                workspaceTaskID: String? = nil, prompt: String? = nil) -> [String: Any] {
-    var body: [String: Any] = ["employeeId": employeeID, "cwd": cwd]
-    if let workspaceID, !workspaceID.isEmpty { body["workspaceId"] = workspaceID }
-    if let workspaceTaskID, !workspaceTaskID.isEmpty { body["workspaceTaskId"] = workspaceTaskID }
-    if let prompt = prompt?.trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty {
-        body["prompt"] = prompt; body["respondImmediately"] = true
-    }
-    return body
 }
 
 func contactTaskSubjectBody(subject: ContactExecutionSubject, prompt: String) -> [String: Any] {

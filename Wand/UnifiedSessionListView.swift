@@ -61,27 +61,19 @@ struct UnifiedSessionListView: View {
             if isSelecting { selectionBar }
         }
         .sheet(isPresented: $showNewSession) {
-            NewSessionView(
+            NewConversationView(
                 api: api,
-                hostServerID: serverID,
+                serverID: serverID,
                 initialCwd: newSessionInitialCwd
-            ) { snapshot, targetServerID in
+            ) { snapshot in
                 showNewSession = false
                 newSessionInitialCwd = nil
-                if targetServerID == serverID {
-                    Task {
-                        await listStore.addCreated(snapshot)
-                        SessionPresenceController.shared.sync(snapshot: snapshot, serverID: serverID)
-                        selectSession(snapshot)
-                    }
-                } else {
-                    _ = serverStore.activateProfile(id: targetServerID)
-                    QuickActionCoordinator.shared.enqueue(
-                        .openSession(id: snapshot.id, serverID: targetServerID)
-                    )
+                Task {
+                    await listStore.addCreated(snapshot)
+                    SessionPresenceController.shared.sync(snapshot: snapshot, serverID: serverID)
+                    selectSession(snapshot)
                 }
             }
-            .environmentObject(serverStore)
         }
         .confirmationDialog(
             pendingDelete?.title ?? "",

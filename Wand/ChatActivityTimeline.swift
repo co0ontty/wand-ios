@@ -1,5 +1,19 @@
 import SwiftUI
 
+private struct ChatViewportHeightKey: EnvironmentKey { static let defaultValue: CGFloat = 0 }
+extension EnvironmentValues {
+    var chatViewportHeight: CGFloat {
+        get { self[ChatViewportHeightKey.self] }
+        set { self[ChatViewportHeightKey.self] = newValue }
+    }
+}
+func activityPanelHeight(viewportHeight: CGFloat) -> CGFloat {
+    viewportHeight > 0 ? min(activityWindowHeight, max(120, viewportHeight / 3)) : activityWindowHeight
+}
+func activityShouldAutoExpand(newest: Bool, running: Bool, timelineEnabled: Bool) -> Bool {
+    newest && running && timelineEnabled
+}
+
 private struct ActivityTimelineRow {
     let position: Int
     let item: DisplayItem
@@ -36,10 +50,12 @@ struct ActivityFoldCard: View {
     var baseURL: URL? = nil
     var isLastTurn = false
     var isResponding = false
+    var timelinePolicyOverride: Bool? = nil
     var askSelections: [String: AskUserSelectionState] = [:]
     var onAskToggle: (String, Int, Int, Bool) -> Void = { _, _, _, _ in }
     var onAskSubmit: (String, String) -> Void = { _, _ in }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.chatViewportHeight) private var viewportHeight
     @ObservedObject private var network = WandNetworkState.shared
     @AppStorage("wand.trafficTimelineMode") private var trafficMode = "wifi"
     @State private var expanded = false
@@ -48,6 +64,15 @@ struct ActivityFoldCard: View {
     @State private var inspecting = Set<String>()
     private var running: Bool { group.newest && isLastTurn && isResponding }
     private var rows: [ActivityTimelineRow] { activityTimelineRows(group.items, running: running) }
+    private var autoExpanded: Bool { activityShouldAutoExpand(newest: group.newest, running: running, timelineEnabled: automaticTimeline) }
+    private var liveToolID: String? {
+        guard running else { return nil }
+        return rows.reversed().compactMap { row -> String? in
+            guard case .tool(let id, let name, _, let input, _, let result) = row.item,
+                  ToolCallPresentation(name: name, input: input, result: result, sessionRunning: true).state == .running else { return nil }
+            return id
+        }.first
+    }
     private var revision: String {
         rows.map { row in
             switch row.item {
@@ -57,7 +82,7 @@ struct ActivityFoldCard: View {
             }
         }.joined(separator: "\u{0}")
     }
-    private var automaticTimeline: Bool { trafficMode == "all" || network.wifi }
+    private var automaticTimeline: Bool { timelinePolicyOverride ?? (trafficMode == "all" || network.wifi) }
     private var summary: String {
         var categories: [String: Set<String>] = [:]
         var seen = Set<String>(), thinking = 0
@@ -88,7 +113,7 @@ struct ActivityFoldCard: View {
             Button {
                 userToggled = true
                 withAnimation(activityWindowAnimation(reduceMotion)) { expanded.toggle() }
-                if expanded { pinned = true }
+                if expanded { pinned = running }
             } label: {
                 HStack(spacing: 8) {
                     if let time = rows.last?.occurredAt {
@@ -106,9 +131,10 @@ struct ActivityFoldCard: View {
             if expanded && !rows.isEmpty { timeline }
         }
         .animation(activityWindowAnimation(reduceMotion), value: expanded)
-        .onAppear { if !userToggled { expanded = group.newest && automaticTimeline } }
-        .onChange(of: group.newest) { _, newest in if !userToggled { expanded = newest && automaticTimeline } }
-        .onChange(of: automaticTimeline) { _, enabled in if !userToggled { expanded = group.newest && enabled } }
+        .onAppear { if !userToggled { expanded = autoExpanded } }
+        .onChange(of: autoExpanded) { _, next in
+            if !userToggled { withAnimation(activityWindowAnimation(reduceMotion)) { expanded = next } }
+        }
     }
     private var timeline: some View {
         ScrollViewReader { proxy in
@@ -118,12 +144,13 @@ struct ActivityFoldCard: View {
                         ActivityTimelineEntry(row: row, thinkingOrdinal: rows.filter { item in
                             item.position <= row.position && { if case .plain(.thinking) = item.item { return true }; return false }()
                         }.count, thinkingTotal: rows.filter { if case .plain(.thinking) = $0.item { return true }; return false }.count,
+                            active: running && (row.key == rows.last?.key || { if case .tool(let id, _, _, _, _, _) = row.item { return id == liveToolID }; return false }()),
                             baseURL: baseURL, onInspection: { open in if open { inspecting.insert(row.key) } else { inspecting.remove(row.key) } })
                     }
                     Color.clear.frame(height: 1).id("activity-tail")
                 }
             }
-            .frame(height: min(activityWindowHeight, max(120, CGFloat(rows.count) * 60)))
+            .frame(height: min(activityPanelHeight(viewportHeight: viewportHeight), max(120, CGFloat(rows.count) * 60)))
             .onScrollPhaseChange { _, phase in if phase == .interacting { pinned = false } }
             .onScrollGeometryChange(for: Bool.self) { $0.contentSize.height - ($0.contentOffset.y + $0.containerSize.height) < activityTailPin } action: { _, tail in pinned = tail }
             .onAppear { if pinned { proxy.scrollTo("activity-tail", anchor: .bottom) } }
@@ -139,6 +166,7 @@ private struct ActivityTimelineEntry: View {
     let row: ActivityTimelineRow
     let thinkingOrdinal: Int
     let thinkingTotal: Int
+    let active: Bool
     let baseURL: URL?
     let onInspection: (Bool) -> Void
     @State private var expanded = false
@@ -156,7 +184,20 @@ private struct ActivityTimelineEntry: View {
         if case .tool(_, _, let description, let input, _, let result) = row.item { return result?.text.isEmpty == false ? result!.text : activityToolSummary(description: description, input: input) }
         return ""
     }
-    private var failed: Bool { if case .tool(_, _, _, _, _, let result) = row.item { return result?.isError == true }; return false }
+    private var state: ToolCallState {
+        if case .tool(_, let name, _, let input, _, let result) = row.item {
+            return ToolCallPresentation(name: name, input: input, result: result, sessionRunning: active).state
+        }
+        return active ? .running : .completed
+    }
+    private var statusColor: Color {
+        switch state {
+        case .running: return Theme.brand
+        case .failed: return Theme.danger
+        case .completed: return Theme.success
+        case .unreturned: return Theme.textMuted
+        }
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
@@ -165,14 +206,14 @@ private struct ActivityTimelineEntry: View {
             } label: {
                 HStack(alignment: .top, spacing: 8) {
                     Text(SessionTimeFormatting.chatClock(iso: row.occurredAt)).font(.caption.monospaced()).foregroundStyle(Theme.textSecondary).frame(width: 64, alignment: .leading)
-                    Circle().fill(failed ? Theme.danger : Theme.success).frame(width: 6, height: 6).padding(.top, 6)
+                    Circle().fill(statusColor).frame(width: 6, height: 6).padding(.top, 6)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(label).font(.caption.weight(.semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
                         Text(String(preview.prefix(400))).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(thinking != nil ? 1 : 2)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "chevron.down").font(.caption).rotationEffect(.degrees(expanded ? 180 : 0))
                 }.frame(minHeight: thinking != nil ? 44 : 78, alignment: .topLeading).padding(.vertical, 8).contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel(label).accessibilityValue(expanded ? "已展开" : "已收起")
+            }.buttonStyle(.plain).accessibilityLabel(label).accessibilityValue(state.label + (expanded ? "，已展开" : "，已收起"))
             if expanded {
                 if let thinking { Text(thinking.isEmpty ? "思考内容尚未到达。" : thinking).font(.subheadline).textSelection(.enabled).padding(.leading, 78) }
                 else { ActivityTimelineToolDetail(item: row.item, baseURL: baseURL).padding(.leading, 78) }
@@ -195,11 +236,13 @@ private struct ActivityTimelineToolDetail: View {
     private var projectedItem: DisplayItem {
         guard let loaded, case .tool(let id, let name, let description, let input, let subagent, let result) = item else { return item }
         var merged = input
-        for (key, value) in loaded.input where merged[key] == nil { merged[key] = value }
-        return .tool(id: id, name: name, description: description, input: merged, subagent: subagent,
-            result: ToolResultInfo(toolUseId: id, text: loaded.text, isError: loaded.isError || result?.isError == true,
+        for (key, value) in loaded.input { merged[key] = value }
+        let fullResult = loaded.resultAvailable
+            ? ToolResultInfo(toolUseId: id, text: loaded.text, isError: loaded.isError || result?.isError == true,
                 truncated: false, images: loaded.images.isEmpty ? result?.images ?? [] : loaded.images,
-                projection: mergingToolProjection(local: result?.projection, incoming: loaded.projection)))
+                projection: mergingToolProjection(local: result?.projection, incoming: loaded.projection))
+            : result
+        return .tool(id: id, name: name, description: description, input: merged, subagent: subagent, result: fullResult)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {

@@ -42,9 +42,20 @@ final class AppUpdateTests: XCTestCase {
         owner.setActive(true)
         await settle { !owner.checking }
         owner.openInstallPage()
-        XCTAssertEqual(opened.map(\.scheme), ["itms-services", "https"])
+        XCTAssertEqual(opened.map(\.scheme), ["https", "https"])
         XCTAssertEqual(opened.last?.path, "/ios/install")
         owner.setActive(false)
+        // Without a validated install page the flow must still reach the system installer directly.
+        let pageless = try candidate(["installPageUrl": "http://updates.example.test/ios/install"])
+        var fallbackOpened: [URL] = []
+        let fallback = AppUpdateController(currentVersion: version, bundleID: bundleID, fetch: { _ in pageless }, open: { url, complete in
+            fallbackOpened.append(url); complete(true)
+        })
+        fallback.setActive(true)
+        await settle { fallback.info != nil }
+        fallback.install()
+        XCTAssertEqual(fallbackOpened.map(\.scheme), ["itms-services"])
+        fallback.setActive(false)
         for page in ["http://updates.example.test/ios/install", "https://foreign.test/ios/install", "https://user@updates.example.test/ios/install", "https://updates.example.test/ios/install?token=bad"] {
             let invalid = try candidate(["installPageUrl": page])
             let rejected = AppUpdateController(currentVersion: version, bundleID: bundleID, fetch: { _ in invalid })
@@ -95,7 +106,7 @@ final class AppUpdateTests: XCTestCase {
         for _ in 0..<90 {
             try await Task.sleep(for: .seconds(1))
             if urls.count == 2 {
-                XCTAssertEqual(urls.map(\.scheme), ["itms-services", "https"])
+                XCTAssertEqual(urls.map(\.scheme), ["https", "https"])
                 XCTAssertNotNil(owner.handoffMessage)
                 XCTAssertNil(owner.error)
                 return
@@ -197,7 +208,7 @@ final class AppUpdateTests: XCTestCase {
         var callback: ((Bool) -> Void)?
         var calls = 0
         let owner = AppUpdateController(currentVersion: version, bundleID: bundleID, fetch: { _ in info }, open: { url, completion in
-            XCTAssertEqual(url.scheme, "itms-services"); calls += 1; callback = completion
+            XCTAssertEqual(url.scheme, "https"); XCTAssertEqual(url.path, "/ios/install"); calls += 1; callback = completion
         })
         owner.setActive(true)
         await settle { owner.promptVersion != nil }
@@ -230,7 +241,7 @@ final class AppUpdateTests: XCTestCase {
         owner.setActive(false)
     }
 
-    func testInstalledServerUpdateUsesProductionAPIAndOnlyOffersSystemHandoff() async throws {
+    func testInstalledServerUpdateUsesProductionAPIAndOnlyOffersInstallPageHandoff() async throws {
         let pointer = URL(fileURLWithPath: "/tmp/wand-ios-update-acceptance-profile-path")
         guard let path = ProcessInfo.processInfo.environment["WAND_IOS_UPDATE_ACCEPTANCE_PROFILE"]
             ?? (try? String(contentsOf: pointer, encoding: .utf8)) else {
@@ -252,7 +263,8 @@ final class AppUpdateTests: XCTestCase {
         XCTAssertNotNil(owner.promptVersion)
         if let expected = acceptance.expectedVersion { XCTAssertEqual(owner.promptVersion, expected) }
         owner.install()
-        XCTAssertEqual(installerURL?.scheme, "itms-services")
+        XCTAssertEqual(installerURL?.scheme, "https")
+        XCTAssertEqual(installerURL?.path, "/ios/install")
         owner.setActive(false)
     }
 

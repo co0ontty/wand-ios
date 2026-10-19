@@ -1,5 +1,7 @@
 import SwiftUI
 import UIKit
+import PhotosUI
+import ImageIO
 
 struct ContactActionButton: View {
     let title: String
@@ -232,20 +234,38 @@ struct ContactCandidateEditor: View {
     }
 }
 
+/// Match Android's avatar upload boundary: downsample before decoding, JPEG
+/// at most 128px and 60KB. Only an explicit profile Save persists this draft.
+func contactAvatarDataURL(_ data: Data) -> String? {
+    guard data.count <= 20 * 1024 * 1024,
+          let source = CGImageSourceCreateWithData(data as CFData, nil),
+          let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 128
+          ] as CFDictionary),
+          let jpeg = UIImage(cgImage: image).jpegData(compressionQuality: 0.85),
+          jpeg.count <= 60 * 1024 else { return nil }
+    return "data:image/jpeg;base64," + jpeg.base64EncodedString()
+}
+
 struct EmployeeProfilePanel: View {
     let id: String?
     let api: WandAPI
     @ObservedObject var directory: ContactsStore
+    var onMessage: (() -> Void)?
     let onClose: () -> Void
     @StateObject private var model: EmployeeProfileStore
     @State private var roleExpanded = false
     @State private var candidatesExpanded = false
     @State private var knowledgeExpanded = false
     @State private var confirmAction: String?
+    @State private var avatarPhoto: PhotosPickerItem?
+    @State private var avatarMessage: String?
     @Environment(\.accessibilityReduceMotion) private var reduced
 
-    init(id: String?, api: WandAPI, directory: ContactsStore, onClose: @escaping () -> Void) {
-        self.id = id; self.api = api; self.directory = directory; self.onClose = onClose
+    init(id: String?, api: WandAPI, directory: ContactsStore, onMessage: (() -> Void)? = nil, onClose: @escaping () -> Void) {
+        self.id = id; self.api = api; self.directory = directory; self.onMessage = onMessage; self.onClose = onClose
         _model = StateObject(wrappedValue: EmployeeProfileStore(id: id, api: api))
     }
     var body: some View {
@@ -263,7 +283,7 @@ struct EmployeeProfilePanel: View {
                     if model.builtin {
                         Text(model.draft.name).font(.title3.weight(.semibold))
                         Text(model.draft.duty).font(.subheadline)
-                        Text("内置员工资料由服务端固定，仅可维护执行候选。")
+                        Text("内置员工资料由服务端固定，可维护执行候选与系统调用历史保留上限。")
                             .font(.caption).foregroundStyle(Theme.textSecondary)
                         Text(model.employee?.displayTags.joined(separator: " · ") ?? "")
                             .font(.caption).foregroundStyle(Theme.brand)
@@ -274,10 +294,22 @@ struct EmployeeProfilePanel: View {
                             .accessibilityIdentifier("contact-employee-duty")
                         TextField("标签，用逗号分隔", text: $model.draft.tagInput)
                             .accessibilityIdentifier("contact-employee-tags")
+                        PhotosPicker(selection: $avatarPhoto, matching: .images) {
+                            Label("上传头像", systemImage: "photo")
+                        }.frame(minHeight: 44)
+                        if let avatarMessage { Text(avatarMessage).font(.caption).foregroundStyle(Theme.danger) }
                         Menu("头像") {
                             Button("默认头像") { model.draft.avatar = "" }
                             ForEach(0..<ContactCatAvatar.coats.count) { shade in Button("猫咪 \(shade + 1)") { model.draft.avatar = "cat:\(shade)" } }
                         }
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("系统调用历史保留上限").font(.subheadline)
+                        TextField("留空表示不限", text: $model.draft.systemSessionLimitInput)
+                            .keyboardType(.numberPad)
+                            .accessibilityIdentifier("employee-system-session-limit")
+                        Text("0–10000，留空不限，0 不保留。仅保留标题生成等系统辅助功能的最新 N 条已结束记录，保存后永久清理超出部分。任务派发、agent 间调用（含决策）、手动聊天与运行中会话不计入，也不会清理。")
+                            .font(.caption).foregroundStyle(Theme.textSecondary)
                     }
                     DisclosureGroup("角色设定", isExpanded: $roleExpanded) {
                         if model.builtin {
@@ -307,6 +339,9 @@ struct EmployeeProfilePanel: View {
                 Text(model.message ?? " ").font(.caption)
                     .foregroundStyle(model.phase == .failed ? Theme.danger : Theme.success)
                     .frame(minHeight: 24, alignment: .leading)
+                if let onMessage, model.employee != nil {
+                    Button("发送消息", action: onMessage).frame(minHeight: 44).disabled(directory.busy)
+                }
                 if let employee = model.employee {
                     DisclosureGroup("独立知识库", isExpanded: $knowledgeExpanded) {
                         if knowledgeExpanded { ContactKnowledgePanel(employeeId: employee.id, api: api, directory: directory) }
@@ -318,10 +353,27 @@ struct EmployeeProfilePanel: View {
             }
         }
         .padding(16).background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
+        .buttonStyle(WandQuietButtonStyle())
         .animation(reduced ? nil : WandMotion.stateSwap, value: roleExpanded)
         .animation(reduced ? nil : WandMotion.stateSwap, value: candidatesExpanded)
         .animation(reduced ? nil : WandMotion.stateSwap, value: knowledgeExpanded)
         .task { await model.load(); directory.editorDirty = model.hasUnsavedChanges }
+        .task(id: avatarPhoto) {
+            guard let avatarPhoto else { return }
+            let previous = model.draft.avatar
+            avatarMessage = nil
+            do {
+                guard let data = try await avatarPhoto.loadTransferable(type: Data.self),
+                      let value = contactAvatarDataURL(data) else {
+                    if !Task.isCancelled { avatarMessage = "无法读取头像，请选择可用的图片。" }
+                    return
+                }
+                guard !Task.isCancelled, !model.busy, model.draft.avatar == previous else { return }
+                model.draft.avatar = value
+            } catch {
+                if !Task.isCancelled { avatarMessage = "头像读取失败，请重新选择。" }
+            }
+        }
         .onChange(of: model.draft) { _, _ in directory.editorDirty = model.hasUnsavedChanges }
         .onDisappear { model.close(); directory.editorDirty = false }
         .confirmationDialog("确认操作该员工？历史聊天不会改写。", isPresented: Binding(

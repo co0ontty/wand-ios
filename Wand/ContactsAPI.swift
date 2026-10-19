@@ -22,12 +22,17 @@ extension EmployeeEditingService {
 }
 
 protocol ContactTeamService {
+    func contactDefaultCandidate() async throws -> ContactCandidate
     func models() async throws -> ModelsResponse
     func contactTeam(_ id: String) async throws -> ContactTeamInfo
     func saveContactTeam(id: String?, draft: ContactTeamDraft) async throws -> ContactTeam
     func deleteContactTeam(_ id: String) async throws
     func startContactTeam(teamId: String, workspaceId: String, note: String) async throws -> ContactRunDetail
 }
+extension ContactTeamService {
+    func contactDefaultCandidate() async throws -> ContactCandidate { ContactCandidate() }
+}
+
 protocol ContactRunService {
     func contactRun(_ id: String) async throws -> ContactRunDetail
     func contactRunAction(_ id: String, action: String, body: [String: Any]) async throws -> ContactRunDetail
@@ -39,9 +44,10 @@ protocol ContactRunService {
 extension WandAPI: ContactDirectoryService, EmployeeEditingService, ContactTeamService, ContactRunService {
     func createContactEmployeeSession(employeeID: String, cwd: String, workspaceID: String? = nil,
                                       workspaceTaskID: String? = nil, prompt: String? = nil) async throws -> SessionSnapshot {
-        let snapshot = try await request(SessionSnapshot.self, method: "POST", path: "/api/structured-sessions",
-            body: contactEmployeeSessionBody(employeeID: employeeID, cwd: cwd, workspaceID: workspaceID,
-                                             workspaceTaskID: workspaceTaskID, prompt: prompt))
+        let snapshot = try await createSession(
+            kind: "structured", cwd: cwd, prompt: prompt,
+            workspaceId: workspaceID, workspaceTaskId: workspaceTaskID, employeeId: employeeID
+        )
         guard !snapshot.id.isEmpty, snapshot.isStructured, snapshot.employeeId == employeeID,
               workspaceTaskID == nil || snapshot.workspaceTaskId == workspaceTaskID else {
             throw APIError.network("员工会话回执身份或任务归属不一致，请刷新核对，勿重复创建。")
@@ -69,7 +75,7 @@ extension WandAPI: ContactDirectoryService, EmployeeEditingService, ContactTeamS
         let agent = try await boardTaskAgentDefaults()
         var candidate = ContactCandidate()
         candidate.provider = agent.provider; candidate.model = agent.model
-        candidate.thinkingEffort = agent.thinkingEffort; candidate.mode = agent.mode
+        candidate.thinkingEffort = agent.thinkingEffort; candidate.mode = agent.mode; candidate.engine = agent.engine
         return candidate
     }
     func listContactEmployees() async throws -> [SiliconEmployee] {
@@ -81,8 +87,9 @@ extension WandAPI: ContactDirectoryService, EmployeeEditingService, ContactTeamS
     }
     func contactDefaultCwd() async throws -> String? { try await serverConfig().defaultCwd }
     func createEmployeeConversation(employeeId: String, binding: ContactConversationBinding) async throws -> SessionSnapshot {
-        let result = try await request(SessionSnapshot.self, method: "POST", path: "/api/structured-sessions",
-                                       body: employeeConversationBody(employeeId: employeeId, binding: binding))
+        let result = try await createSession(
+            kind: "structured", cwd: binding.cwd, workspaceId: binding.workspaceId, employeeId: employeeId
+        )
         guard !result.id.isEmpty, result.isStructured, result.employeeId == employeeId else {
             throw APIError.network("员工对话回执无效，请刷新核对，勿重复创建。")
         }

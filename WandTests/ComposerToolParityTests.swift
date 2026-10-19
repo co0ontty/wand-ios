@@ -21,38 +21,205 @@ private final class ComposerTransportStub: SessionInputTransport {
     func sendPtyInputChunk(id: String, input: String, view: String, shortcutKey: String?) async throws {}
 }
 
+@MainActor
+private final class QueueRetrievalStub: QueueRetrievalTransport {
+    var calls: [(String, Int, String)] = []
+    var resume: CheckedContinuation<SessionSnapshot, Error>?
+    func deleteQueued(id: String, index: Int, expectedText: String) async throws -> SessionSnapshot {
+        calls.append((id, index, expectedText))
+        return try await withCheckedThrowingContinuation { resume = $0 }
+    }
+}
+
 final class ComposerToolParityTests: XCTestCase {
-    func testIdleInputHoldToTalkPreservesEditingAndKeyboardStates() {
-        XCTAssertTrue(composerHoldToTalkEligible(text: "", focused: false, keyboardVisible: false))
-        XCTAssertFalse(composerHoldToTalkEligible(text: "", focused: true, keyboardVisible: false))
-        XCTAssertFalse(composerHoldToTalkEligible(text: "", focused: false, keyboardVisible: true))
-        XCTAssertFalse(composerHoldToTalkEligible(text: "草稿", focused: false, keyboardVisible: false))
-        XCTAssertFalse(composerHoldToTalkEligible(text: " ", focused: false, keyboardVisible: false))
-        XCTAssertFalse(composerShouldExpand(focused: false, voiceMode: true))
+    @MainActor
+    func testStagedUploadPreservesInputRevisionAndDoesNotRepeatAcceptedBatch() async throws {
+        let controller = ComposerAttachmentController(sessionId: UUID().uuidString, api: api)
+        controller.stageFileSelection(.success([URL(fileURLWithPath: "/tmp/first")]), cleanupAfterUpload: false)
+        let revision = controller.stagedInputRevision
+        var calls = 0
+        try await controller.uploadStaged(to: "accepted") { _, urls, started in
+            calls += 1
+            started()
+            XCTAssertEqual(urls.count, 1)
+            return [self.file("/work/uploaded")]
+        }
+        XCTAssertEqual(controller.stagedInputRevision, revision)
+        XCTAssertEqual(controller.stagedAttachmentCount, 0)
+        XCTAssertEqual(controller.attachments.map(\.savedPath), ["/work/uploaded"])
+        try await controller.uploadStaged(to: "accepted") { _, _, _ in
+            calls += 1
+            return []
+        }
+        XCTAssertEqual(calls, 1)
     }
 
-    func testServerSpeechWavUsesCanonicalPCM16HeaderAndBounds() throws {
-        let pcm = Data(repeating: 12, count: 3200)
-        let wav = try SpeechWav.encode(pcm)
-        XCTAssertEqual(wav.count, 3244)
-        XCTAssertEqual(String(data: wav.subdata(in: 0..<4), encoding: .ascii), "RIFF")
-        XCTAssertEqual(String(data: wav.subdata(in: 8..<16), encoding: .ascii), "WAVEfmt ")
-        XCTAssertEqual(wav.subdata(in: 44..<wav.count), pcm)
-        XCTAssertEqual(Array(wav[20..<24]), [1, 0, 1, 0])
-        XCTAssertEqual(Array(wav[24..<28]), [128, 62, 0, 0])
-        XCTAssertEqual(Array(wav[34..<36]), [16, 0])
-        for count in [0, 100, 3201, SpeechWav.maxPCMBytes + 2] {
-            XCTAssertThrowsError(try SpeechWav.encode(Data(repeating: 0, count: count)))
+    @MainActor
+    func testStagedUploadDefiniteRejectionAndLocalFailureCanRetry() async throws {
+        let controller = ComposerAttachmentController(sessionId: UUID().uuidString, api: api)
+        controller.stageFileSelection(.success([URL(fileURLWithPath: "/tmp/first")]), cleanupAfterUpload: false)
+        for requestStarted in [false, true] {
+            do {
+                try await controller.uploadStaged(to: "rejected") { _, _, started in
+                    if requestStarted { started() }
+                    throw WandAPI.APIError.server(status: 400, message: "rejected")
+                }
+                XCTFail("Expected rejection")
+            } catch {}
         }
+        try await controller.uploadStaged(to: "rejected") { _, _, started in
+            started()
+            return [self.file("/work/retry")]
+        }
+        XCTAssertEqual(controller.stagedAttachmentCount, 0)
     }
-    func testServerSpeechStatusDecodesReadyAndRecoveryReason() throws {
-        let status = try JSONDecoder().decode(ServerSpeechStatus.self, from: Data("""
-        {"ready":false,"reason":"模型未下载","settings":{"model":"base"},"runtime":{"backend":"cpu"}}
-        """.utf8))
-        XCTAssertFalse(status.ready)
-        XCTAssertEqual(status.reason, "模型未下载")
-        XCTAssertEqual(status.settings.model, "base")
-        XCTAssertEqual(status.runtime.backend, "cpu")
+
+    @MainActor
+    func testStagedUploadUnknownBlocksRetryAcrossControllerRecreation() async throws {
+        let pendingID = UUID().uuidString
+        let sessionID = UUID().uuidString
+        let url = URL(fileURLWithPath: "/tmp/first")
+        let controller = ComposerAttachmentController(sessionId: pendingID, api: api)
+        controller.stageFileSelection(.success([url]), cleanupAfterUpload: false)
+        do {
+            try await controller.uploadStaged(to: sessionID) { _, _, started in
+                started()
+                throw WandAPI.APIError.network("receipt lost")
+            }
+            XCTFail("Expected unknown delivery")
+        } catch {}
+        let restored = ComposerAttachmentController(sessionId: pendingID, api: api)
+        restored.stageFileSelection(.success([url]), cleanupAfterUpload: false)
+        var retried = false
+        do {
+            try await restored.uploadStaged(to: sessionID) { _, _, _ in
+                retried = true
+                return []
+            }
+            XCTFail("Unknown upload must remain locked")
+        } catch {}
+        XCTAssertFalse(retried)
+        XCTAssertEqual(restored.stagedAttachmentCount, 1)
+        let key = "wand.pending-upload.v1." + ServerProfiles.stableID(for: api.baseURL) + "." + pendingID
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    @MainActor
+    func testQueueRetrievalWaitsForDeleteAndRequiresAdoptionIntoLatestDraft() async throws {
+        let transport = QueueRetrievalStub()
+        let store = ChatStore(sessionId: "queue", api: api, drafts: SessionDraftStore(), queueRetrievalTransport: transport)
+        store.queuedMessages = ["queued original"]
+        store.composerDraft.text = "existing"
+        store.composerDraft.attachments.attachments = [file("/work/keep")]
+        let request = Task { await store.retrieveQueued(index: 0) }
+        while transport.resume == nil { await Task.yield() }
+        XCTAssertEqual(store.queuedMessages, ["queued original"])
+        XCTAssertEqual(store.composerDraft.text, "existing")
+        XCTAssertEqual(transport.calls.first?.0, "queue")
+        XCTAssertEqual(transport.calls.first?.1, 0)
+        XCTAssertEqual(transport.calls.first?.2, "queued original")
+        store.composerDraft.text = "new typing"
+        store.composerDraft.attachments.attachments.append(file("/work/new"))
+        let snapshot = try decode(SessionSnapshot.self, #"{"id":"queue","sessionKind":"structured","status":"idle","queuedMessages":[]}"#)
+        transport.resume?.resume(returning: snapshot)
+        let confirmed = await request.value
+        XCTAssertTrue(confirmed)
+        XCTAssertEqual(store.composerDraft.text, "new typing")
+        XCTAssertEqual(store.composerDraft.queueRecoveryPhase, .ready)
+        XCTAssertEqual(store.composerDraft.queueRecoveryText, "queued original")
+        XCTAssertTrue(store.composerDraft.restoreQueuedOriginal())
+        XCTAssertEqual(store.composerDraft.text, "new typing\n\nqueued original")
+        XCTAssertFalse(store.composerDraft.restoreQueuedOriginal())
+        XCTAssertEqual(store.composerDraft.attachments.attachments.map(\.savedPath), ["/work/keep", "/work/new"])
+        XCTAssertTrue(store.queuedMessages.isEmpty)
+        XCTAssertNil(store.composerDraft.queueRecoveryText)
+    }
+
+    @MainActor
+    func testUnknownQueueDeleteKeepsSourceAndNeverRetriesOrRefills() async {
+        let transport = QueueRetrievalStub()
+        let store = ChatStore(sessionId: "unknown-queue", api: api, drafts: SessionDraftStore(), queueRetrievalTransport: transport)
+        store.queuedMessages = ["possibly removed"]
+        store.composerDraft.text = "keep current"
+        let request = Task { await store.retrieveQueued(index: 0) }
+        while transport.resume == nil { await Task.yield() }
+        transport.resume?.resume(throwing: WandAPI.APIError.network("lost receipt"))
+        let confirmed = await request.value
+        XCTAssertFalse(confirmed)
+        XCTAssertEqual(store.composerDraft.text, "keep current")
+        XCTAssertEqual(store.composerDraft.queueRecoveryText, "possibly removed")
+        let retried = await store.retrieveQueued(index: 0)
+        XCTAssertFalse(retried)
+        XCTAssertEqual(transport.calls.count, 1)
+        XCTAssertFalse(store.composerDraft.queueRetrievalPending)
+        XCTAssertEqual(store.composerDraft.queueRecoveryPhase, .unconfirmed)
+        XCTAssertFalse(store.composerDraft.restoreQueuedOriginal())
+        XCTAssertTrue(store.composerDraft.restoreQueuedOriginal(confirmedNotExecuted: true))
+        XCTAssertEqual(store.composerDraft.text, "keep current\n\npossibly removed")
+        XCTAssertNil(store.composerDraft.queueRecoveryText)
+    }
+
+    @MainActor
+    func testQueueRecoveryBelongsToServerAndSessionAndCannotReviveRetiredDraft() {
+        let drafts = SessionDraftStore()
+        let original = drafts.draft(sessionId: "recovery", api: api)
+        original.text = "local"
+        XCTAssertTrue(original.beginQueueRetrieval("queued"))
+        XCTAssertFalse(original.beginQueueRetrieval("another"))
+        XCTAssertNil(drafts.draft(sessionId: "other", api: api).queueRecoveryText)
+        let otherServer = WandAPI(baseURL: URL(string: "http://127.0.0.1:2")!, token: nil)
+        XCTAssertNil(drafts.draft(sessionId: "recovery", api: otherServer).queueRecoveryText)
+        original.retire()
+        original.finishQueueRetrieval(confirmed: true)
+        XCTAssertEqual(original.text, "")
+        XCTAssertNil(original.queueRecoveryText)
+    }
+
+    @MainActor
+    func testLateQueueRetrievalAcrossViewLifecycleRequiresExplicitAdoption() {
+        let buffer = ComposerDraftState(sessionId: "lifecycle", api: api, defaults: defaults())
+        XCTAssertTrue(buffer.beginQueueRetrieval("source"))
+        buffer.deactivate()
+        buffer.activate()
+        buffer.text = "reopened typing"
+        buffer.finishQueueRetrieval(confirmed: true)
+        XCTAssertEqual(buffer.text, "reopened typing")
+        XCTAssertEqual(buffer.queueRecoveryPhase, .ready)
+        XCTAssertTrue(buffer.restoreQueuedOriginal())
+        XCTAssertEqual(buffer.text, "reopened typing\n\nsource")
+    }
+    @MainActor
+    func testQueueRetrievalOnlyAutoFillsUnchangedActiveEmptyDraft() {
+        let buffer = ComposerDraftState(sessionId: UUID().uuidString, api: api, defaults: defaults())
+        XCTAssertTrue(buffer.beginQueueRetrieval("first"))
+        buffer.finishQueueRetrieval(confirmed: true)
+        XCTAssertEqual(buffer.text, "first"); XCTAssertNil(buffer.queueRecoveryPhase)
+        buffer.text = ""
+        XCTAssertTrue(buffer.beginQueueRetrieval("second"))
+        buffer.text = "typed"; buffer.text = ""
+        buffer.finishQueueRetrieval(confirmed: true)
+        XCTAssertEqual(buffer.text, "")
+        XCTAssertEqual(buffer.queueRecoveryPhase, .ready)
+        XCTAssertTrue(buffer.restoreQueuedOriginal())
+        XCTAssertEqual(buffer.text, "second")
+    }
+
+    @MainActor
+    func testRejectedRetrievalCannotBeAdoptedAndSendingGuardsReadyRecovery() {
+        let buffer = ComposerDraftState(sessionId: UUID().uuidString, api: api, defaults: defaults())
+        XCTAssertTrue(buffer.beginQueueRetrieval("not removed"))
+        buffer.finishQueueRetrieval(confirmed: false, rejected: true)
+        XCTAssertEqual(buffer.queueRecoveryPhase, .rejected)
+        XCTAssertFalse(buffer.restoreQueuedOriginal(confirmedNotExecuted: true))
+        buffer.dismissQueueRecovery()
+        buffer.text = "existing"
+        XCTAssertTrue(buffer.beginQueueRetrieval("removed"))
+        buffer.finishQueueRetrieval(confirmed: true)
+        buffer.beginSending()
+        XCTAssertFalse(buffer.restoreQueuedOriginal())
+        XCTAssertEqual(buffer.text, "existing")
+        buffer.deactivate()
+        XCTAssertFalse(buffer.restoreQueuedOriginal())
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
@@ -71,7 +238,6 @@ final class ComposerToolParityTests: XCTestCase {
     private func file(_ path: String) -> UploadedFile {
         UploadedFile(originalName: "file.txt", savedPath: path, size: 10, mimeType: "text/plain")
     }
-
     @MainActor
     func testUnsentDraftRestoresPerServerAndSession() {
         let preferences = defaults()
@@ -142,49 +308,6 @@ final class ComposerToolParityTests: XCTestCase {
         XCTAssertEqual(reopened.unconfirmedInput, "submit once")
         XCTAssertFalse(reopened.send(text: "submit once"))
         drafts.remove(sessionId: id, api: api)
-    }
-
-    @MainActor
-    func testVoiceAndOptimizationIgnoreClosedOrNewerDrafts() {
-        let buffer = ComposerDraftState(sessionId: "one", api: api, defaults: defaults())
-        buffer.text = "initial"
-        let revision = buffer.textRevision
-        let lifecycle = buffer.lifecycleRevision
-        buffer.deactivate()
-        buffer.activate()
-        buffer.appendVoice("late speech", ifUnchangedSince: revision, lifecycle: lifecycle)
-        XCTAssertEqual(buffer.text, "initial")
-        XCTAssertFalse(buffer.applyOptimized("late optimized", revision: revision, lifecycle: lifecycle))
-        let currentLifecycle = buffer.lifecycleRevision
-        buffer.text = "newer"
-        XCTAssertFalse(buffer.applyOptimized("old result", revision: revision, lifecycle: currentLifecycle))
-        XCTAssertEqual(buffer.text, "newer")
-        XCTAssertTrue(buffer.applyOptimized("current result", revision: buffer.textRevision, lifecycle: currentLifecycle))
-        XCTAssertEqual(buffer.text, "current result")
-    }
-
-    @MainActor
-    func testAsyncOptimizationKeepsEditsMadeWhileWaiting() async {
-        let buffer = ComposerDraftState(sessionId: "one", api: api, defaults: defaults())
-        buffer.text = "original"
-        let started = expectation(description: "Optimization began")
-        let finished = expectation(description: "Optimization finished")
-        var continuation: CheckedContinuation<String, Never>?
-        let subscription = buffer.$isOptimizing.dropFirst().filter { !$0 }.sink { _ in finished.fulfill() }
-        buffer.optimize { text in
-            XCTAssertEqual(text, "original")
-            return await withCheckedContinuation {
-                continuation = $0
-                started.fulfill()
-            }
-        }
-        await fulfillment(of: [started], timeout: 2)
-        buffer.text = "typed while optimizing"
-        continuation?.resume(returning: "optimized old input")
-        await fulfillment(of: [finished], timeout: 2)
-        withExtendedLifetime(subscription) {}
-        XCTAssertEqual(buffer.text, "typed while optimizing")
-        XCTAssertEqual(buffer.optimizationMessage, "输入已更新，保留当前内容")
     }
 
     func testToolPreviewUsesServerProjectionAndBoundsOldHistory() throws {
@@ -265,19 +388,6 @@ final class ComposerToolParityTests: XCTestCase {
         let restored = ComposerDraftState(sessionId: "one", api: api, defaults: preferences)
         XCTAssertEqual(restored.text, "new submission")
         XCTAssertEqual(restored.attachments.attachments.map(\.savedPath), ["/work/new"])
-    }
-
-    @MainActor
-    func testRepeatedActivationDoesNotInvalidatePendingOptimizationOrVoice() {
-        let buffer = ComposerDraftState(sessionId: "one", api: api, defaults: defaults())
-        buffer.text = "initial"
-        let revision = buffer.textRevision
-        let lifecycle = buffer.lifecycleRevision
-        buffer.activate()
-        buffer.activate()
-        XCTAssertEqual(buffer.lifecycleRevision, lifecycle)
-        buffer.appendVoice("voice", ifUnchangedSince: revision, lifecycle: lifecycle)
-        XCTAssertEqual(buffer.text, "initial voice")
     }
 
     func testEqualBodySnapshotRetainsKnownDecisionAndImages() throws {

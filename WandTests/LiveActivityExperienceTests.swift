@@ -48,6 +48,31 @@ final class LiveActivityExperienceTests: XCTestCase {
         XCTAssertEqual(s.structuredState?.phase, "background")
         XCTAssertEqual(SessionTimeFormatting.date(from: s.structuredState?.turnStartedAt)?.timeIntervalSince1970, 1791504000)
     }
+    func testElapsedTextStaysBoundedForLongRunningSessions() {
+        // 灵动岛展开态右侧与状态胶囊共用一行：计时器不能长到把状态挤出去。
+        XCTAssertEqual(activityElapsedText(0), "0:00")
+        XCTAssertEqual(activityElapsedText(94), "1:34")
+        XCTAssertEqual(activityElapsedText(3_599), "59:59")
+        XCTAssertEqual(activityElapsedText(3_600), "1h00")
+        XCTAssertEqual(activityElapsedText(86_042), "23h54")
+        XCTAssertEqual(activityElapsedText(99 * 3_600 + 1), "99h00")
+        XCTAssertEqual(activityElapsedText(100 * 3_600), "99h+")
+        XCTAssertEqual(activityElapsedText(10_000_000), "99h+")
+        for seconds in [0, 94, 3_599, 3_600, 86_042, 356_401, 10_000_000] {
+            XCTAssertLessThanOrEqual(activityElapsedText(TimeInterval(seconds)).count, 5)
+        }
+    }
+    func testOnlyActiveSiblingsEarnAnExtraIslandRow() {
+        let running = entry("run", state: "responding")
+        let done = entry("done", state: "done")
+        let waiting = entry("wait", state: "permission")
+        XCTAssertTrue(SessionActivityAttributes.ContentState(sessions: [running, done], updatedAt: .now).activeSecondarySessions.isEmpty)
+        XCTAssertEqual(
+            SessionActivityAttributes.ContentState(sessions: [running, waiting], updatedAt: .now).activeSecondarySessions.map(\.id),
+            ["run"]
+        )
+        XCTAssertTrue(SessionActivityAttributes.ContentState(sessions: [waiting], updatedAt: .now).activeSecondarySessions.isEmpty)
+    }
     func testRefinedPresentationKeepsStateAndStalenessUnambiguous() {
         let waiting = SessionActivityAttributes.ContentState(sessions: [entry("w", state: "permission")], updatedAt: .now)
         XCTAssertEqual(ActivityPresentation.status(waiting, isStale: false), "待授权")
@@ -59,16 +84,25 @@ final class LiveActivityExperienceTests: XCTestCase {
     func testRefinedNativeActivityVisualMatrix() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let now = Date(timeIntervalSince1970: 1791504000)
+        var permission = entry("p", state: "permission", title: "确认项目目录的访问权限")
+        permission.pendingPrompt = "写入文件 · ios/WandWidgets/WandWidgetsBundle.swift"
         var running = entry("run", state: "responding", title: "优化工作区与会话导航")
         running.taskTitle = "校验列表展开与输入恢复"; running.startedAt = now; running.queuedCount = 2
         var long = entry("wait", state: "waiting-input", title: "核对 iOS 客户端的权限、工作区及团队协作流程")
         long.taskTitle = "等待确认"; long.engineRaw = "core"
+        var longRunning = entry("slow", state: "responding", title: "通宵跑完整端到端回归")
+        longRunning.taskTitle = "逐台核对模拟器与真机"
+        longRunning.startedAt = now.addingTimeInterval(-860_000)
         let rows: [(String, SessionActivityAttributes.ContentState, String, CGFloat, ContentSizeCategory, Bool)] = [
             ("expanded-running", .init(sessions: [running], updatedAt: now), "expanded", 370, .large, false),
+            ("expanded-long-running", .init(sessions: [longRunning], updatedAt: now), "expanded", 370, .large, false),
+            ("expanded-permission-with-task", .init(sessions: [long], updatedAt: now), "expanded", 370, .large, false),
+            ("expanded-permission-request", .init(sessions: [permission], updatedAt: now), "expanded", 370, .large, false),
             ("expanded-multi-long", .init(sessions: [long, running], updatedAt: now), "expanded", 370, .large, false),
             ("expanded-narrow", .init(sessions: [long, running], updatedAt: now), "expanded", 320, .large, false),
+            ("expanded-finished-sibling", .init(sessions: [running, entry("d", state: "done", title: "客户端回归测试")], updatedAt: now), "expanded", 370, .large, false),
             ("lockscreen-running", .init(sessions: [running], updatedAt: now), "lockscreen", 390, .large, false),
-            ("lockscreen-permission", .init(sessions: [entry("p", state: "permission", title: "确认项目目录的访问权限")], updatedAt: now), "lockscreen", 390, .large, false),
+            ("lockscreen-permission", .init(sessions: [permission], updatedAt: now), "lockscreen", 390, .large, false),
             ("lockscreen-failed", .init(sessions: [entry("f", state: "failed", title: "模型与执行工具检查")], updatedAt: now), "lockscreen", 390, .large, false),
             ("lockscreen-done", .init(sessions: [entry("d", state: "done", title: "客户端回归测试")], updatedAt: now), "lockscreen", 390, .large, false),
             ("lockscreen-stale-refined", .init(sessions: [running, long], updatedAt: now), "lockscreen", 390, .large, true),
@@ -83,7 +117,8 @@ final class LiveActivityExperienceTests: XCTestCase {
                     VStack(alignment: .leading, spacing: ActivityLayout.group) {
                         ActivityExpandedHeader(state: state, isStale: stale)
                         ActivityExpandedSummary(state: state, isStale: stale)
-                    }.padding(ActivityLayout.inset)
+                    }.padding(.horizontal, ActivityLayout.expandedInset)
+                        .padding(.vertical, ActivityLayout.group)
                 } else if surface == "compact" {
                     HStack { ActivityCompactIdentity(state: state, isStale: stale); Spacer(minLength: 50); ActivityCompactStatus(state: state, isStale: stale) }.padding(8)
                 } else if surface == "minimal" { ActivityMinimalStatus(state: state, isStale: stale).padding(10) }
@@ -110,7 +145,8 @@ final class LiveActivityExperienceTests: XCTestCase {
         for (name, size, large) in [("island-expanded", CGSize(width: 370, height: 180), false), ("lockscreen-large", CGSize(width: 390, height: 360), true), ("lockscreen-stale", CGSize(width: 390, height: 300), false)] {
             let content = Group {
                 if name == "island-expanded" {
-                    VStack(alignment: .leading, spacing: ActivityLayout.group) { ActivityExpandedHeader(state: state, isStale: false); ActivityExpandedSummary(state: state, isStale: false) }.padding(ActivityLayout.inset)
+                    VStack(alignment: .leading, spacing: ActivityLayout.group) { ActivityExpandedHeader(state: state, isStale: false); ActivityExpandedSummary(state: state, isStale: false) }
+                        .padding(.horizontal, ActivityLayout.expandedInset).padding(.vertical, ActivityLayout.group)
                 } else { ActivityLockScreenView(state: state, isStale: name == "lockscreen-stale") }
             }.foregroundStyle(.white).background(.black).environment(\.colorScheme, .dark).environment(\.sizeCategory, large ? .accessibilityExtraExtraLarge : .large)
             let host = UIHostingController(rootView: content), window = UIWindow(windowScene: scene)

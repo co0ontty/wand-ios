@@ -75,7 +75,11 @@ final class SessionFilesStore: ObservableObject {
     func requestReload() { navigate { [weak self] in guard let self else { return }; if let filePath { loadFile(filePath) } else { loadDirectory(directory) } } }
     func cancelDiscard() { pendingDiscard = nil }
     func confirmDiscard() { let action = pendingDiscard; pendingDiscard = nil; action?() }
-    func requestBack() { if filePath != nil { requestDirectory(directory) } else { requestClose() } }
+    func requestBack() {
+        if filePath != nil { requestDirectory(directory) }
+        else if directory != root && directory != "/" { requestDirectory((directory as NSString).deletingLastPathComponent) }
+        else { requestClose() }
+    }
     private func resetFile() {
         file = nil; editing = false; draft = ""; savePhase = .idle; saveMessage = nil; saveConflict = false; error = nil
     }
@@ -184,6 +188,7 @@ struct SessionFilesView: View {
         .onChange(of: links.previewItem?.id) { _, value in if value != nil { downloadPhase = .done; downloadMessage = "已下载，可预览或分享" } }
         .onChange(of: links.failure?.id) { _, _ in if let failure = links.failure { downloadPhase = .failed; downloadMessage = failure.message } }
         .onChange(of: store.filePath) { _, _ in links.cancel(); downloadPhase = .idle; downloadMessage = nil }
+        .onChange(of: store.directory) { _, _ in filter = "" }
         .onChange(of: store.open) { _, open in if !open { dismiss() } }
         .onDisappear { links.cancel() }
     }
@@ -196,6 +201,9 @@ struct SessionFilesView: View {
     private var directoryContent: some View {
         List {
             Text(store.directory).font(.caption.monospaced()).textSelection(.enabled)
+            if store.directory != store.root {
+                Button("返回会话目录", systemImage: "folder") { store.requestDirectory(store.root) }
+            }
             TextField("筛选文件", text: $filter)
             if store.loading { ProgressView() }
             if let error = store.error { Text(error).foregroundStyle(Theme.danger); Button("重试") { store.requestReload() } }
@@ -217,6 +225,11 @@ struct SessionFilesView: View {
             if store.loading { ProgressView() }
             if store.editing {
                 TextEditor(text: Binding(get: { store.draft }, set: store.edit)).font(.body.monospaced()).disabled(store.savePhase == .running)
+            } else if let file = store.file, file.kind == "image" {
+                WandRemoteImage(baseURL: api.baseURL, path: file.path) {
+                    Label("图片暂不可用，可重试或下载", systemImage: "photo")
+                }.frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
+                    .accessibilityLabel(file.name).id(file.path)
             } else if let content = store.file?.content {
                 ScrollView([.horizontal, .vertical]) { Text(content).font(.body.monospaced()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
             } else {

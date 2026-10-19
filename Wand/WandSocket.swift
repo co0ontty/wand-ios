@@ -41,6 +41,7 @@ final class WandSocket: PtySocketTransport {
     private var sendQueue: [String] = []
     private var queuedBytes = 0
     private var sending = false
+    private let decodeQueue = DispatchQueue(label: "app.wand.socket.decode", qos: .userInitiated)
     private static let queueLimit = 2 * 1024 * 1024
 
     init(baseURL: URL, prepareConnection: (() async throws -> Void)? = nil) {
@@ -122,33 +123,60 @@ final class WandSocket: PtySocketTransport {
     }
     private func receiveNext(_ socket: URLSessionWebSocketTask, generation gen: Int) {
         socket.receive { [weak self] result in
-            DispatchQueue.main.async {
+            // Decode before entering the UI queue, one frame at a time. Do not
+            // receive the next frame until delivery, preserving FIFO/backpressure.
+            guard let self else { return }
+            self.decodeReceived(result) { [weak self] frame in
                 guard let self, !self.closed, gen == self.generation else { return }
                 guard !self.endpointSession.isRetired else { self.close(); return }
                 switch result {
                 case .failure(let error):
                     self.reportFailure(error); self.scheduleReconnect()
-                case .success(let message):
+                case .success:
                     self.lastMessageAt = Date(); self.reconnectDelay = 1
                     if !self.connected { self.connected = true; self.onConnectionChange?(true) }
-                    switch message {
-                    case .string(let text): self.handle(Data(text.utf8))
-                    case .data(let data): self.handle(data)
-                    @unknown default: break
-                    }
+                    if let frame { self.deliver(frame) }
                     self.receiveNext(socket, generation: gen)
                 }
             }
         }
     }
+
+    // Shared with transport tests: decoding is serial/off-main; delivery stays on main.
+    func decodeReceived(_ result: Result<URLSessionWebSocketTask.Message, Error>, completion: @escaping (DecodedFrame?) -> Void) {
+        decodeQueue.async {
+            let frame: DecodedFrame?
+            switch result {
+            case .success(.string(let text)): frame = Self.decode(Data(text.utf8))
+            case .success(.data(let data)): frame = Self.decode(data)
+            default: frame = nil
+            }
+            DispatchQueue.main.async { completion(frame) }
+        }
+    }
+
+    struct DecodedFrame {
+        let incoming: WsIncoming
+        let preview: ConversationSessionUpdate?
+    }
+
+    static func decode(_ data: Data) -> DecodedFrame? {
+        guard let incoming = try? JSONDecoder().decode(WsIncoming.self, from: data) else { return nil }
+        struct PreviewEnvelope: Decodable { let data: ConversationSessionUpdate }
+        let preview = incoming.type == "notification"
+            ? (try? JSONDecoder().decode(PreviewEnvelope.self, from: data))?.data : nil
+        return DecodedFrame(incoming: incoming, preview: preview)
+    }
+
     // Internal entrypoint for deterministic tests. UI callbacks remain FIFO on the main thread.
     func handle(_ data: Data) {
-        guard let incoming = try? JSONDecoder().decode(WsIncoming.self, from: data) else { return }
+        if let frame = Self.decode(data) { deliver(frame) }
+    }
+
+    private func deliver(_ frame: DecodedFrame) {
+        let incoming = frame.incoming
         if incoming.type == "ping" { sendJSON(["type": "pong", "t": incoming.t ?? 0]); return }
-        if incoming.type == "notification" {
-            struct PreviewEnvelope: Decodable { let data: ConversationSessionUpdate }
-            if let preview = try? JSONDecoder().decode(PreviewEnvelope.self, from: data) { onConversationPreview?(preview.data) }
-        }
+        if let preview = frame.preview { onConversationPreview?(preview) }
         guard incoming.sessionId == nil || incoming.sessionId == "__system__" || incoming.sessionId == subscribedSessionId else { return }
         switch incoming.type {
         case "resync_required": requestResync(); return

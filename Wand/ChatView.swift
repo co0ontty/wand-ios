@@ -23,7 +23,6 @@ private enum ModelPickerPresentation: String, Identifiable {
 
 private enum ComposerChoicePresentation: String, Identifiable {
     case mode
-    case attachments
     case context
     var id: String { rawValue }
 }
@@ -68,37 +67,69 @@ extension EnvironmentValues {
     }
 }
 
+/// Coalesce requests until the current publication/layout transaction has finished.
+/// In particular, never call ScrollViewProxy from @Published's willSet callback:
+/// the list still contains the old rows at that point.
+@MainActor final class ChatScrollScheduler: ObservableObject {
+    private var pending: Task<Void, Never>?
+
+    func request(_ scroll: @escaping @MainActor () -> Void) {
+        cancel()
+        pending = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            scroll()
+        }
+    }
+
+    func cancel() { pending?.cancel(); pending = nil }
+    deinit { pending?.cancel() }
+}
+
+/// Reference storage deliberately does not publish: reading a projection must not
+/// invalidate the view that is currently rendering it.
+@MainActor final class ChatProjectionCache<Value> {
+    private var revision: Int?
+    private var responding = false
+    private var cached: Value?
+
+    func value(revision: Int, responding: Bool, build: () -> Value) -> Value {
+        if self.revision == revision, self.responding == responding, let cached { return cached }
+        let value = build()
+        self.revision = revision
+        self.responding = responding
+        cached = value
+        return value
+    }
+}
+
 struct ChatView: View {
     private let sessionId: String
     private let api: WandAPI
     /// 工作区任务页已经有系统返回键和任务标题。嵌套时再往导航栏塞 badge / 路径，
     /// 会和 iOS 26 圆形返回键叠在一起，浅色背景下看起来像残影。
     private let showsNavigationChrome: Bool
-    private let offersInitialCall: Bool
     private let onCompletionVisible: ((SessionSnapshot) -> Void)?
     @State private var viewVisible = false
     @State private var showProviderPicker = false
+    @State private var launchEmployees: [SiliconEmployee] = []
+    @State private var launchEmployeesLoading = false
+    @State private var launchEmployeesError: String?
+    @State private var launchEmployeeReload = 0
 
     @StateObject private var store: ChatStore
     @StateObject private var keyboard = KeyboardObserver()
-    @StateObject private var speech = SpeechRecognizerService()
-    @StateObject private var call = VoiceCallController()
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    private var identityMetrics = ChatIdentityLayoutMetrics()
     @Environment(\.dismiss) private var dismiss
-    @State private var showCallTarget = false
-    @State private var showDraftEditor = false
-    @State private var offeredInitialCall = false
     @StateObject private var composerDraft: ComposerDraftState
-    @State private var voiceDraftRevision = 0
-    @State private var voiceDraftLifecycle = 0
     private var draft: String { composerDraft.text }
     @State private var showQuickCommit = false
     @State private var showDirectoryPicker = false
     @State private var showPiResources = false
+    @State private var composerActionsOpen = false
     @StateObject private var sessionFiles: SessionFilesStore
     @State private var scrollMode: ChatScrollMode = .stickToBottom
-    @State private var voicePressed = false
-    @State private var voiceCanceling = false
     @State private var draftNeedsExpanded = false
     @State private var composerInputHeight: CGFloat = 34
     @State private var composerIsComposing = false
@@ -106,19 +137,19 @@ struct ChatView: View {
     @StateObject private var serverFileLinks = ServerFileLinkController()
     @State private var gitStatus: GitStatusResult?
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
-    /// 轻点 vs 按住的计时器：按满阈值才开始录音，阈值内松手按轻点处理。
     /// 停止任务二次确认弹窗开关：点停止按钮先弹确认，避免误触中断正在跑的任务。
     @State private var showStopConfirm = false
     @State private var showActivityPanel = false
-    /// 排队消息气泡条是否展开成列表（默认折叠成「已排队 N 条」徽章）。
+    /// 输入栏上方队列的原位展开状态。
     @State private var queueBarExpanded = false
     /// 历史折叠记录绝对 turn 下标。prepend 更早页会同时改变 loadedOffset 和局部下标，
     /// 但两者之和不变，因此分页不会把用户刚展开的历史重新收起。
     @State private var expandedHistoryBoundaryAbsolute: Int?
     /// 用户手动收起的助手回复，使用绝对 turn 下标避免历史 prepend 后串状态。
     @State private var collapsedAssistantTurns: Set<Int> = []
-    /// 每次贴底请求递增；较旧的下一帧任务看到代次变化后自行退出，避免连续事件抢滚动。
-    @State private var scrollRequestGeneration = 0
+    @StateObject private var scrollScheduler = ChatScrollScheduler()
+    @State private var messageProjection = ChatProjectionCache<[MessageDisplayItem]>()
+    @State private var subagentProjection = ChatProjectionCache<[SubagentActivity]>()
     /// 顶部分页哨兵是否在视口内。只有用户主动向历史方向拖动后才允许触发，避免页面
     /// 初次布局从顶部跳到底部的瞬间误加载。
     @State private var earlierSentinelVisible = false
@@ -133,21 +164,20 @@ struct ChatView: View {
     private var inputFocused: Bool { get { composerFocus.focused } nonmutating set { composerFocus.focused = newValue } }
     @State private var composerAcknowledged = false
     private var composerEditing: Bool { get { composerFocus.editing } nonmutating set { composerFocus.editing = newValue } }
-    @State private var voiceNotice = ""
     @AppStorage(CatComposerSide.preferenceKey) private var catSideRaw = CatComposerSide.left.rawValue
     @State private var catDragOffset: CGFloat = 0
     @State private var modelPicker: ModelPickerPresentation?
     @State private var composerChoice: ComposerChoicePresentation?
+    @State private var pendingComposerAction: (key: String, lifecycle: Int)?
     @State private var visibleTurnIndex = 0
     @State private var holdCompletedClock = ""
     @State private var sawResponding = false
 
     init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true,
-         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil, sharedStore: ChatStore? = nil, offersInitialCall: Bool = false) {
+         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil, sharedStore: ChatStore? = nil) {
         self.sessionId = sessionId
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
-        self.offersInitialCall = offersInitialCall
         self.onCompletionVisible = onCompletionVisible
         let chatStore = sharedStore ?? ChatStore(sessionId: sessionId, api: api)
         _store = StateObject(wrappedValue: chatStore)
@@ -163,11 +193,15 @@ struct ChatView: View {
                     WandAmbientBackground()
                 }
                 VStack(spacing: 0) {
-                    mainContent
+                    VStack(spacing: 0) {
+                        connectionBanner
+                        mainContent
+                            .clipped()
+                    }
                         .clipped() // Clip the viewport, not just the first message's padding.
-                        .padding(.top, showsNavigationChrome ? ChatTopLayout.clearance(compact: verticalSizeClass == .compact) : 0)
+                        .padding(.top, showsNavigationChrome ? identityMetrics.clearance : 0)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .onTapGesture { composerFocus.collapse() }
+                        .onTapGesture { closeComposerActions(); composerFocus.collapse() }
                         .overlay(alignment: .bottom) { toastView }
 
                     // The parent already ends at the bottom safe-area boundary.
@@ -182,23 +216,20 @@ struct ChatView: View {
         .background(showsNavigationChrome ? Theme.background : Color.clear)
         .onChange(of: sessionFiles.open) { _, open in if !open { composerFocus.resume("files") } }
         .onChange(of: serverFileLinks.failure?.id) { _, failure in if failure != nil { composerFocus.resume("preview") } }
-        .onChange(of: speech.isProcessing) { _, processing in
-            if !processing && !voicePressed { composerFocus.resume("voice") }
-        }
         .onChange(of: composerDraft.text) { _, value in
             if !value.isEmpty { composerAcknowledged = false }
             if value.isEmpty { draftNeedsExpanded = false; composerInputHeight = 34 }
-            if call.ownsInput { call.pause("已切换到文字输入，点继续恢复通话") }
         }
         // 点消息区任意空白处收起键盘；输入栏在 VStack 底部，不受 dismiss 手势误伤。
+        .background { SessionBackSwipeEnabler().allowsHitTesting(false) }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(showsNavigationChrome ? .hidden : .automatic, for: .navigationBar)
         .overlay(alignment: .top) {
             if showsNavigationChrome {
                 ZStack(alignment: .top) {
-                    TopChatCompanion(side: catSide, dragOffset: catDragOffset) { size in companionFace(size: size) }
-                    floatingChatControls.padding(.top, verticalSizeClass == .compact ? 0 : 18)
+                    TopChatCompanion(side: catSide, dragOffset: catDragOffset, title: visibleIdentityTitle, status: visibleIdentityStatus) { size in companionFace(size: size) }
+                    floatingChatControls
                 }
             }
         }
@@ -215,70 +246,32 @@ struct ChatView: View {
                 Section("当前会话") {
                     Text(store.displayEmployeeName ?? store.snapshot?.providerLabel ?? "当前会话")
                     Text(store.snapshot?.cwd ?? "未选择目录")
-                    Button("模型、目录与执行设置") { composerChoice = .context }
+                    Button("查看或切换对象与目录") { composerChoice = .context }
                     Button("返回选择其他员工或会话") { dismiss() }
                 }
-                if store.snapshot?.provider == "pi", store.isStructured {
-                    Button("工具与资源") { showPiResources = true }
-                }
-                if store.isStructured {
-                    Button("持续语音通话") { showCallTarget = true }
-                        .disabled(store.snapshot?.employeeId == nil || store.snapshot?.cwd?.isEmpty != false)
-                }
-                Menu("猫头位置") {
-                    Button("控件间居中") { catSideRaw = CatComposerSide.left.rawValue }
-                    Button("向右微移") { catSideRaw = CatComposerSide.right.rawValue }
-                }
                 if store.isResponding { Button("停止当前任务", role: .destructive) { showStopConfirm = true } }
-                if call.phase == .speaking { Button("暂停朗读声音") { call.pause("朗读已暂停，点继续恢复") } }
-                Button("Git 变更与提交") { showQuickCommit = true }
+                Button("查看变更与提交") { showQuickCommit = true }
+                    .disabled(gitStatus?.isGit != true)
             } label: { FloatingChatIcon(symbol: "ellipsis") }
                 .accessibilityLabel("更多会话功能")
                 .accessibilityValue("\(store.displayEmployeeName ?? "当前会话")，\(store.snapshot?.cwd ?? "未选择目录")")
         }
     }
 
-    private var callContent: some View {
+    private var modalContent: some View {
         chatLayout
-        .confirmationDialog("开始语音通话", isPresented: $showCallTarget, titleVisibility: .visible) {
-            Button("开始通话") {
-                speech.stop(cancelled: true)
-                inputFocused = false
-                call.start(store: store)
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("\(store.displayEmployeeName ?? "员工")\n\(store.snapshot?.cwd ?? "")\n说完后发送给当前会话；回复由系统语音播报。")
-        }
-        .onChange(of: store.isResponding) { _, _ in call.update() }
         .onChange(of: store.inputFeedback) { _, value in
             if value == .failed { composerAcknowledged = false }
-            call.update()
+        }
+        .onAppear {
+            if !store.loading { sendPendingInitialMessage() }
+        }
+        .onChange(of: store.loading) { _, loading in
+            if !loading { sendPendingInitialMessage() }
         }
         .onChange(of: store.unconfirmedInput) { _, value in
             if value != nil { composerAcknowledged = false }
         }
-        .onChange(of: store.pendingEscalation?.requestId) { _, _ in call.update() }
-        .onChange(of: store.permissionBlocked) { _, _ in call.update() }
-        .onChange(of: store.connected) { _, _ in call.update() }
-        .onChange(of: store.messages.count) { _, _ in call.update() }
-        .onChange(of: store.messages.last?.completedAt) { _, _ in call.update() }
-        .onChange(of: store.snapshot?.cwd) { _, _ in call.pause("工作目录已变化，请核对目标后继续") }
-        .onChange(of: store.snapshot?.employeeId) { _, _ in call.pause("员工已变化，请核对目标后继续") }
-        .onChange(of: store.providerSwitching) { _, switching in if switching { call.pause("执行工具正在切换，请核对目标后继续") } }
-        .onChange(of: store.loading) { _, loading in
-            if !loading, offersInitialCall, !offeredInitialCall, store.loadError == nil {
-                offeredInitialCall = true; showCallTarget = true
-            }
-        }
-        .onChange(of: scenePhase) { _, value in
-            if value != .active { call.pause("应用已离开前台，点继续恢复通话") }
-        }
-        .onDisappear { call.end() }
-    }
-
-    private var modalContent: some View {
-        callContent
         .sheet(isPresented: $showActivityPanel, onDismiss: { composerFocus.resume("activity") }) { activityPanel }
         .sheet(isPresented: $showQuickCommit) {
             GitQuickCommitView(
@@ -296,10 +289,6 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showDirectoryPicker) {
             BlankSessionDirectoryPicker(store: store) { showDirectoryPicker = false }
-        }
-        .sheet(isPresented: $showDraftEditor, onDismiss: { composerIsComposing = false; focusComposer() }) {
-            ComposerDraftEditor(text: $composerDraft.text, onCompositionChange: { composerIsComposing = $0 },
-                onPasteImages: { attachments.handlePastedImageData($0) })
         }
         .sheet(isPresented: $showPiResources) { PiResourcesView(sessionID: sessionId, api: api) }
         .fileImporter(
@@ -321,12 +310,20 @@ struct ChatView: View {
             ServerFilePreviewView(item: item)
         }
         .sheet(isPresented: $showProviderPicker) {
-            SearchableChoiceSheet(title: "切换执行工具", sections: [
-                SearchableChoiceSection(id: "provider", items: WandAgentTool.allCases.map {
-                    SearchableChoiceItem(id: $0.rawValue, label: $0.title)
-                }, selectedId: store.snapshot?.agentTool.rawValue ?? "")
-            ]) { _, id in
-                if let tool = WandAgentTool(rawValue: id) { store.switchProvider(tool.provider.rawValue, engine: tool.engine) }
+            SearchableChoiceSheet(title: "选择员工或执行工具", sections: launchTargetSections,
+                notice: launchEmployeesLoading ? "正在读取员工…" : launchEmployeesError,
+                onRetry: launchEmployeesError == nil ? nil : { launchEmployeeReload += 1 }) { section, id in
+                if section == "employee" { store.chooseEmployee(id) }
+                else if let tool = WandAgentTool(rawValue: id) { store.switchProvider(tool.provider.rawValue, engine: tool.engine) }
+            }
+            .task(id: launchEmployeeReload) {
+                launchEmployeesLoading = true; launchEmployeesError = nil
+                defer { launchEmployeesLoading = false }
+                do {
+                    let people = try await api.listContactEmployees()
+                    guard !Task.isCancelled else { return }
+                    launchEmployees = people.filter { !$0.archived && !$0.agents.isEmpty }
+                } catch { if !Task.isCancelled { launchEmployeesError = "员工加载失败，可重试；工具选项仍可使用。" } }
             }
             .presentationDetents([.medium, .large])
         }
@@ -345,7 +342,7 @@ struct ChatView: View {
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
-        .sheet(item: $composerChoice) { choice in
+        .sheet(item: $composerChoice, onDismiss: completeComposerContextAction) { choice in
             composerChoiceSheet(choice)
                 .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
@@ -373,11 +370,10 @@ struct ChatView: View {
             if !showing { refreshGitStatus() }
         }
         .onDisappear {
+            closeComposerActions()
             if viewVisible { store.detachView() }
             viewVisible = false
-            speech.stop(cancelled: true)
-            voicePressed = false
-            voiceCanceling = false
+            pendingComposerAction = nil
             serverFileLinks.cancel()
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -385,8 +381,7 @@ struct ChatView: View {
             if newPhase == .active { store.handleEnterForeground() }
             else if newPhase == .background { store.handleEnterBackground() }
         }
-        .overlay(alignment: .top) { connectionBanner }
-        .animation(WandMotion.disclosure, value: store.connected)
+        .animation(reduceMotion ? nil : WandMotion.disclosure, value: store.connected)
         .overlay {
             if serverFileLinks.isDownloading {
                 HStack(spacing: 10) {
@@ -471,17 +466,15 @@ struct ChatView: View {
                 title: "收起输入",
                 key: .escape,
                 modifiers: [],
-                isEnabled: keyboardShortcutsActive && inputFocused
+                isEnabled: keyboardShortcutsActive && (inputFocused || composerActionsOpen)
             ) {
-                inputFocused = false
+                closeComposerActions(); composerFocus.collapse()
             },
         ]
     }
 
     private var keyboardShortcutsActive: Bool {
-        if call.active { return false }
         return !showQuickCommit
-            && !showDraftEditor
             && !attachments.showFileImporter
             && !attachments.showPhotoPicker
             && !showStopConfirm
@@ -520,7 +513,9 @@ struct ChatView: View {
         } else if store.isStructured && store.messages.isEmpty && !store.isResponding {
             sessionLaunchPanel
         } else {
-            messageList
+            GeometryReader { viewport in
+                messageList.environment(\.chatViewportHeight, viewport.size.height)
+            }
         }
     }
 
@@ -632,6 +627,10 @@ struct ChatView: View {
                     }
                 }
                 .onAppear { scrollToActiveTarget(proxy) }
+                .onDisappear { scrollScheduler.cancel() }
+                .onChange(of: scrollMode) { _, mode in
+                    if mode == .manual { scrollScheduler.cancel() }
+                }
                 .onReceive(store.$messages.dropFirst()) { _ in
                     scrollToActiveTarget(proxy)
                 }
@@ -851,7 +850,9 @@ struct ChatView: View {
     }
 
     private var subagentActivities: [SubagentActivity] {
-        collectSubagentActivities(messages: store.messages, isResponding: store.isResponding)
+        subagentProjection.value(revision: store.messageRevision, responding: store.isResponding) {
+            collectSubagentActivities(messages: store.messages, isResponding: store.isResponding)
+        }
     }
 
     private var completedClock: String {
@@ -867,15 +868,16 @@ struct ChatView: View {
     }
 
     private var groupedMessageItems: [MessageDisplayItem] {
-        let base = collapseActivityItems(
-            flattenAssistantTurns(
-                groupExplorationTurns(toolPairedDisplayTurns(store.messages)),
-                liveTurnIndex: store.isResponding ? latestAssistantTurnIndex : nil
-            ),
-            latestTurnIndex: latestAssistantTurnIndex ?? -1,
-            running: store.isResponding
-        )
-        return base
+        messageProjection.value(revision: store.messageRevision, responding: store.isResponding) {
+            collapseActivityItems(
+                flattenAssistantTurns(
+                    groupExplorationTurns(toolPairedDisplayTurns(store.messages)),
+                    liveTurnIndex: store.isResponding ? latestAssistantTurnIndex : nil
+                ),
+                latestTurnIndex: latestAssistantTurnIndex ?? -1,
+                running: store.isResponding
+            )
+        }
     }
 
     private var presentedMessageItems: [MessageDisplayItem] {
@@ -945,31 +947,14 @@ struct ChatView: View {
 
     /// 根据当前模式同步滚动：贴底跟随，或尊重用户手动浏览。
     private func scrollToActiveTarget(_ proxy: ScrollViewProxy, animated: Bool = false) {
-        guard scrollMode != .manual else { return }
-        let mode = scrollMode
-        scrollRequestGeneration &+= 1
-        let generation = scrollRequestGeneration
-        let scroll = {
-            switch mode {
-            case .stickToBottom:
-                proxy.scrollTo("chat-bottom", anchor: .bottom)
-            case .manual:
-                break
-            }
-        }
-        let performScroll = {
+        guard scrollMode != .manual else { scrollScheduler.cancel(); return }
+        scrollScheduler.request {
+            guard scrollMode != .manual else { return }
             if animated && !reduceMotion {
-                withAnimation(WandMotion.scroll) { scroll() }
+                withAnimation(WandMotion.scroll) { proxy.scrollTo("chat-bottom", anchor: .bottom) }
             } else {
-                scroll()
+                proxy.scrollTo("chat-bottom", anchor: .bottom)
             }
-        }
-        performScroll()
-        Task { @MainActor in
-            // 等消息、键盘或输入栏的新布局提交，再校正一次；新请求或用户手势会取消旧请求。
-            await Task.yield()
-            guard scrollRequestGeneration == generation, scrollMode == mode else { return }
-            performScroll()
         }
     }
 
@@ -981,6 +966,19 @@ struct ChatView: View {
 
     private var providerTint: Color { Theme.providerColor(store.snapshot?.provider) }
 
+    private var launchTargetSections: [SearchableChoiceSection] {
+        var sections: [SearchableChoiceSection] = []
+        if !launchEmployees.isEmpty {
+            sections.append(SearchableChoiceSection(id: "employee", title: "员工身份",
+                items: launchEmployees.map { SearchableChoiceItem(id: $0.id, label: $0.name, enabled: store.canSwitchProvider) },
+                selectedId: store.snapshot?.employeeId ?? "", searchable: true))
+        }
+        sections.append(SearchableChoiceSection(id: "provider", title: "执行工具（保留员工身份）",
+            items: WandAgentTool.allCases.map { SearchableChoiceItem(id: $0.rawValue, label: $0.title, enabled: store.canSwitchProvider) },
+            selectedId: store.snapshot?.agentTool.rawValue ?? ""))
+        return sections
+    }
+
     private var sessionLaunchPanel: some View {
         let provider = currentProvider
         let tint = providerTint
@@ -988,21 +986,28 @@ struct ChatView: View {
             Spacer(minLength: 12)
             Button { showProviderPicker = true } label: {
                 ZStack {
-                    BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
-                        .opacity(store.providerSwitching ? 0 : 1)
+                    if let employeeID = store.snapshot?.employeeId {
+                        ContactAvatar(id: employeeID, avatar: store.displayEmployeeAvatar ?? "", systemKey: store.displayEmployee?.systemKey, size: 52)
+                            .opacity(store.providerSwitching ? 0 : 1)
+                    } else {
+                        BrandLogo(provider: store.snapshot?.provider, color: tint.opacity(0.94))
+                            .opacity(store.providerSwitching ? 0 : 1)
+                    }
                     ProgressView().tint(tint).opacity(store.providerSwitching ? 1 : 0)
-                }.frame(width: 44, height: 44)
+                }.frame(width: 52, height: 52)
             }
             .buttonStyle(.plain)
             .disabled(!store.canSwitchProvider)
-            .accessibilityLabel("切换 CLI 工具")
-            Text("开始与 \(store.snapshot?.providerLabel ?? provider.title) 的对话")
+            .accessibilityLabel("选择员工或执行工具")
+            Text(store.displayEmployeeName ?? store.snapshot?.providerLabel ?? provider.title)
                 .font(.wand(size: 17, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
-            Text("输入消息，让它帮你完成任务")
+            Text(store.snapshot?.employeeId == nil ? "输入消息，让它帮你完成任务 · 点 Logo 选择员工或工具" : "输入消息，交给员工完成 · 点头像选择员工或工具")
                 .font(.wand(size: 13))
                 .foregroundColor(Theme.textSecondary)
             launchContextControls
+            if let error = store.targetChangeError { Text(error).font(.caption).foregroundStyle(Theme.danger) }
+            else if let result = store.targetChangeResult { Text(result).font(.caption).foregroundStyle(Theme.success) }
             Spacer(minLength: 12)
         }
         .padding(.horizontal, 32)
@@ -1011,23 +1016,18 @@ struct ChatView: View {
 
     @ViewBuilder private var launchContextControls: some View {
         if store.isStructured && !inputExpanded {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    launchModelMenu
-                    launchThinkingMenu
-                }
-                VStack(spacing: 8) {
-                    launchModelMenu
-                    launchThinkingMenu
-                }
-            }
-            .frame(maxWidth: 340)
-            if store.canChangeDirectory {
+            VStack(spacing: 0) {
+                launchModelMenu
+                Divider()
+                launchThinkingMenu
+                Divider()
                 Button { showDirectoryPicker = true } label: {
-                    Label(store.snapshot?.cwd ?? "选择运行目录", systemImage: "folder")
-                        .font(.subheadline).lineLimit(1).truncationMode(.middle).frame(minHeight: 44)
-                }.accessibilityLabel("切换运行目录")
-            }
+                    launchOptionChrome(title: "运行目录", value: store.snapshot?.cwd ?? "选择运行目录", icon: "folder")
+                }.buttonStyle(.plain).disabled(!store.canChangeDirectory).accessibilityLabel("切换运行目录")
+                Text(store.directoryChangeError ?? (store.directoryChanging ? "正在切换运行目录…" : store.canChangeDirectory ? "首次发送前可更换运行目录" : "当前任务或会话的运行目录已固定"))
+                    .font(.caption).foregroundStyle(store.directoryChangeError == nil ? Theme.textSecondary : Theme.danger)
+                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxWidth: 360).background(Theme.surface, in: RoundedRectangle(cornerRadius: 20))
         }
     }
 
@@ -1252,12 +1252,6 @@ struct ChatView: View {
 
     private var bottomBar: some View {
         VStack(spacing: 0) {
-            if call.active {
-                VoiceCallPanel(call: call, onStopTask: {
-                    call.pause("请确认是否停止当前任务")
-                    showStopConfirm = true
-                }).padding(.horizontal, 12).padding(.bottom, 6)
-            }
             if hasActivityPanel {
                 Button {
                     composerFocus.borrow("activity", open: composerEditing)
@@ -1280,7 +1274,7 @@ struct ChatView: View {
 
     private var hasActivityPanel: Bool {
         !visibleTodos.isEmpty || store.pendingEscalation != nil || store.legacyPermissionPrompt != nil ||
-            !store.queuedMessages.isEmpty || shouldShowSubagentShelf
+            shouldShowSubagentShelf
     }
     private var activityPanel: some View {
         NavigationStack {
@@ -1300,19 +1294,6 @@ struct ChatView: View {
                         .padding(.horizontal, 12)
                         .padding(.bottom, 8)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                    if !store.queuedMessages.isEmpty {
-                        QueueBar(
-                            items: store.queuedMessages,
-                            expanded: $queueBarExpanded,
-                            inFlight: store.queueInFlight,
-                            onPromote: { store.promoteQueued(index: $0) },
-                            onDelete: { store.deleteQueued(index: $0) },
-                            onEdit: { store.editQueued(index: $0, text: $1) },
-                            onClearAll: { store.clearQueued() }
-                        )
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 6)
                     }
                     if shouldShowSubagentShelf {
                         SubagentActivityShelf(
@@ -1342,8 +1323,8 @@ struct ChatView: View {
     }
 
     private var composerStatus: some View {
-        Text(voiceCanceling ? "松开取消" : speech.isProcessing ? "转写中…" : voicePressed && !speech.isRecording ? "等待麦克风授权…" : speech.isRecording ? "正在听 · 上滑取消" : !voiceNotice.isEmpty ? voiceNotice : store.permissionBlocked ? "等待确认" : call.phase == .speaking ? "正在朗读" : store.inputSending ? "发送中…" : store.isResponding ? "处理中" : "正在输入")
-            .font(.caption).foregroundStyle(voiceCanceling ? Theme.danger : Theme.textSecondary)
+        Text(store.permissionBlocked ? "等待确认" : store.inputSending ? "发送中…" : store.isResponding ? "处理中" : "正在输入")
+            .font(.caption).foregroundStyle(Theme.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityLabel("\(store.displayEmployeeName ?? "员工")的会话状态")
     }
@@ -1357,66 +1338,127 @@ struct ChatView: View {
         max(composerTypeSize.isAccessibilitySize ? 80 : 0, composerMaximumInputHeight(compact: verticalSizeClass == .compact, keyboardVisible: keyboard.isVisible))
     }
     private var catStatusVisible: Bool {
-        store.isResponding || store.inputSending || store.permissionBlocked || call.phase == .speaking ||
-            voicePressed || speech.isRecording || speech.isProcessing || !voiceNotice.isEmpty
+        store.isResponding || store.inputSending || store.permissionBlocked
     }
+    @ViewBuilder private var composerQueueAccessory: some View {
+            if !store.queuedMessages.isEmpty {
+                QueueBar(items: store.queuedMessages, expanded: $queueBarExpanded,
+                    inFlight: store.queueInFlight,
+                    steering: store.snapshot?.provider == "pi" && store.snapshot?.structuredState?.engine == "core",
+                    mutationPending: store.queueMutationPending || composerDraft.queueRetrievalPending,
+                    onPromote: { store.promoteQueued(index: $0) },
+                    onDelete: { store.deleteQueued(index: $0) },
+                    onEdit: { index in
+                        let lifecycle = composerDraft.lifecycleRevision
+                        Task {
+                            if await store.retrieveQueued(index: index), viewVisible,
+                               composerDraft.lifecycleRevision == lifecycle {
+                                queueBarExpanded = false
+                                focusComposer()
+                            }
+                        }
+                    }, onClearAll: { store.clearQueued() })
+            }
+            if let original = composerDraft.queueRecoveryText {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(queueRecoveryMessage)
+                        .font(.caption).foregroundStyle(Theme.textSecondary)
+                    if !composerDraft.queueRetrievalPending {
+                        Text(original).font(.caption).lineLimit(3).textSelection(.enabled)
+                        if composerDraft.queueRecoveryPhase == .ready || composerDraft.queueRecoveryPhase == .unconfirmed {
+                            Button(composerDraft.queueRecoveryPhase == .ready ? "加入当前输入继续编辑" : "确认已移出且未执行，恢复原文") {
+                                if composerDraft.restoreQueuedOriginal(confirmedNotExecuted: composerDraft.queueRecoveryPhase == .unconfirmed) { focusComposer() }
+                            }.frame(minHeight: 44).disabled(store.inputSending)
+                        }
+                        HStack {
+                            Button("复制原文") { UIPasteboard.general.string = original }
+                            Spacer()
+                            Button("关闭") { composerDraft.dismissQueueRecovery() }
+                        }.font(.caption).frame(minHeight: 44)
+                    }
+                }.padding(.horizontal, 16).padding(.bottom, 6)
+            }
+    }
+
+    private var queueRecoveryMessage: String {
+        switch composerDraft.queueRecoveryPhase {
+        case .retrieving: return "正在取回原文…"
+        case .ready: return "已取回；当前输入保留，确认后加入继续编辑。"
+        case .rejected: return "取回被拒绝，原文已保留；请核对队列。"
+        default: return "取回结果未知，请核对队列和会话；不会自动重试。"
+        }
+    }
+
     private var inputBar: some View {
         VStack(spacing: 4) {
             if catStatusVisible { composerStatus.padding(.horizontal, 16) }
             FocusComposerSurface(expanded: catInputExpanded, hasDraft: !draft.isEmpty || !attachments.attachments.isEmpty,
                 onFocus: focusComposer, editor: { composerInputContent }, add: { composerActionsMenu },
-                voice: { composerVoiceButton }, send: { sendButton },
+                send: { sendButton },
                 settings: { SessionComposerSettings(store: store, focus: composerFocus) },
                 actionCount: ComposerActionPresentation(phase: store.inputSending ? .sending : .idle,
-                    turnRunning: store.isResponding, hasDraft: hasComposerDraft).slotCount)
+                    turnRunning: store.isResponding, hasDraft: hasComposerDraft).slotCount,
+                accessory: !composerActionsOpen && store.queuedMessages.isEmpty && composerDraft.queueRecoveryText == nil ? nil : AnyView(composerAccessories))
         }
         .onChange(of: keyboard.isVisible) { old, visible in
             if old && !visible { composerFocus.keyboardHidden() }
         }
         .onChange(of: composerModalActive) { _, active in
-            if active { composerFocus.borrow("modal", open: composerEditing) }
+            if active { composerFocus.borrow("modal", open: composerEditing); closeComposerActions() }
             else { composerFocus.resume("modal") }
         }
         .confirmationDialog("确定要停止当前正在运行的任务吗？", isPresented: $showStopConfirm, titleVisibility: .visible) {
-            Button("停止", role: .destructive) { call.pause("任务已停止，点继续恢复通话"); store.stopResponding() }
+            Button("停止", role: .destructive) { store.stopResponding() }
             Button("取消", role: .cancel) {}
         }
     }
     private var composerModalActive: Bool {
-        composerChoice != nil || modelPicker != nil || showDraftEditor || showDirectoryPicker ||
+        composerChoice != nil || modelPicker != nil || showDirectoryPicker ||
             attachments.showFileImporter || attachments.showPhotoPicker || serverFileLinks.previewItem != nil
+    }
+    private var visibleIdentityTitle: String {
+        if let name = store.displayEmployeeName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
+        return store.displayTitle
+    }
+    private var visibleIdentityStatus: String {
+        if !store.connected { return "连接已断开" }
+        if store.permissionBlocked || store.pendingEscalation != nil { return "等待你的确认" }
+        if store.inputSending { return "正在发送" }
+        if store.isResponding { return "正在执行" }
+        if store.status == "failed" { return "最近一轮失败" }
+        if store.status == "stopped" { return "已停止，可继续对话" }
+        return "可以继续对话"
     }
     private func companionFace(size: CGFloat) -> some View {
         WorkingAvatar(id: store.snapshot?.employeeId ?? sessionId, name: store.displayEmployeeName ?? "员工",
             avatar: store.displayEmployeeAvatar ?? "", activity: avatarFileActivity(messages: store.messages,
                 executing: store.isResponding && store.status == "running" && !store.permissionBlocked && store.pendingEscalation == nil),
-            thinking: avatarThinking, speaking: call.isSpeaking, size: size)
-            .overlay { Color.clear.modifier(catVoiceGesture) }
+            thinking: avatarThinking, size: size)
+            .overlay { Color.clear.modifier(catGesture) }
+            .accessibilityAction(named: "切换角色位置") { catSideRaw = catSide == .left ? CatComposerSide.right.rawValue : CatComposerSide.left.rawValue }
     }
     private var catSide: CatComposerSide { CatComposerSide(rawValue: catSideRaw) ?? .left }
     private var avatarThinking: Bool {
         !store.permissionBlocked && store.pendingEscalation == nil &&
             avatarIsThinking(messages: store.messages, executing: store.isResponding && store.status == "running")
     }
-    private var catVoiceGesture: CatInputGesture {
-        CatInputGesture(onTap: focusComposer, onHold: startVoiceRecording,
-            onMove: { voiceCanceling = $0 }, onRelease: finishVoiceRecording,
+    private var catGesture: CatInputGesture {
+        CatInputGesture(onTap: focusComposer,
             onDrag: { catDragOffset = $0 }, onDrop: { x in
                 catSideRaw = catSide.dropped(translation: x).rawValue
                 catDragOffset = 0
-            })
+            }, identityName: visibleIdentityTitle)
     }
 
     private var inputExpanded: Bool { catInputExpanded }
 
     private func focusComposer() {
-        if call.ownsInput { call.pause("已切换到文字输入，点继续恢复通话") }
+        closeComposerActions()
         composerAcknowledged = false
-        voiceNotice = ""
         composerFocus.focus()
     }
 
-    /// 文本框只处理系统文本编辑；语音手势由外侧独立按钮承载。
+    /// 文本框只处理系统文本编辑。
     @ViewBuilder private var composerInputContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !attachments.attachments.isEmpty {
@@ -1426,10 +1468,6 @@ struct ChatView: View {
                     onRemove: attachments.remove,
                     onPreview: { file in composerFocus.borrow("preview", open: true); serverFileLinks.open(serverPath: file.savedPath, api: api) }
                 )
-            }
-            if let message = composerDraft.optimizationMessage {
-                Text(message).font(.caption).foregroundStyle(Theme.textSecondary)
-                    .accessibilityAddTraits(.updatesFrequently)
             }
             if composerDraft.submissionFailed || store.unconfirmedInput != nil {
                 Label(store.unconfirmedInput != nil ? "送达状态未确认，请核对会话后再发送。草稿已保留。" : (store.inputFeedbackMessage ?? "发送失败，草稿已保留。"), systemImage: "exclamationmark.circle")
@@ -1443,21 +1481,6 @@ struct ChatView: View {
                 .contentShape(Rectangle())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var composerVoiceButton: some View {
-        Image(systemName: voicePressed ? "waveform" : "mic")
-            .font(.system(size: 18, weight: .semibold))
-            .foregroundColor(voiceCanceling ? Theme.danger : (voicePressed ? Theme.brand : Theme.textSecondary))
-            .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-            .background(Circle().fill(Theme.surface.opacity(0.92)))
-            .overlay(Circle().stroke(Theme.border.opacity(0.5), lineWidth: 0.8))
-            .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-            .contentShape(Circle())
-            .modifier(CatInputGesture(onTap: focusComposer, onHold: startVoiceRecording,
-                onMove: { voiceCanceling = $0 }, onRelease: finishVoiceRecording))
-            .accessibilityLabel("语音输入")
-            .accessibilityValue(voicePressed ? "正在录音" : "长按录音")
     }
 
     private var hasComposerDraft: Bool {
@@ -1541,29 +1564,35 @@ struct ChatView: View {
         refreshGitStatus()
     }
 
+    private func closeComposerActions() {
+        composerActionsOpen = false
+        composerFocus.resume("actions")
+    }
+
     private var composerActionsMenu: some View {
-        Button {
-            composerChoice = .attachments
-        } label: {
-            if attachments.isUploading {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(Theme.textSecondary)
-                    .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-            } else {
-                // 卡片内的「+」走极简：无圆底描边，仅图标（对齐 Codex）。
-                Image(systemName: "plus")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
-                    .frame(width: ComposerMetrics.actionVisualSize, height: ComposerMetrics.actionVisualSize)
-                    .contentShape(Rectangle())
-            }
+        ComposerAddButton(expanded: composerActionsOpen, uploading: attachments.isUploading) {
+            if composerActionsOpen { closeComposerActions() }
+            else { composerFocus.borrow("actions", open: true); composerActionsOpen = true }
         }
-        .disabled(attachments.isUploading)
-        .frame(width: ComposerMetrics.actionTouchSize, height: ComposerMetrics.actionTouchSize)
-        .buttonStyle(.plain)
-        .accessibilityLabel("添加附件")
-        .accessibilityHint("轻点从相册或文件选择")
+    }
+
+    private var composerAccessories: some View {
+        VStack(spacing: 4) {
+            if composerActionsOpen {
+                ComposerAttachmentPanel(onPhoto: {
+                    composerFocus.borrow("modal", open: true); closeComposerActions(); attachments.showPhotoPicker = true
+                }, onFile: {
+                    composerFocus.borrow("modal", open: true); closeComposerActions(); attachments.showFileImporter = true
+                }) {
+                    if store.snapshot?.provider == "pi", store.isStructured {
+                        Button("工具与资源", systemImage: "wrench.and.screwdriver") {
+                            closeComposerActions(); showPiResources = true
+                        }.frame(minHeight: 44)
+                    }
+                }
+            }
+            composerQueueAccessory
+        }.animation(reduceMotion ? nil : WandMotion.expansion, value: composerActionsOpen)
     }
 
     /// 多行自增高输入框。走 UIKit marked-text，避免中文输入法组字被 SwiftUI Binding 打断。
@@ -1579,7 +1608,6 @@ struct ChatView: View {
             },
             onFocusChange: {
                 inputFocused = $0
-                if $0 && call.ownsInput { call.pause("已切换到文字输入，点继续恢复通话") }
             },
             onCompositionChange: { composerIsComposing = $0 },
             onSubmit: sendDraft,
@@ -1592,9 +1620,6 @@ struct ChatView: View {
     }
 
     private var composerPlaceholder: String {
-        if voicePressed {
-            return voiceCanceling ? "松开手指，取消输入" : "松开结束 · 上滑取消"
-        }
         return "输入消息，回车换行"
     }
 
@@ -1602,8 +1627,8 @@ struct ChatView: View {
         // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
         // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
         // 组字未确认时不能发，否则会把拼音半成品送出去，或把候选确认键当成发送。
-        !voicePressed && !speech.isRecording && !speech.isProcessing && !store.inputSending &&
-        !store.providerSwitching && !store.directoryChanging && !composerDraft.isOptimizing && !attachments.isUploading &&
+        !store.inputSending &&
+        !store.providerSwitching && !store.directoryChanging && !attachments.isUploading &&
         !composerDraft.isUnconfirmed(composerDraft.submission().prompt) && composerDraftIsSendable(
             draft,
             hasAttachments: !attachments.attachments.isEmpty,
@@ -1611,8 +1636,32 @@ struct ChatView: View {
         )
     }
 
+    private func sendPendingInitialMessage() {
+        guard !store.loading, store.loadError == nil, composerDraft.claimInitialSend() else { return }
+        guard canSend else {
+            composerDraft.finishInitialSend()
+            return
+        }
+        let submission = composerDraft.submission()
+        composerDraft.submitted(submission)
+        let started = store.send(text: submission.prompt, onAccepted: {
+            composerDraft.accepted(submission)
+            composerDraft.finishInitialSend()
+        }, onFailure: {
+            composerDraft.rejected(submission)
+            composerDraft.finishInitialSend()
+            composerAcknowledged = false
+            composerEditing = true
+        })
+        if !started {
+            composerDraft.rejected(submission)
+            composerDraft.finishInitialSend()
+        }
+    }
+
     private func sendDraft() {
         guard canSend else { return }
+        closeComposerActions()
         let submission = composerDraft.submission()
         let started = store.send(text: submission.prompt, onAccepted: {
             composerDraft.accepted(submission)
@@ -1632,44 +1681,6 @@ struct ChatView: View {
         // 清空 draft 后，权限卡/todo bar 的插入移除可能让输入框丢焦点。
         // 发送后主动保持焦点，方便连续输入。
         inputFocused = true
-    }
-
-    // MARK: - 按住说话（端侧语音识别）
-
-    private func finishVoiceRecording(cancelled: Bool) {
-        let revision = voiceDraftRevision, lifecycle = voiceDraftLifecycle
-        voicePressed = false; voiceCanceling = false
-        speech.stop(cancelled: cancelled) { text in
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if composerDraft.textRevision == revision && composerDraft.lifecycleRevision == lifecycle { voiceNotice = "没有听到声音，请再试一次" }
-                return
-            }
-            let before = composerDraft.textRevision
-            composerDraft.appendVoice(text, ifUnchangedSince: revision, lifecycle: lifecycle)
-            if composerDraft.textRevision != before { focusComposer() }
-        }
-        if cancelled { voiceNotice = "已取消，草稿保留" }
-        if !speech.isProcessing { composerFocus.resume("voice") }
-    }
-
-    /// 按满阈值进入录音态（原「按下立即录音」交互的主体）。
-    private func startVoiceRecording() {
-        guard !voicePressed, !speech.isProcessing, !store.inputSending, !store.providerSwitching, !composerDraft.isOptimizing, !attachments.isUploading else { return }
-        if call.ownsInput { call.pause("已切换到按住说话，点继续恢复通话") }
-        composerFocus.borrow("voice", open: composerEditing)
-        voiceDraftRevision = composerDraft.textRevision
-        voiceDraftLifecycle = composerDraft.lifecycleRevision
-        voicePressed = true
-        voiceCanceling = false
-        voiceNotice = ""
-        inputFocused = false
-        speech.start(api: api) { message in
-            voiceNotice = message
-            store.toast = message
-            voicePressed = false
-            voiceCanceling = false
-            composerFocus.resume("voice")
-        }
     }
 
     // MARK: - Toast
@@ -1711,59 +1722,34 @@ struct ChatView: View {
                 store.setMode(itemId)
             }
         case .context:
-            SearchableChoiceSheet(title: "会话上下文", sections: [
+            SearchableChoiceSheet(title: "会话对象与目录", sections: [
                 SearchableChoiceSection(id: "context", items: [
+                    SearchableChoiceItem(id: "provider", label: "执行工具 · \(store.snapshot?.providerLabel ?? currentProvider.title)"),
                     SearchableChoiceItem(id: "model", label: "模型与思考 · \(modelThinkingText)"),
                     SearchableChoiceItem(id: "mode", label: "执行模式 · \(Self.modeLabel(store.mode))"),
-                    SearchableChoiceItem(id: "directory", label: "目录 · \(store.snapshot?.cwd ?? "未选择")"),
-                    SearchableChoiceItem(id: "optimize", label: "优化提示词"),
-                    SearchableChoiceItem(id: "editor", label: "展开编辑长消息"),
-                    SearchableChoiceItem(id: "call", label: "持续语音通话（自动发送与播报）")
+                    SearchableChoiceItem(id: "directory", label: "目录 · \(store.snapshot?.cwd ?? "未选择")")
                 ], selectedId: "")
             ]) { _, itemId in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    switch itemId {
-                    case "model": modelPicker = .session
-                    case "mode":
-                        if currentProvider == .codex { store.toast = "Codex 会话的执行模式固定" }
-                        else { composerChoice = .mode }
-                    case "directory":
-                        if store.canChangeDirectory { showDirectoryPicker = true }
-                        else { store.toast = "当前会话目录固定；更换目录请创建新会话" }
-                    case "editor": showDraftEditor = true
-                    case "optimize":
-                        guard !composerDraft.isOptimizing, !store.inputSending, !attachments.isUploading,
-                              !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                            store.toast = "请输入提示词，等待当前上传或发送完成后再优化"; return
-                        }
-                        composerDraft.optimize { text in try await api.optimizePrompt(id: sessionId, prompt: text) }
-                    case "call": showCallTarget = true
-                    default: break
-                    }
-                }
+                pendingComposerAction = (itemId, composerDraft.lifecycleRevision)
             }
-        case .attachments:
-            SearchableChoiceSheet(
-                title: "添加附件",
-                sections: [
-                    SearchableChoiceSection(
-                        id: "attach",
-                        items: [
-                            SearchableChoiceItem(id: "photo", label: "从相册选择"),
-                            SearchableChoiceItem(id: "file", label: "从文件选择"),
-                        ],
-                        selectedId: ""
-                    )
-                ]
-            ) { _, itemId in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    if itemId == "photo" {
-                        attachments.showPhotoPicker = true
-                    } else {
-                        attachments.showFileImporter = true
-                    }
-                }
-            }
+        }
+    }
+
+    /// Native dismissal completion, not a guessed animation delay; retired drafts cannot open new UI.
+    private func completeComposerContextAction() {
+        guard let pending = pendingComposerAction else { return }
+        pendingComposerAction = nil
+        guard pending.lifecycle == composerDraft.lifecycleRevision else { return }
+        switch pending.key {
+        case "provider": showProviderPicker = true
+        case "model": modelPicker = .session
+        case "mode":
+            if currentProvider == .codex { store.toast = "Codex 会话的执行模式固定" }
+            else { composerChoice = .mode }
+        case "directory":
+            if store.canChangeDirectory { showDirectoryPicker = true }
+            else { store.toast = "当前会话目录固定；更换目录请创建新会话" }
+        default: break
         }
     }
 
@@ -2436,6 +2422,62 @@ struct ToolResultInfo {
     /// 结果内联图片（站内取图 URL 或 data URI）；服务端已归一化。
     var images: [String] = []
     var projection: ToolProjection? = nil
+}
+
+enum ToolCallState: Equatable {
+    case running, completed, failed, unreturned
+    var label: String {
+        switch self {
+        case .running: return "运行中"
+        case .completed: return "完成"
+        case .failed: return "失败"
+        case .unreturned: return "未返回"
+        }
+    }
+}
+
+struct ChatToolStatusIcon: View {
+    let state: ToolCallState
+    let symbol: String
+    var foreground: Color? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduced
+    private var tint: Color {
+        if state == .failed { return Theme.danger }
+        if let foreground { return foreground }
+        switch state {
+        case .running: return Theme.brand
+        case .completed: return Theme.success
+        case .failed: return Theme.danger
+        case .unreturned: return Theme.textMuted
+        }
+    }
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 9).fill(tint.opacity(0.11))
+            Image(systemName: symbol).font(.system(size: 14, weight: .semibold)).opacity(state == .running ? 0 : 1)
+            ProgressView().controlSize(.small).tint(tint).opacity(state == .running ? 1 : 0)
+        }.foregroundStyle(tint).frame(width: 34, height: 34)
+            .animation(reduced ? nil : WandMotion.stateSwap, value: state).accessibilityHidden(true)
+    }
+}
+
+struct ToolCallPresentation: Equatable {
+    let state: ToolCallState
+    let hasInput: Bool
+    let hasBody: Bool
+    init(name: String, input: [String: JSONValue], result: ToolResultInfo?, sessionRunning: Bool) {
+        let operation = name.lowercased().components(separatedBy: "__").last ?? name.lowercased()
+        // Prefer the protocol's task-list semantic. Exact legacy operation IDs are
+        // compatibility adapters, not a guess from displayed labels or output text.
+        let snapshotEvent = input["__wandTasks"] != nil ||
+            ["todowrite", "todo_write", "update_plan", "taskcreate", "task_create", "taskupdate", "task_update", "tasklist", "task_list"].contains(operation)
+        let declaredDone = ["completed", "success", "succeeded", "done"].contains(input["status"]?.stringValue?.lowercased() ?? "")
+        hasInput = input.keys.contains { !$0.hasPrefix("__wand") }
+        hasBody = hasInput || result != nil
+        if result?.isError == true { state = .failed }
+        else if result != nil || snapshotEvent || (!sessionRunning && declaredDone) { state = .completed }
+        else { state = sessionRunning ? .running : .unreturned }
+    }
 }
 
 private func toolResultMetadataToken(_ result: ToolResultInfo?) -> Int {
@@ -3308,7 +3350,7 @@ struct AssistantItemView: View {
     var onAskSubmit: (String, String) -> Void = { _, _ in }
     var showSubagentTags = true
     var forceExpanded = false
-    private func expandDefault(_ configured: Bool) -> Bool { forceExpanded || configured }
+    private func expandDefault(_ configured: Bool) -> Bool { forceExpanded || (isLastTurn && configured) }
 
     var body: some View {
         switch item {
@@ -3338,15 +3380,12 @@ struct AssistantItemView: View {
                 questions: questions,
                 result: result,
                 selection: askSelections[id] ?? AskUserSelectionState(),
-                expandAll: isLastTurn,
+                expandAll: openedFromActivity,
                 onToggle: { qIdx, optIdx, multi in onAskToggle(id, qIdx, optIdx, multi) },
                 onSubmit: { answerText in onAskSubmit(id, answerText) }
             )
-        } else if let result, !result.images.isEmpty {
-            ToolUseCard(name: name, description: description, input: input, result: result,
-                        baseURL: baseURL, initiallyExpanded: openedFromActivity)
         } else if name == "Edit" || name == "Write" || name == "MultiEdit" {
-            DiffCard(toolName: name, input: input, result: result, initiallyExpanded: openedFromActivity || expandDefault(cardDefaults.editCards))
+            DiffCard(toolName: name, input: input, result: result, running: result == nil && isLastTurn && isResponding, initiallyExpanded: openedFromActivity || expandDefault(cardDefaults.editCards))
         } else if name == "Bash" {
             TerminalCard(
                 input: input,
@@ -4019,7 +4058,7 @@ private func groupForTools(
 
 /// 工具调用卡片：图标 + 中文工具名 + 参数摘要 + 可折叠结果区。
 /// 三态对齐 Web：运行中（转圈）/ 成功（左侧绿竖线）/ 失败（红弱底 + 红边框）。
-private struct ToolUseCard: View {
+struct ToolUseCard: View {
     let name: String
     let description: String?
     let input: [String: JSONValue]
@@ -4030,6 +4069,9 @@ private struct ToolUseCard: View {
 
     @State private var expanded = false
     @State private var appliedInitialExpansion = false
+    @State private var userToggled = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var presentation: ToolCallPresentation { ToolCallPresentation(name: name, input: input, result: result, sessionRunning: running) }
 
     /// Read 读到的图片路径（用于卡片内常驻缩略图，对齐 Web 端 inline-tool-image）。
     private var imagePath: String? {
@@ -4039,23 +4081,15 @@ private struct ToolUseCard: View {
     }
 
     private var isError: Bool { result?.isError == true }
-    private var isSuccess: Bool { result != nil && !isError }
-    private var hasBody: Bool {
-        guard let result else { return false }
-        return !result.text.isEmpty || result.truncated
-    }
+    private var isSuccess: Bool { presentation.state == .completed }
+    private var hasBody: Bool { presentation.hasBody }
     private var statusColor: Color {
         if isError { return Theme.danger }
-        if running { return Theme.brand }
+        if presentation.state == .running { return Theme.brand }
         if isSuccess { return chatSuccess }
         return Theme.textSecondary
     }
-    private var statusText: String {
-        if isError { return "失败" }
-        if running { return "处理中" }
-        if isSuccess { return "完成" }
-        return "待执行"
-    }
+    private var statusText: String { presentation.state.label }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -4081,14 +4115,19 @@ private struct ToolUseCard: View {
                     .padding(.horizontal, 12)
                     .padding(.bottom, 12)
             }
-            if expanded, let result, hasBody {
-                Divider()
-                    .overlay(Theme.border.opacity(0.7))
-                    .padding(.horizontal, 12)
-                ToolResultBody(result: result)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 10)
-                    .padding(.bottom, 12)
+            if expanded && hasBody {
+                Divider().overlay(Theme.border.opacity(0.7)).padding(.horizontal, 12)
+                VStack(alignment: .leading, spacing: 8) {
+                    if let result { ToolResultBody(result: result, input: input, showsInput: true) }
+                    else {
+                        if presentation.hasInput {
+                            Text("参数").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
+                            Text(toolInputDetail(input)).font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                        Text(presentation.state == .running ? "调用进行中，结果尚未返回" : presentation.state == .unreturned ? "本次调用没有返回结果" : "已更新")
+                            .font(.caption).foregroundStyle(Theme.textSecondary)
+                    }
+                }.padding(.horizontal, 12).padding(.vertical, 10)
             }
         }
         .background(
@@ -4107,8 +4146,8 @@ private struct ToolUseCard: View {
             appliedInitialExpansion = true
         }
         .onChange(of: result != nil) {
-            if initiallyExpanded && hasBody {
-                withAnimation(WandMotion.disclosure) { expanded = true }
+            if initiallyExpanded && hasBody && !userToggled {
+                withAnimation(reduceMotion ? nil : WandMotion.disclosure) { expanded = true }
             }
         }
     }
@@ -4116,28 +4155,11 @@ private struct ToolUseCard: View {
     private var header: some View {
         Button {
             guard hasBody else { return }
-            withAnimation(WandMotion.disclosure) { expanded.toggle() }
+            userToggled = true
+            withAnimation(reduceMotion ? nil : WandMotion.disclosure) { expanded.toggle() }
         } label: {
             HStack(spacing: 11) {
-                if running {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(statusColor.opacity(0.12))
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(statusColor)
-                    }
-                    .frame(width: 34, height: 34)
-                } else {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(statusColor.opacity(isSuccess ? 0.10 : 0.12))
-                        Image(systemName: iconName)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(statusColor)
-                    }
-                    .frame(width: 34, height: 34)
-                }
+                ChatToolStatusIcon(state: presentation.state, symbol: iconName)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(toolLabel(name))
@@ -4163,16 +4185,10 @@ private struct ToolUseCard: View {
                     }
                 }
                 Spacer(minLength: 0)
-                Text(statusText)
-                    .font(.wand(size: 10, weight: .semibold))
-                    .foregroundColor(statusColor)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(statusColor.opacity(0.10)))
                 if hasBody {
                     ZStack {
                         Circle().fill(Theme.background)
-                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        Image(systemName: "chevron.down").rotationEffect(.degrees(expanded ? 180 : 0))
                             .font(.system(size: 9, weight: .bold))
                             .foregroundColor(Theme.textSecondary)
                     }
@@ -4184,6 +4200,8 @@ private struct ToolUseCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityValue(statusText + (hasBody ? (expanded ? "，详情已展开" : "，详情已收起") : ""))
+        .accessibilityIdentifier("tool-call-" + name)
     }
 
     private var iconName: String {
@@ -4374,6 +4392,7 @@ private struct ToolResultBody: View {
                 let loaded = try await api.fetchToolContent(id: sessionID, toolUseId: toolUseID)
                 try Task.checkCancellation()
                 guard activeRequestID == requestID, activeRequestKey == requestKey else { return }
+                guard loaded.resultAvailable else { throw WandAPI.APIError.network("调用尚未完成，结果未返回") }
                 guard loaded.toolUseId.isEmpty || loaded.toolUseId == toolUseID else {
                     loadError = "服务端返回了不匹配的工具结果"
                     return
@@ -4890,10 +4909,13 @@ private struct DiffCard: View {
     let toolName: String
     let input: [String: JSONValue]
     let result: ToolResultInfo?
+    var running = false
     var initiallyExpanded = false
 
     @State private var expanded = false
     @State private var initialized = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var presentation: ToolCallPresentation { ToolCallPresentation(name: toolName, input: input, result: result, sessionRunning: running) }
 
     private var path: String {
         input["file_path"]?.stringValue ?? input["path"]?.stringValue ?? ""
@@ -4932,21 +4954,7 @@ private struct DiffCard: View {
             || !unifiedDiff.isEmpty || !movePath.isEmpty
     }
 
-    private var statusText: String {
-        guard let result else { return "执行中" }
-        if result.isError {
-            let text = result.text
-            return (text.contains("haven't granted") || text.contains("permission")) ? "等待授权" : "失败"
-        }
-        if kind == "add" { return "已新增" }
-        if kind == "delete" { return "已删除" }
-        if !movePath.isEmpty { return "已移动" }
-        return "已修改"
-    }
-    private var statusColor: Color {
-        guard let result else { return Theme.brand }
-        return result.isError ? Theme.danger : chatSuccess
-    }
+    private var statusText: String { presentation.state.label }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -5029,13 +5037,10 @@ private struct DiffCard: View {
 
     private var header: some View {
         Button {
-            withAnimation(WandMotion.disclosure) { expanded.toggle() }
+            withAnimation(reduceMotion ? nil : WandMotion.disclosure) { expanded.toggle() }
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: "doc.text")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(Theme.brand)
-                    .frame(width: 22)
+                ChatToolStatusIcon(state: presentation.state, symbol: "doc.text")
                 Text(fileName)
                     .font(.wand(size: 13, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
@@ -5046,12 +5051,6 @@ private struct DiffCard: View {
                     .lineLimit(1)
                     .truncationMode(.head)
                 Spacer(minLength: 0)
-                Text(statusText)
-                    .font(.wand(size: 11, weight: .medium))
-                    .foregroundColor(statusColor)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(statusColor.opacity(0.12)))
                 Image(systemName: expanded ? "chevron.up" : "chevron.down")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(Theme.textSecondary)
@@ -5060,7 +5059,7 @@ private struct DiffCard: View {
             .padding(.vertical, 9)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).accessibilityValue(statusText + (expanded ? "，已展开" : "，已收起"))
     }
 
     @ViewBuilder private func diffColumn(label: String, text: String, prefix: String, tint: Color) -> some View {
@@ -5146,6 +5145,9 @@ private struct TerminalCard: View {
 
     @State private var expanded = false
     @State private var appliedInitialExpansion = false
+    @State private var userToggled = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var presentation: ToolCallPresentation { ToolCallPresentation(name: "Bash", input: fullInput, result: result, sessionRunning: running) }
     @State private var outputText: String
     @State private var truncated: Bool
     @State private var loadingFullOutput = false
@@ -5172,10 +5174,6 @@ private struct TerminalCard: View {
 
     private var command: String {
         fullInput["command"]?.stringValue ?? fullInput["cmd"]?.stringValue ?? ""
-    }
-    private var statusColor: Color {
-        guard let result else { return Theme.brand }
-        return result.isError ? Theme.danger : chatSuccess
     }
     // 终端卡固定深色，亮暗主题一致（对齐 Web）。
     private let termBg = Theme.terminalBackground
@@ -5233,8 +5231,8 @@ private struct TerminalCard: View {
             if expanded, truncated { loadFullOutput() }
         }
         .onChange(of: result != nil) {
-            if initiallyExpanded {
-                withAnimation(WandMotion.disclosure) { expanded = true }
+            if initiallyExpanded && !userToggled {
+                withAnimation(reduceMotion ? nil : WandMotion.disclosure) { expanded = true }
             }
         }
         .onChange(of: expanded) { _, open in
@@ -5309,6 +5307,7 @@ private struct TerminalCard: View {
                 try Task.checkCancellation()
                 guard activeOutputRequestID == requestID,
                       activeOutputRequestKey == requestKey else { return }
+                guard loaded.resultAvailable else { throw WandAPI.APIError.network("调用尚未完成，结果未返回") }
                 guard loaded.toolUseId.isEmpty || loaded.toolUseId == toolUseID else {
                     outputLoadError = "服务端返回了不匹配的工具结果"
                     return
@@ -5336,20 +5335,17 @@ private struct TerminalCard: View {
 
     private var header: some View {
         Button {
-            withAnimation(WandMotion.disclosure) { expanded.toggle() }
+            userToggled = true
+            withAnimation(reduceMotion ? nil : WandMotion.disclosure) { expanded.toggle() }
         } label: {
             HStack(spacing: 8) {
-                if running {
-                    ProgressView().controlSize(.small).tint(termText)
-                } else {
-                    Circle().fill(statusColor).frame(width: 8, height: 8)
-                }
+                ChatToolStatusIcon(state: presentation.state, symbol: "terminal", foreground: termText)
                 Text("$ " + (command.count > 80 ? String(command.prefix(77)) + "…" : command))
                     .font(.wand(size: 12, design: .monospaced))
                     .foregroundColor(termText)
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                Image(systemName: "chevron.down").rotationEffect(.degrees(expanded ? 180 : 0))
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(termText.opacity(0.6))
             }
@@ -5357,7 +5353,7 @@ private struct TerminalCard: View {
             .padding(.vertical, 9)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.plain).accessibilityValue(presentation.state.label + (expanded ? "，已展开" : "，已收起"))
     }
 }
 
@@ -5647,54 +5643,39 @@ private enum PhotoLibraryPickerError: LocalizedError {
 
 // MARK: - 排队消息气泡条
 
-/// 输入栏上方的「已排队 N 条消息」气泡条。折叠态只显示数量徽章，展开后逐条列出
-/// 每条都能「立即发送(⚡)」「删除(×)」，整条尾部带「清空全部」。乐观更新由 ChatStore 负责。
+/// 输入栏上方的原位队列。编辑先由服务器确认移出队列，再合并到主输入框。
 private struct QueueBar: View {
     let items: [String]
     @Binding var expanded: Bool
     let inFlight: Bool
+    let steering: Bool
+    let mutationPending: Bool
     let onPromote: (Int) -> Void
     let onDelete: (Int) -> Void
-    let onEdit: (Int, String) -> Void
+    let onEdit: (Int) -> Void
     let onClearAll: () -> Void
-    @State private var editingIndex: Int?
-    @State private var editedText = ""
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             header
             if expanded {
+                ScrollView {
                 VStack(spacing: 6) {
                     ForEach(Array(items.enumerated()), id: \.offset) { index, text in
                         row(index: index, text: text)
                     }
                     clearAllButton
                 }
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }.frame(maxHeight: 200)
+                .disabled(mutationPending)
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .bottom)))
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Theme.surface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Theme.border, lineWidth: 1)
-        )
-        .animation(WandMotion.disclosure, value: expanded)
-        .animation(WandMotion.disclosure, value: items.count)
-        .alert("编辑排队消息", isPresented: Binding(
-            get: { editingIndex != nil }, set: { if !$0 { editingIndex = nil } }
-        )) {
-            TextField("消息", text: $editedText)
-            Button("取消", role: .cancel) { editingIndex = nil }
-            Button("保存") {
-                if let index = editingIndex { onEdit(index, editedText) }
-                editingIndex = nil
-            }
-        }
+        .animation(reduceMotion ? nil : WandMotion.disclosure, value: expanded)
+        .animation(reduceMotion ? nil : WandMotion.disclosure, value: items.count)
     }
 
     private var header: some View {
@@ -5704,15 +5685,16 @@ private struct QueueBar: View {
             HStack(spacing: 6) {
                 Image(systemName: "tray.full")
                     .font(.system(size: 11))
-                Text("已排队 \(items.count) 条消息")
+                Text("待发送 \(items.count) 条")
                     .font(.wand(size: 12, weight: .medium))
                 if inFlight {
-                    Text("· 中断后立即发送")
+                    Text(steering ? "· 安全边界追加" : "· 本轮结束后发送")
                         .font(.wand(size: 10))
                         .foregroundColor(Theme.brand)
                 }
                 Spacer()
-                Image(systemName: expanded ? "chevron.down" : "chevron.up")
+                Image(systemName: "chevron.up")
+                    .rotationEffect(.degrees(expanded ? 180 : 0))
                     .font(.system(size: 10, weight: .semibold))
             }
             .foregroundColor(Theme.textSecondary)
@@ -5727,19 +5709,17 @@ private struct QueueBar: View {
             Text(text)
                 .font(.wand(size: 13))
                 .foregroundColor(Theme.textPrimary)
-                .lineLimit(3)
-                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
             Button {
-                editedText = text
-                editingIndex = index
+                onEdit(index)
             } label: {
                 Image(systemName: "pencil")
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("编辑第 \(index + 1) 条")
+            .accessibilityLabel("取回第 \(index + 1) 条到输入框编辑")
             Button {
                 onPromote(index)
             } label: {
@@ -5884,6 +5864,7 @@ private struct ConversationTurnScrubber: View {
 struct SearchableChoiceItem: Identifiable, Hashable {
     let id: String
     let label: String
+    var enabled = true
 }
 
 struct SearchableChoiceSection: Identifiable {
@@ -5898,6 +5879,8 @@ struct SearchableChoiceSheet: View {
     let title: String
     var searchPrompt: String = "搜索"
     let sections: [SearchableChoiceSection]
+    var notice: String? = nil
+    var onRetry: (() -> Void)? = nil
     let onSelect: (String, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -5935,19 +5918,20 @@ struct SearchableChoiceSheet: View {
                         } else {
                             ForEach(section.items) { item in
                                 Button {
+                                    guard item.enabled else { return }
                                     onSelect(section.id, item.id)
                                     dismiss()
                                 } label: {
                                     HStack {
                                         Text(item.label)
-                                            .foregroundColor(Theme.textPrimary)
+                                            .foregroundColor(item.enabled ? Theme.textPrimary : Theme.textMuted)
                                         Spacer()
                                         if item.id == section.selectedId {
                                             Image(systemName: "checkmark")
                                                 .foregroundColor(Theme.brand)
                                         }
                                     }
-                                }
+                                }.disabled(!item.enabled)
                             }
                         }
                     } header: {
@@ -5959,6 +5943,15 @@ struct SearchableChoiceSheet: View {
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() } } }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let notice {
+                    HStack {
+                        Text(notice).font(.caption).foregroundStyle(Theme.textSecondary)
+                        if let onRetry { Button("重试", action: onRetry).frame(minHeight: 44) }
+                    }.padding(.horizontal, 16).background(Theme.background)
+                }
+            }
             .safeAreaInset(edge: .top, spacing: 0) {
                 if allowsSearch {
                     HStack(spacing: 8) {

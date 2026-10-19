@@ -107,6 +107,7 @@ struct WorkspaceListView: View {
     @State private var newTaskSheetPresented = false
     @State private var newTaskSheetCwd = ""
     @State private var newTaskSheetWorkspaceId: String?
+    @State private var newTaskSheetWorkspaceName = ""
     @State private var collapsedTaskGroups = TaskListExpansionStorage.collapsedIds(kind: "groups")
     @State private var collapsedTaskIds = TaskListExpansionStorage.collapsedIds(kind: "tasks")
     @State private var collapsedLooseGroups = TaskListExpansionStorage.collapsedIds(kind: "loose")
@@ -342,29 +343,44 @@ struct WorkspaceListView: View {
                 )
             }
             .sheet(isPresented: $newTaskSheetPresented) {
-                WorkspaceNewTaskSheet(api: api, store: store, initialCwd: newTaskSheetCwd, workspaceId: newTaskSheetWorkspaceId) { result in
-                    let creation = result.creation
-                    if let sessionError = result.sessionError {
-                        showToast(sessionError)
-                    } else if !creation.isIsolated, let worktreeError = creation.worktreeError {
-                        showToast("已创建任务「\(creation.name)」：\(worktreeError)")
-                    } else if result.session != nil {
-                        showToast("已创建任务「\(creation.name)」并启动会话")
-                    } else {
-                        showToast("已创建任务「\(creation.name)」")
+                NewConversationView(
+                    api: api,
+                    serverID: ServerProfiles.stableID(for: api.baseURL),
+                    initialCwd: newTaskSheetCwd,
+                    workspaceID: newTaskSheetWorkspaceId,
+                    onCreated: { snapshot in
+                        newTaskSheetPresented = false
+                        Task {
+                            await store.loadTaskGroups(force: true)
+                            let session = WorkspaceSessionSummary(snapshot: snapshot)
+                            if let taskId = snapshot.workspaceTaskId,
+                               let summary = store.taskGroups.flatMap(\.tasks).first(where: { $0.id == taskId }) {
+                                let group = store.taskGroups.first { $0.tasks.contains(where: { $0.id == taskId }) }
+                                let workspace = group.map { workspace(for: summary, group: $0) }
+                                    ?? Workspace(id: summary.workspaceId, name: newTaskSheetWorkspaceName, cwd: summary.cwd, defaultProvider: nil, layout: nil, createdAt: "", lastOpenedAt: nil)
+                                showToast("已创建任务「\(summary.name)」并启动会话")
+                                if let onOpenTaskSession {
+                                    onOpenTaskSession(workspace, summary.asTask(), session)
+                                } else {
+                                    onOpenTask(workspace, summary.asTask())
+                                }
+                            } else {
+                                showToast("已创建新对话")
+                                let workspace = store.workspaces.first(where: { $0.id == snapshot.workspaceId })
+                                    ?? Workspace(id: snapshot.workspaceId ?? "wand-global", name: newTaskSheetWorkspaceName, cwd: snapshot.cwd ?? newTaskSheetCwd, defaultProvider: nil, layout: nil, createdAt: "", lastOpenedAt: nil)
+                                if let onOpenSession {
+                                    onOpenSession(workspace, session)
+                                } else {
+                                    onOpenTask(workspace, WorkspaceTask(
+                                        id: "", workspaceId: workspace.id, name: "", worktree: nil,
+                                        layout: nil, status: "active", createdAt: "", lastOpenedAt: nil
+                                    ))
+                                }
+                            }
+                        }
                     }
-                    onOpenTask(result.workspace, WorkspaceTask(
-                        id: creation.id,
-                        workspaceId: creation.workspaceId,
-                        name: creation.name,
-                        worktree: creation.worktree,
-                        layout: nil,
-                        status: creation.status,
-                        createdAt: "",
-                        lastOpenedAt: nil
-                    ))
-                }
-                .presentationDetents([.medium, .large])
+                )
+                .presentationDetents([.large])
             }
     }
 
@@ -857,6 +873,9 @@ struct WorkspaceListView: View {
             }.padding(.vertical, 7)
         }.buttonStyle(.plain)
         .contextMenu {
+            Button("选择多项", systemImage: "checkmark.circle") {
+                beginManagedSelection(); selectedSessionIds.insert(item.session.id)
+            }
             Button { Task { await toggleArchive(item.session) } } label: { Label("归档会话", systemImage: "archivebox") }
             Button { moveSessionTarget = item.session } label: { Label("移动到任务", systemImage: "folder") }
             Button(role: .destructive) { presentConfirm(.deleteSession(item.session)) } label: { Label("删除会话", systemImage: "trash") }
@@ -919,7 +938,7 @@ struct WorkspaceListView: View {
         terminalCreateBusy = true; terminalCreateError = nil
         defer { terminalCreateBusy = false }
         do {
-            let snapshot = try await api.createShellSession(cwd: cwd)
+            let snapshot = try await api.createSession(kind: "pty", cwd: cwd, shell: true)
             guard !snapshot.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   snapshot.sessionKind == "pty" else {
                 throw WandAPI.APIError.network("终端创建回执不完整，请刷新核对，勿重复创建。")
@@ -1030,6 +1049,9 @@ struct WorkspaceListView: View {
     private func presentNewTaskSheet(cwd: String = "", workspaceId: String? = nil) {
         newTaskSheetCwd = cwd
         newTaskSheetWorkspaceId = workspaceId
+        newTaskSheetWorkspaceName = store.workspaces.first(where: { $0.id == workspaceId })?.name
+            ?? store.taskGroups.first(where: { $0.workspaceId == workspaceId })?.workspaceName
+            ?? ""
         newTaskSheetPresented = true
     }
 
@@ -1450,6 +1472,9 @@ struct WorkspaceListView: View {
         workspace: Workspace,
         task: WorkspaceTask
     ) -> some View {
+        Button("选择多项", systemImage: "checkmark.circle") {
+            beginManagedSelection(); selectedTaskIds.insert(summary.id)
+        }
         Button {
             collapsedTaskIds.remove(summary.id)
             onOpenTask(workspace, task)
@@ -1561,6 +1586,9 @@ struct WorkspaceListView: View {
         .accessibilityIdentifier("session-open-" + session.id)
         .accessibilityAddTraits(.isButton)
         .contextMenu {
+            Button("选择多项", systemImage: "checkmark.circle") {
+                beginManagedSelection(); selectedSessionIds.insert(session.id)
+            }
             Button {
                 moveSessionTarget = session
             } label: {
@@ -1802,6 +1830,9 @@ struct WorkspaceListView: View {
         .accessibilityIdentifier("session-open-" + session.id)
         .accessibilityAddTraits(.isButton)
         .contextMenu {
+            Button("选择多项", systemImage: "checkmark.circle") {
+                beginManagedSelection(); selectedSessionIds.insert(session.id)
+            }
             Button {
                 moveSessionTarget = session
             } label: {

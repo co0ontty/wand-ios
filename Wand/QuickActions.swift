@@ -104,7 +104,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
 #if DEBUG
         // Offline UI review must not request notification/audio permissions or start application services.
-        if ProcessInfo.processInfo.environment["WAND_DEBUG_CHAT_DESIGN"] == "1" { return true }
+        if ProcessInfo.processInfo.environment["WAND_DEBUG_CHAT_DESIGN"] == "1" || mobileOperationParityScenario() != nil { return true }
 #endif
         WandServerFileLink.cleanupStaleTemporaryFiles()
         let isLiveActivityMock: Bool

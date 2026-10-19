@@ -13,10 +13,10 @@ struct ContactMorphButton: View {
                 Image(systemName: symbol).opacity(expanded ? 0 : 1).rotationEffect(.degrees(reduced || !expanded ? 0 : -45))
                 Image(systemName: "xmark").opacity(expanded ? 1 : 0).rotationEffect(.degrees(reduced || expanded ? 0 : 45))
             }
-            .font(.system(size: 17, weight: .semibold)).foregroundStyle(Theme.brand)
+            .font(.system(size: 17, weight: .semibold))
             .frame(width: 44, height: 44).contentShape(Rectangle())
             .animation(reduced ? nil : WandMotion.stateSwap, value: expanded)
-        }.buttonStyle(.plain).disabled(disabled).accessibilityLabel(label)
+        }.buttonStyle(WandQuietButtonStyle()).disabled(disabled).accessibilityLabel(label)
     }
 }
 
@@ -51,6 +51,7 @@ struct ContactsView: View {
     let onBack: () -> Void
     let onOpenSession: (SessionSnapshot) -> Void
     let onOpenRun: (String) -> Void
+    var onNewConversation: ((String) -> Void)? = nil
     var onOpenConversation: ((String) -> Void)? = nil
     var onTeamConversation: ((String) -> Void)? = nil
     var embedded = false
@@ -58,6 +59,7 @@ struct ContactsView: View {
     @State private var createChooser = false
     @State private var dispatching = false
     @State private var createKind: String?
+    @State private var createTemplate = ContactTeamTemplate.blank
     @State private var expandedID: String?
     @State private var pendingPanelChange: (() -> Void)?
     @FocusState private var searchFocused: Bool
@@ -73,13 +75,23 @@ struct ContactsView: View {
                             .padding(.vertical, 10)
                     }
                     if createChooser {
-                        HStack {
-                            Button("新建硅基员工") { createChooser = false; createKind = "employee" }
-                                .accessibilityIdentifier("contact-create-employee")
-                            Spacer()
-                            Button("新建 AI 团队") { createChooser = false; createKind = "team" }
-                                .accessibilityIdentifier("contact-create-team")
-                        }.frame(height: 44).padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
+                        VStack(alignment: .leading, spacing: 8) {
+                            Button("创建员工", systemImage: "person.badge.plus") {
+                                createChooser = false; createKind = "employee"
+                            }.buttonStyle(WandQuietButtonStyle()).accessibilityIdentifier("contact-create-employee")
+                            ForEach(ContactTeamTemplate.allCases) { template in
+                                Button {
+                                    createTemplate = template; createChooser = false; createKind = "team"
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(template.name).font(.subheadline.weight(.semibold))
+                                        Text(template.summary).font(.caption).foregroundStyle(Theme.textSecondary)
+                                    }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                }.buttonStyle(WandQuietButtonStyle())
+                                    .accessibilityIdentifier("contact-create-team-" + template.id)
+                            }
+                        }.padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                     if let kind = createKind {
                         let key = "new:" + kind
@@ -89,8 +101,8 @@ struct ContactsView: View {
                             EmployeeProfilePanel(id: nil, api: api, directory: store) { closePanels() }
                                 .id("new-employee")
                         } else {
-                            ContactTeamProfilePanel(id: nil, api: api, directory: store, onClose: closePanels, onOpenRun: onOpenRun)
-                                .id("new-team")
+                            ContactTeamProfilePanel(id: nil, api: api, directory: store, template: createTemplate, onClose: closePanels, onOpenRun: onOpenRun)
+                                .id("new-team-" + createTemplate.id)
                         }
                     }
                     if let error = store.error {
@@ -131,7 +143,7 @@ struct ContactsView: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
-                if !store.busy { await store.refresh() }
+                if !store.busy && !store.editorDirty { clearPanels(); await store.refresh() }
             }
         }
         .background(Theme.background)
@@ -150,7 +162,7 @@ struct ContactsView: View {
         .wandKeyboardShortcuts([
             WandKeyboardShortcutAction(id: "contacts-close", title: "收起通讯录面板", key: .escape,
                                        modifiers: [], isEnabled: !store.busy) {
-                if creationOpen || expandedID != nil { closePanels() }
+                if creationOpen || expandedID != nil || dispatching { closePanels() }
                 else if !query.isEmpty || searchFocused { closeSearch() }
                 else { requestPanelChange(onBack) }
             }
@@ -215,12 +227,14 @@ struct ContactsView: View {
                         createChooser = false; createKind = nil
                         expandedID = expandedID == key ? nil : key
                     }
-                } label: { ContactAvatar(id: employee.id, avatar: employee.avatar, systemKey: employee.systemKey, size: 40) }
+                } label: { ContactAvatar(id: employee.id, avatar: employee.avatar, systemKey: employee.systemKey, size: 40)
+                    .frame(width: 44, height: 44).contentShape(Rectangle()) }
                 .buttonStyle(.plain).accessibilityLabel("员工资料：\(employee.name)")
                 Button {
                     requestPanelChange {
                         clearPanels()
                         if let onOpenConversation { onOpenConversation(ConversationStore.employeeID(employee.id)) }
+                        else if let onNewConversation { onNewConversation(employee.id) }
                         else { store.openEmployee(employee.id, onOpen: onOpenSession) }
                     }
                 } label: {
@@ -235,7 +249,14 @@ struct ContactsView: View {
                 else { Text(error).font(.caption).foregroundStyle(Theme.danger) }
             }
             if expandedID == key {
-                EmployeeProfilePanel(id: employee.id, api: api, directory: store) { closePanels() }
+                EmployeeProfilePanel(id: employee.id, api: api, directory: store, onMessage: {
+                    requestPanelChange {
+                        clearPanels()
+                        if let onOpenConversation { onOpenConversation(ConversationStore.employeeID(employee.id)) }
+                        else if let onNewConversation { onNewConversation(employee.id) }
+                        else { store.openEmployee(employee.id, onOpen: onOpenSession) }
+                    }
+                }) { closePanels() }
                     .id(employee.id).transition(.opacity)
             }
             Divider().padding(.leading, 52)
@@ -251,7 +272,8 @@ struct ContactsView: View {
                         createChooser = false; createKind = nil
                         expandedID = expandedID == key ? nil : key
                     }
-                } label: { ContactAvatar(id: team.id, avatar: "", team: true, size: 40) }
+                } label: { ContactAvatar(id: team.id, avatar: "", team: true, size: 40)
+                    .frame(width: 44, height: 44).contentShape(Rectangle()) }
                 .buttonStyle(.plain).accessibilityLabel("团队资料：\(team.name)")
                 Button { requestPanelChange {
                     clearPanels()
@@ -259,7 +281,7 @@ struct ContactsView: View {
                     else { store.openTeam(team.id, onOpen: onOpenRun) }
                 } } label: {
                     ContactConversationLabel(name: team.name,
-                        subtitle: "\(team.members.count)位成员 · 开新群聊",
+                        subtitle: "\(team.members.count) 位成员" + (team.description.isEmpty ? "" : " · " + team.description),
                         busy: store.busyContact == key)
                 }.buttonStyle(.plain).disabled(store.busy || store.unconfirmedActions.contains(key))
                     .accessibilityLabel("新建团队群聊：\(team.name)")

@@ -65,7 +65,8 @@ final class SessionLiveActivityController {
         taskTitle: String?,
         queuedCount: Int = 0,
         startedAt: Date? = nil,
-        engine: String? = nil
+        engine: String? = nil,
+        pendingPrompt: String? = nil
     ) {
         guard enabled else { return }
         let serverID = serverID ?? ServerStore.shared.activeServerID
@@ -74,7 +75,8 @@ final class SessionLiveActivityController {
         cancelDoneRemoval(sessionId, serverID: serverID)
         upsert(
             sessionId: sessionId, serverID: serverID, title: title, provider: provider, state: state,
-            taskTitle: taskTitle, queuedCount: queuedCount, startedAt: startedAt, engine: engine
+            taskTitle: taskTitle, queuedCount: queuedCount, startedAt: startedAt, engine: engine,
+            pendingPrompt: pendingPrompt
         )
         sync(allowCreate: true)
     }
@@ -96,7 +98,8 @@ final class SessionLiveActivityController {
             if previous?.stateRaw == next.rawValue && previous?.isFinished == true { return }
             start(sessionId: snapshot.id, serverID: serverID, title: snapshot.displayTitle, provider: snapshot.provider,
                 state: next, taskTitle: snapshot.currentTaskTitle, queuedCount: snapshot.queuedMessages?.count ?? 0,
-                startedAt: SessionTimeFormatting.date(from: snapshot.structuredState?.turnStartedAt), engine: snapshot.structuredState?.engine)
+                startedAt: SessionTimeFormatting.date(from: snapshot.structuredState?.turnStartedAt),
+                engine: snapshot.structuredState?.engine, pendingPrompt: Self.pendingPrompt(of: snapshot))
             if next == .failed || next == .stopped { scheduleDoneRemoval(snapshot.id, serverID: serverID) }
         } else if let previous, !previous.isFinished {
             if snapshot.isEnded { end(sessionId: snapshot.id, serverID: serverID, immediately: true) }
@@ -219,7 +222,8 @@ final class SessionLiveActivityController {
                     provider: "claude",
                     state: .permission,
                     taskTitle: "需要确认读取 docs/screenshots 目录",
-                    queuedCount: 0
+                    queuedCount: 0,
+                    pendingPrompt: "读取文件 · docs/screenshots"
                 ),
                 mockEntry(
                     id: "mock-opencode-3",
@@ -238,7 +242,8 @@ final class SessionLiveActivityController {
                     provider: "claude",
                     state: .permission,
                     taskTitle: "Codex 请求写入 iOS Widget 预览截图",
-                    queuedCount: 1
+                    queuedCount: 1,
+                    pendingPrompt: "写入文件 · ios/WandWidgets"
                 )
             ]
         case "done":
@@ -273,7 +278,8 @@ final class SessionLiveActivityController {
         provider: String,
         state: SessionState,
         taskTitle: String?,
-        queuedCount: Int
+        queuedCount: Int,
+        pendingPrompt: String? = nil
     ) -> SessionActivityAttributes.SessionEntry {
         SessionActivityAttributes.SessionEntry(
             id: id,
@@ -282,7 +288,8 @@ final class SessionLiveActivityController {
             stateRaw: state.rawValue,
             taskTitle: taskTitle.map { String($0.prefix(Self.maxTaskTitleLength)) },
             queuedCount: queuedCount,
-            startedAt: state == .responding ? Date().addingTimeInterval(-94) : nil
+            startedAt: state == .responding ? Date().addingTimeInterval(-94) : nil,
+            pendingPrompt: pendingPrompt.map { String($0.prefix(Self.maxTaskTitleLength)) }
         )
     }
 #endif
@@ -337,13 +344,23 @@ final class SessionLiveActivityController {
         }
     }
 
+    /// 「待授权/等你回复」时真正被问的那件事。灵动岛只有一两行，只写「需要你的确认」等于什么都没说。
+    /// 取 escalation 的 scope + target；没有目标时退回 scope 标题。
+    private static func pendingPrompt(of snapshot: SessionSnapshot) -> String? {
+        guard let escalation = snapshot.pendingEscalation else { return nil }
+        let target = escalation.target?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return target.isEmpty ? escalation.scopeTitle : "\(escalation.scopeTitle) · \(target)"
+    }
+
     private func upsert(
         sessionId: String, serverID: String?, title: String, provider: String?, state: SessionState,
-        taskTitle: String?, queuedCount: Int, startedAt requestedStartedAt: Date? = nil, engine: String? = nil
+        taskTitle: String?, queuedCount: Int, startedAt requestedStartedAt: Date? = nil, engine: String? = nil,
+        pendingPrompt: String? = nil
     ) {
         let key = scopedKey(sessionId, serverID: serverID)
         let shortTitle = activityBoundedText(title, maxCharacters: Self.maxTitleLength, maxBytes: 96)
         let shortTaskTitle = taskTitle.map { activityBoundedText($0, maxCharacters: Self.maxTaskTitleLength, maxBytes: 120) }
+        let shortPrompt = pendingPrompt.map { activityBoundedText($0, maxCharacters: Self.maxTaskTitleLength, maxBytes: 120) }
         let startedAt: Date?
         if state == .responding || state == .background {
             startedAt = requestedStartedAt ?? ActivityStore.startedAtBySession[key]
@@ -362,12 +379,13 @@ final class SessionLiveActivityController {
             ActivityStore.entries[index].queuedCount = queuedCount
             ActivityStore.entries[index].startedAt = startedAt
             ActivityStore.entries[index].engineRaw = engine
+            ActivityStore.entries[index].pendingPrompt = shortPrompt
         } else {
             ActivityStore.entries.append(SessionActivityAttributes.SessionEntry(
                 id: sessionId, serverID: serverID,
                 title: shortTitle, providerRaw: provider ?? "claude",
                 stateRaw: state.rawValue, taskTitle: shortTaskTitle, queuedCount: queuedCount,
-                startedAt: startedAt, engineRaw: engine
+                startedAt: startedAt, engineRaw: engine, pendingPrompt: shortPrompt
             ))
             trimEntriesIfNeeded()
         }
@@ -507,7 +525,8 @@ final class SessionPresenceController {
         provider: String?,
         state: SessionLiveActivityController.SessionState = .responding,
         taskTitle: String?,
-        queuedCount: Int = 0
+        queuedCount: Int = 0,
+        pendingPrompt: String? = nil
     ) {
         SessionLiveActivityController.shared.start(
             sessionId: sessionId,
@@ -516,7 +535,8 @@ final class SessionPresenceController {
             provider: provider,
             state: state,
             taskTitle: taskTitle,
-            queuedCount: queuedCount
+            queuedCount: queuedCount,
+            pendingPrompt: pendingPrompt
         )
     }
 

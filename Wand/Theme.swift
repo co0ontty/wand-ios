@@ -30,13 +30,13 @@ extension View {
 /// Shared motion/feedback tokens; views never author per-page timings.
 enum WandMotion {
     static let stateSwap = Animation.easeInOut(duration: 0.18)
+    static let expansion = Animation.interactiveSpring(response: 0.32, dampingFraction: 1, blendDuration: 0)
     static let topicPulse = Animation.easeInOut(duration: 1.15).repeatForever(autoreverses: true)
     static let tabFront = Animation.easeInOut(duration: 0.22)
     static let tabRear = Animation.easeInOut(duration: 0.22).delay(0.08)
     static let submittedDwell: UInt64 = 720_000_000
     static let failedDwell: UInt64 = 1_500_000_000
     static let searchDebounce: UInt64 = 240_000_000
-    static let voiceHoldDelay: TimeInterval = 0.18
     static var disclosure: Animation? { UIAccessibility.isReduceMotionEnabled ? nil : stateSwap }
     static var scroll: Animation? { UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.22) }
     static var keyboard: Animation? { UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.2) }
@@ -45,6 +45,28 @@ enum WandMotion {
     static let activityPulse = Animation.smooth(duration: 1.2, extraBounce: 0).repeatForever(autoreverses: true)
     static let activityTick: TimeInterval = 0.05
     static func keyboard(duration: Double) -> Animation? { UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: max(0, duration)) }
+}
+
+/// Content rhythm shared by native lists and forms; text itself follows Dynamic Type.
+enum WandLayout {
+    static let pageInset: CGFloat = 16
+    static let fieldGap: CGFloat = 12
+    static let sectionGap: CGFloat = 24
+    static let controlTouch: CGFloat = 44
+}
+
+/// Immediate color feedback without moving or resizing the target.
+struct WandQuietButtonStyle: ButtonStyle {
+    var tint: Color = Theme.brandText
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(minWidth: WandLayout.controlTouch, minHeight: WandLayout.controlTouch)
+            .foregroundStyle(enabled ? tint : Theme.textMuted)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(configuration.isPressed ? Theme.brandSoft : Color.clear))
+            .contentShape(Rectangle())
+    }
 }
 
 /// Body text follows native Dynamic Type; fixed logo/terminal-grid dimensions stay explicit.
@@ -428,7 +450,7 @@ private struct WandPreferredAppearanceModifier: ViewModifier {
     }
 }
 
-/// 实心珊瑚色主按钮，禁用态自动变淡。跨平台 SwiftUI，与 macOS 端一致。
+/// 品牌色主按钮，原生按压与禁用反馈；文字随 Dynamic Type 增长。
 struct WandPrimaryButtonStyle: ButtonStyle {
     @MainActor
     func makeBody(configuration: Configuration) -> Body {
@@ -441,7 +463,7 @@ struct WandPrimaryButtonStyle: ButtonStyle {
 
         var body: some View {
             configuration.label
-                .font(.system(size: 16, weight: .semibold))
+                .font(.body.weight(.semibold))
                 .foregroundColor(Theme.onBrand)
                 .padding(.vertical, 13)
                 .padding(.horizontal, 18)
@@ -460,7 +482,7 @@ struct WandSecondaryButtonStyle: ButtonStyle {
     @MainActor
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 16, weight: .medium))
+            .font(.body.weight(.medium))
             .foregroundColor(Theme.textPrimary)
             .padding(.vertical, 13)
             .padding(.horizontal, 18)

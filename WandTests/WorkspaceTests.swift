@@ -21,6 +21,17 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(emptyTaskWorkspaceCaption("wand"), "WAND")
     }
 
+    func testWorkspaceTaskCreationUsesPendingConversationAndOpensCreatedSession() throws {
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Wand/WorkspaceListView.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("NewConversationView("))
+        XCTAssertTrue(source.contains("serverID: ServerProfiles.stableID(for: api.baseURL)"))
+        XCTAssertTrue(source.contains("workspaceID: newTaskSheetWorkspaceId"))
+        XCTAssertTrue(source.contains("onOpenTaskSession(workspace, summary.asTask(), session)"))
+        XCTAssertFalse(source.contains("WorkspaceNewTaskSheet(api:"))
+    }
+
     func testTaskListPresentationShortensPathsAndAvoidsSharedDirectoryLabel() {
         XCTAssertEqual(
             TaskListPresentation.shortenWorkspacePath("/Users/me/Self/vibe_coding/wand"),
@@ -120,58 +131,34 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertFalse(global.isSynthetic)
     }
 
-    func testHorizontalSwipeSelectsAdjacentTaskSession() {
-        let sessions = [
-            summary(id: "session-1", startedAt: "2026-08-09T00:00:01Z"),
-            summary(id: "session-2", startedAt: "2026-08-09T00:00:02Z"),
-            summary(id: "session-3", startedAt: "2026-08-09T00:00:03Z"),
-        ]
-
-        XCTAssertEqual(
-            taskSessionSwipeTarget(sessions: sessions, currentSessionId: "session-1", horizontalTranslation: -80)?.id,
-            "session-2"
-        )
-        XCTAssertEqual(
-            taskSessionSwipeTarget(sessions: sessions, currentSessionId: "session-2", horizontalTranslation: 80)?.id,
-            "session-1"
-        )
-        XCTAssertNil(taskSessionSwipeTarget(sessions: sessions, currentSessionId: "session-1", horizontalTranslation: -40))
-        XCTAssertNil(taskSessionSwipeTarget(sessions: sessions, currentSessionId: "session-3", horizontalTranslation: -80))
-        XCTAssertNil(taskSessionSwipeTarget(sessions: sessions, currentSessionId: "missing", horizontalTranslation: 80))
+    func testTaskDetailIsSessionDirectoryAndDoesNotDependOnATabSelection() {
+        let sessions = [summary(id: "session-1", startedAt: "2026-08-09T00:00:01Z"),
+                        summary(id: "session-2", startedAt: "2026-08-09T00:00:02Z")]
+        XCTAssertEqual(workspaceTaskVisibleSessions(sessions).map(\.id), ["session-1", "session-2"])
+        XCTAssertTrue(workspaceTaskVisibleSessions([]).isEmpty)
     }
 
-    func testTaskSessionTransitionDirectionMatchesTabMovement() {
-        let sessions = [
-            summary(id: "session-1", startedAt: "2026-08-09T00:00:01Z"),
-            summary(id: "session-2", startedAt: "2026-08-09T00:00:02Z"),
-            summary(id: "session-3", startedAt: "2026-08-09T00:00:03Z"),
-        ]
+    func testNewTaskRoutingMatchesAndroidForEmptyPromptsEmployeesAndRegisteredDirectories() {
+        XCTAssertTrue(newTaskStartsUngroupedSession(name: "", startFirstSession: true, parentTaskID: nil, teamSelected: false))
+        XCTAssertTrue(newTaskStartsUngroupedSession(name: "  ", startFirstSession: true, parentTaskID: "", teamSelected: false))
+        XCTAssertFalse(newTaskStartsUngroupedSession(name: "named", startFirstSession: true, parentTaskID: nil, teamSelected: false))
+        XCTAssertFalse(newTaskStartsUngroupedSession(name: "", startFirstSession: false, parentTaskID: nil, teamSelected: false))
+        XCTAssertFalse(newTaskStartsUngroupedSession(name: "", startFirstSession: true, parentTaskID: "parent", teamSelected: false))
+        XCTAssertFalse(newTaskStartsUngroupedSession(name: "", startFirstSession: true, parentTaskID: nil, teamSelected: true))
+    }
 
-        XCTAssertEqual(
-            taskSessionTransitionDirection(
-                fromSessionId: "session-1",
-                toSessionId: "session-2",
-                sessions: sessions
-            ),
-            1
-        )
-        XCTAssertEqual(
-            taskSessionTransitionDirection(
-                fromSessionId: "session-3",
-                toSessionId: "session-2",
-                sessions: sessions
-            ),
-            -1
-        )
-        XCTAssertNil(
-            taskSessionTransitionDirection(
-                fromSessionId: "session-1",
-                toSessionId: "session-1",
-                sessions: sessions
-            )
-        )
-        XCTAssertEqual(sessionTabTitleMaxWidth(selected: true), 168)
-        XCTAssertEqual(sessionTabTitleMaxWidth(selected: false), 112)
+    func testCreationRetryNeverReplaysAcceptedOrUnknownLaunch() {
+        XCTAssertTrue(newTaskMayRetryLaunch(accepted: false, unknown: false))
+        XCTAssertFalse(newTaskMayRetryLaunch(accepted: true, unknown: false))
+        XCTAssertFalse(newTaskMayRetryLaunch(accepted: false, unknown: true))
+        XCTAssertFalse(newTaskMayRetryLaunch(accepted: true, unknown: true))
+    }
+
+    func testNewTaskParentIsPassedAtomicallyAndAbsentParentIsOmitted() {
+        let grouped = createWorkspaceTaskRequest(workspaceId: "w", name: "child", baseRef: nil, description: "goal", parentTaskId: "parent")
+        XCTAssertEqual(grouped.body["parentTaskId"], .string("parent"))
+        XCTAssertEqual(createStandaloneTaskRequest(name: "child", parentTaskId: "parent").body["parentTaskId"], .string("parent"))
+        XCTAssertNil(createStandaloneTaskRequest(name: "child").body["parentTaskId"])
     }
 
     func testTaskListKeepsCreatedOrderWithNewItemsFirst() throws {
@@ -352,8 +339,10 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/workspaces/ws-1/tasks"))
         XCTAssertTrue(changesTaskHierarchy(method: "DELETE", path: "/api/workspaces/ws-1"))
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/wand-tasks/task-1"))
-        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/commands"))
-        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/structured-sessions"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions"))
+        XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions?source=new-session"))
+        XCTAssertFalse(changesTaskHierarchy(method: "POST", path: "/api/commands"))
+        XCTAssertFalse(changesTaskHierarchy(method: "POST", path: "/api/structured-sessions"))
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/batch-delete"))
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/batch-archive"))
         XCTAssertTrue(changesTaskHierarchy(method: "POST", path: "/api/sessions/s1/archive"))
@@ -374,22 +363,26 @@ final class WorkspaceTests: XCTestCase {
             baseRef: nil,
             worktree: false,
             cwd: "/repo",
-            description: "把侧栏重构一遍"
+            description: "把侧栏重构一遍",
+            creationRequestId: "task-request-1"
         )
         XCTAssertEqual(project.path, "/api/workspaces/ws-1/tasks")
         XCTAssertEqual(project.body["description"], .string("把侧栏重构一遍"))
         XCTAssertEqual(project.body["worktree"], .bool(false))
         XCTAssertEqual(project.body["cwd"], .string("/repo"))
+        XCTAssertEqual(project.body["creationRequestId"], .string("task-request-1"))
 
         let standalone = createStandaloneTaskRequest(
             name: "未命名任务",
             cwd: "/scratch",
             worktree: false,
-            description: "写个脚本"
+            description: "写个脚本",
+            creationRequestId: "standalone-request-1"
         )
         XCTAssertEqual(standalone.path, "/api/tasks")
         XCTAssertEqual(standalone.body["description"], .string("写个脚本"))
         XCTAssertEqual(standalone.body["worktree"], .bool(false))
+        XCTAssertEqual(standalone.body["creationRequestId"], .string("standalone-request-1"))
 
         // 空/全空白描述不占位，避免服务端拿空字符串去总结标题。
         XCTAssertNil(createStandaloneTaskRequest(name: "任务", description: "   ").body["description"])
@@ -406,12 +399,19 @@ final class WorkspaceTests: XCTestCase {
             target: .claude,
             binding: binding,
             kind: .structured,
-            prompt: " 修好登录 "
+            prompt: " 修好登录 ",
+            mode: "managed",
+            model: "claude-sonnet",
+            thinkingEffort: "deep"
         )
-        XCTAssertEqual(structured.path, "/api/structured-sessions")
+        XCTAssertEqual(structured.path, "/api/sessions")
+        XCTAssertEqual(structured.body["kind"], .string("structured"))
         XCTAssertEqual(structured.body["prompt"], .string("修好登录"))
         XCTAssertNil(structured.body["initialInput"])
         XCTAssertEqual(structured.body["workspaceTaskId"], .string("task-1"))
+        XCTAssertEqual(structured.body["mode"], .string("managed"))
+        XCTAssertEqual(structured.body["model"], .string("claude-sonnet"))
+        XCTAssertEqual(structured.body["thinkingEffort"], .string("deep"))
 
         let pty = workspaceTaskWindowRequest(
             target: .claude,
@@ -419,7 +419,11 @@ final class WorkspaceTests: XCTestCase {
             kind: .pty,
             prompt: "修好登录"
         )
-        XCTAssertEqual(pty.path, "/api/commands")
+        XCTAssertEqual(pty.path, "/api/sessions")
+        XCTAssertEqual(pty.body["kind"], .string("pty"))
+        XCTAssertNil(pty.body["mode"])
+        XCTAssertNil(pty.body["model"])
+        XCTAssertNil(pty.body["thinkingEffort"])
         XCTAssertEqual(pty.body["initialInput"], .string("修好登录"))
         XCTAssertNil(pty.body["prompt"])
 
@@ -429,7 +433,10 @@ final class WorkspaceTests: XCTestCase {
             kind: .pty,
             prompt: "修好登录"
         )
+        XCTAssertEqual(shell.path, "/api/sessions")
+        XCTAssertEqual(shell.body["kind"], .string("pty"))
         XCTAssertEqual(shell.body["shell"], .bool(true))
+        XCTAssertNil(shell.body["provider"])
         XCTAssertNil(shell.body["initialInput"])
     }
 
@@ -563,14 +570,16 @@ final class WorkspaceTests: XCTestCase {
         for target in WorkspaceSessionTarget.allCases {
             let pty = workspaceTaskWindowRequest(target: target, binding: binding, kind: .pty)
             if target == .wandAgent {
-                XCTAssertEqual(pty.path, "/api/structured-sessions")
+                XCTAssertEqual(pty.path, "/api/sessions")
+                XCTAssertEqual(pty.body["kind"], .string("structured"))
                 XCTAssertEqual(pty.body["provider"], .string("pi"))
                 XCTAssertEqual(pty.body["engine"], .string("sdk"))
                 XCTAssertEqual(pty.body["workspaceTaskId"], .string("task-id"))
                 XCTAssertNil(pty.body["command"])
                 continue
             }
-            XCTAssertEqual(pty.path, "/api/commands")
+            XCTAssertEqual(pty.path, "/api/sessions")
+            XCTAssertEqual(pty.body["kind"], .string("pty"))
             XCTAssertEqual(pty.body["cwd"], .string("/task/worktree"))
             XCTAssertEqual(pty.body["workspaceId"], .string("workspace-id"))
             XCTAssertEqual(pty.body["workspaceTaskId"], .string("task-id"))
@@ -587,7 +596,8 @@ final class WorkspaceTests: XCTestCase {
                 XCTAssertNil(pty.body["shell"])
 
                 let structured = workspaceTaskWindowRequest(target: target, binding: binding, kind: .structured)
-                XCTAssertEqual(structured.path, "/api/structured-sessions")
+                XCTAssertEqual(structured.path, "/api/sessions")
+                XCTAssertEqual(structured.body["kind"], .string("structured"))
                 XCTAssertEqual(structured.body["provider"], .string(target.rawValue))
                 XCTAssertNotNil(structured.body["runner"])
                 XCTAssertNil(structured.body["command"])
@@ -1217,7 +1227,10 @@ private final class MockWorkspaceService: WorkspaceServing {
         target: WorkspaceSessionTarget,
         binding: WorkspaceBinding,
         kind: WorkspaceSessionKind,
-        prompt: String?
+        prompt: String?,
+        mode: String?,
+        model: String?,
+        thinkingEffort: String?
     ) async throws -> SessionSnapshot {
         createRequests.append(
             CreateRequest(target: target, binding: binding, kind: kind, prompt: prompt)
@@ -1313,7 +1326,9 @@ private final class MockWorkspaceService: WorkspaceServing {
         baseRef: String?,
         worktree: Bool?,
         cwd: String?,
-        description: String?
+        description: String?,
+        parentTaskId: String?,
+        creationRequestId: String?
     ) async throws -> WorkspaceTaskCreation {
         throw MockError.createUnavailable
     }
@@ -1322,7 +1337,9 @@ private final class MockWorkspaceService: WorkspaceServing {
         name: String,
         cwd: String?,
         worktree: Bool?,
-        description: String?
+        description: String?,
+        parentTaskId: String?,
+        creationRequestId: String?
     ) async throws -> WorkspaceTaskCreation {
         throw MockError.createUnavailable
     }

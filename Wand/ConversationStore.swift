@@ -210,7 +210,7 @@ final class ConversationStore: ObservableObject {
         return draft
     }
     func hasUnknown(_ id: String, target: ConversationTarget?) -> Bool { unknownRequests[draftKey(id, target: target)] != nil }
-    func send(_ id: String, target: ConversationTarget?, dispatch: Bool, workspaceID: String?, cwd: String?) {
+    func send(_ id: String, target: ConversationTarget?, dispatch: Bool, workspaceID: String?, cwd: String?, executionPreference: ConversationExecutionPreference? = nil) {
         let draft = composer(id, target: target)
         let key = draftKey(id, target: target)
         let submitted = draft.submission()
@@ -220,8 +220,8 @@ final class ConversationStore: ObservableObject {
         if dispatch, workspaceID?.isEmpty != false { draft.finishSending(accepted: false, message: "请选择项目再派发任务"); return }
         var body: [String: Any] = dispatch
             ? ["description": text, "workspaceId": workspaceID ?? "", "memberVersion": details[id]?.memberVersion ?? 1]
-            : ["input": text, "target": target?.body ?? NSNull()]
-        if let cwd, !cwd.isEmpty { body["cwd"] = cwd }
+            : conversationMessageBody(input: text, target: target, cwd: cwd, executionPreference: executionPreference)
+        if dispatch, let cwd, !cwd.isEmpty { body["cwd"] = cwd }
         if dispatch, let target { body["continueTaskId"] = target.taskId }
         draft.submitted(submitted); draft.beginSending()
         Task {
@@ -269,8 +269,9 @@ final class ConversationStore: ObservableObject {
         guard let request = unknownRequests[draftKey(id, target: target)] else { return }
         Task { await reconcile(request) }
     }
-    func update(_ id: String, patch: [String: Bool]) async {
-        guard !mutationBusy else { return }
+    @discardableResult
+    func update(_ id: String, patch: [String: Bool]) async -> Bool {
+        guard !mutationBusy else { return false }
         mutationBusy = true; defer { mutationBusy = false }
         do {
             let updated = try await service.updateConversationListState(id, patch: patch)
@@ -279,7 +280,8 @@ final class ConversationStore: ObservableObject {
             items.sort { ($0.pinnedAt ?? "", $0.messageAt) > ($1.pinnedAt ?? "", $1.messageAt) }
             details.removeValue(forKey: id)
             await load(id)
-        } catch { self.error = error.localizedDescription }
+            return true
+        } catch { self.error = error.localizedDescription; return false }
     }
     func remove(_ id: String) async throws {
         try await service.deleteConversation(id)

@@ -27,9 +27,9 @@ final class ContactTeamProfileStore: ObservableObject {
     private let service: any ContactTeamService
     private var generation = 0
     private var active = true
-    init(id: String?, api: WandAPI, service: (any ContactTeamService)? = nil) {
+    init(id: String?, api: WandAPI, template: ContactTeamTemplate = .blank, service: (any ContactTeamService)? = nil) {
         self.id = id; self.service = service ?? api; ready = id == nil
-        if id == nil { savedDraft = ContactTeamDraft() }
+        if id == nil { draft = template.draft(); savedDraft = draft }
     }
     var busy: Bool { phase == .sending || startPhase == .sending }
     var hasUnsavedChanges: Bool { savedDraft.map { draft != $0 } ?? false }
@@ -40,6 +40,11 @@ final class ContactTeamProfileStore: ObservableObject {
         loading = true
         async let models = try? service.models()
         do {
+            if team == nil && id == nil, let agent = try? await service.contactDefaultCandidate(),
+               active, request == generation, revision == draftRevision, !hasUnsavedChanges {
+                for index in draft.members.indices { draft.members[index].agents = [agent] }
+                savedDraft = draft
+            }
             if let id = team?.id ?? id {
                 let info = try await service.contactTeam(id)
                 guard active, request == generation, !Task.isCancelled else { return }
@@ -149,9 +154,9 @@ struct ContactTeamProfilePanel: View {
     @State private var replacingID: String?
     @State private var inviteQuery = ""
     @Environment(\.accessibilityReduceMotion) private var reduced
-    init(id: String?, api: WandAPI, directory: ContactsStore, onClose: @escaping () -> Void, onOpenRun: @escaping (String) -> Void) {
+    init(id: String?, api: WandAPI, directory: ContactsStore, template: ContactTeamTemplate = .blank, onClose: @escaping () -> Void, onOpenRun: @escaping (String) -> Void) {
         self.id = id; self.api = api; self.directory = directory; self.onClose = onClose; self.onOpenRun = onOpenRun
-        _model = StateObject(wrappedValue: ContactTeamProfileStore(id: id, api: api))
+        _model = StateObject(wrappedValue: ContactTeamProfileStore(id: id, api: api, template: template))
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -203,6 +208,7 @@ struct ContactTeamProfilePanel: View {
             } else { ProgressView().frame(height: 44) }
         }
         .padding(16).background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
+        .buttonStyle(WandQuietButtonStyle())
         .animation(reduced ? nil : WandMotion.stateSwap, value: instructionsExpanded)
         .animation(reduced ? nil : WandMotion.stateSwap, value: inviteOpen)
         .task {
@@ -227,10 +233,8 @@ struct ContactTeamProfilePanel: View {
                 if item.employeeId != nil { Text("通讯录绑定").font(.caption).foregroundStyle(Theme.brand) }
                 Spacer()
                 Button("移除") {
-                    let wasLeader = model.draft.members[index].isLeader
-                    model.draft.members.remove(at: index)
-                    if wasLeader, !model.draft.members.isEmpty { model.draft.members[0].isLeader = true }
-                }.foregroundStyle(Theme.danger)
+                    model.draft.members = contactTeamRemovingMember(model.draft.members, at: index)
+                }.foregroundStyle(Theme.danger).disabled(model.draft.members.count <= 2)
             }
             if item.employeeId == nil {
                 TextField("成员名字", text: $model.draft.members[index].name)
@@ -243,7 +247,7 @@ struct ContactTeamProfilePanel: View {
                 Picker("职责", selection: Binding(
                     get: { model.draft.members[index].role ?? "any" }, set: { model.draft.members[index].role = $0 }
                 )) {
-                    Text("通用").tag("any"); Text("规划").tag("plan"); Text("工作").tag("work"); Text("验证").tag("verify")
+                    Text("通用").tag("any"); Text("规划").tag("plan"); Text("执行").tag("work"); Text("验收").tag("verify")
                 }
                 Button(replacingID == item.id && inviteOpen ? "收起替换" : "替换员工") {
                     inviteQuery = ""; replacingID = item.id; inviteOpen.toggle()
@@ -257,6 +261,7 @@ struct ContactTeamProfilePanel: View {
                 }
                 Text("身份与候选由员工维护，团队只维护分工和负责人。")
                     .font(.caption).foregroundStyle(Theme.textSecondary)
+                Button("改为手工 CLI（解除员工绑定）") { model.draft.members[index].employeeId = nil }
             } else {
                 ContactCandidateEditor(agents: $model.draft.members[index].agents, catalog: model.catalog)
             }

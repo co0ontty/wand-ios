@@ -36,9 +36,33 @@ struct TerminalShortcut: Identifiable, Hashable {
 }
 
 struct TerminalShortcuts {
-    /// 默认底部快捷栏：Esc / Ctrl+C / Tab / Shift+Tab / 方向键 / Enter。
+    /// 默认底部快捷栏：Enter / ↑ / Tab / Esc / Ctrl+C / Shift+Tab / ← / → / ↓。
     /// 与 Android `DefaultTerminalShortcuts` 保持一致，方便两端观感统一。
     static let defaults: [TerminalShortcut] = [
+        TerminalShortcut(
+            id: "enter",
+            label: "⏎",
+            accessibilityLabel: "Enter",
+            binding: TerminalKeyBinding(key: "enter", modifiers: []),
+            builtIn: true,
+            repeatable: false
+        ),
+        TerminalShortcut(
+            id: "arrow-up",
+            label: "↑",
+            accessibilityLabel: "上方向键",
+            binding: TerminalKeyBinding(key: "arrowUp", modifiers: []),
+            builtIn: true,
+            repeatable: true
+        ),
+        TerminalShortcut(
+            id: "tab",
+            label: "Tab",
+            accessibilityLabel: "Tab",
+            binding: TerminalKeyBinding(key: "tab", modifiers: []),
+            builtIn: true,
+            repeatable: false
+        ),
         TerminalShortcut(
             id: "escape",
             label: "Esc",
@@ -52,14 +76,6 @@ struct TerminalShortcuts {
             label: "⌃C",
             accessibilityLabel: "Control C",
             binding: TerminalKeyBinding(key: "c", modifiers: [.ctrl]),
-            builtIn: true,
-            repeatable: false
-        ),
-        TerminalShortcut(
-            id: "tab",
-            label: "Tab",
-            accessibilityLabel: "Tab",
-            binding: TerminalKeyBinding(key: "tab", modifiers: []),
             builtIn: true,
             repeatable: false
         ),
@@ -80,10 +96,10 @@ struct TerminalShortcuts {
             repeatable: true
         ),
         TerminalShortcut(
-            id: "arrow-up",
-            label: "↑",
-            accessibilityLabel: "上方向键",
-            binding: TerminalKeyBinding(key: "arrowUp", modifiers: []),
+            id: "arrow-right",
+            label: "→",
+            accessibilityLabel: "右方向键",
+            binding: TerminalKeyBinding(key: "arrowRight", modifiers: []),
             builtIn: true,
             repeatable: true
         ),
@@ -94,22 +110,6 @@ struct TerminalShortcuts {
             binding: TerminalKeyBinding(key: "arrowDown", modifiers: []),
             builtIn: true,
             repeatable: true
-        ),
-        TerminalShortcut(
-            id: "arrow-right",
-            label: "→",
-            accessibilityLabel: "右方向键",
-            binding: TerminalKeyBinding(key: "arrowRight", modifiers: []),
-            builtIn: true,
-            repeatable: true
-        ),
-        TerminalShortcut(
-            id: "enter",
-            label: "⏎",
-            accessibilityLabel: "Enter",
-            binding: TerminalKeyBinding(key: "enter", modifiers: []),
-            builtIn: true,
-            repeatable: false
         ),
     ]
 }

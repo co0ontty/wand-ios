@@ -127,6 +127,13 @@ final class AppUpdateController: ObservableObject {
     func dismissPrompt() { dismissedVersion = info?.latestVersion }
 
     func install() {
+        // iOS 26+ never backgrounds the requesting app after the itms confirmation, so an
+        // in-app handoff stalls until the app is force-quit. Prefer the validated Safari
+        // install page; it backgrounds Wand before the system installer starts.
+        if installPageURL != nil {
+            openInstallPage()
+            return
+        }
         guard let url = installURL else {
             error = "当前更新包暂不可安装，请重新检查更新。"
             return
@@ -207,7 +214,7 @@ struct AppUpdateBanner: View {
                     .accessibilityLabel("稍后提醒")
                     .disabled(updater.opening)
                 }
-                Text(updater.error ?? updater.handoffMessage ?? "在系统提示中确认安装即可，无需连接电脑。")
+                Text(updater.error ?? updater.handoffMessage ?? "将打开浏览器安装页，在页面中确认即可，无需连接电脑。")
                     .font(.subheadline)
                     .foregroundStyle(updater.error == nil ? Theme.textSecondary : Theme.danger)
                     .fixedSize(horizontal: false, vertical: true)

@@ -43,7 +43,6 @@ struct ConversationListView: View {
     let onSettings: () -> Void
     let onSwitchServer: () -> Void
     @State private var query = ""
-    @State private var searching = false
     @State private var creating = false
     @State private var tier = ConversationListTier.all
     @State private var selecting = false
@@ -64,7 +63,7 @@ struct ConversationListView: View {
     private func recoverEmptyList() {
         switch emptyState {
         case .empty: creating = true; searchFocused = false
-        case .search: query = ""; searchFocused = searching
+        case .search: query = ""; searchFocused = true
         case .filtered: query = ""; tier = .all; searchFocused = false
         case .historyOnly: tier = .dissolved; searchFocused = false
         }
@@ -72,14 +71,8 @@ struct ConversationListView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            if creationOpen {
-                ConversationGroupPanel(store: store, context: store.creatingPresetID.map { "preset:" + $0 } ?? "create", inviteTo: nil, templateID: store.creatingPresetID,
-                    onClose: { creating = false; store.creatingPresetID = nil }, onAccepted: { creating = false; store.creatingPresetID = nil; onSelect($0) })
-                    .padding(.horizontal, 12)
-                    .transition(.opacity.combined(with: reduced ? .identity : .move(edge: .top)))
-            }
-            Picker("对话筛选", selection: $tier) { ForEach(ConversationListTier.allCases, id: \.self) { Text($0.title).tag($0) } }
-                .pickerStyle(.segmented).padding(.horizontal, 12).padding(.bottom, 8)
+            ZStack(alignment: .top) {
+                VStack(spacing: 0) {
             List(selection: $selected) {
                 if store.loading && store.items.isEmpty { ProgressView().frame(maxWidth: .infinity).listRowBackground(Color.clear) }
                 if let error = store.error {
@@ -106,12 +99,7 @@ struct ConversationListView: View {
                                 Button(item.dissolvedAt == nil ? "解散" : "恢复") { Task { await store.update(item.id, patch: ["dissolved": item.dissolvedAt == nil]) } }.tint(Theme.textSecondary)
                             }
                         }
-                        .contextMenu {
-                            Button(item.pinnedAt == nil ? "置顶" : "取消置顶") { Task { await store.update(item.id, patch: ["pinned": item.pinnedAt == nil]) } }
-                            if item.kind == "group" { Button(item.dissolvedAt == nil ? "解散" : "恢复") { Task { await store.update(item.id, patch: ["dissolved": item.dissolvedAt == nil]) } } }
-                            Button("多选") { selecting = true; selected.insert(item.id) }
-                            Button("删除", role: .destructive) { deleteIDs = [item.id] }
-                        }
+                        .onLongPressGesture { selecting = true; selected.insert(item.id) }
                 }
                 if rows.isEmpty && !store.loading && store.error == nil {
                     ContentUnavailableView {
@@ -134,34 +122,67 @@ struct ConversationListView: View {
                     Button("置顶") { batchPin(true) }.disabled(selected.isEmpty || batchBusy)
                     Button("取消置顶") { batchPin(false) }.disabled(selected.isEmpty || batchBusy)
                     Button("删除", role: .destructive) { deleteIDs = selected }.disabled(selected.isEmpty || batchBusy)
-                }.padding(12)
+                }.padding(WandLayout.fieldGap)
+            }
+            }
+            .opacity(creationOpen ? 0 : 1)
+            .allowsHitTesting(!creationOpen).accessibilityHidden(creationOpen)
+            if creationOpen {
+                ConversationGroupPanel(store: store, context: store.creatingPresetID.map { "preset:" + $0 } ?? "create", inviteTo: nil, templateID: store.creatingPresetID,
+                    onClose: { creating = false; store.creatingPresetID = nil }, onAccepted: { creating = false; store.creatingPresetID = nil; onSelect($0) })
+                    .padding(.horizontal, WandLayout.fieldGap).padding(.bottom, WandLayout.fieldGap)
+                    .transition(.opacity.combined(with: reduced ? .identity : .move(edge: .top)))
+            }
             }
         }
-        .animation(reduced ? nil : WandMotion.stateSwap, value: creating)
+        .animation(reduced ? nil : WandMotion.expansion, value: creationOpen)
+        .onKeyPress(.escape) {
+            if creationOpen { creating = false; store.creatingPresetID = nil; return .handled }
+            if selecting { selected = []; selecting = false; return .handled }
+            if !query.isEmpty || searchFocused { query = ""; searchFocused = false; return .handled }
+            return .ignored
+        }
         .alert("删除对话？", isPresented: Binding(get: { !deleteIDs.isEmpty }, set: { if !$0 { deleteIDs = [] } })) {
             Button("取消", role: .cancel) { deleteIDs = [] }
             Button("删除", role: .destructive) { batchDelete() }
         } message: { Text("删除其所属执行会话和群任务资源；不会删除其他对话或工作区。") }
     }
     private var header: some View {
-        HStack(spacing: 4) {
-            Button(action: onSwitchServer) { WandBrandMark(size: 26).frame(width: 44, height: 44) }.accessibilityLabel("切换服务器")
-            if searching {
-                TextField("搜索对话与任务", text: $query).focused($searchFocused).textInputAutocapitalization(.never)
-                    .transition(.opacity)
-            } else { Text("聊天").font(.headline).frame(maxWidth: .infinity, alignment: .leading) }
-            ContactMorphButton(expanded: searching, symbol: "magnifyingglass", label: searching ? "关闭搜索" : "搜索") {
-                searching.toggle(); searchFocused = searching
-                if !searching { query = "" }
+        VStack(spacing: 4) {
+            HStack(spacing: 4) {
+                Color.clear.frame(width: 88, height: 44).accessibilityHidden(true)
+                Text(tier == .all ? "消息" : tier.title).font(.headline)
+                    .lineLimit(1).frame(maxWidth: .infinity)
+                HStack(spacing: 0) {
+                    Menu {
+                        ForEach(ConversationListTier.allCases, id: \.self) { option in
+                            Button { tier = option } label: {
+                                HStack { Text(option == .all ? "全部消息" : option.title); if option == tier { Image(systemName: "checkmark") } }
+                            }
+                        }
+                        Divider()
+                        Button("设置", systemImage: "gearshape", action: onSettings)
+                        Button("切换服务器", systemImage: "server.rack", action: onSwitchServer)
+                    } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
+                        .accessibilityLabel("消息菜单").disabled(creationOpen)
+                    ContactMorphButton(expanded: creationOpen, symbol: "plus", label: creationOpen ? "关闭建群" : "发起群聊") {
+                        if creationOpen { creating = false; store.creatingPresetID = nil } else { creating = true }
+                        searchFocused = false
+                    }
+                }.background(Theme.surface, in: Capsule()).overlay(Capsule().stroke(Theme.border.opacity(0.6)))
+            }.frame(minHeight: 56)
+            if !creationOpen {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(Theme.textSecondary)
+                    TextField("搜索聊天或任务", text: $query).focused($searchFocused)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled().submitLabel(.search)
+                    if !query.isEmpty {
+                        Button { query = "" } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
+                            .buttonStyle(.plain).accessibilityLabel("清空搜索")
+                    }
+                }.padding(.horizontal, 12).frame(minHeight: 44).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
             }
-            ContactMorphButton(expanded: creationOpen, symbol: "plus", label: creationOpen ? "关闭建群" : "建群") { if creationOpen { creating = false; store.creatingPresetID = nil } else { creating = true }; searchFocused = false }
-            Menu {
-                Button("多选") { selecting = true }
-                Button("刷新") { Task { await store.refresh() } }
-                Button("设置", action: onSettings)
-            } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }.accessibilityLabel("聊天菜单")
-        }.padding(.horizontal, 8).frame(minHeight: 52)
-            .animation(reduced ? nil : WandMotion.stateSwap, value: searching)
+        }.padding(.horizontal, WandLayout.pageInset).padding(.vertical, 4)
     }
     private func row(_ item: ConversationInstance) -> some View {
         HStack(spacing: 12) {
@@ -178,19 +199,25 @@ struct ConversationListView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text(item.title).font(.body.weight(.semibold)).lineLimit(1)
+                        Text(item.title).font(.headline).lineLimit(2)
                         Spacer()
                         if item.pinnedAt != nil { Image(systemName: "pin.fill").font(.caption).foregroundStyle(Theme.textSecondary) }
                     }
                     Text(item.unavailableReason ?? item.preview).font(.subheadline).foregroundStyle(Theme.textSecondary).lineLimit(2)
                     if item.kind == "group" { Text("\(item.team?.members.count ?? 0) 人 · \(item.tasks.count) 项任务").font(.caption).foregroundStyle(Theme.textSecondary) }
-                }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(.plain)
+                }.frame(maxWidth: .infinity, minHeight: 56, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(WandQuietButtonStyle(tint: Theme.textPrimary))
         }.padding(.vertical, 4).listRowBackground(Theme.surface)
     }
     private func batchPin(_ pin: Bool) {
+        guard !batchBusy, !selected.isEmpty else { return }
+        let ids = selected
         batchBusy = true
-        Task { for id in selected { await store.update(id, patch: ["pinned": pin]) }; batchBusy = false }
+        Task {
+            var failed = Set<String>()
+            for id in ids { if !(await store.update(id, patch: ["pinned": pin])) { failed.insert(id) } }
+            selected = failed; selecting = !failed.isEmpty; batchBusy = false
+        }
     }
     private func batchDelete() {
         let ids = deleteIDs; deleteIDs = []; batchBusy = true
@@ -212,6 +239,10 @@ struct ConversationGroupPanel: View {
     @ObservedObject private var operation: ConversationOperation
     @State private var draft: ConversationGroupDraft
     @State private var visible = false
+    @State private var memberQuery = ""
+    @State private var settingsExpanded = false
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.accessibilityReduceMotion) private var reduced
     init(store: ConversationStore, context: String, inviteTo: ConversationInstance?, templateID: String?, onClose: @escaping () -> Void, onAccepted: @escaping (String) -> Void) {
         self.store = store; self.context = context; self.inviteTo = inviteTo; self.templateID = templateID; self.onClose = onClose; self.onAccepted = onAccepted
         _operation = ObservedObject(wrappedValue: store.operation("group:" + context))
@@ -225,55 +256,141 @@ struct ConversationGroupPanel: View {
         members.contains { member in member.employeeId.map { id in !store.employees.contains { $0.id == id && !$0.archived } } ?? false }
             || draft.duties.values.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).count > 2000 }
     }
+    private var matchingEmployees: [SiliconEmployee] {
+        let term = memberQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return store.employees.filter { !$0.archived && (term.isEmpty || $0.name.localizedCaseInsensitiveContains(term) || $0.duty.localizedCaseInsensitiveContains(term)) }
+    }
+    private func isSelected(_ id: String) -> Bool { members.contains { $0.employeeId == id || $0.id == id } }
+    private func alreadyInGroup(_ id: String) -> Bool { inviteTo?.team?.members.contains { $0.employeeId == id || $0.id == id } == true }
+    private var presetPicker: some View {
+        Picker("团队预设", selection: $draft.templateId) {
+            Text("自选员工").tag("")
+            ForEach(store.presets) { Text($0.name).tag($0.id) }
+        }.pickerStyle(.menu).frame(minHeight: 44).disabled(!operation.canSubmit)
+    }
+    private var memberSearch: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").font(.system(size: 17)).foregroundStyle(Theme.textSecondary)
+            TextField("搜索员工名字或职责", text: $memberQuery).textInputAutocapitalization(.never).autocorrectionDisabled()
+            if !memberQuery.isEmpty {
+                Button { memberQuery = "" } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
+                    .buttonStyle(WandQuietButtonStyle()).accessibilityLabel("清空成员搜索")
+            }
+        }.padding(.horizontal, 12).frame(minHeight: WandLayout.controlTouch).wandInputSurface(focused: false)
+    }
+    private var groupNameField: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("群名（可选）").font(.caption).foregroundStyle(Theme.textSecondary)
+            TextField("例如：项目协作", text: $draft.name)
+                .padding(.horizontal, 12).frame(minHeight: WandLayout.controlTouch).wandInputSurface(focused: false)
+                .accessibilityLabel("群名，可选").disabled(!operation.canSubmit)
+        }
+    }
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack { Text(inviteTo == nil ? "建群" : "邀请成员").font(.headline); Spacer(); Button("取消", action: onClose) }
-                Picker("团队预设", selection: $draft.templateId) {
-                    Text("从通讯录选择").tag("")
-                    ForEach(store.presets) { Text($0.name).tag($0.id) }
+        VStack(alignment: .leading, spacing: WandLayout.fieldGap) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(inviteTo == nil ? (typeSize.isAccessibilitySize ? "建群" : "发起群聊") : "邀请成员")
+                        .font(.headline).fixedSize(horizontal: false, vertical: true)
+                    Text(inviteTo == nil ? "已选 \(total)/8" : "已选 \(members.count) 位 · 全群 \(total)/8")
+                        .accessibilityLabel("已选 \(members.count) 位，全群 \(total) 位，最多8位成员")
+                        .font(.caption).foregroundStyle(total > 8 || invalid ? Theme.danger : Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                ForEach(store.employees.filter { !$0.archived }) { employee in
-                    Toggle(employee.name, isOn: Binding(get: { draft.employeeIds.contains(employee.id) }, set: { value in
-                        if value { draft.employeeIds.insert(employee.id) } else { draft.employeeIds.remove(employee.id) }
-                    }))
-                }
-                ForEach(members) { member in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(member.name).font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Button("移除") { draft.employeeIds.remove(member.employeeId ?? member.id); draft.excludedMemberIds.insert(member.id) }
-                        }
-                        TextField("本群职责", text: Binding(get: { draft.duties[member.employeeId ?? member.id] ?? member.duty }, set: { draft.duties[member.employeeId ?? member.id] = $0 }), axis: .vertical)
-                            .lineLimit(1...3).textFieldStyle(.roundedBorder)
+                Spacer(minLength: 8)
+                Button("取消", action: onClose).frame(minWidth: WandLayout.controlTouch, minHeight: WandLayout.controlTouch)
+                    .buttonStyle(WandQuietButtonStyle())
+            }
+            if !typeSize.isAccessibilitySize { presetPicker; memberSearch }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if typeSize.isAccessibilitySize {
+                        VStack(alignment: .leading, spacing: WandLayout.fieldGap) {
+                            presetPicker; memberSearch
+                            if inviteTo == nil { groupNameField }
+                        }.padding(.bottom, WandLayout.sectionGap)
                     }
-                }
-                if inviteTo == nil {
-                    Picker("负责人", selection: $draft.leaderId) {
-                        Text("按预设").tag("")
-                        ForEach(members) { Text($0.name).tag($0.employeeId ?? $0.id) }
+                    ForEach(matchingEmployees) { employee in
+                        let checked = isSelected(employee.id)
+                        Toggle(isOn: Binding(get: { isSelected(employee.id) }, set: { value in
+                            draft.selectEmployee(employee.id, selected: value, employees: store.employees, presets: store.presets)
+                        })) {
+                            HStack(spacing: 12) {
+                                ContactAvatar(id: employee.id, avatar: employee.avatar, systemKey: employee.systemKey, size: 40)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(employee.name).font(.headline).lineLimit(typeSize.isAccessibilitySize ? nil : 2)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Text(alreadyInGroup(employee.id) ? "已在群中" : employee.duty).font(.caption).foregroundStyle(Theme.textSecondary)
+                                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                                }.containerRelativeFrame(.horizontal, alignment: .leading) { width, _ in
+                                    max(0, width - 40 - WandLayout.controlTouch - WandLayout.fieldGap * 2)
+                                }
+                                ZStack {
+                                    Image(systemName: "circle").opacity(checked ? 0 : 1)
+                                    Image(systemName: "checkmark.circle.fill").opacity(checked ? 1 : 0)
+                                }.font(.system(size: 22)).foregroundStyle(checked ? Theme.brandText : Theme.textMuted)
+                                    .frame(width: 44, height: 44).accessibilityHidden(true)
+                                    .animation(reduced ? nil : WandMotion.stateSwap, value: checked)
+                            }.containerRelativeFrame(.horizontal)
+                        }.toggleStyle(.button).buttonStyle(WandQuietButtonStyle(tint: Theme.textPrimary))
+                            .accessibilityValue(checked ? "已选择" : "未选择")
+                            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 64)
+                            .disabled(!operation.canSubmit || alreadyInGroup(employee.id) || (!checked && total >= 8))
+                            .padding(.vertical, 4)
+                        Divider()
                     }
-                    TextField("群名（可选）", text: $draft.name).textFieldStyle(.roundedBorder)
+                    if matchingEmployees.isEmpty {
+                        Text(memberQuery.isEmpty ? "还没有可选员工。" : "没有匹配的员工，可换词或清空搜索。")
+                            .font(.subheadline).foregroundStyle(Theme.textSecondary).padding(.vertical, WandLayout.sectionGap)
+                    }
+                    DisclosureGroup("群设置与成员职责", isExpanded: $settingsExpanded) {
+                        VStack(alignment: .leading, spacing: WandLayout.fieldGap) {
+                            if inviteTo == nil {
+                                Picker("负责人", selection: $draft.leaderId) {
+                                    Text("按预设或名单顺序").tag("")
+                                    ForEach(members) { Text($0.name).tag($0.employeeId ?? $0.id) }
+                                }
+                            }
+                            ForEach(members) { member in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text(member.name).font(.headline)
+                                        Spacer()
+                                        Button("移除") { draft.selectEmployee(member.employeeId ?? member.id, selected: false, employees: store.employees, presets: store.presets) }
+                                            .frame(minHeight: 44).buttonStyle(WandQuietButtonStyle())
+                                    }
+                                    Text("本群职责").font(.caption).foregroundStyle(Theme.textSecondary)
+                                    TextField("沿用员工职责", text: Binding(get: { draft.duties[member.employeeId ?? member.id] ?? member.duty }, set: { draft.duties[member.employeeId ?? member.id] = $0 }), axis: .vertical)
+                                        .lineLimit(1...3).textFieldStyle(.roundedBorder).accessibilityLabel(member.name + "本群职责")
+                                }
+                            }
+                        }.padding(.top, WandLayout.fieldGap)
+                    }.padding(.top, WandLayout.sectionGap).disabled(!operation.canSubmit)
                 }
-                Text("\(total)/8 位成员").font(.caption).foregroundStyle(total > 8 || invalid ? Theme.danger : Theme.textSecondary)
-                if invalid { Text("请处理不可用成员或超长职责。").font(.caption).foregroundStyle(Theme.danger) }
-                if let message = operation.message { Text(message).font(.caption).foregroundStyle(operation.phase == .failed ? Theme.danger : Theme.textSecondary) }
+            }.frame(maxHeight: .infinity).scrollDismissesKeyboard(.interactively)
+            if inviteTo == nil && !typeSize.isAccessibilitySize { groupNameField }
+            if invalid { Text("请展开群设置，处理不可用成员或超长职责。").font(.caption).foregroundStyle(Theme.danger) }
+            if let message = operation.message { Text(message).font(.caption).foregroundStyle(operation.phase == .failed ? Theme.danger : Theme.textSecondary) }
+            if operation.unknownRequest != nil { Button("核对请求") { operation.reconcile(service: store.service, accepted: accept) }.frame(minHeight: 44) }
+            if let receipt = operation.receipt { Button("打开已建立的群") { accept(receipt) }.frame(minHeight: 44) }
+            Button(action: submit) {
                 HStack {
-                    if operation.unknownRequest != nil { Button("核对请求") { operation.reconcile(service: store.service, accepted: accept) } }
-                    if let receipt = operation.receipt { Button("打开已建立的群") { accept(receipt) } }
-                    Spacer()
-                    Button(action: submit) {
-                        HStack {
-                            Text(operation.phase == .sending ? "处理中" : operation.phase == .sent ? "已完成" : operation.phase == .failed ? "失败" : inviteTo == nil ? "建群" : "邀请")
-                            if operation.phase == .sending { ProgressView().controlSize(.small) }
-                        }.frame(width: 96, height: 44)
-                    }.buttonStyle(.borderedProminent).disabled(!operation.canSubmit || members.isEmpty || total > 8 || invalid)
-                }
-            }.padding(12)
-        }.frame(maxHeight: 340).background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
-            .onChange(of: draft) { _, value in store.groupDrafts[context] = value }
-            .onAppear { visible = true }.onDisappear { visible = false }
+                    Text(operation.phase == .sending ? "处理中" : operation.phase == .sent ? "已完成" : operation.phase == .failed ? "失败" : inviteTo == nil ? "建群" : "邀请")
+                    ProgressView().controlSize(.small).opacity(operation.phase == .sending ? 1 : 0)
+                        .accessibilityHidden(operation.phase != .sending)
+                }.frame(maxWidth: .infinity)
+            }.buttonStyle(WandPrimaryButtonStyle()).disabled(!operation.canSubmit || members.isEmpty || total > 8 || invalid)
+        }
+        .padding(WandLayout.pageInset).frame(maxHeight: .infinity)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
+        .animation(reduced ? nil : WandMotion.expansion, value: settingsExpanded)
+        .onChange(of: draft) { _, value in store.groupDrafts[context] = value }
+        .onChange(of: invalid) { _, value in if value { settingsExpanded = true } }
+        .onAppear { visible = true }
+        .onDisappear {
+            if operation.receipt == nil { store.groupDrafts[context] = draft }
+            visible = false
+        }
     }
     private func accept(_ receipt: ConversationReceipt) {
         guard visible else { return }
@@ -297,7 +414,6 @@ struct ConversationDetailView: View {
     let onOpenConversation: (String) -> Void
     let onEmployee: (String) -> Void
     @StateObject private var composerFocus = ComposerFocusController()
-    @StateObject private var voice = DraftVoiceController()
     @StateObject private var keyboard = KeyboardObserver()
     @AppStorage(CatComposerSide.preferenceKey) private var sideRaw = CatComposerSide.left.rawValue
     @State private var dragOffset: CGFloat = 0
@@ -310,7 +426,9 @@ struct ConversationDetailView: View {
     @State private var inviting = false
     @State private var scrollPinned = true
     @State private var userScrolling = false
+    @StateObject private var scrollScheduler = ChatScrollScheduler()
     @Environment(\.accessibilityReduceMotion) private var reduced
+    private var identityMetrics = ChatIdentityLayoutMetrics()
     private var detail: ConversationInstance? { store.details[id] }
     private var messages: [ConversationMessage] {
         let filter = store.filters[id] ?? ""
@@ -332,7 +450,9 @@ struct ConversationDetailView: View {
                         Spacer(); Button("查看全部") { store.filters[id] = nil }
                     }.padding(10).background(Theme.surface)
                 }
-                messageList(detail).clipped()
+                GeometryReader { viewport in
+                    messageList(detail).environment(\.chatViewportHeight, viewport.size.height)
+                }.clipped()
                     .overlay {
                         if messages.isEmpty {
                             ContentUnavailableView(
@@ -342,7 +462,7 @@ struct ConversationDetailView: View {
                         }
                     }
                     .onTapGesture { composerFocus.collapse() }
-                ConversationComposerView(id: id, store: store, detail: detail, target: store.targets[id], focus: composerFocus, voice: voice, onEmployee: onEmployee)
+                ConversationComposerView(id: id, store: store, detail: detail, target: store.targets[id], focus: composerFocus, onEmployee: onEmployee)
                     .id(store.draftKey(id, target: store.targets[id]))
                     .padding(.bottom, keyboard.lift)
             } else {
@@ -353,8 +473,9 @@ struct ConversationDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.top, ChatTopLayout.clearance(compact: verticalSizeClass == .compact))
+        .padding(.top, identityMetrics.clearance)
         .background(Theme.background)
+        .background { SessionBackSwipeEnabler().allowsHitTesting(false) }
         .navigationTitle("").navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .navigationBar)
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -384,22 +505,23 @@ struct ConversationDetailView: View {
             }
         }
         .task(id: id) { store.select(id); await store.load(id) }
-        .onDisappear { inviting = false; voice.finish(cancelled: true); composerFocus.collapse(); messageLinks.cancel() }
+        .onDisappear { inviting = false; composerFocus.collapse(); messageLinks.cancel(); scrollScheduler.cancel() }
         .animation(reduced ? nil : WandMotion.stateSwap, value: members)
         .animation(reduced ? nil : WandMotion.stateSwap, value: tasks)
         .animation(reduced ? nil : WandMotion.stateSwap, value: inviting)
     }
     private var navigation: some View {
         ZStack(alignment: .top) {
-            TopChatCompanion(side: CatComposerSide(rawValue: sideRaw) ?? .left, dragOffset: dragOffset) { size in
+            TopChatCompanion(side: CatComposerSide(rawValue: sideRaw) ?? .left, dragOffset: dragOffset,
+                title: detail?.title ?? "对话", status: detail?.identityStatus ?? "正在加载对话") { size in
                 if let detail {
                     let employee = store.employees.first { $0.id == detail.peerEmployeeId }
                     let session = detail.messages.last(where: { $0.sessionPreview?.active == true })?.sessionLink?.sessionId ?? detail.communicationSessionId
                     ConversationCompanionFace(employee: employee, detail: detail, execution: session.map { store.executionStore($0) }, size: size)
-                        .overlay { Color.clear.modifier(voice.gesture(draft: store.composer(id, target: store.targets[id]), focus: composerFocus,
-                            onDrag: { dragOffset = $0 }, onDrop: { offset in
+                        .overlay { Color.clear.modifier(CatInputGesture(onTap: { composerFocus.focus() }, onDrag: { dragOffset = $0 }, onDrop: { offset in
                                 sideRaw = (CatComposerSide(rawValue: sideRaw) ?? .left).dropped(translation: offset).rawValue; dragOffset = 0
-                            })) }
+                            }, identityName: detail.title)) }
+                        .accessibilityAction(named: "切换角色位置") { sideRaw = sideRaw == "left" ? "right" : "left" }
                 }
             }
             FloatingChatControls(onBack: { dismiss() }) {
@@ -412,12 +534,8 @@ struct ConversationDetailView: View {
                         Button("邀请成员") { composerFocus.collapse(); inviting.toggle(); members = false }
                         Button(tasks ? "收起任务" : "任务与执行") { composerFocus.collapse(); tasks.toggle() }
                     }
-                    Menu("猫头位置") {
-                        Button("控件间居中") { sideRaw = CatComposerSide.left.rawValue }
-                        Button("向右微移") { sideRaw = CatComposerSide.right.rawValue }
-                    }
                 } label: { FloatingChatIcon(symbol: "ellipsis") }.accessibilityLabel("对话菜单")
-            }.padding(.top, verticalSizeClass == .compact ? 0 : 18)
+            }
         }
     }
     private func messageList(_ detail: ConversationInstance) -> some View {
@@ -441,16 +559,23 @@ struct ConversationDetailView: View {
             .onScrollGeometryChange(for: CGSize.self) { geometry in
                 CGSize(width: geometry.containerSize.width, height: geometry.containerSize.height)
             } action: { old, new in
-                if old != new, scrollPinned, !userScrolling {
-                    proxy.scrollTo("im-tail", anchor: .bottom)
-                }
+                if old != new { scrollToTail(proxy) }
             }
             .onChange(of: messages.map(\.renderRevision)) { _, _ in
-                if scrollPinned { proxy.scrollTo("im-tail", anchor: .bottom) }
+                scrollToTail(proxy)
             }
+            .onChange(of: scrollPinned) { _, pinned in if !pinned { scrollScheduler.cancel() } }
+            .onChange(of: userScrolling) { _, scrolling in if scrolling { scrollScheduler.cancel() } }
             .overlay(alignment: .bottomTrailing) {
-                if !scrollPinned { Button { scrollPinned = true; proxy.scrollTo("im-tail", anchor: .bottom) } label: { Image(systemName: "arrow.down").frame(width: 44, height: 44).background(Theme.surface, in: Circle()) }.accessibilityLabel("回到最新消息").padding(12) }
+                if !scrollPinned { Button { userScrolling = false; scrollPinned = true; scrollToTail(proxy) } label: { Image(systemName: "arrow.down").frame(width: 44, height: 44).background(Theme.surface, in: Circle()) }.accessibilityLabel("回到最新消息").padding(12) }
             }
+        }
+    }
+    private func scrollToTail(_ proxy: ScrollViewProxy) {
+        guard scrollPinned, !userScrolling else { scrollScheduler.cancel(); return }
+        scrollScheduler.request {
+            guard scrollPinned, !userScrolling else { return }
+            proxy.scrollTo("im-tail", anchor: .bottom)
         }
     }
     private func messageView(_ message: ConversationMessage, detail: ConversationInstance) -> some View {
@@ -590,30 +715,80 @@ private struct ConversationComposerView: View {
     @ObservedObject private var draft: ComposerDraftState
     @ObservedObject private var attachments: ComposerAttachmentController
     @ObservedObject private var action: ConversationOperation
-    @State private var menu = false
+    @State private var contextExpanded = false
+    @State private var composerActionsOpen = false
     @ObservedObject var focus: ComposerFocusController
-    @ObservedObject var voice: DraftVoiceController
     @StateObject private var links = ServerFileLinkController()
     @State private var settingsInfo = false
-    @State private var pendingAttachment: String?
-    @State private var pendingStop = false
     @State private var stopConfirm = false
     @State private var composing = false
     @State private var height: CGFloat = 36
     @State private var workspaceID = ""
     @State private var cwd = ""
+    @State private var executionPreference: ConversationExecutionPreference?
+    @State private var modelCatalog: ModelsResponse?
     @State private var notice: String?
     @State private var draftConsumer = UUID()
     @State private var visible = false
     @StateObject private var keyboard = KeyboardObserver()
     @Environment(\.accessibilityReduceMotion) private var reduced
-    init(id: String, store: ConversationStore, detail: ConversationInstance, target: ConversationTarget?, focus: ComposerFocusController, voice: DraftVoiceController, onEmployee: @escaping (String) -> Void) {
-        self.id = id; self.store = store; self.detail = detail; self.target = target; self.focus = focus; self.voice = voice; self.onEmployee = onEmployee
+    init(id: String, store: ConversationStore, detail: ConversationInstance, target: ConversationTarget?, focus: ComposerFocusController, onEmployee: @escaping (String) -> Void) {
+        self.id = id; self.store = store; self.detail = detail; self.target = target; self.focus = focus; self.onEmployee = onEmployee
         let draft = store.composer(id, target: target)
         _draft = ObservedObject(wrappedValue: draft); _attachments = ObservedObject(wrappedValue: draft.attachments)
         _action = ObservedObject(wrappedValue: store.operation("action:" + id + ":" + (target?.runId ?? "talk")))
     }
     private var dispatch: Bool { store.dispatchIntent.contains(id) }
+    private var employee: SiliconEmployee? { store.employees.first { $0.id == detail.peerEmployeeId } }
+    private var preferenceEligible: Bool { detail.kind == "dm" && target == nil && !dispatch }
+    private var defaultPreference: ConversationExecutionPreference? {
+        guard let candidate = employee?.agents.first else { return nil }
+        return ConversationExecutionPreference(
+            provider: candidate.provider,
+            engine: candidate.engine,
+            model: candidate.model,
+            thinkingEffort: candidate.thinkingEffort
+        )
+    }
+    private var effectivePreference: ConversationExecutionPreference? { executionPreference ?? defaultPreference }
+    private var preferenceTool: WandAgentTool? {
+        guard let preference = effectivePreference else { return nil }
+        return WandAgentTool(provider: preference.provider, engine: preference.engine)
+    }
+    private var preferenceProvider: WandProvider { preferenceTool?.provider ?? .claude }
+    private var preferenceModels: [ModelInfo] { modelCatalog?.models(for: preferenceProvider) ?? [] }
+    private var preferenceDefaultModel: String { modelCatalog?.defaultModelId(for: preferenceProvider.rawValue) ?? "" }
+    private var preferenceThinkingOptions: [ThinkingEffortOption] {
+        thinkingEffortOptions(provider: preferenceProvider.rawValue, selectedModel: effectivePreference?.model,
+            defaultModel: preferenceDefaultModel, models: preferenceModels,
+            providerEfforts: modelCatalog?.thinkingEfforts(for: preferenceProvider.rawValue) ?? [])
+    }
+    private var preferenceToolTitle: String {
+        guard let tool = preferenceTool else { return "员工默认" }
+        if tool == .pi { return "Pi CLI" }
+        return tool.title
+    }
+    private var preferenceLabel: String {
+        guard let preference = effectivePreference, preferenceTool != nil else { return "员工默认" }
+        let model = preference.model == "default" ? "默认模型" : preference.model
+        return "\(preferenceToolTitle) · \(model) · \(composerThinkingName(preference.thinkingEffort))"
+    }
+    private func updatePreference(provider: String? = nil, engine: String? = nil, model: String? = nil, thinking: String? = nil) {
+        guard let current = effectivePreference else { return }
+        let nextProvider = provider ?? current.provider
+        let nextEngine = provider == nil ? current.engine : engine
+        let nextModel = model ?? current.model
+        let nextThinking = thinking ?? current.thinkingEffort
+        executionPreference = ConversationExecutionPreference(
+            provider: nextProvider, engine: nextEngine, model: nextModel, thinkingEffort: nextThinking
+        )
+    }
+    private func loadPreferenceModels() {
+        guard modelCatalog == nil else { return }
+        Task {
+            if let models = try? await store.api.models() { modelCatalog = models }
+        }
+    }
     private var run: ContactRunDetail? { detail.runDetails.first { $0.run.id == target?.runId } }
     private var execution: ChatStore? { (run?.run.chatSessionId ?? detail.communicationSessionId).map { store.executionStore($0) } }
     private var running: Bool { target != nil ? ["running", "awaiting_approval", "waiting_user"].contains(run?.run.status ?? "") : execution?.isResponding == true }
@@ -624,7 +799,7 @@ private struct ConversationComposerView: View {
             if target != nil || dispatch {
                 HStack {
                     Text(dispatch ? "派发任务" : "回复本轮 · " + (detail.tasks.first { $0.id == target?.taskId }?.task.title ?? "任务")).font(.caption)
-                    Spacer(); Button("取消") { store.dispatchIntent.remove(id); store.targets[id] = nil; menu = false }
+                    Spacer(); Button("取消") { store.dispatchIntent.remove(id); store.targets[id] = nil; contextExpanded = false }
                 }
             }
             if run?.run.status == "awaiting_approval" {
@@ -633,9 +808,8 @@ private struct ConversationComposerView: View {
             if store.hasUnknown(id, target: target) { Button("核对送达状态") { store.reconcileComposer(id, target: target) } }
             if action.unknownRequest != nil { Button("核对运行操作") { action.reconcile(service: store.service, accepted: { _ in Task { await store.load(id) } }) } }
             if let notice { Text(notice).font(.caption).foregroundStyle(Theme.textSecondary) }
-            if voice.holding || voice.speech.isProcessing || voice.notice != nil {
-                Text(voice.cancelling ? "松开取消" : voice.speech.isProcessing ? "转写中…" : voice.notice ?? "正在听 · 上滑取消").font(.caption)
-            }
+            if composerActionsOpen { composerActionsPanel.transition(.opacity.combined(with: reduced ? .identity : .move(edge: .bottom))) }
+            if contextExpanded { contextPanel.transition(.opacity.combined(with: reduced ? .identity : .move(edge: .bottom))) }
             FocusComposerSurface(expanded: expanded, hasDraft: !draft.text.isEmpty || !attachments.attachments.isEmpty,
                 onFocus: { focus.focus() }, editor: {
                     VStack(spacing: 4) {
@@ -648,21 +822,80 @@ private struct ConversationComposerView: View {
                             .frame(height: min(maximumHeight, max(34, height)))
                     }
                 }, add: {
-                    Button { focus.borrow("menu", open: true); menu = true } label: { Image(systemName: "plus").frame(width: 48, height: 48) }.accessibilityLabel("添加附件与对话操作")
-                }, voice: {
-                    Image(systemName: voice.holding ? "waveform" : "mic").frame(width: 48, height: 48)
-                        .modifier(voice.gesture(draft: draft, focus: focus)).accessibilityLabel("语音输入")
+                    ComposerAddButton(expanded: composerActionsOpen, uploading: attachments.isUploading) {
+                        if composerActionsOpen { closeComposerActions() }
+                        else { contextExpanded = false; focus.borrow("actions", open: true); composerActionsOpen = true }
+                    }
                 }, send: {
                         NativeComposerActions(phase: composerPhase,
                             turnRunning: running && !dispatch, hasDraft: hasComposerDraft,
-                            canSubmit: !voice.holding && !voice.speech.isProcessing && composerDraftIsSendable(draft.text, hasAttachments: !attachments.attachments.isEmpty, isComposing: composing)
+                            canSubmit: composerDraftIsSendable(draft.text, hasAttachments: !attachments.attachments.isEmpty, isComposing: composing)
                                 && !attachments.isUploading && !store.hasUnknown(id, target: target) && action.canSubmit && detail.dissolvedAt == nil && !detail.deleting,
                             canStop: action.canSubmit,
                             message: action.message ?? draft.sendFeedback, sendLabel: dispatch ? "确认派发任务" : running ? "继续发送" : "发送消息",
                             onSend: send, onStop: { if action.canSubmit { stopConfirm = true } })
                 }, settings: {
-                    if let execution, !dispatch, target != nil || detail.kind == "group" { SessionComposerSettings(store: execution, focus: focus) }
-                    else {
+                    if preferenceEligible, let employee, !employee.agents.isEmpty {
+                        HStack(spacing: 8) {
+                            Menu {
+                                Section("执行工具") {
+                                    ForEach(WandAgentTool.allCases) { tool in
+                                        Button {
+                                            updatePreference(provider: tool.provider.rawValue, engine: tool.engine,
+                                                model: "default", thinking: "off")
+                                            loadPreferenceModels()
+                                        } label: {
+                                            let title = tool == .pi ? "Pi CLI" : tool.title
+                                            if preferenceTool == tool { Label(title, systemImage: "checkmark") }
+                                            else { Text(title) }
+                                        }
+                                    }
+                                }
+                                if let preferenceTool {
+                                    Section("模型") {
+                                        Button {
+                                            updatePreference(model: "default")
+                                        } label: {
+                                            if effectivePreference?.model == "default" { Label("默认模型", systemImage: "checkmark") }
+                                            else { Text("默认模型") }
+                                        }
+                                        ForEach(preferenceModels.filter { $0.id != "default" }) { model in
+                                            Button {
+                                                updatePreference(model: model.id)
+                                            } label: {
+                                                if effectivePreference?.model == model.id { Label(model.label, systemImage: "checkmark") }
+                                                else { Text(model.label) }
+                                            }
+                                        }
+                                    }
+                                    Section("思考深度") {
+                                        ForEach(preferenceThinkingOptions) { option in
+                                            Button {
+                                                updatePreference(thinking: option.id)
+                                            } label: {
+                                                if effectivePreference?.thinkingEffort == option.id { Label(option.menuLabel, systemImage: "checkmark") }
+                                                else { Text(option.menuLabel) }
+                                            }
+                                        }
+                                    }
+                                    Button("刷新模型目录") { modelCatalog = nil; loadPreferenceModels() }
+                                }
+                            } label: {
+                                ComposerSettingLabel(title: preferenceLabel)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("本页执行配置")
+                            .accessibilityHint("临时选择执行工具、模型和思考深度，不修改员工定义")
+                            .onAppear(perform: loadPreferenceModels)
+                            if executionPreference != nil {
+                                Button("恢复员工默认") { executionPreference = nil }
+                                    .font(.caption)
+                                    .accessibilityIdentifier("dm-execution-reset")
+                            }
+                        }
+                    } else if let execution, !dispatch, target != nil || detail.kind == "group" {
+                        SessionComposerSettings(store: execution, focus: focus)
+                    } else {
                         Button { focus.borrow("settings", open: true); settingsInfo = true } label: {
                             ComposerSettingLabel(title: store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) })?.agents.first.map {
                                 $0.model == "default" ? "默认模型" : $0.model
@@ -673,7 +906,17 @@ private struct ConversationComposerView: View {
                     turnRunning: running && !dispatch, hasDraft: hasComposerDraft).slotCount)
         }
         .onAppear { if !visible { draft.acquire(draftConsumer) }; visible = true; attachments.setToastHandler { notice = $0 } }
-        .onDisappear { menu = false; voice.finish(cancelled: true); if visible { draft.release(draftConsumer) }; visible = false }
+        .onDisappear { executionPreference = nil; closeComposerActions(); contextExpanded = false; if visible { draft.release(draftConsumer) }; visible = false }
+        .animation(reduced ? nil : WandMotion.expansion, value: contextExpanded)
+        .animation(reduced ? nil : WandMotion.expansion, value: composerActionsOpen)
+        .onChange(of: target?.runId) { _, _ in executionPreference = nil; closeComposerActions(); contextExpanded = false }
+        .onChange(of: target?.taskId) { _, _ in executionPreference = nil }
+        .onChange(of: detail.peerEmployeeId) { _, _ in executionPreference = nil }
+        .onChange(of: dispatch) { _, active in if active { executionPreference = nil } }
+        .onChange(of: id) { _, _ in executionPreference = nil }
+        .onChange(of: focus.editing) { _, editing in if !editing { closeComposerActions() } }
+        .onChange(of: store.filters[id]) { _, _ in closeComposerActions(); contextExpanded = false }
+        .onKeyPress(.escape) { if composerActionsOpen { closeComposerActions(); return .handled }; if contextExpanded { contextExpanded = false; return .handled }; return .ignored }
         .onChange(of: keyboard.isVisible) { old, value in if old && !value { focus.keyboardHidden() } }
         .onChange(of: draft.sendPhase) { _, phase in
             if phase == .sent && draft.text.isEmpty && attachments.attachments.isEmpty && !composing { focus.collapse() }
@@ -686,19 +929,10 @@ private struct ConversationComposerView: View {
         .alert("附件预览失败", isPresented: Binding(get: { links.failure != nil }, set: { if !$0 { links.failure = nil; focus.resume("preview") } })) {
             Button("完成") { links.failure = nil; focus.resume("preview") }
         } message: { Text(links.failure?.message ?? "") }
-        .sheet(isPresented: $menu, onDismiss: {
-            focus.resume("menu")
-            if pendingStop { pendingStop = false; stopConfirm = true }
-            if let pendingAttachment {
-                self.pendingAttachment = nil
-                if pendingAttachment == "file" { attachments.showFileImporter = true }
-                else { attachments.showPhotoPicker = true }
-            }
-        }) { menuSheet }
         .sheet(isPresented: $settingsInfo, onDismiss: { focus.resume("settings") }) {
             NavigationStack {
                 List {
-                    Text("这里展示员工默认配置，影响后续新工作。私聊每条消息按员工候选新建会话，尚不支持只覆盖本条消息的模型、权限或思考深度；不会修改历史会话。")
+                    Text("这里展示员工默认配置，影响后续新工作。私聊可在输入栏本页临时覆盖执行工具、模型和思考深度；覆盖仅随本页有效，不修改员工定义，也不会改写历史会话。权限仍由员工配置决定。")
                     if let employee = store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) }) {
                         ForEach(Array(employee.agents.enumerated()), id: \.offset) { index, candidate in
                             VStack(alignment: .leading) {
@@ -715,40 +949,72 @@ private struct ConversationComposerView: View {
             Button("停止", role: .destructive) { if target != nil { perform("stop") } else { execution?.stopResponding() } }
         }
     }
+    private func closeComposerActions() {
+        composerActionsOpen = false; focus.resume("actions")
+    }
+    private var composerActionsPanel: some View {
+        ComposerAttachmentPanel(onPhoto: {
+            focus.borrow("attachment", open: true); closeComposerActions(); attachments.showPhotoPicker = true
+        }, onFile: {
+            focus.borrow("attachment", open: true); closeComposerActions(); attachments.showFileImporter = true
+        }) {
+            HStack {
+                Button(dispatch ? "取消派发" : "派发任务", systemImage: "checklist") {
+                    closeComposerActions()
+                    if dispatch { store.dispatchIntent.remove(id) } else { store.dispatchIntent.insert(id) }
+                }.frame(maxWidth: .infinity, minHeight: 44)
+                Button("派发与目录设置", systemImage: "slider.horizontal.3") {
+                    closeComposerActions(); contextExpanded = true
+                }.frame(maxWidth: .infinity, minHeight: 44)
+            }
+            HStack {
+                if detail.kind == "group", let leader = detail.leader {
+                    Button("@" + leader.name, systemImage: "at") {
+                        closeComposerActions(); draft.text += "@" + leader.name + " "; focus.focus()
+                    }.frame(maxWidth: .infinity, minHeight: 44)
+                }
+                if let employee = detail.peerEmployeeId {
+                    Button("员工执行配置", systemImage: "person.crop.circle") {
+                        closeComposerActions(); onEmployee(employee)
+                    }.frame(maxWidth: .infinity, minHeight: 44)
+                }
+                if running {
+                    Button("停止当前任务", systemImage: "stop", role: .destructive) {
+                        closeComposerActions(); stopConfirm = true
+                    }.frame(maxWidth: .infinity, minHeight: 44).disabled(!action.canSubmit || draft.sendPhase == .sending)
+                }
+            }
+        }
+    }
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var typeSize
     private var maximumHeight: CGFloat { max(typeSize.isAccessibilitySize ? 80 : 0, composerMaximumInputHeight(compact: verticalSizeClass == .compact, keyboardVisible: keyboard.isVisible)) }
     private var expanded: Bool { focus.editing || focus.focused || draft.submissionFailed || store.hasUnknown(id, target: target) }
-    private var menuSheet: some View {
-        NavigationStack {
-                VStack(alignment: .leading, spacing: 8) {
-                    if running {
-                        Button("停止当前任务", role: .destructive) { pendingStop = true; menu = false }
-                            .disabled(!action.canSubmit || draft.sendPhase == .sending)
-                    }
-                    HStack {
-                        Button("附件") { focus.borrow("attachment", open: true); pendingAttachment = "file"; menu = false }
-                        Button("照片") { focus.borrow("attachment", open: true); pendingAttachment = "photo"; menu = false }
-                        Button(dispatch ? "取消派发" : "派发任务") { if dispatch { store.dispatchIntent.remove(id); menu = false } else { store.dispatchIntent.insert(id) } }
-                    }
-                    if detail.kind == "group", let leader = detail.leader { Button("@" + leader.name) { draft.text += "@" + leader.name + " "; menu = false; focus.focus() } }
-                    if dispatch {
-                        Picker("项目", selection: $workspaceID) {
-                            Text("选择项目").tag("")
-                            ForEach(contactProjectCandidates(store.projects)) { Text($0.name).tag($0.id) }
-                        }
-                    }
-                    TextField("工作目录（可选）", text: $cwd).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    if let employee = detail.peerEmployeeId { Button("员工执行配置") { menu = false; onEmployee(employee) } }
-                }.padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-                .navigationTitle("附件与对话操作")
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { menu = false } } }
-        }.presentationDetents([.medium, .large])
+    private var contextPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("派发与目录设置").font(.headline)
+                Spacer()
+                Button { contextExpanded = false } label: { Image(systemName: "xmark").frame(width: 44, height: 44) }
+                    .buttonStyle(WandQuietButtonStyle()).accessibilityLabel("关闭派发设置")
+            }
+            if dispatch {
+                Picker("项目", selection: $workspaceID) {
+                    Text("选择项目").tag("")
+                    ForEach(contactProjectCandidates(store.projects)) { Text($0.name).tag($0.id) }
+                }.frame(minHeight: 44)
+            }
+            Text("工作目录（可选）").font(.caption).foregroundStyle(Theme.textSecondary)
+            TextField("沿用当前目录", text: $cwd).textInputAutocapitalization(.never).autocorrectionDisabled()
+                .padding(.horizontal, 12).frame(minHeight: 44).wandInputSurface(focused: false).accessibilityLabel("工作目录，可选")
+        }.padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
     }
     private func send() {
+        closeComposerActions()
         guard !composing else { return }
-        store.send(id, target: target, dispatch: dispatch, workspaceID: workspaceID, cwd: cwd)
-        menu = false
+        store.send(id, target: target, dispatch: dispatch, workspaceID: workspaceID, cwd: cwd,
+                   executionPreference: preferenceEligible ? executionPreference : nil)
+        contextExpanded = false
     }
     private func perform(_ name: String) {
         guard let target else { return }
