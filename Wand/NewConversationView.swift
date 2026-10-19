@@ -34,6 +34,7 @@ struct NewConversationView: View {
     @State private var frozenAttachmentRevision: Int?
     @State private var taskOwnership = "none"
     @State private var newTaskName = ""
+    @State private var worktreeEnabled = false
     @State private var targetWorkspaceID = ""
     @StateObject private var stagedAttachments: ComposerAttachmentController
     @State private var pendingDraftRevision = 0
@@ -70,7 +71,7 @@ struct NewConversationView: View {
         self.initialEmployeeID = initialEmployeeID
         self.initialCreateTask = initialCreateTask
         self.onCreated = onCreated
-        _cwd = State(initialValue: initialCwd ?? "")
+        _cwd = State(initialValue: Self.preferredCwd(initialCwd: initialCwd))
         _selectedTaskID = State(initialValue: initialWorkspaceTaskID ?? "")
         _taskOwnership = State(initialValue: initialWorkspaceTaskID == nil ? (initialCreateTask ? "new" : "none") : "existing")
         _targetWorkspaceID = State(initialValue: workspaceID ?? "")
@@ -84,6 +85,12 @@ struct NewConversationView: View {
             serverID: serverID,
             scope: scope
         ))
+    }
+
+    static func preferredCwd(initialCwd: String?, recentPaths: [RecentPath] = [], defaultCwd: String? = nil) -> String {
+        ([initialCwd] + recentPaths.map { Optional($0.path) } + [defaultCwd])
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? ""
     }
 
     private var text: String { pendingDraft.text }
@@ -106,8 +113,22 @@ struct NewConversationView: View {
         return didLoadConfiguration && !loading && !creating && !isUnknown && !hasOutstandingCreation && hasContent && !cwd.isEmpty && hasTaskSelection && hasTaskName && employeeIsAvailable
     }
 
+    private var executionConfigurationReady: Bool {
+        didLoadConfiguration && !loading
+            && (contactSubject?.type != "employee" || selectedEmployee != nil)
+            && (initialEmployeeID == nil || contactsError == nil)
+    }
+
+    static func canResumeCreation(creating: Bool, hasAcceptedSession: Bool, hasAcceptedTask: Bool,
+                                  configurationReady: Bool) -> Bool {
+        !creating && (hasAcceptedSession || (hasAcceptedTask && configurationReady))
+    }
+
     private var canResumeCreation: Bool {
-        !creating && (coordinator.acceptedTaskIDForContinuation != nil || coordinator.acceptedSessionIDForContinuation != nil)
+        Self.canResumeCreation(creating: creating,
+                               hasAcceptedSession: coordinator.acceptedSessionIDForContinuation != nil,
+                               hasAcceptedTask: coordinator.acceptedTaskIDForContinuation != nil,
+                               configurationReady: executionConfigurationReady)
     }
 
     private var hasOutstandingCreation: Bool {
@@ -285,7 +306,7 @@ struct NewConversationView: View {
                                 }
                                 workspaceSelectionIsLocked = value == "existing"
                                 if value == "none" || value == "new" {
-                                    cwd = initialCwd ?? defaultCwd ?? cwd
+                                    cwd = Self.preferredCwd(initialCwd: initialCwd, recentPaths: recentPaths, defaultCwd: defaultCwd)
                                     workspaceSelectionIsLocked = false
                                 }
                             }
@@ -297,6 +318,15 @@ struct NewConversationView: View {
                                     Text("按工作目录创建").tag("")
                                     ForEach(taskWorkspaceOptions) { workspace in Text(workspace.name + " · " + workspace.cwd).tag(workspace.id) }
                                 }.pickerStyle(.menu).accessibilityLabel("任务所在项目")
+                                Picker("工作目录方式", selection: $worktreeEnabled) {
+                                    Text("共用工作区").tag(false)
+                                    Text("隔离 worktree").tag(true)
+                                }.pickerStyle(.segmented)
+                                Text(worktreeEnabled
+                                    ? "需要 Git 仓库，会创建独立工作树。"
+                                    : "默认仅做界面分组，不创建目录。")
+                                    .font(.footnote)
+                                    .foregroundStyle(Theme.textMuted)
                             }
                             if taskOwnership == "existing", !taskListLoaded {
                                 Text("正在加载任务列表…")
@@ -536,7 +566,7 @@ struct NewConversationView: View {
     }
 
     private func createTask(name: String, cwd: String, workspaceID: String?, description: String,
-                            creationRequestId: String) async throws -> String {
+                            worktree: Bool, creationRequestId: String) async throws -> String {
         let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedName.isEmpty else { throw WandAPI.APIError.server(status: 400, message: "任务名称不能为空。") }
         let created: WorkspaceTaskCreation
@@ -545,7 +575,7 @@ struct NewConversationView: View {
                 workspaceId: workspaceID,
                 name: normalizedName,
                 baseRef: nil,
-                worktree: false,
+                worktree: worktree,
                 cwd: cwd,
                 description: description,
                 creationRequestId: creationRequestId
@@ -554,7 +584,7 @@ struct NewConversationView: View {
             created = try await api.createStandaloneTask(
                 name: normalizedName,
                 cwd: cwd,
-                worktree: false,
+                worktree: worktree,
                 description: description,
                 creationRequestId: creationRequestId
             )
@@ -689,7 +719,7 @@ struct NewConversationView: View {
             let catalog = try? await api.models()
             guard !Task.isCancelled else { return }
             modelCatalog = catalog
-            let shouldApplyInitialCwd = cwd == (initialCwd ?? "")
+            let shouldApplyInitialCwd = cwd == Self.preferredCwd(initialCwd: initialCwd)
             if !didLoadConfiguration {
                 provider = WandProvider(normalizing: config.defaultProvider).rawValue
                 mode = currentProvider.clamp(mode: config.resolvedDefaultMode)
@@ -705,9 +735,8 @@ struct NewConversationView: View {
             let paths = (try? await api.recentPaths()) ?? []
             guard !Task.isCancelled else { return }
             recentPaths = paths
-            if shouldApplyInitialCwd {
-                if let initialCwd { cwd = initialCwd }
-                else { cwd = paths.first?.path ?? config.defaultCwd ?? "" }
+            if shouldApplyInitialCwd, cwd == Self.preferredCwd(initialCwd: initialCwd) {
+                cwd = Self.preferredCwd(initialCwd: initialCwd, recentPaths: paths, defaultCwd: config.defaultCwd)
             }
             do {
                 let workspaces = try await api.listWorkspaces()
@@ -787,7 +816,8 @@ struct NewConversationView: View {
     }
 
     private func continueSessionCreation(taskID: String) {
-        guard !creating else { return }
+        guard !creating, executionConfigurationReady,
+              coordinator.acceptedTaskIDForContinuation == taskID else { return }
         creating = true
         let frozenProvider = provider
         let frozenMode = mode
@@ -898,6 +928,7 @@ struct NewConversationView: View {
         let frozenOwnership = taskOwnership
         let frozenTaskID = selectedTaskID
         let frozenTaskName = newTaskName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let frozenWorktree = worktreeEnabled
         let frozenTargetWorkspaceID = targetWorkspaceID
         let frozenSourceText = frozenText
         frozenDraftText = frozenText
@@ -941,7 +972,7 @@ struct NewConversationView: View {
                 let task = await coordinator.createTask(requestID: taskRequestID) {
                     try await self.createTask(name: frozenTaskName, cwd: sessionCwd,
                                               workspaceID: sessionWorkspaceID, description: frozenText,
-                                              creationRequestId: taskRequestID)
+                                              worktree: frozenWorktree, creationRequestId: taskRequestID)
                 }
                 guard let task else {
                     creating = false
@@ -957,19 +988,32 @@ struct NewConversationView: View {
             } else {
                 frozenTaskIDForSession = nil
             }
+            var resolvedCwd = sessionCwd
+            var resolvedWorkspaceID = sessionWorkspaceID
+            if frozenOwnership == "new", let taskID = frozenTaskIDForSession {
+                do {
+                    let detail = try await api.getWorkspaceTask(taskId: taskID)
+                    resolvedCwd = detail.cwd
+                    resolvedWorkspaceID = detail.workspaceId
+                } catch {
+                    creating = false
+                    errorMessage = "无法读取已创建任务的工作目录；任务已保留，可重试继续创建会话。\n\(error.localizedDescription)"
+                    return
+                }
+            }
             let sessionRequestID = UUID().uuidString.lowercased()
             let snapshot = await coordinator.create(requestID: sessionRequestID, using: {
                 try await api.createSession(
                     kind: frozenSessionKind == "shell" ? "pty" : frozenSessionKind,
                     provider: frozenSessionKind == "shell" || (frozenEmployeeID != nil && !frozenEmployeeOverride) ? nil : frozenProvider,
-                    cwd: sessionCwd,
+                    cwd: resolvedCwd,
                     mode: frozenSessionKind == "structured" && (frozenEmployeeID == nil || frozenEmployeeOverride) ? frozenMode : nil,
                     model: frozenSessionKind == "structured" && (frozenEmployeeID == nil || frozenEmployeeOverride) && !frozenModel.isEmpty ? frozenModel : nil,
                     thinkingEffort: frozenSessionKind == "structured" && (frozenEmployeeID == nil || frozenEmployeeOverride) ? frozenEffort : nil,
                     prompt: nil,
                     engine: frozenSessionKind == "structured" && (frozenEmployeeID == nil || frozenEmployeeOverride) ? frozenEngine : nil,
                     shell: frozenSessionKind == "shell",
-                    workspaceId: sessionWorkspaceID,
+                    workspaceId: resolvedWorkspaceID,
                     workspaceTaskId: frozenTaskIDForSession,
                     employeeId: frozenEmployeeID,
                     overrideCli: frozenEmployeeID != nil && frozenEmployeeOverride,

@@ -3,6 +3,45 @@ import XCTest
 @testable import Wand
 
 final class NewConversationTests: XCTestCase {
+    func testEmptyInitialDirectoryFallsBackWithoutOverridingExplicitContext() {
+        let paths = [RecentPath(path: "", name: nil, lastUsedAt: nil),
+                     RecentPath(path: "/recent", name: nil, lastUsedAt: nil)]
+        XCTAssertEqual(NewConversationView.preferredCwd(initialCwd: "", recentPaths: paths, defaultCwd: "/default"), "/recent")
+        XCTAssertEqual(NewConversationView.preferredCwd(initialCwd: "  \n", defaultCwd: "/default"), "/default")
+        XCTAssertEqual(NewConversationView.preferredCwd(initialCwd: "/explicit", recentPaths: paths, defaultCwd: "/default"), "/explicit")
+        XCTAssertEqual(NewConversationView.preferredCwd(initialCwd: nil), "")
+    }
+
+    func testGlobalPresentationHasOneOwnerAndNewTasksKeepWorktreeBinding() throws {
+        let sourceDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Wand")
+        let root = try String(contentsOf: sourceDirectory.appendingPathComponent("NativeRootView.swift"), encoding: .utf8)
+        XCTAssertTrue(root.contains(".sheet(isPresented: $presentNewConversation"))
+        XCTAssertFalse(root.contains("requestNewTask: Binding(get: { presentNewConversation }"))
+        let pending = try String(contentsOf: sourceDirectory.appendingPathComponent("NewConversationView.swift"), encoding: .utf8)
+        XCTAssertTrue(pending.contains("Picker(\"工作目录方式\", selection: $worktreeEnabled)"))
+        XCTAssertTrue(pending.contains("let frozenWorktree = worktreeEnabled"))
+        XCTAssertTrue(pending.contains("worktree: frozenWorktree, creationRequestId:"))
+        XCTAssertFalse(pending.contains("worktree: false,"))
+        XCTAssertTrue(pending.contains("let detail = try await api.getWorkspaceTask(taskId: taskID)"))
+        XCTAssertTrue(pending.contains("resolvedCwd = detail.cwd"))
+        XCTAssertTrue(pending.contains("cwd: resolvedCwd,"))
+        XCTAssertTrue(pending.contains("workspaceId: resolvedWorkspaceID,"))
+    }
+
+    func testAcceptedTaskContinuationWaitsForConfigurationButSessionHandoffDoesNot() {
+        XCTAssertFalse(NewConversationView.canResumeCreation(creating: false, hasAcceptedSession: false,
+                                                             hasAcceptedTask: true, configurationReady: false))
+        XCTAssertTrue(NewConversationView.canResumeCreation(creating: false, hasAcceptedSession: false,
+                                                            hasAcceptedTask: true, configurationReady: true))
+        XCTAssertTrue(NewConversationView.canResumeCreation(creating: false, hasAcceptedSession: true,
+                                                            hasAcceptedTask: true, configurationReady: false))
+        XCTAssertFalse(NewConversationView.canResumeCreation(creating: true, hasAcceptedSession: true,
+                                                             hasAcceptedTask: true, configurationReady: true))
+        XCTAssertFalse(NewConversationView.canResumeCreation(creating: false, hasAcceptedSession: false,
+                                                             hasAcceptedTask: false, configurationReady: true))
+    }
+
     @MainActor
     func testUnknownCreateCannotBeRetried() async {
         let (coordinator, defaults, suite) = makeCoordinator()

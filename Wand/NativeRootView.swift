@@ -600,7 +600,6 @@ struct NativeRootView: View {
                                     selectedWorkspaceTask = nil
                                 }
                             },
-                            requestNewTask: Binding(get: { presentNewConversation }, set: { presentNewConversation = $0 }),
                             employees: homeEmployees,
                             teams: homeTeams,
                             onOpenTeamRun: { runId in
