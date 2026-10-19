@@ -228,6 +228,12 @@ private struct PtySessionView: View {
             }
         }
         .onChange(of: completionVisibilityToken) { _, _ in publishCompletionVisibility() }
+        .onChange(of: store.loading) { _, loading in
+            if !loading { sendPendingInitialMessage() }
+        }
+        .onChange(of: canSend) { _, ready in
+            if ready { sendPendingInitialMessage() }
+        }
         .onAppear {
             if !viewVisible { store.attachView() }
             viewVisible = true
@@ -241,6 +247,7 @@ private struct PtySessionView: View {
             terminal.terminal.onTerminalFocus = { composerActionsOpen = false; inputFocused = false; inputDrawerOpen = false }
             terminal.terminal.onPasteImages = attachments.handlePastedImageData
             terminal.start()
+            sendPendingInitialMessage()
             refreshGitStatus()
         }
         .onChange(of: showQuickCommit) { _, showing in
@@ -720,12 +727,19 @@ private struct PtySessionView: View {
         )
     }
 
+    private func sendPendingInitialMessage() {
+        guard !store.loading, store.loadError == nil,
+              composerDraft.claimInitialSend(when: canSend) else { return }
+        sendDraft()
+    }
+
     private func sendDraft() {
         guard canSend else { return }
         composerActionsOpen = false
         let submission = composerDraft.submission()
         composerDraft.submitted(submission)
         Task {
+            defer { composerDraft.finishInitialSend() }
             do {
                 try await store.sendPtyTerminalInput(submission.prompt)
                 composerDraft.accepted(submission)

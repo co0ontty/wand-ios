@@ -4,6 +4,7 @@ struct TaskBoardView: View {
     let api: WandAPI
     /// 任务看板与会话树共用同一套任务/终端：看板里移动会话要直接改归属。
     @ObservedObject var workspaceStore: WorkspaceStore
+    var creationServerID: String? = nil
     var linkedWorkspaceId: String? = nil
     let onOpenSession: (String) -> Void
     /// 会话已绑定任务时优先打开任务上下文（对齐 web / Android 的 openSessionWithOwningTask）。
@@ -79,7 +80,7 @@ struct TaskBoardView: View {
         .sheet(isPresented: $showCreate) {
             NewConversationView(
                 api: api,
-                serverID: ServerProfiles.stableID(for: api.baseURL),
+                serverID: creationServerID ?? workspaceStore.serverID,
                 initialCwd: createCwd,
                 workspaceID: createWorkspaceID,
                 initialCreateTask: true

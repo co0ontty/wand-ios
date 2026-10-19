@@ -88,7 +88,66 @@ final class ComposerToolParityTests: XCTestCase {
         XCTAssertTrue(controller.attachments.isEmpty)
         XCTAssertEqual(controller.stagedAttachmentCount, 0)
         let key = "wand.pending-upload.v1." + ServerProfiles.stableID(for: api.baseURL) + "." + pendingID
-        UserDefaults.standard.removeObject(forKey: key)
+        XCTAssertNil(UserDefaults.standard.object(forKey: key))
+        let reopened = ComposerAttachmentController(sessionId: pendingID, api: api)
+        reopened.stageFileSelection(.success([URL(fileURLWithPath: "/tmp/next")]), cleanupAfterUpload: false)
+        try await reopened.uploadStaged(to: "late") { _, urls, started in
+            started()
+            XCTAssertEqual(urls.map(\.lastPathComponent), ["next"])
+            return [self.file("/work/next")]
+        }
+        XCTAssertEqual(reopened.attachments.map(\.savedPath), ["/work/next"])
+    }
+
+    @MainActor
+    func testSuccessfulStaleUploadDrainsOnlyAcceptedSelectionsAndKeepsNewBatch() async throws {
+        let controller = ComposerAttachmentController(sessionId: UUID().uuidString, api: api)
+        controller.stageFileSelection(.success([URL(fileURLWithPath: "/tmp/accepted")]), cleanupAfterUpload: false)
+        do {
+            try await controller.uploadStaged(to: "same-session") { _, _, started in
+                started()
+                controller.stageFileSelection(.success([URL(fileURLWithPath: "/tmp/new")]), cleanupAfterUpload: false)
+                return [self.file("/work/accepted")]
+            }
+            XCTFail("Changed input must not adopt the stale result")
+        } catch is CancellationError {}
+        XCTAssertTrue(controller.attachments.isEmpty)
+        XCTAssertEqual(controller.stagedAttachmentCount, 1)
+        XCTAssertEqual(controller.stagedAttachments.map(\.name), ["new"])
+        let revision = controller.stagedInputRevision
+        try await controller.uploadStaged(to: "same-session") { _, urls, started in
+            started()
+            XCTAssertEqual(urls.map(\.lastPathComponent), ["new"])
+            return [self.file("/work/new")]
+        }
+        XCTAssertEqual(controller.stagedInputRevision, revision)
+        XCTAssertEqual(controller.attachments.map(\.savedPath), ["/work/new"])
+    }
+
+    @MainActor
+    func testSuccessfulUploadAfterDeactivationSettlesBatchWithoutAdoptionOrRetry() async throws {
+        let pendingID = UUID().uuidString
+        let controller = ComposerAttachmentController(sessionId: pendingID, api: api)
+        controller.stageFileSelection(.success([URL(fileURLWithPath: "/tmp/accepted")]), cleanupAfterUpload: false)
+        do {
+            try await controller.uploadStaged(to: "inactive-session") { _, _, started in
+                started()
+                controller.deactivate()
+                return [self.file("/work/accepted")]
+            }
+            XCTFail("Inactive owner must not adopt a late result")
+        } catch is CancellationError {}
+        XCTAssertTrue(controller.attachments.isEmpty)
+        XCTAssertEqual(controller.stagedAttachmentCount, 0)
+        let key = "wand.pending-upload.v1." + ServerProfiles.stableID(for: api.baseURL) + "." + pendingID
+        XCTAssertNil(UserDefaults.standard.object(forKey: key))
+        controller.activate()
+        var retried = false
+        try await controller.uploadStaged(to: "inactive-session") { _, _, _ in
+            retried = true
+            return []
+        }
+        XCTAssertFalse(retried)
     }
 
     @MainActor

@@ -75,6 +75,7 @@ private enum TaskListConfirm: Identifiable {
 struct WorkspaceListView: View {
     @ObservedObject var store: WorkspaceStore
     let api: WandAPI
+    var creationServerID: String? = nil
     var serverDisplayName: String? = nil
     let selectedTaskId: String?
     var selectedSessionId: String? = nil
@@ -345,7 +346,7 @@ struct WorkspaceListView: View {
             .sheet(isPresented: $newTaskSheetPresented) {
                 NewConversationView(
                     api: api,
-                    serverID: ServerProfiles.stableID(for: api.baseURL),
+                    serverID: creationServerID ?? store.serverID,
                     initialCwd: newTaskSheetCwd,
                     workspaceID: newTaskSheetWorkspaceId,
                     onCreated: { snapshot in

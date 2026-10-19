@@ -53,6 +53,31 @@ final class NewConversationTests: XCTestCase {
     }
 
     @MainActor
+    func testDefiniteRejectionClearsPersistedInflightMarker() async throws {
+        let suite = "NewConversationTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        for task in [false, true] {
+            let key = "rejected-\(task)"
+            let coordinator = NewConversationCoordinator(storageKey: key, defaults: defaults)
+            if task {
+                _ = await coordinator.createTask {
+                    throw WandAPI.APIError.server(status: 400, message: "rejected")
+                }
+            } else {
+                _ = await coordinator.create {
+                    throw WandAPI.APIError.server(status: 400, message: "rejected")
+                }
+            }
+            let restored = NewConversationCoordinator(storageKey: key, defaults: defaults)
+            XCTAssertTrue(restored.canSubmit)
+            let snapshot = try decodeSnapshot(id: UUID().uuidString)
+            let accepted = await restored.create { snapshot }
+            XCTAssertEqual(accepted?.id, snapshot.id)
+        }
+    }
+
+    @MainActor
     func testAcceptedCreateCanAdoptOnlyIntoEmptyDraftForAcceptedSession() async throws {
         let (coordinator, defaults, suite) = makeCoordinator()
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -72,6 +97,39 @@ final class NewConversationTests: XCTestCase {
         draft.finishInitialSend()
         XCTAssertFalse(draft.claimInitialSend())
         SessionDraftStore.shared.remove(sessionId: snapshot.id, api: api)
+    }
+
+    @MainActor
+    func testPtyInitialDraftIsClaimedOnceAndUsesExistingTwoPacketSubmission() async throws {
+        let suite = "NewConversationTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9")!, token: nil)
+        let draft = ComposerDraftState(sessionId: "pty-initial", api: api, defaults: defaults)
+        XCTAssertTrue(draft.adoptInitialDraft(text: "first message", expectedSourceRevision: 0, expectedText: "first message"))
+        draft.requestInitialSend()
+        XCTAssertFalse(draft.claimInitialSend(when: false))
+        XCTAssertFalse(draft.claimInitialSend(when: false))
+        XCTAssertTrue(draft.claimInitialSend(when: true))
+        XCTAssertFalse(draft.claimInitialSend(when: true))
+        let submission = draft.submission()
+        draft.submitted(submission)
+        var chunks: [PtyInputChunk] = []
+        try await sendPtySubmission(ptyInputSubmission(text: submission.prompt, view: "terminal")) { chunks.append($0) }
+        draft.accepted(submission)
+        draft.finishInitialSend()
+        XCTAssertEqual(chunks.map(\.input), ["first message", "\r"])
+        XCTAssertEqual(chunks.last?.shortcutKey, "enter_text")
+        XCTAssertTrue(draft.text.isEmpty)
+        XCTAssertFalse(draft.claimInitialSend())
+
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Wand/SessionDestinationView.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("composerDraft.claimInitialSend(when: canSend)"))
+        XCTAssertTrue(source.contains("if ready { sendPendingInitialMessage() }"))
+        XCTAssertTrue(source.contains("if !loading { sendPendingInitialMessage() }"))
+        XCTAssertTrue(source.contains("store.sendPtyTerminalInput(submission.prompt)"))
     }
 
     @MainActor

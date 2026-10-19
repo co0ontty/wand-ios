@@ -269,6 +269,7 @@ final class NewConversationCoordinator: ObservableObject {
                 persist(phase)
             } else {
                 phase = .rejected(error.localizedDescription)
+                persist(phase)
             }
             return
         }

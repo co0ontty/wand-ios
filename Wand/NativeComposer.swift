@@ -447,8 +447,8 @@ final class ComposerDraftState: ObservableObject {
         return true
     }
 
-    func claimInitialSend() -> Bool {
-        guard pendingInitialSend, !initialSendClaimed else { return false }
+    func claimInitialSend(when ready: Bool = true) -> Bool {
+        guard ready, pendingInitialSend, !initialSendClaimed else { return false }
         initialSendClaimed = true
         return true
     }
@@ -680,6 +680,7 @@ final class ComposerAttachmentController: ObservableObject {
         }
         guard !stagedFiles.isEmpty else { return }
         let batch = stagedFiles
+        let batchIDs = Set(stagedAttachments.map(\.id))
         let uploadGeneration = stagedGeneration
         let uploaded: [UploadedFile]
         var requestStarted = false
@@ -701,16 +702,20 @@ final class ComposerAttachmentController: ObservableObject {
             }
             throw error
         }
-        guard active, stagedGeneration == uploadGeneration, !Task.isCancelled else {
-            throw CancellationError()
-        }
-        appendUploaded(uploaded)
-        stagedFiles.removeFirst(batch.count)
-        stagedAttachments.removeFirst(batch.count)
         uncertainStagedSessions.remove(sessionID)
         persistUncertainStagedSessions()
+        let canAdopt = active && !Task.isCancelled
+        let sourceUnchanged = stagedGeneration == uploadGeneration
+        if canAdopt && sourceUnchanged { appendUploaded(uploaded) }
+        // A successful receipt settles this batch even when its selections changed.
+        // Remove by identity so later selections are neither cleared nor uploaded again.
+        for index in stagedAttachments.indices.reversed() where batchIDs.contains(stagedAttachments[index].id) {
+            stagedFiles.remove(at: index)
+            stagedAttachments.remove(at: index)
+        }
         stagedRevision &+= 1
         for item in batch where item.cleanup { try? FileManager.default.removeItem(at: item.url) }
+        guard canAdopt, sourceUnchanged else { throw CancellationError() }
     }
 
     private func persistUncertainStagedSessions() {

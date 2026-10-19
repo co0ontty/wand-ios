@@ -50,7 +50,7 @@ struct NewConversationView: View {
     @State private var showExecutionSettings = false
     @State private var confirmedCheckedSessions = false
     @FocusState private var focused: Bool
-    private let pendingDraftConsumer = UUID()
+    @State private var pendingDraftConsumer = UUID()
 
     init(
         api: WandAPI,
@@ -444,14 +444,6 @@ struct NewConversationView: View {
             }
             .onDisappear {
                 pendingDraft.release(pendingDraftConsumer)
-                if coordinator.acceptedSessionIDForContinuation != nil {
-                    let sessionID = coordinator.acceptedSessionIDForContinuation!
-                    resumeAcceptedSession(sessionID, text: frozenDraftText ?? text,
-                                          textRevision: frozenDraftRevision ?? pendingDraftRevision,
-                                          sourceText: frozenDraftText ?? text,
-                                          attachmentRevision: frozenAttachmentRevision ?? pendingAttachmentRevision,
-                                          attachments: stagedAttachments)
-                }
             }
         }
     }
@@ -649,6 +641,10 @@ struct NewConversationView: View {
               pendingDraft.text == sourceText,
               stagedAttachments.stagedInputRevision == attachmentRevision else { return }
         pendingDraft.text = ""
+        let transferredPaths = Set(stagedAttachments.attachments.map(\.savedPath))
+        if !transferredPaths.isEmpty {
+            stagedAttachments.attachments.removeAll { transferredPaths.contains($0.savedPath) }
+        }
         stagedAttachments.discardStaged()
         pendingDraftRevision = pendingDraft.textRevision
         pendingAttachmentRevision = stagedAttachments.stagedInputRevision
@@ -793,7 +789,6 @@ struct NewConversationView: View {
     private func continueSessionCreation(taskID: String) {
         guard !creating else { return }
         creating = true
-        let frozenCwd = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
         let frozenProvider = provider
         let frozenMode = mode
         let frozenModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -818,19 +813,27 @@ struct NewConversationView: View {
                                       attachments: attachmentController, alreadyCreating: true)
                 return
             }
+            let taskDetail: WorkspaceTaskDetail
+            do {
+                taskDetail = try await api.getWorkspaceTask(taskId: frozenTaskID)
+            } catch {
+                creating = false
+                errorMessage = "无法读取已创建任务的工作目录；任务已保留，可重试继续创建会话。\n\(error.localizedDescription)"
+                return
+            }
             let sessionRequestID = coordinator.currentCreationRequestID ?? UUID().uuidString.lowercased()
             let snapshot = await coordinator.create(requestID: sessionRequestID) {
                 try await api.createSession(
                     kind: frozenSessionKind == "shell" ? "pty" : frozenSessionKind,
                     provider: frozenSessionKind == "shell" || (frozenEmployeeID != nil && !frozenEmployeeOverride) ? nil : frozenProvider,
-                    cwd: frozenCwd,
+                    cwd: taskDetail.cwd,
                     mode: frozenSessionKind == "structured" && (frozenEmployeeID == nil || frozenEmployeeOverride) ? frozenMode : nil,
                     model: frozenSessionKind == "structured" && (frozenEmployeeID == nil || frozenEmployeeOverride) && !frozenModel.isEmpty ? frozenModel : nil,
                     thinkingEffort: frozenSessionKind == "structured" && (frozenEmployeeID == nil || frozenEmployeeOverride) ? frozenEffort : nil,
                     prompt: nil,
                     engine: frozenSessionKind == "structured" && (frozenEmployeeID == nil || frozenEmployeeOverride) ? frozenEngine : nil,
                     shell: frozenSessionKind == "shell",
-                    workspaceId: workspaceID, workspaceTaskId: frozenTaskID,
+                    workspaceId: taskDetail.workspaceId, workspaceTaskId: frozenTaskID,
                     employeeId: frozenEmployeeID,
                     overrideCli: frozenEmployeeID != nil && frozenEmployeeOverride,
                     creationRequestId: sessionRequestID

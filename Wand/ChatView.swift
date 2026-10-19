@@ -269,6 +269,9 @@ struct ChatView: View {
         .onChange(of: store.loading) { _, loading in
             if !loading { sendPendingInitialMessage() }
         }
+        .onChange(of: canSend) { _, ready in
+            if ready { sendPendingInitialMessage() }
+        }
         .onChange(of: store.unconfirmedInput) { _, value in
             if value != nil { composerAcknowledged = false }
         }
@@ -1637,11 +1640,8 @@ struct ChatView: View {
     }
 
     private func sendPendingInitialMessage() {
-        guard !store.loading, store.loadError == nil, composerDraft.claimInitialSend() else { return }
-        guard canSend else {
-            composerDraft.finishInitialSend()
-            return
-        }
+        guard !store.loading, store.loadError == nil,
+              composerDraft.claimInitialSend(when: canSend) else { return }
         let submission = composerDraft.submission()
         composerDraft.submitted(submission)
         let started = store.send(text: submission.prompt, onAccepted: {
