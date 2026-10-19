@@ -444,6 +444,14 @@ struct NewConversationView: View {
             }
             .onDisappear {
                 pendingDraft.release(pendingDraftConsumer)
+                if coordinator.acceptedSessionIDForContinuation != nil {
+                    let sessionID = coordinator.acceptedSessionIDForContinuation!
+                    resumeAcceptedSession(sessionID, text: frozenDraftText ?? text,
+                                          textRevision: frozenDraftRevision ?? pendingDraftRevision,
+                                          sourceText: frozenDraftText ?? text,
+                                          attachmentRevision: frozenAttachmentRevision ?? pendingAttachmentRevision,
+                                          attachments: stagedAttachments)
+                }
             }
         }
     }
@@ -897,7 +905,7 @@ struct NewConversationView: View {
         if let sessionID = coordinator.acceptedSessionIDForContinuation {
             resumeAcceptedSession(sessionID, text: frozenText, textRevision: frozenDraftRevision,
                                   sourceText: frozenSourceText, attachmentRevision: frozenAttachmentRevision,
-                                  attachments: frozenAttachments)
+                                  attachments: frozenAttachments, alreadyCreating: true)
             return
         }
         if isUnknown {

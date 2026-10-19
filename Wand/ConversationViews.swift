@@ -727,6 +727,8 @@ private struct ConversationComposerView: View {
     @State private var cwd = ""
     @State private var executionPreference: ConversationExecutionPreference?
     @State private var modelCatalog: ModelsResponse?
+    @State private var modelCatalogLoading = false
+    @State private var modelCatalogError: String?
     @State private var notice: String?
     @State private var draftConsumer = UUID()
     @State private var visible = false
@@ -778,15 +780,29 @@ private struct ConversationComposerView: View {
         let nextProvider = provider ?? current.provider
         let nextEngine = provider == nil ? current.engine : engine
         let nextModel = model ?? current.model
-        let nextThinking = thinking ?? current.thinkingEffort
+        var nextThinking = thinking ?? current.thinkingEffort
+        if let model, provider == nil, model != "default",
+           let options = dynamicThinkingEffortOptions(provider: nextProvider, selectedModel: model,
+                defaultModel: preferenceDefaultModel, models: preferenceModels,
+                providerEfforts: modelCatalog?.thinkingEfforts(for: nextProvider) ?? []),
+           !options.contains(where: { $0.id == nextThinking }) {
+            nextThinking = "off"
+        }
         executionPreference = ConversationExecutionPreference(
             provider: nextProvider, engine: nextEngine, model: nextModel, thinkingEffort: nextThinking
         )
     }
     private func loadPreferenceModels() {
-        guard modelCatalog == nil else { return }
+        guard modelCatalog == nil, !modelCatalogLoading else { return }
+        modelCatalogLoading = true
+        modelCatalogError = nil
         Task {
-            if let models = try? await store.api.models() { modelCatalog = models }
+            defer { modelCatalogLoading = false }
+            do {
+                modelCatalog = try await store.api.models()
+            } catch {
+                modelCatalogError = "模型目录加载失败：\(error.localizedDescription)"
+            }
         }
     }
     private var run: ContactRunDetail? { detail.runDetails.first { $0.run.id == target?.runId } }
@@ -851,7 +867,7 @@ private struct ConversationComposerView: View {
                                         }
                                     }
                                 }
-                                if let preferenceTool {
+                                if preferenceTool != nil {
                                     Section("模型") {
                                         Button {
                                             updatePreference(model: "default")
@@ -859,12 +875,19 @@ private struct ConversationComposerView: View {
                                             if effectivePreference?.model == "default" { Label("默认模型", systemImage: "checkmark") }
                                             else { Text("默认模型") }
                                         }
-                                        ForEach(preferenceModels.filter { $0.id != "default" }) { model in
-                                            Button {
-                                                updatePreference(model: model.id)
-                                            } label: {
-                                                if effectivePreference?.model == model.id { Label(model.label, systemImage: "checkmark") }
-                                                else { Text(model.label) }
+                                        if modelCatalogLoading {
+                                            Text("正在加载模型目录…")
+                                        } else if let modelCatalogError {
+                                            Text(modelCatalogError)
+                                            Button("重试加载模型目录") { modelCatalog = nil; loadPreferenceModels() }
+                                        } else {
+                                            ForEach(preferenceModels.filter { $0.id != "default" }) { model in
+                                                Button {
+                                                    updatePreference(model: model.id)
+                                                } label: {
+                                                    if effectivePreference?.model == model.id { Label(model.label, systemImage: "checkmark") }
+                                                    else { Text(model.label) }
+                                                }
                                             }
                                         }
                                     }
