@@ -417,6 +417,22 @@ final class ComposerToolParityTests: XCTestCase {
         XCTAssertEqual(toolResultPreview(text: text, projection: projection), "bounded result")
     }
 
+    /// 时间线时钟的取值顺序与 Android 一致：activity 自带时间优先，其次块级 occurredAt，两者都没有时不造假。
+    func testToolClockFallsBackToBlockTimestampWithoutFabricatingOne() throws {
+        func clock(_ json: String) -> [String: JSONValue]? {
+            guard case let .toolUse(_, _, _, input, _) = try? decode(ContentBlock.self, json) else { return nil }
+            return input["__wandToolActivity"]?.objectValue
+        }
+        let withBoth = clock(#"{"type":"tool_use","id":"t","name":"Read","occurredAt":"2026-10-19T01:02:03Z","activity":{"kind":"read_file","occurredAt":"2026-10-19T00:00:00Z"},"input":{}}"#)
+        XCTAssertEqual(withBoth?["occurredAt"]?.stringValue, "2026-10-19T00:00:00Z")
+        XCTAssertEqual(withBoth?["kind"]?.stringValue, "read_file")
+        let blockOnly = clock(#"{"type":"tool_use","id":"t","name":"Read","occurredAt":"2026-10-19T01:02:03Z","input":{}}"#)
+        XCTAssertEqual(blockOnly?["occurredAt"]?.stringValue, "2026-10-19T01:02:03Z")
+        let withoutTime = clock(#"{"type":"tool_use","id":"t","name":"Read","input":{}}"#)
+        XCTAssertNil(withoutTime?["occurredAt"])
+        XCTAssertNil(withoutTime?["kind"])
+    }
+
     @MainActor
     func testLateDecisionResultRetainsStandaloneIdentityAndExplicitExpansion() throws {
         let result = try decode(ContentBlock.self, #"{"type":"tool_result","tool_use_id":"decision","content":"","_truncated":true,"semantic":{"kind":"decision","summary":{"label":"采用方案 B","outcome":"B"}}}"#)

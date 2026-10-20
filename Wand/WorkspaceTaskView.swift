@@ -18,10 +18,12 @@ func isGenericWorkspaceName(_ name: String) -> Bool {
     ["全局", "全局任务"].contains(name.trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
-func emptyTaskWorkspaceCaption(_ name: String) -> String? {
-    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty, !isGenericWorkspaceName(trimmed) else { return nil }
-    return trimmed.uppercased()
+/// 任务页是否让位给会话自己的那条栏。未呈现会话、快照还没到位或切到别的任务时都要保留任务栏，
+/// 否则任务标题和「新建工作窗口」会在加载态整条消失。
+func taskPresentsSession(presentedSessionID: String?, visibleSnapshotID: String?,
+                         currentTaskID: String?, taskID: String?) -> Bool {
+    guard let presentedSessionID, let currentTaskID, let taskID, currentTaskID == taskID else { return false }
+    return visibleSnapshotID == presentedSessionID
 }
 
 /// The task retains ownership while its selected conversation is shown directly.
@@ -99,36 +101,34 @@ struct WorkspaceTaskView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
+        // 会话可见时整屏只留会话自己那条栏（对齐 Android 的会话路由）；任务动作并进它的「更多」。
+        .toolbar(presentsSession ? .hidden : .visible, for: .navigationBar)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                workspaceNavigationTitle
-            }
-            .sharedBackgroundVisibility(.hidden)
-            if showsToolbarPlus {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { store.presentTargetPicker() } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 19))
-                            .foregroundColor(Theme.brand)
-                    }
-                    .disabled(store.creating)
-                    .accessibilityLabel("新建工作窗口")
+            if !presentsSession {
+                ToolbarItem(placement: .principal) {
+                    workspaceNavigationTitle
                 }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    if let onOpenChat { Button("打开聊天", systemImage: "bubble.left.and.bubble.right", action: onOpenChat) }
-                    if let onOpenParallel {
-                        Button("并行任务", systemImage: "square.stack.3d.up", action: onOpenParallel)
-                            .disabled(taskCwd.isEmpty)
+                .sharedBackgroundVisibility(.hidden)
+                if showsToolbarPlus {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button { store.presentTargetPicker() } label: {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 19))
+                                .foregroundColor(Theme.brand)
+                        }
+                        .disabled(store.creating)
+                        .accessibilityLabel("新建工作窗口")
                     }
-                    if let onOpenTaskBoard { Button("任务管理", systemImage: "square.grid.2x2", action: onOpenTaskBoard) }
-                    Button("刷新任务", systemImage: "arrow.clockwise") { Task { await store.reloadCurrentTask() } }
-                    Button("复制工作目录", systemImage: "doc.on.doc") { UIPasteboard.general.string = taskCwd }
-                        .disabled(taskCwd.isEmpty)
-                } label: { Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 44) }
-                    .accessibilityLabel("任务操作")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        ForEach(taskActions) { item in
+                            Button(item.title, systemImage: item.symbol, action: item.action)
+                                .disabled(!item.isEnabled)
+                        }
+                    } label: { Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 44) }
+                        .accessibilityLabel("任务操作")
+                }
             }
         }
         .wandToolbarSurface()
@@ -226,6 +226,37 @@ struct WorkspaceTaskView: View {
         return false
     }
 
+    /// 会话正文是否已经占住这条栏：只有宿主当前任务、且可见快照就是被呈现的会话时才成立。
+    private var presentsSession: Bool {
+        taskPresentsSession(presentedSessionID: presentedSessionID, visibleSnapshotID: store.visibleSnapshot?.id,
+                            currentTaskID: store.currentTask?.id, taskID: task.id)
+    }
+
+    /// 任务级动作的唯一来源：顶栏「…」用一份，会话独占那条栏时交给会话的「更多」菜单。
+    private var taskActions: [SessionHostAction] {
+        var actions: [SessionHostAction] = []
+        if showsToolbarPlus {
+            actions.append(SessionHostAction(id: "new-window", title: "新建工作窗口", symbol: "plus.circle",
+                                             isEnabled: !store.creating) { store.presentTargetPicker() })
+        }
+        if let onOpenChat {
+            actions.append(SessionHostAction(id: "chat", title: "打开聊天", symbol: "bubble.left.and.bubble.right", action: onOpenChat))
+        }
+        if let onOpenParallel {
+            actions.append(SessionHostAction(id: "parallel", title: "并行任务", symbol: "square.stack.3d.up",
+                                             isEnabled: !taskCwd.isEmpty, action: onOpenParallel))
+        }
+        if let onOpenTaskBoard {
+            actions.append(SessionHostAction(id: "task-board", title: "任务管理", symbol: "square.grid.2x2", action: onOpenTaskBoard))
+        }
+        actions.append(SessionHostAction(id: "refresh", title: "刷新任务", symbol: "arrow.clockwise") {
+            Task { await store.reloadCurrentTask() }
+        })
+        actions.append(SessionHostAction(id: "copy-cwd", title: "复制工作目录", symbol: "doc.on.doc",
+                                         isEnabled: !taskCwd.isEmpty) { UIPasteboard.general.string = taskCwd })
+        return actions
+    }
+
     private var workspaceNavigationTitle: some View {
         let chrome = workspaceTaskNavigationChrome(taskName: task.name, workspaceName: workspace.name)
         return VStack(spacing: 1) {
@@ -269,82 +300,39 @@ struct WorkspaceTaskView: View {
     }
 
     private func emptyTask(_ detail: WorkspaceTaskDetail) -> some View {
-        ScrollView {
-            VStack(spacing: 0) {
+        VStack(spacing: 0) {
+            if !WorkspaceSessionSummary.splitArchived(detail.sessions).archived.isEmpty {
                 archivedSessions(detail.sessions)
-                    .padding(.horizontal, 24)
-                Spacer(minLength: 54)
-                if let caption = emptyTaskWorkspaceCaption(workspace.name) {
-                    Text(caption)
-                        .font(.wand(size: 11, weight: .semibold))
-                        .foregroundColor(Theme.brand)
-                        .padding(.bottom, 18)
-                }
-
-                Image(systemName: "terminal")
-                    .font(.system(size: 30, weight: .medium))
-                    .foregroundColor(Theme.brand)
-                    .frame(width: 68, height: 68)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Theme.brand.opacity(0.10))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(Theme.brand.opacity(0.28), lineWidth: 1)
-                    )
-                    .padding(.bottom, 20)
-
-                Text(detail.name)
-                    .font(.wand(size: 24, weight: .bold))
-                    .foregroundColor(Theme.textPrimary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 24)
-
-                Text("选择 CLI 工具，以及结构化或 PTY，开始这个任务。")
-                    .font(.wand(size: 13))
-                    .foregroundColor(Theme.textSecondary)
-                    .padding(.top, 8)
-
-                WorkspaceTargetPicker(store: store, taskId: task.id, embedded: true)
-                    .padding(.top, 26)
-                    .padding(.horizontal, 24)
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("工作目录")
-                        .font(.wand(size: 11, weight: .semibold))
-                        .foregroundColor(Theme.textMuted)
-                    Text(detail.cwd)
-                        .font(.wand(size: 12, design: .monospaced))
-                        .foregroundColor(Theme.textSecondary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: 520, alignment: .leading)
-                .padding(14)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Theme.surface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(Theme.border, lineWidth: 1)
-                )
-                .padding(.horizontal, 24)
-                .padding(.top, 24)
-
-                if let warning = detail.worktreeError, !warning.isEmpty {
-                    Label(warning, systemImage: "exclamationmark.triangle")
-                        .font(.footnote)
-                        .foregroundColor(Theme.textSecondary)
-                        .padding(.horizontal, 24)
-                        .padding(.top, 14)
-                }
-                Spacer(minLength: 40)
+                    .padding(.horizontal, 12)
             }
-            .frame(maxWidth: .infinity)
+            if let warning = detail.worktreeError, !warning.isEmpty {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundColor(Theme.textSecondary)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 8)
+            }
+            // 空任务正文就是那段默认的空白聊天：绑定当前任务，发送时在这里开第一个会话。
+            NewConversationView(
+                api: api,
+                serverID: store.serverID,
+                initialCwd: detail.cwd,
+                workspaceID: workspace.id,
+                initialWorkspaceTaskID: task.id,
+                embedded: true,
+                boundTask: NewConversationBoundTask(
+                    id: task.id, workspaceId: workspace.id, name: task.name, cwd: detail.cwd
+                )
+            ) { snapshot in
+                Task {
+                    await store.loadTaskGroups(force: true)
+                    await store.openTask(workspace: workspace, task: task, preferredSessionId: snapshot.id)
+                    if let id = store.visibleSessionID { presentTaskSession(id) }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func readyTask(_ detail: WorkspaceTaskDetail) -> some View {
@@ -431,10 +419,11 @@ struct WorkspaceTaskView: View {
     private var sessionContent: some View {
         if let snapshot = store.visibleSnapshot,
            snapshot.id == presentedSessionID {
-            SessionDestinationView(session: snapshot, api: api, showsNavigationChrome: true, onCompletionVisible: { visible in
+            SessionDestinationView(session: snapshot, api: api, showsNavigationChrome: true,
+                                   onCompletionVisible: { visible in
                 visibleCompletionSnapshot = visible
                 reportCompletionVisible(visible)
-            })
+            }, hostActions: taskActions, hostTitle: task.name)
                 .id(snapshot.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if store.sessionLoading {

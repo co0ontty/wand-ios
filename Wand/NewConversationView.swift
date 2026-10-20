@@ -1,5 +1,21 @@
 import SwiftUI
 
+/// 空任务页内嵌对话时，任务可能在任务列表快照之外（例如列表尚未刷新）；
+/// 用进入任务时已有的身份锁定归属，避免误建到未分组会话。
+struct NewConversationBoundTask: Equatable {
+    let id: String
+    let workspaceId: String
+    let name: String
+    let cwd: String
+}
+
+/// 内嵌绑定的任务不依赖任务列表快照：列表未加载或分页暂未包含它时，归属仍然有效。
+func pendingConversationTaskAvailable(boundTaskID: String?, selectedTaskID: String,
+                                      taskListLoaded: Bool, existingTaskIDs: [String]) -> Bool {
+    if let boundTaskID, boundTaskID == selectedTaskID { return true }
+    return taskListLoaded && existingTaskIDs.contains(selectedTaskID)
+}
+
 /// Chat-first pending conversation. It performs no mutation until the first submit.
 struct NewConversationView: View {
     let api: WandAPI
@@ -10,6 +26,9 @@ struct NewConversationView: View {
     let initialWorkspaceTaskID: String?
     let initialEmployeeID: String?
     let initialCreateTask: Bool
+    /// 空任务页把它作为任务正文内嵌：不套 NavigationStack 与取消按钮，导航栏归宿主任务页。
+    let embedded: Bool
+    let boundTask: NewConversationBoundTask?
 
     @Environment(\.dismiss) private var dismiss
     @StateObject private var coordinator: NewConversationCoordinator
@@ -50,7 +69,11 @@ struct NewConversationView: View {
     @State private var creating = false
     @State private var showExecutionSettings = false
     @State private var confirmedCheckedSessions = false
-    @FocusState private var focused: Bool
+    @State private var focused = false
+    @State private var showSettings = false
+    @State private var showAttachments = false
+    @State private var inputHeight: CGFloat = 36
+    @State private var isComposing = false
     @State private var pendingDraftConsumer = UUID()
 
     init(
@@ -61,6 +84,8 @@ struct NewConversationView: View {
         initialWorkspaceTaskID: String? = nil,
         initialEmployeeID: String? = nil,
         initialCreateTask: Bool = false,
+        embedded: Bool = false,
+        boundTask: NewConversationBoundTask? = nil,
         onCreated: @escaping (SessionSnapshot) -> Void
     ) {
         self.api = api
@@ -70,12 +95,15 @@ struct NewConversationView: View {
         self.initialWorkspaceTaskID = initialWorkspaceTaskID
         self.initialEmployeeID = initialEmployeeID
         self.initialCreateTask = initialCreateTask
+        self.embedded = embedded
+        self.boundTask = boundTask
         self.onCreated = onCreated
-        _cwd = State(initialValue: Self.preferredCwd(initialCwd: initialCwd))
-        _selectedTaskID = State(initialValue: initialWorkspaceTaskID ?? "")
-        _taskOwnership = State(initialValue: initialWorkspaceTaskID == nil ? (initialCreateTask ? "new" : "none") : "existing")
-        _targetWorkspaceID = State(initialValue: workspaceID ?? "")
-        _workspaceSelectionIsLocked = State(initialValue: initialWorkspaceTaskID != nil)
+        let lockedTaskID = boundTask?.id ?? initialWorkspaceTaskID
+        _cwd = State(initialValue: boundTask?.cwd ?? Self.preferredCwd(initialCwd: initialCwd))
+        _selectedTaskID = State(initialValue: lockedTaskID ?? "")
+        _taskOwnership = State(initialValue: lockedTaskID == nil ? (initialCreateTask ? "new" : "none") : "existing")
+        _targetWorkspaceID = State(initialValue: boundTask?.workspaceId ?? workspaceID ?? "")
+        _workspaceSelectionIsLocked = State(initialValue: lockedTaskID != nil)
         let scope = initialWorkspaceTaskID ?? initialCwd ?? workspaceID ?? "global"
         let pendingID = "pending-new-conversation:\(serverID):\(scope)"
         let draft = SessionDraftStore.shared.draft(sessionId: pendingID, api: api)
@@ -139,7 +167,9 @@ struct NewConversationView: View {
     }
 
     private var isSelectedTaskAvailable: Bool {
-        taskListLoaded && existingTasks.contains { $0.id == selectedTaskID }
+        pendingConversationTaskAvailable(boundTaskID: boundTask?.id, selectedTaskID: selectedTaskID,
+                                         taskListLoaded: taskListLoaded,
+                                         existingTaskIDs: existingTasks.map(\.id))
     }
 
     private var taskWorkspaceOptions: [Workspace] {
@@ -148,35 +178,197 @@ struct NewConversationView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        Text("新建对话")
-                            .font(.wand(size: 24, weight: .semibold))
-                            .foregroundStyle(Theme.textPrimary)
-                        Text("先写下要做的事。发送前不会创建会话或任务。")
-                            .font(.subheadline)
-                            .foregroundStyle(Theme.textSecondary)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("消息")
-                                .font(.wand(size: 14, weight: .semibold))
-                                .foregroundStyle(Theme.textPrimary)
-                            TextEditor(text: $pendingDraft.text)
-                                .focused($focused)
-                                .scrollContentBackground(.hidden)
-                                .frame(minHeight: 150)
-                                .padding(8)
-                                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                .accessibilityLabel("输入要处理的内容")
-                                .disabled(creating)
-                            stagedAttachmentPreview
-                            attachmentActions
+        if embedded {
+            conversationForm
+        } else {
+            NavigationStack {
+                conversationForm
+                    .navigationTitle("新建对话")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") { dismiss() }.disabled(creating)
                         }
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("完成") { focused = false }
+                                .disabled(!focused)
+                        }
+                    }
+            }
+        }
+    }
 
-                        DisclosureGroup(isExpanded: $showExecutionSettings) {
-                            VStack(alignment: .leading, spacing: 12) {
+    private var conversationForm: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(embedded ? "写下要处理的内容，发送后在当前任务开始工作。"
+                         : "先写下要做的事。发送前不会创建会话或任务。")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+
+                    if loading { ProgressView("正在加载对话配置…") }
+                    if taskOwnership == "new" {
+                        TextField("任务名称", text: $newTaskName)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("新任务名称")
+                    }
+                    Text(taskOwnership == "new" ? "发送后创建任务，并开始这段对话。"
+                         : embedded ? "写下目标，开始这段对话。"
+                         : "写下目标，开始一段新的对话。")
+                        .font(.body)
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(maxWidth: .infinity, minHeight: 120)
+
+                }
+                .padding(16)
+                .disabled(creating)
+            }
+
+            if isUnknown {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(errorMessage ?? "创建结果未知。请先检查会话列表，确认是否已创建。")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.danger)
+                    Toggle(unknownConfirmationLabel, isOn: $confirmedCheckedSessions)
+                        .font(.footnote)
+                    if coordinator.unknownOperation == nil || (coordinator.unknownOperation == .session && coordinator.unknownSessionID == nil) || (coordinator.unknownOperation == .task && coordinator.unknownTaskID == nil) {
+                        Text("当前服务端没有返回创建请求标识。仅查看列表无法证明没有创建成功，因此不会允许重试。")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 6)
+            } else if let errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.danger)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 6)
+            }
+
+            VStack(spacing: 6) {
+                stagedAttachmentPreview
+                if showAttachments { attachmentActions }
+                FocusComposerSurface(
+                    expanded: true, hasDraft: !text.isEmpty,
+                    onFocus: { focused = true },
+                    editor: {
+                        IMEAwareComposerTextView(
+                            text: $pendingDraft.text,
+                            placeholder: "输入要处理的内容…",
+                            isFocused: focused,
+                            submitOnReturn: false,
+                            onFocusChange: { focused = $0 },
+                            onCompositionChange: { isComposing = $0 },
+                            onSubmit: performPrimaryAction,
+                            onHeightChange: { inputHeight = $0 }
+                        )
+                        .frame(height: inputHeight)
+                        .disabled(creating)
+                    },
+                    add: {
+                        ComposerAddButton(expanded: showAttachments, uploading: stagedAttachments.isUploading) {
+                            showAttachments.toggle()
+                        }.disabled(creating)
+                    },
+                    send: {
+                        NativeComposerActionButton(
+                            phase: creating ? .sending : .idle,
+                            turnRunning: false, hasDraft: true,
+                            canSubmit: primaryActionEnabled,
+                            message: nil,
+                            sendLabel: isUnknown ? "检查并继续" : canResumeCreation ? "继续创建" : "发送",
+                            onSend: performPrimaryAction, onStop: {}
+                        )
+                    },
+                    settings: {
+                        Button {
+                            focused = false
+                            showSettings = true
+                        } label: {
+                            Label("设置", systemImage: "slider.horizontal.3")
+                                .font(.subheadline)
+                        }.disabled(creating)
+                    },
+                    actionCount: 1
+                )
+            }
+            .background(Theme.background)
+
+        }
+        .background(WandAmbientBackground())
+        .sheet(isPresented: $showSettings) { conversationSettings }
+        .onAppear {
+            pendingDraft.acquire(pendingDraftConsumer)
+            pendingDraftRevision = pendingDraft.textRevision
+            pendingAttachmentRevision = stagedAttachments.stagedInputRevision
+        }
+        .onChange(of: sessionKind) { _, value in
+            if value != "structured" { contactSubject = nil }
+            if value == "shell" { engine = nil }
+        }
+        .onChange(of: contactSubject) { oldValue, newValue in
+            if oldValue?.id != newValue?.id || oldValue?.type != newValue?.type {
+                employeeOverride = false
+                if let employee = contactEmployees.first(where: { $0.id == newValue?.id && newValue?.type == "employee" }),
+                   let candidate = employee.agents.first {
+                    provider = candidate.provider
+                    engine = candidate.engine
+                    model = candidate.model == "default" ? "" : candidate.model
+                    mode = currentProvider.clamp(mode: candidate.mode, fallback: "managed")
+                    thinkingEffort = candidate.thinkingEffort
+                    normalizeThinkingEffort()
+                }
+            }
+        }
+        .onChange(of: provider) { _, value in
+            guard contactSubject?.type != "employee" || employeeOverride else { return }
+            model = configModel(for: value)
+            mode = currentProvider.clamp(mode: mode, fallback: "managed")
+            thinkingEffort = "off"
+            normalizeThinkingEffort()
+        }
+        .onChange(of: taskOwnership) { _, value in
+            if value == "existing", selectedTaskID.isEmpty {
+                selectedTaskID = existingTasks.first?.id ?? ""
+            }
+            if value == "existing", let task = existingTasks.first(where: { $0.id == selectedTaskID }) {
+                cwd = task.cwd
+            }
+            workspaceSelectionIsLocked = value == "existing"
+            if value == "none" || value == "new" {
+                cwd = Self.preferredCwd(initialCwd: initialCwd, recentPaths: recentPaths, defaultCwd: defaultCwd)
+                workspaceSelectionIsLocked = false
+            }
+        }
+        .onChange(of: selectedTaskID) { _, taskID in
+            guard taskOwnership == "existing",
+                  let task = existingTasks.first(where: { $0.id == taskID }) else { return }
+            cwd = task.cwd
+        }
+        .task { await loadConfiguration() }
+        .onChange(of: pendingDraft.textRevision) { _, revision in
+            pendingDraftRevision = revision
+            if !creating { clearFrozenDraft() }
+        }
+        .onChange(of: stagedAttachments.stagedInputRevision) { _, revision in
+            pendingAttachmentRevision = revision
+            if !creating { clearFrozenDraft() }
+        }
+        .onDisappear {
+            pendingDraft.release(pendingDraftConsumer)
+        }
+    }
+
+    private var conversationSettings: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    DisclosureGroup(isExpanded: $showExecutionSettings) {
+                        VStack(alignment: .leading, spacing: 12) {
                             Picker("会话类型", selection: $sessionKind) {
                                 Text("结构化").tag("structured")
                                 Text("PTY").tag("pty")
@@ -184,10 +376,6 @@ struct NewConversationView: View {
                             }
                             .pickerStyle(.segmented)
                             .accessibilityLabel("会话类型")
-                            .onChange(of: sessionKind) { _, value in
-                                if value != "structured" { contactSubject = nil }
-                                if value == "shell" { engine = nil }
-                            }
                             if sessionKind == "structured" {
                                 ContactExecutionSubjectPicker(
                                     subject: $contactSubject,
@@ -195,20 +383,6 @@ struct NewConversationView: View {
                                     error: contactsError,
                                     onRetry: { Task { await loadContacts() } }
                                 )
-                                .onChange(of: contactSubject) { oldValue, newValue in
-                                    if oldValue?.id != newValue?.id || oldValue?.type != newValue?.type {
-                                        employeeOverride = false
-                                        if let employee = contactEmployees.first(where: { $0.id == newValue?.id && newValue?.type == "employee" }),
-                                           let candidate = employee.agents.first {
-                                            provider = candidate.provider
-                                            engine = candidate.engine
-                                            model = candidate.model == "default" ? "" : candidate.model
-                                            mode = currentProvider.clamp(mode: candidate.mode, fallback: "managed")
-                                            thinkingEffort = candidate.thinkingEffort
-                                            normalizeThinkingEffort()
-                                        }
-                                    }
-                                }
                             }
                             if sessionKind != "shell" && (contactSubject?.type != "employee" || employeeOverride) {
                                 Picker("执行工具", selection: Binding(
@@ -226,13 +400,6 @@ struct NewConversationView: View {
                                 }
                                 .pickerStyle(.menu)
                                 .accessibilityLabel("执行工具")
-                                .onChange(of: provider) { _, value in
-                                    guard contactSubject?.type != "employee" || employeeOverride else { return }
-                                    model = configModel(for: value)
-                                    mode = currentProvider.clamp(mode: mode, fallback: "managed")
-                                    thinkingEffort = "off"
-                                    normalizeThinkingEffort()
-                                }
                             }
                             if sessionKind == "structured" && (contactSubject?.type != "employee" || employeeOverride) {
                                 Picker("模式", selection: $mode) {
@@ -276,205 +443,140 @@ struct NewConversationView: View {
                                 }
                                 .font(.caption.weight(.medium))
                             }
-                            }
-                            .padding(14)
-                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        } label: {
-                            Label("执行设置", systemImage: "slider.horizontal.3")
-                                .font(.wand(size: 14, weight: .semibold))
-                                .foregroundStyle(Theme.textPrimary)
-                        }
-                        .tint(Theme.textSecondary)
-
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("所属任务", systemImage: "checklist")
-                                .font(.wand(size: 14, weight: .semibold))
-                                .foregroundStyle(Theme.textPrimary)
-                            Picker("所属任务", selection: $taskOwnership) {
-                                Text("不归属任务").tag("none")
-                                Text("新建任务").tag("new")
-                                if taskListLoaded { Text("已有任务").tag("existing") }
-                            }
-                            .pickerStyle(.menu)
-                            .accessibilityLabel("所属任务")
-                            .onChange(of: taskOwnership) { _, value in
-                                if value == "existing", selectedTaskID.isEmpty {
-                                    selectedTaskID = existingTasks.first?.id ?? ""
-                                }
-                                if value == "existing", let task = existingTasks.first(where: { $0.id == selectedTaskID }) {
-                                    cwd = task.cwd
-                                }
-                                workspaceSelectionIsLocked = value == "existing"
-                                if value == "none" || value == "new" {
-                                    cwd = Self.preferredCwd(initialCwd: initialCwd, recentPaths: recentPaths, defaultCwd: defaultCwd)
-                                    workspaceSelectionIsLocked = false
-                                }
-                            }
-                            if taskOwnership == "new" {
-                                TextField("任务名称", text: $newTaskName)
-                                    .textFieldStyle(.roundedBorder)
-                                    .accessibilityLabel("新任务名称")
-                                Picker("任务所在项目", selection: $targetWorkspaceID) {
-                                    Text("按工作目录创建").tag("")
-                                    ForEach(taskWorkspaceOptions) { workspace in Text(workspace.name + " · " + workspace.cwd).tag(workspace.id) }
-                                }.pickerStyle(.menu).accessibilityLabel("任务所在项目")
-                                Picker("工作目录方式", selection: $worktreeEnabled) {
-                                    Text("共用工作区").tag(false)
-                                    Text("隔离 worktree").tag(true)
-                                }.pickerStyle(.segmented)
-                                Text(worktreeEnabled
-                                    ? "需要 Git 仓库，会创建独立工作树。"
-                                    : "默认仅做界面分组，不创建目录。")
-                                    .font(.footnote)
-                                    .foregroundStyle(Theme.textMuted)
-                            }
-                            if taskOwnership == "existing", !taskListLoaded {
-                                Text("正在加载任务列表…")
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.textSecondary)
-                                Button("重试加载任务") { Task { await loadTaskList() } }
-                                    .font(.caption)
-                            } else if taskOwnership == "existing", existingTasks.isEmpty {
-                                Text("当前没有可绑定的已有任务。")
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.textSecondary)
-                            } else if taskOwnership == "existing" {
-                                existingTaskPicker
-                            }
                         }
                         .padding(14)
                         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("工作目录", systemImage: "folder")
-                                .font(.wand(size: 14, weight: .semibold))
-                                .foregroundStyle(Theme.textPrimary)
-                            TextField("输入服务器目录", text: $cwd)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .textFieldStyle(.roundedBorder)
-                                .disabled(workspaceSelectionIsLocked || loading)
-                                .accessibilityLabel("工作目录")
-                            if !recentPaths.isEmpty && !workspaceSelectionIsLocked {
-                                ForEach(recentPaths.prefix(4)) { path in
-                                    Button {
-                                        cwd = path.path
-                                    } label: {
-                                        Label(path.path, systemImage: "clock")
-                                            .font(.caption)
-                                            .lineLimit(1)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .disabled(workspaceSelectionIsLocked || loading)
-                                    .accessibilityLabel("选择最近目录 \(path.path)")
-                                }
-                            }
-                        }
-                        .padding(14)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                    }
-                    .padding(16)
-                    .disabled(creating)
-                }
-
-                if isUnknown {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(errorMessage ?? "创建结果未知。请先检查会话列表，确认是否已创建。")
-                            .font(.footnote)
-                            .foregroundStyle(Theme.danger)
-                        Toggle(unknownConfirmationLabel, isOn: $confirmedCheckedSessions)
-                            .font(.footnote)
-                        if coordinator.unknownOperation == nil || (coordinator.unknownOperation == .session && coordinator.unknownSessionID == nil) || (coordinator.unknownOperation == .task && coordinator.unknownTaskID == nil) {
-                            Text("当前服务端没有返回创建请求标识。仅查看列表无法证明没有创建成功，因此不会允许重试。")
-                                .font(.caption)
-                                .foregroundStyle(Theme.textSecondary)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 6)
-                } else if let errorMessage {
-                    Text(errorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(Theme.danger)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 6)
-                }
-
-                HStack(spacing: 12) {
-                    Button("取消") { dismiss() }
-                        .buttonStyle(WandSecondaryButtonStyle())
-                        .disabled(creating)
-                    Spacer(minLength: 0)
-                    Button {
-                        if isUnknown {
-                            errorMessage = nil
-                            switch coordinator.unknownOperation {
-                            case .task:
-                                Task { await verifyUnknownTaskCreation() }
-                            case .session:
-                                Task { await loadSessionList() }
-                            case nil:
-                                errorMessage = "创建请求缺少可核对的请求标识，无法安全继续；请保留此页面并联系支持。"
-                            }
-                        } else if canResumeCreation {
-                            if let sessionID = coordinator.acceptedSessionIDForContinuation {
-                                let source = frozenDraftText ?? text
-                                resumeAcceptedSession(sessionID, text: source,
-                                                      textRevision: frozenDraftRevision ?? pendingDraftRevision,
-                                                      sourceText: source,
-                                                      attachmentRevision: frozenAttachmentRevision ?? pendingAttachmentRevision,
-                                                      attachments: stagedAttachments)
-                            } else if let taskID = coordinator.acceptedTaskIDForContinuation {
-                                coordinator.beginSessionContinuation()
-                                continueSessionCreation(taskID: taskID)
-                            }
-                        } else {
-                            submit()
-                        }
                     } label: {
-                        HStack(spacing: 8) {
-                            if creating { ProgressView().tint(.white) }
-                            Text(isUnknown ? "检查并继续" : canResumeCreation ? "继续创建" : "发送")
-                        }
-                        .frame(minWidth: 90)
+                        Label("执行设置", systemImage: "slider.horizontal.3")
+                            .font(.wand(size: 14, weight: .semibold))
+                            .foregroundStyle(Theme.textPrimary)
                     }
-                    .buttonStyle(WandPrimaryButtonStyle())
-                    .disabled(isUnknown ? !confirmedCheckedSessions : (!canResumeCreation && !canSubmit))
-                    .accessibilityHint(isUnknown ? "检查对应列表；如果创建已成功，将继续使用该任务或会话" : "创建会话后发送此消息")
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(Theme.background.opacity(0.98))
+                    .tint(Theme.textSecondary)
+
+                    if !embedded {
+                        taskOwnershipSection
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("工作目录", systemImage: "folder")
+                            .font(.wand(size: 14, weight: .semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                        TextField("输入服务器目录", text: $cwd)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(workspaceSelectionIsLocked || loading)
+                            .accessibilityLabel("工作目录")
+                        if !recentPaths.isEmpty && !workspaceSelectionIsLocked {
+                            ForEach(recentPaths.prefix(4)) { path in
+                                Button {
+                                    cwd = path.path
+                                } label: {
+                                    Label(path.path, systemImage: "clock")
+                                        .font(.caption)
+                                        .lineLimit(1)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(workspaceSelectionIsLocked || loading)
+                                .accessibilityLabel("选择最近目录 \(path.path)")
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                }.padding(16)
             }
-            .background(WandAmbientBackground())
-            .navigationTitle("")
+            .navigationTitle("对话设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { focused = false }
-                        .disabled(!focused)
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { showSettings = false }
                 }
             }
-            .onAppear {
-                pendingDraft.acquire(pendingDraftConsumer)
-                pendingDraftRevision = pendingDraft.textRevision
-                pendingAttachmentRevision = stagedAttachments.stagedInputRevision
+        }
+    }
+
+    private var taskOwnershipSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("所属任务", systemImage: "checklist")
+                .font(.wand(size: 14, weight: .semibold))
+                .foregroundStyle(Theme.textPrimary)
+            Picker("所属任务", selection: $taskOwnership) {
+                Text("不归属任务").tag("none")
+                Text("新建任务").tag("new")
+                if taskListLoaded { Text("已有任务").tag("existing") }
             }
-            .task { await loadConfiguration() }
-            .onChange(of: pendingDraft.textRevision) { _, revision in
-                pendingDraftRevision = revision
-                if !creating { clearFrozenDraft() }
+            .pickerStyle(.menu)
+            .accessibilityLabel("所属任务")
+            if taskOwnership == "new" {
+                TextField("任务名称", text: $newTaskName)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("新任务名称")
+                Picker("任务所在项目", selection: $targetWorkspaceID) {
+                    Text("按工作目录创建").tag("")
+                    ForEach(taskWorkspaceOptions) { workspace in Text(workspace.name + " · " + workspace.cwd).tag(workspace.id) }
+                }.pickerStyle(.menu).accessibilityLabel("任务所在项目")
+                Picker("工作目录方式", selection: $worktreeEnabled) {
+                    Text("共用工作区").tag(false)
+                    Text("隔离 worktree").tag(true)
+                }.pickerStyle(.segmented)
+                Text(worktreeEnabled
+                    ? "需要 Git 仓库，会创建独立工作树。"
+                    : "默认仅做界面分组，不创建目录。")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textMuted)
             }
-            .onChange(of: stagedAttachments.stagedInputRevision) { _, revision in
-                pendingAttachmentRevision = revision
-                if !creating { clearFrozenDraft() }
+            if taskOwnership == "existing", !taskListLoaded {
+                Text("正在加载任务列表…")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Button("重试加载任务") { Task { await loadTaskList() } }
+                    .font(.caption)
+            } else if taskOwnership == "existing", existingTasks.isEmpty {
+                Text("当前没有可绑定的已有任务。")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            } else if taskOwnership == "existing" {
+                existingTaskPicker
             }
-            .onDisappear {
-                pendingDraft.release(pendingDraftConsumer)
+        }
+        .padding(14)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var primaryActionEnabled: Bool {
+        !creating && !isComposing && !stagedAttachments.isUploading &&
+            (isUnknown ? confirmedCheckedSessions : (canResumeCreation || canSubmit))
+    }
+
+    private func performPrimaryAction() {
+        guard primaryActionEnabled else { return }
+        if isUnknown {
+            errorMessage = nil
+            switch coordinator.unknownOperation {
+            case .task:
+                Task { await verifyUnknownTaskCreation() }
+            case .session:
+                Task { await loadSessionList() }
+            case nil:
+                errorMessage = "创建请求缺少可核对的请求标识，无法安全继续；请保留此页面并联系支持。"
             }
+        } else if canResumeCreation {
+            if let sessionID = coordinator.acceptedSessionIDForContinuation {
+                let source = frozenDraftText ?? text
+                resumeAcceptedSession(sessionID, text: source,
+                                      textRevision: frozenDraftRevision ?? pendingDraftRevision,
+                                      sourceText: source,
+                                      attachmentRevision: frozenAttachmentRevision ?? pendingAttachmentRevision,
+                                      attachments: stagedAttachments)
+            } else if let taskID = coordinator.acceptedTaskIDForContinuation {
+                coordinator.beginSessionContinuation()
+                continueSessionCreation(taskID: taskID)
+            }
+        } else {
+            submit()
         }
     }
 
@@ -514,10 +616,6 @@ struct NewConversationView: View {
             }
             .pickerStyle(.menu)
             .accessibilityLabel("选择已有任务")
-            .onChange(of: selectedTaskID) { _, taskID in
-                guard let task = existingTasks.first(where: { $0.id == taskID }) else { return }
-                cwd = task.cwd
-            }
             if let task = existingTasks.first(where: { $0.id == selectedTaskID }) {
                 Text("工作目录已锁定：\(task.cwd)")
                     .font(.caption)
@@ -743,6 +841,13 @@ struct NewConversationView: View {
                 availableWorkspaces = workspaces
                 let groups = try await api.listTaskGroups()
                 existingTasks = groups.flatMap(\.tasks)
+                if let boundTask, !existingTasks.contains(where: { $0.id == boundTask.id }) {
+                    existingTasks.append(WorkspaceTaskSummary(
+                        id: boundTask.id, workspaceId: boundTask.workspaceId, name: boundTask.name,
+                        worktree: nil, layout: nil, status: "active", createdAt: "", lastOpenedAt: nil,
+                        cwd: boundTask.cwd, isolated: nil, worktreeError: nil, sessions: []
+                    ))
+                }
                 taskListLoaded = true
             } catch {
                 guard !Task.isCancelled else { return }

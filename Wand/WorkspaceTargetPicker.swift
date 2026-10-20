@@ -3,7 +3,6 @@ import SwiftUI
 struct WorkspaceTargetPicker: View {
     @ObservedObject var store: WorkspaceStore
     let taskId: String
-    var embedded: Bool = false
 
     @Environment(\.dismiss) private var dismiss
     @State private var subject: ContactExecutionSubject?
@@ -13,13 +12,6 @@ struct WorkspaceTargetPicker: View {
     @State private var contactGeneration = 0
 
     var body: some View {
-        if embedded {
-            VStack(spacing: 12) {
-                pickerFields
-                submitBar
-            }.task { await loadContacts() }
-                .onDisappear { contactGeneration += 1 }
-        } else {
         NavigationStack {
             ZStack(alignment: .bottom) {
                 WandAmbientBackground()
@@ -47,7 +39,6 @@ struct WorkspaceTargetPicker: View {
         .interactiveDismissDisabled(store.creating)
         .task { await loadContacts() }
         .onDisappear { contactGeneration += 1 }
-        }
     }
 
     private var pickerFields: some View {

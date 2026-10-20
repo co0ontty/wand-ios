@@ -22,7 +22,7 @@ ChatDesignPreview为可操作DEBUG离线原生夹具，包含空态、键盘、1
 
 用户最新决定：移动端输入区状态行不重复显示员工名字，只展示状态。聊天标题/员工选择继续承载身份，状态行保留员工身份的VoiceOver标签；不改iOS系统状态栏。
 
-聊天页最新简化：正常聊天隐藏占整行的导航表面，沿用NavigationStack的返回栈，不隐藏单独系统返回项、不安装替代手势；左侧48pt悬浮返回，右侧文件/更多（36pt圆形视觉）。更多保留当前员工与目录辨认、原模型/模式/目录入口、Pi资源和Git；换员工回原会话选择，不改历史目标。消息视口顶部56pt避让，首条和滚动文字均不被图标遮住；按钮实色Theme.surface保证浅深色可读。顶端不忽略刘海安全区，键盘/底部安全区维持原owner。嵌入任务页showsNavigationChrome=false保留上层导航责任。系统返回手势、VoiceOver与手动阅读仍须实机/可操作系统验收，锁屏宿主未人工操作。
+聊天页最新简化：正常聊天隐藏占整行的导航表面，沿用NavigationStack的返回栈，不隐藏单独系统返回项、不安装替代手势；左侧48pt悬浮返回，右侧文件/更多（36pt圆形视觉）。更多保留当前员工与目录辨认、原模型/模式/目录入口、Pi资源和Git；换员工回原会话选择，不改历史目标。消息视口顶部56pt避让，首条和滚动文字均不被图标遮住；按钮实色Theme.surface保证浅深色可读。顶端不忽略刘海安全区，键盘/底部安全区维持原owner。嵌入任务页时整屏仍只有一条栏：会话可见就由会话独占这条栏（`showsNavigationChrome=true`），宿主任务页用`taskPresentsSession`隐藏自己的系统导航栏，并把任务动作（新建工作窗口、打开聊天、并行任务、任务管理、刷新、复制目录）经`hostActions`并进会话「更多」菜单的「任务」分区，不因单层化丢入口；未呈现会话、快照未到位或切到别的任务时任务栏照旧保留。系统返回手势、VoiceOver与手动阅读仍须实机/可操作系统验收，锁屏宿主未人工操作。
 
 辅助无障碍大字号时上下文入口只呈图标，完整accessibilityLabel保留，48pt触控不缩，避免文字挤掉发送/停止。最终完整XCTest357通过、2跳过、0失败；真实深色accessibility-large像素已核对，操作行完整可见。
 
@@ -47,3 +47,43 @@ ChatDesignPreview为可操作DEBUG离线原生夹具，包含空态、键盘、1
 当前独立猫头方案最终XCTest全量369项、2既有跳过、0失败；包括原生SwiftUI固定视口与失败反馈到期后保稿检查。真实原生离线录像与八项审阅材料已记录于output/architecture-stage2/ios-cat-composer/DELIVERY.md。主线程临时让窗排查Mac Wand启动，未启动最终unsigned Release，未写安装目录；服务稳定后恢复。真实麦克风、人工VoiceOver/触控和实机中断仍未验收，签名条件缺失不可宣称直接安装。
 
 最终包完成：4.89.3-debug.10111130，Release arm64，unsigned；更新接口与实际下载字节/SHA一致，unsigned-ipa阻塞保留。上述临时打包暂停已解除并完成。交付与全部Library ID见DELIVERY.md；无设备安装或签名变更。
+
+### 运行态只留顶部一处（2026-10-19）
+
+输入框上方原有一份状态小字（处理中/发送中…/等待确认），与顶部身份区文案同义重复，且占掉一条本可给消息的垂直空间。现删掉输入区状态行：发送态由原提交按钮的发送中/停止形态承担，确认与连接异常由权限卡与连接横幅承担（会话顶栏自 2026-10-19 起不再显示状态文案，见下节）；运行态的细粒度进度由待办进度条与子 Agent 状态坞承载。顶部头像与状态文案曾共用同一份读/写 activity 判定，避免两处各算一次。会话状态文案真源为 `identityWorkStatus`，判定与 Android 一致性由 `CurrentAndroidParityTests` 覆盖。
+
+### 会话顶栏改成身份栏：任务名 + 员工·目录（2026-10-19）
+
+会话顶栏原先是「头像 + 员工名 + 一句状态」，读起来像「赛博虎妞 正在处理」：主位被员工名占走，而这条栏真正要回答的是「我在做哪件事」；状态那句又和权限卡、连接横幅、待办进度条重复。现按 Mac/Web 已有的形态收敛（Mac `SessionHeaderView` 与 Web 顶栏都不放头像，标题即会话/任务名，目录只显示末级名）：
+
+- 主标题 = 任务名（宿主任务页注入的 `hostTitle`），独立会话没有归属任务时回落会话标题 `store.displayTitle`；`currentTaskTitle` 仍不参与顶栏，遵守「响应期间不能替换标题」的既有约束。
+- 小字 = 「员工名 · 目录缩写」，目录只取末级路径名（`abbreviatedDirectory`），根目录或空路径不显示，缺项自动省掉分隔符。
+- 头像取消：`ChatView` 不再画 `TopChatCompanion`/`WorkingAvatar`，随之删掉顶部伙伴的左右拖动与点按聚焦入口（`catSideRaw`/`catDragOffset`/`catGesture`），点输入区聚焦的原有路径不变。IM 私聊仍以头像为身份，继续用 `TopChatCompanion`。
+- 运行与异常只以一个 6pt 状态点呈现（品牌色=运行、permission=等待确认、danger=异常，静止表示空闲），复用 `topicTitleRhythm` 呼吸而不是自起定时器；文案不进视觉，但 `chatTopReadback` 仍把「标题，小字，状态」完整交给读屏，`chat-visible-identity` 标识保留。
+- 高度改为两行文字的 `identityClearance`（56pt 起，随 Dynamic Type 增长），不再为头像占 114pt，消息视口相应变长。
+- 水平位置不再按屏幕居中：`ChatTopLayout.identityBand` 用返回键（60pt）与文件/更多两枚按钮（112pt）算出可用带子，身份区在带子里居中，长标题的省略号不会压到右侧按钮；Android 侧同一份几何是 `FloatingControlsBackInset`/`FloatingControlsActionsInset`。
+- 结构化会话与终端会话（`PtySessionView.titleStatus`）走同一个 `chatTopIdentity`，两条链路都不再画头像；终端顶栏原来的完整路径 `WandPathRevealText` 换成同一条「员工名 · 目录缩写」。
+
+判定与归属由 `CurrentAndroidParityTests`（`chatTopIdentity`/`ChatTopAttention`/源码单一归属）与 `ChatComposerCatTests`（`testSessionIdentityBarKeepsStableHeightAndFullReadback` 高度不随标题长度变化、盖住控件触控安全区；`testIdentityBandStaysBetweenTopControls` 带子左右边界）覆盖。模拟器实机验收：已安装服务 + 真实任务会话，顶栏为「状态点 + 任务名 / 赛博虎妞 · wand」单层，读屏标签为 `iOS对话界面多项布局与交互优化，赛博虎妞 · wand`，身份区右边界 278pt、`会话文件` 按钮左边界 308pt 不重叠；IM 私聊仍为头像版。
+
+### 工具时间线用窄轨道 + 行内时钟（2026-10-19）
+
+时间线每行原先用固定 64pt 时钟列，再排圆点和正文，正文从约 86pt 起，长参数摘要被压得很窄；而 iOS 只读 `activity.occurredAt`，块级 `occurredAt` 被丢弃，历史条目没有 activity 时整列空白，左侧空得更明显。现按 Android `ToolActivitySummary.kt` 的几何对齐：圆点占 12pt 轨道槽、轨道竖线走槽中心，正文从轨道右侧 8pt 起（相对轨道中心 14pt，与 Android 的 `ACTIVITY_RAIL_X`/`ACTIVITY_CONTENT_START` 等距），展开详情同基准；时钟只在有真实发生时间时以 `caption2` 等宽内联在圆点之后，无时间的条目不预留列。折叠头同样以圆点对齐轨道，顺序为「圆点 → 时钟 → 摘要」，与每行一致。数据侧 `ContentBlock` 解码补上 `activity.occurredAt ?: 块级 occurredAt` 回落，不伪造时间；回归见 `ComposerToolParityTests`。
+
+### 任务模式单层顶栏与队列计数单一归属（2026-10-19）
+
+任务模式进入会话时，宿主任务页原先无条件保留系统导航栏，会话又画自己那条悬浮栏，整屏出现两条栏（「Web 性能优化 / wand」+「正在执行」）。Android 侧会话是独立路由，只有一条栏，iOS 现按同一语义收敛：会话独占那条栏，任务页在 `taskPresentsSession` 为真时隐藏自己的系统栏，任务级动作改由 `SessionHostAction` 注入会话「更多」菜单的「任务」分区；加载态、无会话态或切到别的任务时任务栏不变。底部「查看执行进度」行也不再重复 `待发 N`，排队条数只由输入框上方的 `QueueBar`「待发送 N 条」呈现，与 Android `ChatScreen` 的单一归属一致；回归见 `CurrentAndroidParityTests.testQueuedCountHasSingleOwnerAboveComposer`。
+
+### 图片自适应放大与全屏查看器翻页（2026-10-19）
+
+聊天内联图片原先固定 240×200 上限，横图和竖图都只用到框的一角，实际显示偏小；全屏查看器只接单个 `path`，一条消息里多张图必须关掉再开下一张。现按 Android `WandImage` 同步为共享常量 `WandImageLayout.thumbnailMaxWidth/Height = 320/360`：图片在框内按比例完整显示，横图吃满宽度、竖图吃满高度、小图不放大，缩略图各调用点不再各写像素值。`WandImageThumbnail` 与 `WandToolImageThumbnail` 增加 `group`/`groupIndex`，全屏查看器改为 `sources` + `startIndex`（越界钳制到首张，见 `wandImageViewerStart`），同一条消息或同一张卡片里的图片一起传入，多张时右下角显示 `n / N`。查看器为自绘的有界三页容器：未放大时横向拖动翻页（超过 28% 宽或同向甩动），纵向拖动 >90pt 下滑关闭，双指或双击缩放至 1–5×，放大后横向手势改判为平移并停翻页，边缘仍有 0.35 阻尼；轴在 10pt 处锁定，避免斜向拖动同时翻页和位移。相邻页只为滑动预加载，`accessibilityHidden` 出树，当前页报「图片 n，共 N 张」，VoiceOver 可用转子左右滑翻页。几何与分组回归见 `CurrentAndroidParityTests.testToolImageLoadingAlwaysHasVisibleGeometry`、`testInlineImagesPageWithinTheirGroup`；真机（模拟器）已核对缩略图 AX 帧为 320×120 / 320×360、`1 / 3 → 3 / 3` 钳制、下滑关闭与右上角关闭。捏合缩放依赖真实多点触控，模拟器合成手势未覆盖。
+
+### 空任务直接内嵌空白对话（2026-10-20）
+
+任务详情在没有任何会话时，原先显示一套独立的欢迎页（项目 caption、terminal 图标、任务名、执行对象/CLI 工具列表），与「新建对话」并列成第二个创建入口。用户要求清空这个页面：新建任务只有默认空白聊天一个入口，另加员工对话派发。现 `WorkspaceTaskView.emptyTask` 直接承载 `NewConversationView(embedded: true, boundTask:)`：
+
+- 内嵌模式不套 `NavigationStack`、不画取消/完成工具栏，也不显示「所属任务」选择区；任务页仍是唯一一条导航栏，正文就是输入框和可选的员工/模型/引擎配置。输入、员工候选、草稿继承与未知送达核对全部复用 `NewConversationView` / `NewConversationCoordinator`，没有另写一套创建状态机。
+- `NewConversationBoundTask` 用进入任务时的 id/workspaceId/name/cwd 锁定归属；`pendingConversationTaskAvailable` 在任务列表未加载、分页未包含该任务时仍视为可用，避免误建未分组会话。配置加载时若快照缺该任务，只补一条用于归属校验的任务摘要，创建仍使用进入任务时的真实 cwd/workspace。
+- 归档会话入口保留在空白聊天上方；发送成功后刷新任务并直接打开新会话。`WorkspaceTargetPicker` 的 embedded 分支随之删除。
+
+回归见 `WorkspaceTests.testEmptyTaskHostsTheBoundPendingConversation` 与 `testBoundTaskStaysSelectableBeforeTaskListLoads`。

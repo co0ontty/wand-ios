@@ -739,7 +739,14 @@ enum ContentBlock: Decodable {
             if let preview = try? c.decode(String.self, forKey: .preview) {
                 input["__wandToolPreview"] = .string(preview)
             }
-            if let activity = try? c.decode([String: JSONValue].self, forKey: .activity) {
+            // 时间戳有两个来源：transport 的 activity 摘要与块级 occurredAt。activity 缺时间时
+            // 回落到块级值（对齐 Android 的 use.activity?.occurredAt ?: use.occurredAt），
+            // 否则时间线的时钟列会整列空掉。
+            var activity = (try? c.decode([String: JSONValue].self, forKey: .activity)) ?? [:]
+            if activity["occurredAt"] == nil, let blockOccurredAt = try? c.decode(String.self, forKey: .occurredAt) {
+                activity["occurredAt"] = .string(blockOccurredAt)
+            }
+            if !activity.isEmpty {
                 input["__wandToolActivity"] = .object(activity)
             }
             self = .toolUse(

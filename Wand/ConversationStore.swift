@@ -62,12 +62,14 @@ final class ConversationStore: ObservableObject {
     @Published var filters: [String: String] = [:] { didSet { persist() } }
     @Published var dispatchIntent: Set<String> = []
     @Published var groupDrafts: [String: ConversationGroupDraft] = [:]
+    @Published private(set) var executionPreferences: [String: ConversationExecutionPreference] = [:]
     @Published var creatingPresetID: String?
     @Published private(set) var mutationBusy = false
     private let defaults: UserDefaults
     private let storageKey: String
     private let drafts: SessionDraftStore
     private var generations: [String: Int] = [:]
+    private var executionPreferenceEmployees: [String: String] = [:]
     private var detailAccessOrder: [String] = []
     private var listRevision = 0
     private var active = false
@@ -198,6 +200,23 @@ final class ConversationStore: ObservableObject {
     func draftKey(_ id: String, target: ConversationTarget?) -> String {
         "conversation:" + id + ":" + (target?.taskId ?? "") + ":" + (target?.runId ?? "talk")
     }
+    /// Page-scoped override, owned outside the rebuilt composer view. The employee guard
+    /// retires a stale choice when the conversation is rebound to another employee.
+    func executionPreference(for id: String, employeeID: String?) -> ConversationExecutionPreference? {
+        guard let employeeID, executionPreferenceEmployees[id] == employeeID else { return nil }
+        return executionPreferences[id]
+    }
+    func setExecutionPreference(_ preference: ConversationExecutionPreference?, for id: String, employeeID: String) {
+        if executionPreferenceEmployees[id] != employeeID {
+            executionPreferences[id] = nil
+            executionPreferenceEmployees[id] = employeeID
+        }
+        executionPreferences[id] = preference
+    }
+    func clearExecutionPreference(for id: String) {
+        executionPreferences[id] = nil
+        executionPreferenceEmployees[id] = nil
+    }
     func composer(_ id: String, target: ConversationTarget?) -> ComposerDraftState {
         let key = draftKey(id, target: target); ownedDraftKeys.insert(key)
         let draft = drafts.draft(sessionId: key, api: api)
@@ -288,6 +307,7 @@ final class ConversationStore: ObservableObject {
         listRevision += 1; generations[id] = (generations[id] ?? 0) + 1
         items.removeAll { $0.id == id }; details.removeValue(forKey: id)
         targets.removeValue(forKey: id); filters.removeValue(forKey: id); dispatchIntent.remove(id)
+        clearExecutionPreference(for: id)
         for key in ownedDraftKeys.filter({ $0.hasPrefix("conversation:" + id + ":") }) {
             drafts.remove(sessionId: key, api: api); ownedDraftKeys.remove(key)
             unknownRequests.removeValue(forKey: key); unknownSubmissions.removeValue(forKey: key)

@@ -106,9 +106,15 @@ extension EnvironmentValues {
 struct ChatView: View {
     private let sessionId: String
     private let api: WandAPI
-    /// 工作区任务页已经有系统返回键和任务标题。嵌套时再往导航栏塞 badge / 路径，
-    /// 会和 iOS 26 圆形返回键叠在一起，浅色背景下看起来像残影。
+    /// 会话页自己就是那条栏：悬浮返回/头像/文件/更多，不往系统导航栏塞 badge / 路径，
+    /// 否则会和 iOS 26 圆形返回键叠在一起，浅色背景下看起来像残影。
+    /// 嵌进工作区任务页时由宿主隐藏自己的系统栏，整屏仍只有一条栏；宿主动作经
+    /// `hostActions` 并进这里的「更多」菜单，不因单层化丢入口。
     private let showsNavigationChrome: Bool
+    private let hostActions: [SessionHostAction]
+    /// 宿主（工作区任务页）的任务名：顶栏主标题的真源。独立会话没有归属任务时为 nil，
+    /// 回落到会话自己的标题。
+    private let hostTitle: String?
     private let onCompletionVisible: ((SessionSnapshot) -> Void)?
     @State private var viewVisible = false
     @State private var showProviderPicker = false
@@ -164,8 +170,6 @@ struct ChatView: View {
     private var inputFocused: Bool { get { composerFocus.focused } nonmutating set { composerFocus.focused = newValue } }
     @State private var composerAcknowledged = false
     private var composerEditing: Bool { get { composerFocus.editing } nonmutating set { composerFocus.editing = newValue } }
-    @AppStorage(CatComposerSide.preferenceKey) private var catSideRaw = CatComposerSide.left.rawValue
-    @State private var catDragOffset: CGFloat = 0
     @State private var modelPicker: ModelPickerPresentation?
     @State private var composerChoice: ComposerChoicePresentation?
     @State private var pendingComposerAction: (key: String, lifecycle: Int)?
@@ -174,10 +178,13 @@ struct ChatView: View {
     @State private var sawResponding = false
 
     init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true,
-         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil, sharedStore: ChatStore? = nil) {
+         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil, sharedStore: ChatStore? = nil,
+         hostActions: [SessionHostAction] = [], hostTitle: String? = nil) {
         self.sessionId = sessionId
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
+        self.hostActions = hostActions
+        self.hostTitle = hostTitle
         self.onCompletionVisible = onCompletionVisible
         let chatStore = sharedStore ?? ChatStore(sessionId: sessionId, api: api)
         _store = StateObject(wrappedValue: chatStore)
@@ -199,7 +206,7 @@ struct ChatView: View {
                             .clipped()
                     }
                         .clipped() // Clip the viewport, not just the first message's padding.
-                        .padding(.top, showsNavigationChrome ? identityMetrics.clearance : 0)
+                        .padding(.top, showsNavigationChrome ? identityMetrics.identityClearance : 0)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .onTapGesture { closeComposerActions(); composerFocus.collapse() }
                         .overlay(alignment: .bottom) { toastView }
@@ -228,7 +235,8 @@ struct ChatView: View {
         .overlay(alignment: .top) {
             if showsNavigationChrome {
                 ZStack(alignment: .top) {
-                    TopChatCompanion(side: catSide, dragOffset: catDragOffset, title: visibleIdentityTitle, status: visibleIdentityStatus) { size in companionFace(size: size) }
+                    ChatTopIdentityBar(title: topIdentity.title, subtitle: topIdentity.subtitle,
+                        attention: topAttention, statusText: visibleIdentityStatus)
                     floatingChatControls
                 }
             }
@@ -252,6 +260,15 @@ struct ChatView: View {
                 if store.isResponding { Button("停止当前任务", role: .destructive) { showStopConfirm = true } }
                 Button("查看变更与提交") { showQuickCommit = true }
                     .disabled(gitStatus?.isGit != true)
+                // 宿主（任务模式）已隐藏自己的顶栏，动作挂到这条栏上。
+                if !hostActions.isEmpty {
+                    Section("任务") {
+                        ForEach(hostActions) { item in
+                            Button(item.title, systemImage: item.symbol, action: item.action)
+                                .disabled(!item.isEnabled)
+                        }
+                    }
+                }
             } label: { FloatingChatIcon(symbol: "ellipsis") }
                 .accessibilityLabel("更多会话功能")
                 .accessibilityValue("\(store.displayEmployeeName ?? "当前会话")，\(store.snapshot?.cwd ?? "未选择目录")")
@@ -679,6 +696,11 @@ struct ChatView: View {
                 .onChange(of: store.pendingEscalation != nil) {
                     scrollToActiveTarget(proxy)
                 }
+                // Collapsing an activity window changes the content height without a new
+                // message revision; keep the stick-to-bottom contract in that case too.
+                .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { old, new in
+                    if old != new { scrollToActiveTarget(proxy) }
+                }
         }
     }
 
@@ -866,7 +888,7 @@ struct ChatView: View {
     }
 
     private var shouldShowSubagentShelf: Bool {
-        // 没有子任务时不摆一条点不开的「子 Agent」栏：运行态提示交给输入栏，这里只承接真实子任务。
+        // 没有子任务时不摆一条点不开的「子 Agent」栏：运行态提示交给顶部身份区，这里只承接真实子任务。
         store.isStructured && !subagentActivities.isEmpty
     }
 
@@ -1263,7 +1285,6 @@ struct ChatView: View {
                     HStack {
                         Label(store.pendingEscalation != nil || store.legacyPermissionPrompt != nil ? "等待权限确认" : "查看执行进度", systemImage: "list.bullet.rectangle")
                         Spacer()
-                        if !store.queuedMessages.isEmpty { Text("待发 \(store.queuedMessages.count)") }
                         Image(systemName: "chevron.up")
                     }.font(.caption).frame(minHeight: 44).padding(.horizontal, 16)
                 }.buttonStyle(.plain)
@@ -1325,13 +1346,6 @@ struct ChatView: View {
         }.presentationDetents([.medium, .large])
     }
 
-    private var composerStatus: some View {
-        Text(store.permissionBlocked ? "等待确认" : store.inputSending ? "发送中…" : store.isResponding ? "处理中" : "正在输入")
-            .font(.caption).foregroundStyle(Theme.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityLabel("\(store.displayEmployeeName ?? "员工")的会话状态")
-    }
-
     private var catInputExpanded: Bool {
         catComposerExpanded(editing: composerEditing, focused: inputFocused, keyboard: keyboard.isVisible,
             failed: composerDraft.submissionFailed, unconfirmed: store.unconfirmedInput != nil)
@@ -1339,9 +1353,6 @@ struct ChatView: View {
     @Environment(\.dynamicTypeSize) private var composerTypeSize
     private var composerMaximumHeight: CGFloat {
         max(composerTypeSize.isAccessibilitySize ? 80 : 0, composerMaximumInputHeight(compact: verticalSizeClass == .compact, keyboardVisible: keyboard.isVisible))
-    }
-    private var catStatusVisible: Bool {
-        store.isResponding || store.inputSending || store.permissionBlocked
     }
     @ViewBuilder private var composerQueueAccessory: some View {
             if !store.queuedMessages.isEmpty {
@@ -1394,7 +1405,6 @@ struct ChatView: View {
 
     private var inputBar: some View {
         VStack(spacing: 4) {
-            if catStatusVisible { composerStatus.padding(.horizontal, 16) }
             FocusComposerSurface(expanded: catInputExpanded, hasDraft: !draft.isEmpty || !attachments.attachments.isEmpty,
                 onFocus: focusComposer, editor: { composerInputContent }, add: { composerActionsMenu },
                 send: { sendButton },
@@ -1419,39 +1429,37 @@ struct ChatView: View {
         composerChoice != nil || modelPicker != nil || showDirectoryPicker ||
             attachments.showFileImporter || attachments.showPhotoPicker || serverFileLinks.previewItem != nil
     }
-    private var visibleIdentityTitle: String {
-        if let name = store.displayEmployeeName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
-        return store.displayTitle
+    /// 顶栏身份：主标题是任务名（独立会话回落会话标题），小字是「员工名 · 目录缩写」。
+    /// 头像不再出现在这条栏上，员工身份由小字行承载。
+    private var topIdentity: (title: String, subtitle: String) {
+        chatTopIdentity(taskTitle: hostTitle, sessionTitle: store.displayTitle,
+            employeeName: store.displayEmployeeName ?? store.snapshot?.providerLabel,
+            cwd: store.snapshot?.cwd)
     }
+    private var topAttention: ChatTopAttention {
+        ChatTopAttention.resolve(connected: store.connected,
+            blocked: store.permissionBlocked || store.pendingEscalation != nil,
+            sending: store.inputSending, responding: store.isResponding, status: store.status)
+    }
+    /// 视觉上做减法后，读屏仍播报完整状态。
     private var visibleIdentityStatus: String {
         if !store.connected { return "连接已断开" }
         if store.permissionBlocked || store.pendingEscalation != nil { return "等待你的确认" }
         if store.inputSending { return "正在发送" }
-        if store.isResponding { return "正在执行" }
+        if store.isResponding {
+            return identityWorkStatus(activity: avatarActivity, hasDetailedProgress: hasDetailedProgress)
+        }
         if store.status == "failed" { return "最近一轮失败" }
         if store.status == "stopped" { return "已停止，可继续对话" }
         return "可以继续对话"
     }
-    private func companionFace(size: CGFloat) -> some View {
-        WorkingAvatar(id: store.snapshot?.employeeId ?? sessionId, name: store.displayEmployeeName ?? "员工",
-            avatar: store.displayEmployeeAvatar ?? "", activity: avatarFileActivity(messages: store.messages,
-                executing: store.isResponding && store.status == "running" && !store.permissionBlocked && store.pendingEscalation == nil),
-            thinking: avatarThinking, size: size)
-            .overlay { Color.clear.modifier(catGesture) }
-            .accessibilityAction(named: "切换角色位置") { catSideRaw = catSide == .left ? CatComposerSide.right.rawValue : CatComposerSide.left.rawValue }
+    /// 头像与顶部状态共用同一份读/写活动判定，避免两处各算一次出现分歧。
+    private var avatarActivity: AvatarFileActivity {
+        avatarFileActivity(messages: store.messages, executing: store.isResponding && store.status == "running" &&
+            !store.permissionBlocked && store.pendingEscalation == nil)
     }
-    private var catSide: CatComposerSide { CatComposerSide(rawValue: catSideRaw) ?? .left }
-    private var avatarThinking: Bool {
-        !store.permissionBlocked && store.pendingEscalation == nil &&
-            avatarIsThinking(messages: store.messages, executing: store.isResponding && store.status == "running")
-    }
-    private var catGesture: CatInputGesture {
-        CatInputGesture(onTap: focusComposer,
-            onDrag: { catDragOffset = $0 }, onDrop: { x in
-                catSideRaw = catSide.dropped(translation: x).rawValue
-                catDragOffset = 0
-            }, identityName: visibleIdentityTitle)
-    }
+    /// 待办进度条或子 Agent 状态坞已经在展示细粒度进度时，顶部不再重复一句泛化状态。
+    private var hasDetailedProgress: Bool { !visibleTodos.isEmpty || shouldShowSubagentShelf }
 
     private var inputExpanded: Bool { catInputExpanded }
 
@@ -2781,11 +2789,14 @@ private struct TurnView: View {
     }
 
     /// 上传附件：图片走缩略图、非图片走文件块，整体靠右对齐用户侧。
+    /// 同一气泡内的图片组成一组，全屏后可以左右滑动切换。
     @ViewBuilder private func attachmentsView(_ paths: [String]) -> some View {
+        let images = paths.filter { isImagePath($0) }
         VStack(alignment: .trailing, spacing: 6) {
             ForEach(Array(paths.enumerated()), id: \.offset) { _, path in
                 if let baseURL, isImagePath(path) {
-                    WandImageThumbnail(baseURL: baseURL, path: path)
+                    WandImageThumbnail(baseURL: baseURL, path: path,
+                                       group: images, groupIndex: images.firstIndex(of: path) ?? 0)
                 } else {
                     WandFileChip(path: path)
                 }
@@ -3567,8 +3578,8 @@ private struct BlockView: View {
             } else {
                 if let baseURL = api?.baseURL, !images.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(images.enumerated()), id: \.offset) { _, image in
-                            WandToolImageThumbnail(baseURL: baseURL, source: image)
+                        ForEach(Array(images.enumerated()), id: \.offset) { index, image in
+                            WandToolImageThumbnail(baseURL: baseURL, source: image, group: images, groupIndex: index)
                         }
                     }
                 }
@@ -4091,29 +4102,46 @@ struct ToolUseCard: View {
     }
     private var statusText: String { presentation.state.label }
 
+    /// 图片结果直出：只保留文件名与图片，不再套工具调用卡片。
+    private var imageFigureSources: [String] {
+        guard let result, !result.isError else { return [] }
+        if !result.images.isEmpty { return result.images }
+        if let imagePath { return [imagePath] }
+        return []
+    }
+    private var imageFigureDirectSource: Bool { result?.images.isEmpty == false }
+
     var body: some View {
+        if let baseURL, !imageFigureSources.isEmpty {
+            let sources = imageFigureSources
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array(sources.enumerated()), id: \.offset) { index, source in
+                    WandToolImageFigure(
+                        baseURL: baseURL,
+                        source: source,
+                        name: toolImageDisplayName(
+                            inputPath: imagePath, source: source,
+                            index: index, total: sources.count
+                        ),
+                        directSource: imageFigureDirectSource,
+                        group: sources,
+                        groupIndex: index
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            cardBody
+        }
+    }
+
+    private var cardBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             if let result {
                 ToolPreviewText(text: toolResultPreview(text: result.text, projection: result.projection),
                                 color: result.isError ? Theme.danger : Theme.textSecondary)
                     .padding(.horizontal, 12).padding(.bottom, 10)
-            }
-            // 结果内联图片优先（服务端已归一化），没有时退回 Read 按路径取图；
-            // 两者同时渲染会出现同一张图两个缩略图。
-            if let baseURL, let resultImages = result?.images, !resultImages.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(resultImages.enumerated()), id: \.offset) { _, source in
-                        WandToolImageThumbnail(baseURL: baseURL, source: source)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
-            } else if let imagePath, let baseURL {
-                // Read 读到图片：卡片里常驻内联缩略图（点击放大），对齐 Web。
-                WandImageThumbnail(baseURL: baseURL, path: imagePath)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
             }
             if expanded && hasBody {
                 Divider().overlay(Theme.border.opacity(0.7)).padding(.horizontal, 12)
@@ -4281,8 +4309,8 @@ private struct ToolResultBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if showsInput, let baseURL = api?.baseURL, !fullImages.isEmpty {
-                ForEach(Array(fullImages.enumerated()), id: \.offset) { _, image in
-                    WandToolImageThumbnail(baseURL: baseURL, source: image)
+                ForEach(Array(fullImages.enumerated()), id: \.offset) { index, image in
+                    WandToolImageThumbnail(baseURL: baseURL, source: image, group: fullImages, groupIndex: index)
                 }
             }
             if showsInput {

@@ -253,6 +253,45 @@ import XCTest
         XCTAssertFalse(avatarIsThinking(messages: messages, executing: true))
         XCTAssertFalse(avatarIsThinking(messages: messages, executing: false))
     }
+    /// 无头像的会话身份栏：高度只由两行文字决定，与标题长度无关；随 Dynamic Type 增长但不得超过
+    /// 原头像版占掉的高度；读屏拿到「标题，小字，状态」的完整组合。
+    func testSessionIdentityBarKeepsStableHeightAndFullReadback() {
+        for compact in [false, true] {
+            for width: CGFloat in [320, 402, 768] {
+                for type: DynamicTypeSize in [.large, .accessibility3] {
+                    var heights: [CGFloat] = []
+                    for title in ["修复图片显示", String(repeating: "长", count: 40)] {
+                        let bar = ChatTopIdentityBar(title: title, subtitle: "赛博虎妞 · wand", attention: .running, statusText: "正在读文件")
+                            .environment(\.verticalSizeClass, compact ? .compact : .regular).environment(\.dynamicTypeSize, type)
+                        heights.append(UIHostingController(rootView: bar).sizeThatFits(in: CGSize(width: width, height: 800)).height)
+                    }
+                    XCTAssertEqual(heights[0], heights[1], accuracy: 1, "标题长度不能改变顶栏高度")
+                    XCTAssertGreaterThanOrEqual(heights[0], ChatTopLayout.controlsClearance)
+                    let avatarCompanion = TopChatCompanion(title: "修复图片显示", status: "正在读文件") { size in
+                        Color.clear.frame(width: size, height: size)
+                    }.environment(\.verticalSizeClass, compact ? .compact : .regular).environment(\.dynamicTypeSize, type)
+                    let avatarBar = UIHostingController(rootView: avatarCompanion).sizeThatFits(in: CGSize(width: width, height: 800)).height
+                    XCTAssertLessThanOrEqual(heights[0], avatarBar, "两行文字不能比头像版占更多空间")
+                    if type == .large { XCTAssertEqual(heights[0], 56, accuracy: 1) }
+                }
+            }
+        }
+        XCTAssertEqual(chatTopReadback(title: "修复图片显示", subtitle: "赛博虎妞 · wand", status: "等待你的确认"),
+            "修复图片显示，赛博虎妞 · wand，等待你的确认")
+        XCTAssertEqual(chatTopReadback(title: "修复图片显示", subtitle: "", status: ""), "修复图片显示")
+    }
+
+    /// 身份区只在顶栏控件之间的带子里排布：左边界让开返回键，右边界让开文件与更多按钮，
+    /// 长标题的省略号不会压到可点控件上。
+    func testIdentityBandStaysBetweenTopControls() {
+        for width: CGFloat in [320, 402, 768] {
+            let band = ChatTopLayout.identityBand(width: width)
+            XCTAssertGreaterThanOrEqual(band.width, 48)
+            XCTAssertEqual(band.center - band.width / 2, ChatTopLayout.backInset, accuracy: 0.5)
+            XCTAssertEqual(band.center + band.width / 2, width - ChatTopLayout.actionsInset, accuracy: 0.5)
+        }
+    }
+
     func testFileActivityRetiresErrorsAndUsesLatestCurrentTurn() throws {
         let data = Data(#"[{"role":"user","content":[{"type":"text","text":"test"}]},{"role":"assistant","content":[{"type":"tool_use","id":"r","name":"read","activity":{"kind":"read_file"}},{"type":"tool_use","id":"w","name":"write","activity":{"kind":"edit_file"}},{"type":"tool_result","tool_use_id":"w","content":"failed","is_error":true}]}]"#.utf8)
         let messages = try JSONDecoder().decode([ConversationTurn].self, from: data)

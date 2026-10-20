@@ -64,6 +64,8 @@ final class TaskBoardTests: XCTestCase {
             from: Data(#"{"id":"t-3","title":"旧数据","status":"todo"}"#.utf8)
         )
         XCTAssertNil(missing.workspaceTaskId)
+        XCTAssertEqual(WandBoardStatus.allCases.map(\.rawValue), ["backlog", "todo", "doing", "done"])
+        XCTAssertEqual(WandBoardStatus.backlog.label, "待立项")
 
         // 空白终端的 provider 是 shell/session，不能把内部标识当工具名印在卡片上。
         XCTAssertEqual(wandBoardProviderLabel("shell"), "终端")

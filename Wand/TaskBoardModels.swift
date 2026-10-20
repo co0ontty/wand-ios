@@ -168,10 +168,11 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
 }
 
 enum WandBoardStatus: String, CaseIterable, Identifiable {
-    case todo, doing, done
+    case backlog, todo, doing, done
     var id: String { rawValue }
     var label: String {
         switch self {
+        case .backlog: return "待立项"
         case .todo: return "待办"
         case .doing: return "进行中"
         case .done: return "已完成"
@@ -179,6 +180,7 @@ enum WandBoardStatus: String, CaseIterable, Identifiable {
     }
     var empty: String {
         switch self {
+        case .backlog: return "还没有待立项任务"
         case .todo: return "还没有待办任务"
         case .doing: return "暂无进行中的任务"
         case .done: return "还没有完成的任务"

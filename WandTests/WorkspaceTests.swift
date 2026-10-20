@@ -16,9 +16,40 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "", workspaceName: "").title, "任务")
         XCTAssertEqual(workspaceTaskNavigationChrome(taskName: "修顶栏", workspaceName: "全局").title, "修顶栏")
         XCTAssertNil(workspaceTaskNavigationChrome(taskName: "修顶栏", workspaceName: "全局").subtitle)
-        XCTAssertNil(emptyTaskWorkspaceCaption(""))
-        XCTAssertNil(emptyTaskWorkspaceCaption("全局"))
-        XCTAssertEqual(emptyTaskWorkspaceCaption("wand"), "WAND")
+    }
+
+    /// 空任务不再维护独立的「选择 CLI 工具」页面：直接内嵌绑定当前任务的空白对话。
+    func testEmptyTaskHostsTheBoundPendingConversation() throws {
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Wand/WorkspaceTaskView.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("NewConversationView("))
+        XCTAssertTrue(source.contains("embedded: true"))
+        XCTAssertTrue(source.contains("boundTask: NewConversationBoundTask("))
+        XCTAssertFalse(source.contains("选择 CLI 工具"))
+        XCTAssertFalse(source.contains("WorkspaceTargetPicker(store: store, taskId: task.id, embedded"))
+    }
+
+    /// 内嵌绑定的任务不依赖任务列表：列表未加载或暂未包含它时归属仍然有效，避免误建未分组会话。
+    func testBoundTaskStaysSelectableBeforeTaskListLoads() {
+        XCTAssertTrue(pendingConversationTaskAvailable(boundTaskID: "t1", selectedTaskID: "t1",
+                                                       taskListLoaded: false, existingTaskIDs: []))
+        XCTAssertFalse(pendingConversationTaskAvailable(boundTaskID: "t1", selectedTaskID: "t2",
+                                                        taskListLoaded: false, existingTaskIDs: []))
+        XCTAssertFalse(pendingConversationTaskAvailable(boundTaskID: nil, selectedTaskID: "t1",
+                                                        taskListLoaded: false, existingTaskIDs: ["t1"]))
+        XCTAssertTrue(pendingConversationTaskAvailable(boundTaskID: nil, selectedTaskID: "t1",
+                                                       taskListLoaded: true, existingTaskIDs: ["t1"]))
+    }
+
+    /// 任务模式只允许一条顶栏：会话可见时任务页让位给会话 chrome，加载/切换态仍保留任务栏。
+    func testTaskPageYieldsItsNavigationBarOnlyWhilePresentingASession() {        XCTAssertTrue(taskPresentsSession(presentedSessionID: "s1", visibleSnapshotID: "s1", currentTaskID: "t1", taskID: "t1"))
+        XCTAssertFalse(taskPresentsSession(presentedSessionID: nil, visibleSnapshotID: nil, currentTaskID: "t1", taskID: "t1"),
+                       "没有呈现会话时不能把任务栏也藏掉")
+        XCTAssertFalse(taskPresentsSession(presentedSessionID: "s1", visibleSnapshotID: nil, currentTaskID: "t1", taskID: "t1"),
+                       "快照还在加载时保留任务栏，避免出现空栏")
+        XCTAssertFalse(taskPresentsSession(presentedSessionID: "s1", visibleSnapshotID: "s1", currentTaskID: "t2", taskID: "t1"),
+                       "切到别的任务时不能沿用上一个任务的让位状态")
     }
 
     func testWorkspaceTaskCreationUsesPendingConversationAndOpensCreatedSession() throws {

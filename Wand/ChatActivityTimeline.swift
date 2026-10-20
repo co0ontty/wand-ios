@@ -13,6 +13,14 @@ func activityPanelHeight(viewportHeight: CGFloat) -> CGFloat {
 func activityShouldAutoExpand(newest: Bool, running: Bool, timelineEnabled: Bool) -> Bool {
     newest && running && timelineEnabled
 }
+/// 与 Android activityTimelineEnabled 同语义：all 一直打开、wifi 仅 Wi-Fi、never 一直折叠。
+func activityTimelineEnabled(mode: String, wifiConnected: Bool) -> Bool {
+    switch mode {
+    case "all": return true
+    case "wifi": return wifiConnected
+    default: return false
+    }
+}
 
 private struct ActivityTimelineRow {
     let position: Int
@@ -82,7 +90,9 @@ struct ActivityFoldCard: View {
             }
         }.joined(separator: "\u{0}")
     }
-    private var automaticTimeline: Bool { timelinePolicyOverride ?? (trafficMode == "all" || network.wifi) }
+    private var automaticTimeline: Bool {
+        timelinePolicyOverride ?? activityTimelineEnabled(mode: trafficMode, wifiConnected: network.wifi)
+    }
     private var summary: String {
         var categories: [String: Set<String>] = [:]
         var seen = Set<String>(), thinking = 0
@@ -112,17 +122,25 @@ struct ActivityFoldCard: View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
                 userToggled = true
-                withAnimation(activityWindowAnimation(reduceMotion)) { expanded.toggle() }
-                if expanded { pinned = running }
+                let next = !expanded
+                withAnimation(activityWindowAnimation(reduceMotion)) { expanded = next }
+                if next { pinned = true }
+                // 对话内手动收放同步全局：打开 = 一直打开，收起 = 一直折叠；
+                // 「仅 Wi-Fi」只在设置里手动选择，不由收放写回。
+                if timelinePolicyOverride == nil {
+                    trafficMode = next ? "all" : "never"
+                }
             } label: {
                 HStack(spacing: 8) {
-                    if let time = rows.last?.occurredAt {
-                        Text(SessionTimeFormatting.chatClock(iso: time)).font(.caption.monospaced()).foregroundStyle(Theme.textSecondary)
-                    }
                     ZStack {
                         ProgressView().controlSize(.mini).tint(Theme.brand).opacity(running && !reduceMotion ? 1 : 0)
                         Circle().fill(running ? Theme.brand : Theme.success).frame(width: 6, height: 6).opacity(running && !reduceMotion ? 0 : 1)
                     }.frame(width: 12, height: 12)
+                    // 摘要点与时间线各行的轨道对齐，时钟紧跟圆点、排在摘要之前，
+                    // 与行内「圆点 → 时钟 → 标题」同序（对齐 Android），左侧不留时间列。
+                    if let time = rows.last?.occurredAt {
+                        Text(SessionTimeFormatting.chatClock(iso: time)).font(.caption2.monospaced()).foregroundStyle(Theme.textMuted).layoutPriority(1)
+                    }
                     Text(summary).font(.caption).foregroundStyle(Theme.textSecondary).frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "chevron.down").font(.caption).rotationEffect(.degrees(expanded ? 180 : 0))
                 }.frame(minHeight: 44).contentShape(Rectangle())
@@ -134,6 +152,7 @@ struct ActivityFoldCard: View {
         .onAppear { if !userToggled { expanded = autoExpanded } }
         .onChange(of: autoExpanded) { _, next in
             if !userToggled { withAnimation(activityWindowAnimation(reduceMotion)) { expanded = next } }
+            if next { pinned = true }
         }
     }
     private var timeline: some View {
@@ -155,9 +174,6 @@ struct ActivityFoldCard: View {
             .onScrollGeometryChange(for: Bool.self) { $0.contentSize.height - ($0.contentOffset.y + $0.containerSize.height) < activityTailPin } action: { _, tail in pinned = tail }
             .onAppear { if pinned { proxy.scrollTo("activity-tail", anchor: .bottom) } }
             .onChange(of: revision) { _, _ in if pinned && inspecting.isEmpty { proxy.scrollTo("activity-tail", anchor: .bottom) } }
-            .overlay(alignment: .bottomTrailing) {
-                if !pinned { Button { pinned = true; proxy.scrollTo("activity-tail", anchor: .bottom) } label: { Image(systemName: "arrow.down").frame(width: 44, height: 44).background(Theme.surface, in: Circle()) }.accessibilityLabel("回到最新调用") }
-            }
         }
     }
 }
@@ -198,6 +214,13 @@ private struct ActivityTimelineEntry: View {
         case .unreturned: return Theme.textMuted
         }
     }
+    /// 时钟只在有真实发生时间时随行内展示；没有时间的条目不预留时间列（对齐 Android）。
+    private var clock: String? {
+        let text = SessionTimeFormatting.chatClock(iso: row.occurredAt)
+        return text.isEmpty ? nil : text
+    }
+    /// 圆点轨道槽宽度：竖线与展开详情都以它为基准，正文从轨道右侧开始占满剩余宽度。
+    private static let railWidth: CGFloat = 12
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
@@ -205,20 +228,27 @@ private struct ActivityTimelineEntry: View {
                 onInspection(expanded)
             } label: {
                 HStack(alignment: .top, spacing: 8) {
-                    Text(SessionTimeFormatting.chatClock(iso: row.occurredAt)).font(.caption.monospaced()).foregroundStyle(Theme.textSecondary).frame(width: 64, alignment: .leading)
-                    Circle().fill(statusColor).frame(width: 6, height: 6).padding(.top, 6)
+                    Circle().fill(statusColor).frame(width: 6, height: 6)
+                        .frame(width: Self.railWidth, height: 12).padding(.top, 2)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(label).font(.caption.weight(.semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                        HStack(spacing: 6) {
+                            if let clock {
+                                Text(clock).font(.caption2.monospaced()).foregroundStyle(Theme.textMuted)
+                                    .layoutPriority(1)
+                            }
+                            Text(label).font(.caption.weight(.semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
                         Text(String(preview.prefix(400))).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(thinking != nil ? 1 : 2)
                     }.frame(maxWidth: .infinity, alignment: .leading)
-                    Image(systemName: "chevron.down").font(.caption).rotationEffect(.degrees(expanded ? 180 : 0))
+                    Image(systemName: "chevron.down").font(.caption).rotationEffect(.degrees(expanded ? 180 : 0)).padding(.top, 2)
                 }.frame(minHeight: thinking != nil ? 44 : 78, alignment: .topLeading).padding(.vertical, 8).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel(label).accessibilityValue(state.label + (expanded ? "，已展开" : "，已收起"))
             if expanded {
-                if let thinking { Text(thinking.isEmpty ? "思考内容尚未到达。" : thinking).font(.subheadline).textSelection(.enabled).padding(.leading, 78) }
-                else { ActivityTimelineToolDetail(item: row.item, baseURL: baseURL).padding(.leading, 78) }
+                if let thinking { Text(thinking.isEmpty ? "思考内容尚未到达。" : thinking).font(.subheadline).textSelection(.enabled).padding(.leading, Self.railWidth + 8) }
+                else { ActivityTimelineToolDetail(item: row.item, baseURL: baseURL).padding(.leading, Self.railWidth + 8) }
             }
-        }.overlay(alignment: .leading) { Rectangle().fill(Theme.border).frame(width: 1).offset(x: 75).allowsHitTesting(false) }
+        }.overlay(alignment: .leading) { Rectangle().fill(Theme.border).frame(width: 1).offset(x: Self.railWidth / 2).allowsHitTesting(false) }
         .onDisappear { onInspection(false) }
     }
 }

@@ -234,14 +234,18 @@ struct SettingsView: View {
             .padding(.vertical, 6)
             Toggle("触感反馈", isOn: $hapticEnabled)
             Picker("实时工具时间线", selection: $trafficTimelineMode) {
-                Text("仅 Wi-Fi 自动展开").tag("wifi")
-                Text("所有网络自动展开").tag("all")
+                Text("仅 Wi-Fi").tag("wifi")
+                Text("一直打开").tag("all")
+                Text("一直折叠").tag("never")
             }
                 .tint(Theme.brand)
         } header: {
             Text("外观与反馈")
         } footer: {
-            Text("选择明亮、黑暗，或跟随 iOS 系统外观。")
+            VStack(alignment: .leading, spacing: 4) {
+                Text("选择明亮、黑暗，或跟随 iOS 系统外观。")
+                Text("实时工具时间线：仅 Wi-Fi 时自动展开，或一直打开 / 一直折叠；在对话里手动收放会同步这里的开关。")
+            }
         }
     }
 

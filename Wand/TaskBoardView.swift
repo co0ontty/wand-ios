@@ -345,7 +345,7 @@ struct TaskBoardView: View {
 
             if swipedTaskId == nil {
                 Button {
-                    openCreate("todo")
+                    openCreate("backlog")
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 22, weight: .semibold))
@@ -416,7 +416,7 @@ struct TaskBoardView: View {
 
             HStack(spacing: 6) {
                 ForEach(
-                    [("", "全部"), ("todo", "待办"), ("doing", "进行中"), ("done", "已完成"), ("archived", "归档")],
+                    [("", "全部"), ("backlog", "待立项"), ("todo", "待办"), ("doing", "进行中"), ("done", "已完成"), ("archived", "归档")],
                     id: \.0
                 ) { value, label in
                     let active = statusFilter == value
@@ -533,7 +533,7 @@ struct TaskBoardView: View {
             Text(query.isEmpty && statusFilter.isEmpty ? "点右下角 +，把事情做完。" : "换个筛选条件，或新建一条任务。")
                 .font(.wand(size: 13))
                 .foregroundColor(Theme.textMuted)
-            Button("新建任务", action: { openCreate("todo") })
+            Button("新建任务", action: { openCreate("backlog") })
                 .buttonStyle(WandPrimaryButtonStyle())
                 .frame(maxWidth: 180)
                 .padding(.top, 4)

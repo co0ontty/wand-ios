@@ -84,21 +84,36 @@ extension Notification.Name {
     static let wandBeginSessionSelection = Notification.Name("wandBeginSessionSelection")
 }
 
+/// 宿主页面（任务模式）交给会话的动作。会话可见时宿主不再叠第二条顶栏，
+/// 这些动作并进会话自己的「更多」菜单，保持一条栏且不丢入口。
+struct SessionHostAction: Identifiable {
+    let id: String
+    let title: String
+    let symbol: String
+    var isEnabled = true
+    let action: () -> Void
+}
+
 struct SessionDestinationView: View {
     let session: SessionSnapshot
     let api: WandAPI
     var showsNavigationChrome: Bool = true
     var onCompletionVisible: ((SessionSnapshot) -> Void)? = nil
     var sharedChatStore: ChatStore? = nil
+    var hostActions: [SessionHostAction] = []
+    /// 归属工作区任务的任务名，会话顶栏主标题的真源；独立会话不传，回落会话标题。
+    var hostTitle: String? = nil
 
     @ViewBuilder var body: some View {
         Group {
             if session.isStructured {
                 ChatView(sessionId: session.id, api: api, showsNavigationChrome: showsNavigationChrome,
-                         onCompletionVisible: onCompletionVisible, sharedStore: sharedChatStore)
+                         onCompletionVisible: onCompletionVisible, sharedStore: sharedChatStore,
+                         hostActions: hostActions, hostTitle: hostTitle)
             } else {
                 PtySessionView(session: session, api: api, showsNavigationChrome: showsNavigationChrome,
-                               onCompletionVisible: onCompletionVisible)
+                               onCompletionVisible: onCompletionVisible, hostActions: hostActions,
+                               hostTitle: hostTitle)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -112,6 +127,8 @@ private struct PtySessionView: View {
     let api: WandAPI
     let showsNavigationChrome: Bool
     let onCompletionVisible: ((SessionSnapshot) -> Void)?
+    let hostActions: [SessionHostAction]
+    let hostTitle: String?
     @State private var viewVisible = false
 
     @StateObject private var store: ChatStore
@@ -141,11 +158,14 @@ private struct PtySessionView: View {
     }
 
     init(session: SessionSnapshot, api: WandAPI, showsNavigationChrome: Bool = true,
-         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil) {
+         onCompletionVisible: ((SessionSnapshot) -> Void)? = nil, hostActions: [SessionHostAction] = [],
+         hostTitle: String? = nil) {
         self.session = session
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
         self.onCompletionVisible = onCompletionVisible
+        self.hostActions = hostActions
+        self.hostTitle = hostTitle
         let chatStore = ChatStore(sessionId: session.id, api: api)
         _store = StateObject(wrappedValue: chatStore)
         _terminal = StateObject(wrappedValue: PtyTerminalStore(sessionId: session.id, api: api))
@@ -196,6 +216,20 @@ private struct PtySessionView: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 GitChangesToolbarButton(status: gitStatus, phase: quickCommitFeedback.phase) {
                     showQuickCommit = true
+                }
+            }
+            // 任务模式隐藏了宿主顶栏，任务动作并进这条栏。
+            if !hostActions.isEmpty {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        Section("任务") {
+                            ForEach(hostActions) { item in
+                                Button(item.title, systemImage: item.symbol, action: item.action)
+                                    .disabled(!item.isEnabled)
+                            }
+                        }
+                    } label: { Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 44) }
+                        .accessibilityLabel("任务操作")
                 }
             }
         }
@@ -818,35 +852,52 @@ private struct PtySessionView: View {
         }
     }
 
-    private var titleStatus: some View {
-        HStack(spacing: 8) {
-            let provider = store.snapshot?.provider ?? session.provider
-            // 与 Android 一致：透明底，只展示品牌 logo。
-            if let employeeId = store.snapshot?.employeeId ?? session.employeeId {
-                ContactAvatar(id: employeeId, avatar: store.displayEmployeeAvatar ?? session.employeeAvatar ?? "",
-                              provider: provider, size: 40, name: store.displayEmployeeName ?? "", floating: true)
-            } else {
-                BrandLogo(provider: provider, color: Color.white.opacity(0.9), onDark: true)
-                .frame(width: 18, height: 18)
-                .frame(width: 26, height: 26)
+    @ViewBuilder private var titleStatus: some View {
+        let identity = chatTopIdentity(taskTitle: hostTitle, sessionTitle: store.displayTitle,
+            employeeName: store.displayEmployeeName ?? store.snapshot?.providerLabel ?? session.employeeName,
+            cwd: store.snapshot?.cwd ?? session.cwd)
+        let attention = ChatTopAttention.resolve(connected: store.connected,
+            blocked: store.permissionBlocked || store.pendingEscalation != nil,
+            sending: store.inputSending, responding: store.isResponding, status: store.status)
+        HStack(alignment: .center, spacing: 6) {
+            // 与结构化会话顶栏同语义：不放头像，主标题是任务名，小字是「员工名 · 目录缩写」，
+            // 运行与异常只以一个状态点呈现。
+            if attention != .quiet {
+                Circle().fill(attention.color).frame(width: 6, height: 6)
+                    .topicTitleRhythm(attention == .running)
+                    .accessibilityHidden(true)
             }
-            VStack(spacing: 0) {
-                Text(store.displayTitle)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(identity.title)
                     .font(.wand(size: 13, weight: .semibold))
                     .foregroundColor(Color.white.opacity(0.88))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: 175)
+                    .frame(maxWidth: 210, alignment: .leading)
                     .topicTitleRhythm(store.titleGenerating)
-                if let cwd = session.cwd, !cwd.isEmpty {
-                    WandPathRevealText(path: cwd, fontSize: 9, color: Color.white.opacity(0.58))
-                        .frame(width: 175)
+                if !identity.subtitle.isEmpty {
+                    Text(identity.subtitle)
+                        .font(.wand(size: 9))
+                        .foregroundColor(Color.white.opacity(0.58))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 210, alignment: .leading)
                 }
             }
         }
+        .frame(maxWidth: .infinity)
         .shadow(color: Color.black.opacity(0.26), radius: 3, x: 0, y: 1)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(store.displayEmployeeName ?? store.snapshot?.providerLabel ?? session.providerLabel)，\(store.displayTitle)")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(chatTopReadback(title: identity.title, subtitle: identity.subtitle, status: topStatusText))
+    }
+
+    /// 终端会话的状态文案只给读屏播报，视觉由状态点与底部输入区承担。
+    private var topStatusText: String {
+        if !store.connected { return "连接已断开" }
+        if store.permissionBlocked || store.pendingEscalation != nil { return "等待你的确认" }
+        if store.inputSending { return "正在发送" }
+        if store.isResponding { return "正在处理" }
+        return "可以继续对话"
     }
 }
 

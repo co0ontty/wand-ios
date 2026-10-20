@@ -505,7 +505,10 @@ struct ConversationDetailView: View {
             }
         }
         .task(id: id) { store.select(id); await store.load(id) }
-        .onDisappear { inviting = false; composerFocus.collapse(); messageLinks.cancel(); scrollScheduler.cancel() }
+        .onDisappear {
+            inviting = false; composerFocus.collapse(); messageLinks.cancel(); scrollScheduler.cancel()
+            store.clearExecutionPreference(for: id)
+        }
         .animation(reduced ? nil : WandMotion.stateSwap, value: members)
         .animation(reduced ? nil : WandMotion.stateSwap, value: tasks)
         .animation(reduced ? nil : WandMotion.stateSwap, value: inviting)
@@ -563,6 +566,11 @@ struct ConversationDetailView: View {
             }
             .onChange(of: messages.map(\.renderRevision)) { _, _ in
                 scrollToTail(proxy)
+            }
+            // Expanding or collapsing an activity window changes the content height without
+            // changing the message revision, so pinned follow must not depend on new messages.
+            .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { old, new in
+                if old != new { scrollToTail(proxy) }
             }
             .onChange(of: scrollPinned) { _, pinned in if !pinned { scrollScheduler.cancel() } }
             .onChange(of: userScrolling) { _, scrolling in if scrolling { scrollScheduler.cancel() } }
@@ -725,10 +733,6 @@ private struct ConversationComposerView: View {
     @State private var height: CGFloat = 36
     @State private var workspaceID = ""
     @State private var cwd = ""
-    @State private var executionPreference: ConversationExecutionPreference?
-    @State private var modelCatalog: ModelsResponse?
-    @State private var modelCatalogLoading = false
-    @State private var modelCatalogError: String?
     @State private var notice: String?
     @State private var draftConsumer = UUID()
     @State private var visible = false
@@ -743,68 +747,6 @@ private struct ConversationComposerView: View {
     private var dispatch: Bool { store.dispatchIntent.contains(id) }
     private var employee: SiliconEmployee? { store.employees.first { $0.id == detail.peerEmployeeId } }
     private var preferenceEligible: Bool { detail.kind == "dm" && target == nil && !dispatch }
-    private var defaultPreference: ConversationExecutionPreference? {
-        guard let candidate = employee?.agents.first else { return nil }
-        return ConversationExecutionPreference(
-            provider: candidate.provider,
-            engine: candidate.engine,
-            model: candidate.model,
-            thinkingEffort: candidate.thinkingEffort
-        )
-    }
-    private var effectivePreference: ConversationExecutionPreference? { executionPreference ?? defaultPreference }
-    private var preferenceTool: WandAgentTool? {
-        guard let preference = effectivePreference else { return nil }
-        return WandAgentTool(provider: preference.provider, engine: preference.engine)
-    }
-    private var preferenceProvider: WandProvider { preferenceTool?.provider ?? .claude }
-    private var preferenceModels: [ModelInfo] { modelCatalog?.models(for: preferenceProvider) ?? [] }
-    private var preferenceDefaultModel: String { modelCatalog?.defaultModelId(for: preferenceProvider.rawValue) ?? "" }
-    private var preferenceThinkingOptions: [ThinkingEffortOption] {
-        thinkingEffortOptions(provider: preferenceProvider.rawValue, selectedModel: effectivePreference?.model,
-            defaultModel: preferenceDefaultModel, models: preferenceModels,
-            providerEfforts: modelCatalog?.thinkingEfforts(for: preferenceProvider.rawValue) ?? [])
-    }
-    private var preferenceToolTitle: String {
-        guard let tool = preferenceTool else { return "员工默认" }
-        if tool == .pi { return "Pi CLI" }
-        return tool.title
-    }
-    private var preferenceLabel: String {
-        guard let preference = effectivePreference, preferenceTool != nil else { return "员工默认" }
-        let model = preference.model == "default" ? "默认模型" : preference.model
-        return "\(preferenceToolTitle) · \(model) · \(composerThinkingName(preference.thinkingEffort))"
-    }
-    private func updatePreference(provider: String? = nil, engine: String? = nil, model: String? = nil, thinking: String? = nil) {
-        guard let current = effectivePreference else { return }
-        let nextProvider = provider ?? current.provider
-        let nextEngine = provider == nil ? current.engine : engine
-        let nextModel = model ?? current.model
-        var nextThinking = thinking ?? current.thinkingEffort
-        if let model, provider == nil, model != "default",
-           let options = dynamicThinkingEffortOptions(provider: nextProvider, selectedModel: model,
-                defaultModel: preferenceDefaultModel, models: preferenceModels,
-                providerEfforts: modelCatalog?.thinkingEfforts(for: nextProvider) ?? []),
-           !options.contains(where: { $0.id == nextThinking }) {
-            nextThinking = "off"
-        }
-        executionPreference = ConversationExecutionPreference(
-            provider: nextProvider, engine: nextEngine, model: nextModel, thinkingEffort: nextThinking
-        )
-    }
-    private func loadPreferenceModels() {
-        guard modelCatalog == nil, !modelCatalogLoading else { return }
-        modelCatalogLoading = true
-        modelCatalogError = nil
-        Task {
-            defer { modelCatalogLoading = false }
-            do {
-                modelCatalog = try await store.api.models()
-            } catch {
-                modelCatalogError = "模型目录加载失败：\(error.localizedDescription)"
-            }
-        }
-    }
     private var run: ContactRunDetail? { detail.runDetails.first { $0.run.id == target?.runId } }
     private var execution: ChatStore? { (run?.run.chatSessionId ?? detail.communicationSessionId).map { store.executionStore($0) } }
     private var running: Bool { target != nil ? ["running", "awaiting_approval", "waiting_user"].contains(run?.run.status ?? "") : execution?.isResponding == true }
@@ -852,70 +794,8 @@ private struct ConversationComposerView: View {
                             onSend: send, onStop: { if action.canSubmit { stopConfirm = true } })
                 }, settings: {
                     if preferenceEligible, let employee, !employee.agents.isEmpty {
-                        HStack(spacing: 8) {
-                            Menu {
-                                Section("执行工具") {
-                                    ForEach(WandAgentTool.allCases) { tool in
-                                        Button {
-                                            updatePreference(provider: tool.provider.rawValue, engine: tool.engine,
-                                                model: "default", thinking: "off")
-                                            loadPreferenceModels()
-                                        } label: {
-                                            let title = tool == .pi ? "Pi CLI" : tool.title
-                                            if preferenceTool == tool { Label(title, systemImage: "checkmark") }
-                                            else { Text(title) }
-                                        }
-                                    }
-                                }
-                                if preferenceTool != nil {
-                                    Section("模型") {
-                                        Button {
-                                            updatePreference(model: "default")
-                                        } label: {
-                                            if effectivePreference?.model == "default" { Label("默认模型", systemImage: "checkmark") }
-                                            else { Text("默认模型") }
-                                        }
-                                        if modelCatalogLoading {
-                                            Text("正在加载模型目录…")
-                                        } else if let modelCatalogError {
-                                            Text(modelCatalogError)
-                                            Button("重试加载模型目录") { modelCatalog = nil; loadPreferenceModels() }
-                                        } else {
-                                            ForEach(preferenceModels.filter { $0.id != "default" }) { model in
-                                                Button {
-                                                    updatePreference(model: model.id)
-                                                } label: {
-                                                    if effectivePreference?.model == model.id { Label(model.label, systemImage: "checkmark") }
-                                                    else { Text(model.label) }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Section("思考深度") {
-                                        ForEach(preferenceThinkingOptions) { option in
-                                            Button {
-                                                updatePreference(thinking: option.id)
-                                            } label: {
-                                                if effectivePreference?.thinkingEffort == option.id { Label(option.menuLabel, systemImage: "checkmark") }
-                                                else { Text(option.menuLabel) }
-                                            }
-                                        }
-                                    }
-                                    Button("刷新模型目录") { modelCatalog = nil; loadPreferenceModels() }
-                                }
-                            } label: {
-                                ComposerSettingLabel(title: preferenceLabel)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("本页执行配置")
-                            .accessibilityHint("临时选择执行工具、模型和思考深度，不修改员工定义")
-                            .onAppear(perform: loadPreferenceModels)
-                            if executionPreference != nil {
-                                Button("恢复员工默认") { executionPreference = nil }
-                                    .font(.caption)
-                                    .accessibilityIdentifier("dm-execution-reset")
-                            }
-                        }
+                        ConversationExecutionSettings(store: store, conversationID: id, employee: employee, focus: focus,
+                            disabled: composerPhase == .sending || attachments.isUploading || store.hasUnknown(id, target: target))
                     } else if let execution, !dispatch, target != nil || detail.kind == "group" {
                         SessionComposerSettings(store: execution, focus: focus)
                     } else {
@@ -929,14 +809,10 @@ private struct ConversationComposerView: View {
                     turnRunning: running && !dispatch, hasDraft: hasComposerDraft).slotCount)
         }
         .onAppear { if !visible { draft.acquire(draftConsumer) }; visible = true; attachments.setToastHandler { notice = $0 } }
-        .onDisappear { executionPreference = nil; closeComposerActions(); contextExpanded = false; if visible { draft.release(draftConsumer) }; visible = false }
+        .onDisappear { closeComposerActions(); contextExpanded = false; if visible { draft.release(draftConsumer) }; visible = false }
         .animation(reduced ? nil : WandMotion.expansion, value: contextExpanded)
         .animation(reduced ? nil : WandMotion.expansion, value: composerActionsOpen)
-        .onChange(of: target?.runId) { _, _ in executionPreference = nil; closeComposerActions(); contextExpanded = false }
-        .onChange(of: target?.taskId) { _, _ in executionPreference = nil }
-        .onChange(of: detail.peerEmployeeId) { _, _ in executionPreference = nil }
-        .onChange(of: dispatch) { _, active in if active { executionPreference = nil } }
-        .onChange(of: id) { _, _ in executionPreference = nil }
+        .onChange(of: target?.runId) { _, _ in closeComposerActions(); contextExpanded = false }
         .onChange(of: focus.editing) { _, editing in if !editing { closeComposerActions() } }
         .onChange(of: store.filters[id]) { _, _ in closeComposerActions(); contextExpanded = false }
         .onKeyPress(.escape) { if composerActionsOpen { closeComposerActions(); return .handled }; if contextExpanded { contextExpanded = false; return .handled }; return .ignored }
@@ -1036,12 +912,171 @@ private struct ConversationComposerView: View {
         closeComposerActions()
         guard !composing else { return }
         store.send(id, target: target, dispatch: dispatch, workspaceID: workspaceID, cwd: cwd,
-                   executionPreference: preferenceEligible ? executionPreference : nil)
+                   executionPreference: preferenceEligible ? store.executionPreference(for: id, employeeID: detail.peerEmployeeId) : nil)
         contextExpanded = false
     }
     private func perform(_ name: String) {
         guard let target else { return }
         action.submit({ try await store.service.conversationPost(path: "/api/conversations/" + store.api.percentEncodePathComponent(id) + "/actions", body: ["target": target.body, "action": name]) }, accepted: { _ in Task { await store.load(id) } })
+    }
+}
+
+/// DM-only, page-scoped override of the employee's first candidate. Mirrors Android's
+/// three separate pickers; the selection lives in ConversationStore so composer rebuilds,
+/// focus changes and polling cannot silently reset it.
+private struct ConversationExecutionSettings: View {
+    @ObservedObject var store: ConversationStore
+    let conversationID: String
+    let employee: SiliconEmployee
+    @ObservedObject var focus: ComposerFocusController
+    var disabled = false
+    @State private var picker: Picker?
+    @State private var catalog: ModelsResponse?
+    @State private var loading = false
+    @State private var loadError: String?
+    @State private var requestedCatalog = false
+
+    private enum Picker: String, Identifiable {
+        case tool, model, thinking
+        var id: String { rawValue }
+    }
+    private var preference: ConversationExecutionPreference? {
+        store.executionPreference(for: conversationID, employeeID: employee.id)
+    }
+    private var defaultPreference: ConversationExecutionPreference? {
+        guard let candidate = employee.agents.first else { return nil }
+        return ConversationExecutionPreference(
+            provider: candidate.provider,
+            engine: candidate.engine,
+            model: candidate.model,
+            thinkingEffort: candidate.thinkingEffort
+        )
+    }
+    private var effective: ConversationExecutionPreference? { preference ?? defaultPreference }
+    private var tool: WandAgentTool? {
+        effective.map { WandAgentTool(provider: $0.provider, engine: $0.engine) }
+    }
+    private var provider: WandProvider { tool?.provider ?? .claude }
+    private var models: [ModelInfo] { catalog?.models(for: provider) ?? [] }
+    private var defaultModelID: String { catalog?.defaultModelId(for: provider.rawValue) ?? "" }
+    private var thinkingOptions: [ThinkingEffortOption] {
+        thinkingEffortOptions(provider: provider.rawValue, selectedModel: effective?.model,
+            defaultModel: defaultModelID, models: models,
+            providerEfforts: catalog?.thinkingEfforts(for: provider.rawValue) ?? [])
+    }
+    private var toolLabel: String { tool.map(toolTitle) ?? "员工默认" }
+    private var selectedModelID: String {
+        let model = effective?.model ?? ""
+        return model.isEmpty ? "default" : model
+    }
+    private var modelLabel: String {
+        guard selectedModelID != "default" else { return "默认模型" }
+        return models.first { $0.id == selectedModelID }?.label ?? selectedModelID
+    }
+    private var thinkingLabel: String {
+        thinkingOptions.first { $0.id == effective?.thinkingEffort }?.label ?? "自动"
+    }
+    private func toolTitle(_ tool: WandAgentTool) -> String { tool == .pi ? "Pi CLI" : tool.title }
+    var body: some View {
+        HStack(spacing: 4) {
+            ComposerSettingsStrip(model: modelLabel, mode: toolLabel, thinking: thinkingLabel,
+                onModel: { open(.model) }, onMode: { open(.tool) }, onThinking: { open(.thinking) },
+                modeName: "执行工具", modeSymbol: "wrench.and.screwdriver")
+            if preference != nil {
+                Button {
+                    store.setExecutionPreference(nil, for: conversationID, employeeID: employee.id)
+                } label: {
+                    Image(systemName: "arrow.counterclockwise").font(.system(size: 15))
+                        .frame(width: 44, height: 48).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(Theme.textSecondary)
+                .accessibilityLabel("恢复员工默认")
+                .accessibilityHint("清除本页对执行工具、模型和思考深度的临时覆盖")
+                .accessibilityIdentifier("dm-execution-reset")
+            }
+        }
+        .disabled(disabled)
+        .sheet(item: $picker, onDismiss: { focus.resume("settings") }) { selection in
+            sheet(selection)
+        }
+        .onAppear { loadModels() }
+    }
+    private func open(_ selection: Picker) {
+        focus.borrow("settings", open: true); picker = selection
+    }
+    @ViewBuilder private func sheet(_ selection: Picker) -> some View {
+        switch selection {
+        case .tool:
+            SearchableChoiceSheet(title: "本页执行工具", sections: [
+                SearchableChoiceSection(id: "tool",
+                    items: WandAgentTool.allCases.map { SearchableChoiceItem(id: $0.rawValue, label: toolTitle($0)) },
+                    selectedId: tool?.rawValue ?? ""),
+            ]) { _, value in
+                guard let tool = WandAgentTool(rawValue: value) else { return }
+                update(provider: tool.provider.rawValue, engine: tool.engine, model: "default", thinking: "off")
+            }
+        case .model:
+            SearchableChoiceSheet(title: "本页模型", sections: [
+                SearchableChoiceSection(id: "model", items: modelItems, selectedId: selectedModelID, searchable: true),
+            ], notice: loading ? "正在加载模型目录…" : loadError,
+               onRetry: loadError == nil ? nil : { reloadModels() }) { _, value in
+                update(model: value)
+            }
+        case .thinking:
+            SearchableChoiceSheet(title: "本页思考深度", sections: [
+                SearchableChoiceSection(id: "thinking",
+                    items: thinkingOptions.map { SearchableChoiceItem(id: $0.id, label: $0.menuLabel) },
+                    selectedId: effective?.thinkingEffort ?? "off"),
+            ]) { _, value in
+                update(thinking: value)
+            }
+        }
+    }
+    private var modelItems: [SearchableChoiceItem] {
+        var items = [SearchableChoiceItem(id: "default", label: "默认模型")]
+        items += models.filter { $0.id != "default" }.map { SearchableChoiceItem(id: $0.id, label: $0.label) }
+        if selectedModelID != "default", !items.contains(where: { $0.id == selectedModelID }) {
+            items.append(SearchableChoiceItem(id: selectedModelID, label: selectedModelID))
+        }
+        return items
+    }
+    private func update(provider nextProvider: String? = nil, engine nextEngine: String? = nil,
+                        model nextModel: String? = nil, thinking nextThinking: String? = nil) {
+        guard let current = effective else { return }
+        let provider = nextProvider ?? current.provider
+        let engine = nextProvider == nil ? current.engine : nextEngine
+        let model = nextModel ?? current.model
+        var thinking = nextThinking ?? current.thinkingEffort
+        if nextModel != nil, nextProvider == nil, thinking != "off",
+           let options = dynamicThinkingEffortOptions(provider: provider, selectedModel: model,
+                defaultModel: defaultModelID, models: models,
+                providerEfforts: catalog?.thinkingEfforts(for: provider) ?? []),
+           !options.contains(where: { $0.id == thinking }) {
+            thinking = "off"
+        }
+        store.setExecutionPreference(ConversationExecutionPreference(
+            provider: provider, engine: engine, model: model, thinkingEffort: thinking
+        ), for: conversationID, employeeID: employee.id)
+    }
+    private func loadModels(force: Bool = false) {
+        guard (force || !requestedCatalog), !loading else { return }
+        requestedCatalog = true
+        loading = true
+        loadError = nil
+        Task {
+            do {
+                let value = try await store.api.models()
+                guard !Task.isCancelled else { return }
+                catalog = value
+            } catch {
+                if !Task.isCancelled { loadError = "模型目录加载失败：\(error.localizedDescription)" }
+            }
+            loading = false
+        }
+    }
+    private func reloadModels() {
+        guard !loading else { return }
+        loadModels(force: true)
     }
 }
 

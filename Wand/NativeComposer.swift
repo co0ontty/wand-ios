@@ -345,7 +345,7 @@ struct FloatingChatControls<Actions: View>: View {
                 .buttonStyle(.plain).accessibilityLabel("返回会话列表")
             Spacer(minLength: 0)
             actions()
-        }.padding(.horizontal, 12).padding(.top, ChatTopLayout.controlRowInset)
+        }.padding(.horizontal, ChatTopLayout.horizontalInset).padding(.top, ChatTopLayout.controlRowInset)
     }
 }
 

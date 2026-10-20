@@ -271,6 +271,31 @@ final class CurrentAndroidParityTests: XCTestCase {
         let target = ConversationTarget(taskId: "task", runId: "run")
         XCTAssertNil(conversationMessageBody(input: "work", target: target, cwd: nil, executionPreference: preference)["executionPreference"])
     }
+    func testExecutionPreferenceOutlivesComposerRebuildsAndFollowsEmployeeBinding() {
+        let store = ConversationStore(api: api(), service: ConversationFake(), drafts: SessionDraftStore(), defaults: defaults())
+        let first = ConversationExecutionPreference(provider: "claude", engine: nil, model: "model-a", thinkingEffort: "high")
+        store.setExecutionPreference(first, for: "dm_e", employeeID: "e1")
+        XCTAssertEqual(store.executionPreference(for: "dm_e", employeeID: "e1"), first)
+        XCTAssertNil(store.executionPreference(for: "dm_e", employeeID: "e2"))
+        let second = ConversationExecutionPreference(provider: "pi", engine: "cli", model: "default", thinkingEffort: "off")
+        store.setExecutionPreference(second, for: "dm_e", employeeID: "e2")
+        XCTAssertNil(store.executionPreference(for: "dm_e", employeeID: "e1"))
+        XCTAssertEqual(store.executionPreference(for: "dm_e", employeeID: "e2"), second)
+        store.clearExecutionPreference(for: "dm_e")
+        XCTAssertNil(store.executionPreference(for: "dm_e", employeeID: "e2"))
+    }
+    func testToolImageFigureNamesPreferReadPathThenSourceFile() {
+        XCTAssertEqual(toolImageDisplayName(inputPath: "/tmp/wand-ios-new-12.png",
+                                            source: "/tmp/wand-ios-new-12.png", index: 0, total: 1),
+                       "wand-ios-new-12.png")
+        XCTAssertEqual(toolImageDisplayName(inputPath: nil,
+                                            source: "https://host/api/sessions/s/tool-images/t/0.png?token=1",
+                                            index: 0, total: 1), "0.png")
+        XCTAssertEqual(toolImageDisplayName(inputPath: nil,
+                                            source: "data:image/png;base64,AAAA", index: 0, total: 1), "图片")
+        XCTAssertEqual(toolImageDisplayName(inputPath: nil,
+                                            source: "data:image/png;base64,AAAA", index: 1, total: 2), "图片 2")
+    }
     func testIMSendOwnsFrozenDraftAndAckCannotClearNewerInput() async throws {
         let fake = ConversationFake(); fake.suspendPost = true
         let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults())
@@ -393,6 +418,15 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertTrue(SearchableChoiceItem(id: "active", label: "可选").enabled)
         XCTAssertFalse(SearchableChoiceItem(id: "locked", label: "已固定", enabled: false).enabled)
     }
+    func testActivityTimelineModeMatchesAndroidThreeWayPreference() {
+        XCTAssertTrue(activityTimelineEnabled(mode: "all", wifiConnected: false))
+        XCTAssertTrue(activityTimelineEnabled(mode: "all", wifiConnected: true))
+        XCTAssertFalse(activityTimelineEnabled(mode: "wifi", wifiConnected: false))
+        XCTAssertTrue(activityTimelineEnabled(mode: "wifi", wifiConnected: true))
+        XCTAssertFalse(activityTimelineEnabled(mode: "never", wifiConnected: false))
+        XCTAssertFalse(activityTimelineEnabled(mode: "never", wifiConnected: true))
+        XCTAssertFalse(activityTimelineEnabled(mode: "unknown", wifiConnected: true), "未知档位不能回落到按 Wi-Fi 自动展开")
+    }
     func testActivityAutoExpansionRequiresLatestRunningGroupAndRespectsViewport() {
         for newest in [false, true] { for running in [false, true] { for allowed in [false, true] {
             XCTAssertEqual(activityShouldAutoExpand(newest: newest, running: running, timelineEnabled: allowed), newest && running && allowed)
@@ -401,6 +435,64 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertEqual(activityPanelHeight(viewportHeight: 600), 200)
         XCTAssertEqual(activityPanelHeight(viewportHeight: 1200), 240)
         XCTAssertEqual(activityPanelHeight(viewportHeight: 0), 240)
+    }
+    func testCompanionWorkStatusMatchesAndroidAndLeavesDetailedProgressToActivityArea() {
+        XCTAssertEqual(identityWorkStatus(activity: .idle, hasDetailedProgress: true), "")
+        XCTAssertEqual(identityWorkStatus(activity: .idle, hasDetailedProgress: false), "正在处理")
+        XCTAssertEqual(identityWorkStatus(activity: .reading, hasDetailedProgress: true), "正在读文件")
+        XCTAssertEqual(identityWorkStatus(activity: .writing, hasDetailedProgress: true), "正在写文件")
+    }
+
+    /// 会话顶栏身份：主标题是任务名（独立会话回落会话标题），小字是「员工名 · 目录缩写」；
+    /// 目录只取最后一段，和 macOS SessionHeaderView 的 basename 显示同语义。
+    func testChatTopIdentityUsesTaskNameWithEmployeeAndLeafDirectory() {
+        XCTAssertEqual(abbreviatedDirectory("/Users/co0ontty/Self/vibe_coding/wand"), "wand")
+        XCTAssertEqual(abbreviatedDirectory("/Users/co0ontty/Self/vibe_coding/wand/"), "wand")
+        XCTAssertEqual(abbreviatedDirectory("/"), "")
+        XCTAssertEqual(abbreviatedDirectory("   "), "")
+        let task = chatTopIdentity(taskTitle: " 图片自适应放大 ", sessionTitle: "会话标题",
+            employeeName: "赛博虎妞", cwd: "/Users/co0ontty/Self/vibe_coding/wand")
+        XCTAssertEqual(task.title, "图片自适应放大", "任务名不能被会话标题覆盖")
+        XCTAssertEqual(task.subtitle, "赛博虎妞 · wand")
+        let standalone = chatTopIdentity(taskTitle: "   ", sessionTitle: "会话标题", employeeName: nil, cwd: nil)
+        XCTAssertEqual(standalone.title, "会话标题")
+        XCTAssertEqual(standalone.subtitle, "", "缺项不能留下光秃秃的分隔符")
+        XCTAssertEqual(chatTopIdentity(taskTitle: nil, sessionTitle: "", employeeName: "赛博虎妞", cwd: "/tmp/x").title, "当前会话")
+    }
+
+    /// 状态点由真实状态位判定，不从展示文案反推；异常优先于等待确认，等待确认优先于运行。
+    func testChatTopAttentionFollowsRealSessionState() {
+        XCTAssertEqual(ChatTopAttention.resolve(connected: false, blocked: false, sending: true, responding: true, status: "running"), .fault)
+        XCTAssertEqual(ChatTopAttention.resolve(connected: true, blocked: true, sending: false, responding: false, status: "failed"), .fault)
+        XCTAssertEqual(ChatTopAttention.resolve(connected: true, blocked: true, sending: true, responding: true, status: "running"), .needsYou)
+        XCTAssertEqual(ChatTopAttention.resolve(connected: true, blocked: false, sending: true, responding: false, status: "running"), .running)
+        XCTAssertEqual(ChatTopAttention.resolve(connected: true, blocked: false, sending: false, responding: true, status: "running"), .running)
+        XCTAssertEqual(ChatTopAttention.resolve(connected: true, blocked: false, sending: false, responding: false, status: "stopped"), .quiet)
+    }
+
+    /// 会话页（结构化 + 终端）不再画头像，只保留 IM 私聊的头像版伙伴；两条链路的身份都走
+    /// 同一个 chatTopIdentity，任务名由宿主任务页注入。
+    func testSessionTopBarReplacesAvatarWithTaskIdentity() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let chat = try String(contentsOf: root.appendingPathComponent("Wand/ChatView.swift"), encoding: .utf8)
+        let destination = try String(contentsOf: root.appendingPathComponent("Wand/SessionDestinationView.swift"), encoding: .utf8)
+        let workspace = try String(contentsOf: root.appendingPathComponent("Wand/WorkspaceTaskView.swift"), encoding: .utf8)
+        XCTAssertTrue(chat.contains("ChatTopIdentityBar(title: topIdentity.title"))
+        XCTAssertFalse(chat.contains("TopChatCompanion"), "结构化会话仍在画头像")
+        XCTAssertFalse(chat.contains("companionFace"), "结构化会话残留头像绘制")
+        XCTAssertTrue(chat.contains("chatTopIdentity(taskTitle: hostTitle"))
+        XCTAssertTrue(destination.contains("chatTopIdentity(taskTitle: hostTitle"), "终端顶栏没走同一份身份判定")
+        XCTAssertFalse(destination.contains("ContactAvatar("), "终端顶栏仍在画头像")
+        XCTAssertTrue(workspace.contains("hostTitle: task.name"), "宿主任务名没有注入顶栏")
+    }
+
+    /// 排队条数只由输入栏上方的 QueueBar 承载（Android 也只有「已排队 N 条消息」一处），
+    /// 「查看执行进度」行不再重复一份计数。
+    func testQueuedCountHasSingleOwnerAboveComposer() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let chat = try String(contentsOf: root.appendingPathComponent("Wand/ChatView.swift"), encoding: .utf8)
+        XCTAssertFalse(chat.contains("\"待发 \\(store.queuedMessages.count)\""), "进度行与队列条重复计数")
+        XCTAssertTrue(chat.contains("Text(\"待发送 \\(items.count) 条\")"))
     }
     func testPendingFullToolFetchCannotFabricateSuccessOrEraseKnownResult() throws {
         let pending = try parityDecode(ToolContentResponse.self, #"{"tool_use_id":"t","input":{"query":"full"},"content":"","pending":true,"resultAvailable":false}"#)
@@ -644,7 +736,13 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertTrue(conversation.contains(".environment(\\.serverFileLinkController, messageLinks)"))
         XCTAssertFalse(try source("NativeRootView.swift").contains(".toolbar(.visible, for: .navigationBar)"), "The navigation parent must not override chat's floating chrome")
         XCTAssertTrue(try source("SessionDestinationView.swift").contains(".toolbar(showsNavigationChrome ? .visible : .automatic, for: .navigationBar)"))
-        XCTAssertTrue(try source("WorkspaceTaskView.swift").contains(".toolbar(.visible, for: .navigationBar)"))
+        // 任务模式单层化：会话可见时任务页隐藏自己的系统栏，任务动作改挂会话「更多」菜单。
+        let taskPage = try source("WorkspaceTaskView.swift")
+        XCTAssertTrue(taskPage.contains(".toolbar(presentsSession ? .hidden : .visible, for: .navigationBar)"),
+                      "任务页会话可见时不能再叠第二条顶栏")
+        XCTAssertTrue(taskPage.contains("hostActions: taskActions"))
+        XCTAssertTrue(try source("ChatView.swift").contains("Section(\"任务\")"))
+        XCTAssertTrue(try source("SessionDestinationView.swift").contains("Section(\"任务\")"))
         for name in ["ChatView.swift", "SessionDestinationView.swift", "WorkspaceTaskView.swift", "ConversationViews.swift"] {
             let page = try source(name)
             XCTAssertFalse(page.contains("sessionStrip("), name)
@@ -1011,11 +1109,37 @@ final class CurrentAndroidParityTests: XCTestCase {
     }
 
     func testToolImageLoadingAlwaysHasVisibleGeometry() {
+        // 放大上限只有一处真源，两端同值：横图吃满宽、竖图吃满高，小图不拉伸。
+        XCTAssertEqual(WandImageLayout.thumbnailMaxWidth, 320)
+        XCTAssertEqual(WandImageLayout.thumbnailMaxHeight, 360)
         let host = UIHostingController(rootView: WandToolImageThumbnail(baseURL: parityURL, source: "/api/sessions/sample/tool-images/image.png"))
-        let size = host.sizeThatFits(in: CGSize(width: 240, height: 200))
+        let size = host.sizeThatFits(in: CGSize(width: 420, height: 900))
         XCTAssertGreaterThanOrEqual(size.width, 96)
         XCTAssertGreaterThanOrEqual(size.height, 64)
-        XCTAssertLessThanOrEqual(size.height, 200)
+        XCTAssertLessThanOrEqual(size.width, WandImageLayout.thumbnailMaxWidth)
+        XCTAssertLessThanOrEqual(size.height, WandImageLayout.thumbnailMaxHeight)
+    }
+
+    func testInlineImagesPageWithinTheirGroup() throws {
+        // 起始页钳制：越界与空分组都退回第一张，不崩溃。
+        XCTAssertEqual(wandImageViewerStart(index: 2, count: 3), 2)
+        XCTAssertEqual(wandImageViewerStart(index: 7, count: 3), 2)
+        XCTAssertEqual(wandImageViewerStart(index: -1, count: 3), 0)
+        XCTAssertEqual(wandImageViewerStart(index: 0, count: 0), 0)
+        // 缩略图必须把同组图片交给全屏查看器，才有左右滑动切换。
+        let thumbnail = WandImageThumbnail(baseURL: parityURL, path: "/work/b.png",
+                                           group: ["/work/a.png", "/work/b.png"], groupIndex: 1)
+        XCTAssertEqual(thumbnail.viewerSources, ["/work/a.png", "/work/b.png"])
+        XCTAssertEqual(thumbnail.viewerStart, 1)
+        let single = WandToolImageThumbnail(baseURL: parityURL, source: "/api/sessions/s/tool-images/0")
+        XCTAssertEqual(single.viewerSources, ["/api/sessions/s/tool-images/0"])
+        XCTAssertEqual(single.viewerStart, 0)
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let chat = try String(contentsOf: root.appendingPathComponent("Wand/ChatView.swift"), encoding: .utf8)
+        XCTAssertTrue(chat.contains("group: images, groupIndex: images.firstIndex(of: path) ?? 0"),
+                      "同一气泡的附件图片要作为一组传给查看器")
+        XCTAssertTrue(chat.contains("group: images, groupIndex: index"))
+        XCTAssertTrue(chat.contains("group: fullImages, groupIndex: index"))
     }
 
     func testImageHTTPFailuresExplainDeniedMissingAndTransientStates() {

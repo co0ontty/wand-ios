@@ -43,6 +43,15 @@ struct ChatDesignPreview: View {
                                 .font(.body).padding(12).background(Theme.brandSoft, in: RoundedRectangle(cornerRadius: 16))
                             Text("我会先阅读说明。你可以继续补充要求，附件和草稿都会保留。\n\n发送与停止任务是独立操作；发送状态不明确时先核对会话。").font(.body).lineSpacing(4)
                             Text("离线交互预览 · \(stage)").font(.caption).foregroundStyle(Theme.textSecondary)
+                            if !fixtureImages.isEmpty {
+                                // 生产视图本身：缩略图自适应放大 + 全屏滑动切换。
+                                VStack(alignment: .leading, spacing: 10) {
+                                    ForEach(Array(fixtureImages.enumerated()), id: \.offset) { index, source in
+                                        WandToolImageThumbnail(baseURL: URL(string: "https://127.0.0.1:1")!, source: source,
+                                                               group: fixtureImages, groupIndex: index)
+                                    }
+                                }
+                            }
                         }.padding(16).frame(maxWidth: 760).frame(maxWidth: .infinity)
                     }.clipped().onTapGesture { composerFocus.collapse() }.padding(.top, identityMetrics.clearance)
                     previewComposer.padding(.bottom, keyboard.lift)
@@ -99,13 +108,15 @@ struct ChatDesignPreview: View {
                 }
         }
     }
-    private let stages = ["思考中", "阅读中", "书写中", "流式文本", "右侧阅读", "有稿运行", "仅附件", "空态", "短按文字", "附件", "附件取消", "发送确认", "失败保稿", "未知送达", "收起草稿"]
+    private let stages = ["思考中", "阅读中", "书写中", "流式文本", "右侧阅读", "有稿运行", "仅附件", "图片组", "空态", "短按文字", "附件", "附件取消", "发送确认", "失败保稿", "未知送达", "收起草稿"]
+    /// 三种比例的离线图片，验证缩略图自适应上限与全屏查看器翻页；data URI 不走网络、不需要凭据。
+    @State private var fixtureImages: [String] = []
     private func focus() { composerFocus.focus(); notice = "" }
     private func openSetting(_ title: String) { setting = title; composerFocus.borrow("settings", open: true); context = true }
     private func apply(_ title: String) {
         stage = title; context = false
         failed = false; running = false; activity = .idle; acknowledged = false; files = []; focused = false
-        editing = false; thinking = false; notice = ""; text = ""
+        editing = false; thinking = false; notice = ""; text = ""; fixtureImages = []
         switch title {
         case "思考中": running = true; thinking = true
         case "阅读中": running = true; activity = .reading
@@ -114,6 +125,7 @@ struct ChatDesignPreview: View {
         case "右侧阅读": sideRaw = CatComposerSide.right.rawValue; running = true; activity = .reading
         case "有稿运行": text = "请补充检查安全区"; running = true
         case "仅附件": files = [fixtureFile]; editing = true
+        case "图片组": fixtureImages = Self.fixtureImageSources()
         case "短按文字": focus()
         case "附件": text = "请结合附件检查设计。"; files = [fixtureFile]; focus()
         case "附件取消": text = "请结合附件检查设计。"; focus()
@@ -135,7 +147,27 @@ struct ChatDesignPreview: View {
                 sideRaw = (CatComposerSide(rawValue: sideRaw) ?? .left).dropped(translation: offset).rawValue; dragOffset = 0
             })
     }
+    /// 横、竖、方三张离线色块图，用来肉眼区分全屏查看器的不同页。
+    static func fixtureImageSources() -> [String] {
+        [(CGSize(width: 1600, height: 600), "横 1600×600", UIColor.systemBlue),
+         (CGSize(width: 600, height: 1600), "竖 600×1600", UIColor.systemRed),
+         (CGSize(width: 900, height: 900), "方 900×900", UIColor.systemGreen)].map { spec in
+            let renderer = UIGraphicsImageRenderer(size: spec.0)
+            let image = renderer.image { _ in
+                spec.2.setFill()
+                UIRectFill(CGRect(origin: .zero, size: spec.0))
+                (spec.1 as NSString).draw(at: CGPoint(x: 24, y: 24), withAttributes: [
+                    .font: UIFont.boldSystemFont(ofSize: min(spec.0.width, spec.0.height) / 8),
+                    .foregroundColor: UIColor.white,
+                ])
+            }
+            guard let data = image.pngData() else { return "" }
+            return "data:image/png;base64," + data.base64EncodedString()
+        }.filter { !$0.isEmpty }
+    }
+
     private func openFixtureFile() {
+
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("离线样例-设计说明.pdf")
         let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 420, height: 594))
         do {

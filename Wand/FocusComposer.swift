@@ -149,11 +149,20 @@ func topCompanionCenter(width: CGFloat, size: CGFloat, side: CatComposerSide, dr
 
 /// One shared boundary for chat, IM and previews; independent of drafts and the keyboard.
 enum ChatTopLayout {
+    static let horizontalInset: CGFloat = 12
     static let controlTouch: CGFloat = 48
     static let controlRowInset: CGFloat = 4
     static let controlsClearance = controlTouch + controlRowInset * 2
     static func clearance(compact: Bool) -> CGFloat {
         max(controlsClearance, compact ? 56 : 100)
+    }
+    /// 顶栏身份区可用的水平带子：左侧让开返回键，右侧让开文件与更多两枚按钮，
+    /// 与 Android `FloatingControlsBackInset` / `FloatingControlsActionsInset` 同一份几何。
+    static let backInset = horizontalInset + controlTouch
+    static let actionsInset = horizontalInset + controlTouch * 2 + controlRowInset
+    static func identityBand(width: CGFloat) -> (center: CGFloat, width: CGFloat) {
+        let usable = max(48, width - backInset - actionsInset)
+        return (backInset + usable / 2, usable)
     }
 }
 
@@ -167,6 +176,110 @@ struct ChatIdentityLayoutMetrics: DynamicProperty {
     var faceSize: CGFloat { compact ? 48 : 56 }
     var textHeight: CGFloat { titleLine * 2 + 2 + statusLine }
     var clearance: CGFloat { max(ChatTopLayout.controlsClearance, compact ? textHeight + 8 : 4 + faceSize + 4 + textHeight + 4) }
+    /// 无头像版的两行身份区高度，只剩文字，不再为头像占位。
+    var identityClearance: CGFloat { max(ChatTopLayout.controlsClearance, textHeight + 8) }
+}
+
+/// 顶部身份区的运行态文案（对齐 Android `companionWorkStatus`）：能看出在读还是在写就说
+/// 在读还是在写；已经有待办进度条或子 Agent 状态坞在承载细粒度进度时留空，不再重复一句
+/// 「正在处理」。整个会话只有一个运行态文案，输入区不另写一份。
+func identityWorkStatus(activity: AvatarFileActivity, hasDetailedProgress: Bool) -> String {
+    switch activity {
+    case .reading: return "正在读文件"
+    case .writing: return "正在写文件"
+    case .idle: return hasDetailedProgress ? "" : "正在处理"
+    }
+}
+
+/// 顶栏目录缩写：只留最后一段路径名（与 macOS `SessionHeaderView` 的 basename 显示同语义）。
+/// 绝对路径整条塞进小字行会把员工名挤掉，根目录或空路径则不显示。
+func abbreviatedDirectory(_ cwd: String?) -> String {
+    let raw = (cwd ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !raw.isEmpty else { return "" }
+    let trimmed = raw.hasSuffix("/") ? String(raw.dropLast()) : raw
+    let name = (trimmed as NSString).lastPathComponent
+    return name == "/" ? "" : name
+}
+
+/// 会话顶栏身份两行：主标题优先任务名，没有归属任务（独立会话、IM 执行会话）时回落会话标题；
+/// 小字为「员工名 · 目录缩写」，缺项自动省掉分隔符。
+func chatTopIdentity(taskTitle: String?, sessionTitle: String, employeeName: String?, cwd: String?)
+    -> (title: String, subtitle: String) {
+    func clean(_ value: String?) -> String { value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "" }
+    let task = clean(taskTitle)
+    let title = task.isEmpty ? clean(sessionTitle) : task
+    let subtitle = [clean(employeeName), abbreviatedDirectory(cwd)].filter { !$0.isEmpty }
+        .joined(separator: " · ")
+    return (title.isEmpty ? "当前会话" : title, subtitle)
+}
+
+/// 顶栏状态点的语义档位。由会话的真实状态位判定，不从展示文案反推。
+enum ChatTopAttention: Equatable {
+    case quiet, running, needsYou, fault
+
+    static func resolve(connected: Bool, blocked: Bool, sending: Bool, responding: Bool, status: String) -> ChatTopAttention {
+        if !connected || status == "failed" { return .fault }
+        if blocked { return .needsYou }
+        if sending || responding { return .running }
+        return .quiet
+    }
+
+    var color: Color {
+        switch self {
+        case .quiet: return Color.clear
+        case .running: return Theme.brand
+        case .needsYou: return Theme.permission
+        case .fault: return Theme.danger
+        }
+    }
+}
+
+/// 顶栏的读屏播报：视觉上只剩标题、小字和一个状态点，完整信息仍要能被读出来。
+func chatTopReadback(title: String, subtitle: String, status: String) -> String {
+    [title, subtitle, status].filter { !$0.isEmpty }.joined(separator: "，")
+}
+
+/// 会话顶栏身份区：不放头像，主标题是任务名，小字是「员工名 · 目录缩写」。
+/// 运行与异常只以一个状态点呈现，具体文案交给权限卡、连接横幅和进度条，这条栏不再重复说话。
+struct ChatTopIdentityBar: View {
+    let title: String
+    let subtitle: String
+    let attention: ChatTopAttention
+    /// 读屏仍播报完整状态，视觉做减法不代表信息丢失。
+    var statusText: String = ""
+    private var identityMetrics = ChatIdentityLayoutMetrics()
+
+    var body: some View {
+        GeometryReader { area in
+            let band = ChatTopLayout.identityBand(width: area.size.width)
+            VStack(spacing: 2) {
+                HStack(spacing: 5) {
+                    if attention != .quiet { dot }
+                    Text(title)
+                        .font(.caption.weight(.semibold)).foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1).truncationMode(.tail)
+                }.frame(height: identityMetrics.titleLine)
+                Text(subtitle)
+                    .font(.caption2).foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1).truncationMode(.middle)
+                    .frame(height: identityMetrics.statusLine)
+            }
+            // 身份文字只在返回键与右侧两枚按钮之间的带子里排布，长标题省略号不会压到按钮。
+            .frame(width: band.width)
+            .position(x: band.center, y: identityMetrics.identityClearance / 2)
+        }
+        .frame(height: identityMetrics.identityClearance)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(chatTopReadback(title: title, subtitle: subtitle, status: statusText))
+        .accessibilityIdentifier("chat-visible-identity")
+    }
+
+    /// 状态点复用全局节奏 token 呼吸，不自己起一个定时器；关闭动效时静止。
+    private var dot: some View {
+        Circle().fill(attention.color).frame(width: 6, height: 6)
+            .topicTitleRhythm(attention == .running)
+            .accessibilityHidden(true)
+    }
 }
 
 struct TopChatCompanion<Face: View>: View {
@@ -236,16 +349,18 @@ struct ComposerSettingsStrip: View {
     let onModel: () -> Void
     let onMode: () -> Void
     let onThinking: () -> Void
+    var modeName: String = "权限模式"
+    var modeSymbol: String = "lock"
     var body: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
                 setting(model, accessibility: "模型：\(model)", action: onModel)
-                setting(mode, accessibility: "权限模式：\(mode)", action: onMode)
+                setting(mode, accessibility: "\(modeName)：\(mode)", action: onMode)
                 setting(thinking, accessibility: "思考深度：\(thinking)", action: onThinking)
             }.fixedSize(horizontal: true, vertical: false)
             HStack(spacing: 0) {
                 setting(model, accessibility: "模型：\(model)", action: onModel)
-                setting(mode, symbol: "lock", accessibility: "权限模式：\(mode)", action: onMode)
+                setting(mode, symbol: modeSymbol, accessibility: "\(modeName)：\(mode)", action: onMode)
                 setting(thinking, symbol: "brain", accessibility: "思考深度：\(thinking)", action: onThinking)
             }
         }.buttonStyle(.plain).foregroundStyle(Theme.textSecondary)

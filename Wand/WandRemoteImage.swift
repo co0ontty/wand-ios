@@ -252,14 +252,34 @@ enum WandImageCache {
     }()
 }
 
+// MARK: - 缩略图尺寸真源
+
+/// 聊天内联图片的自适应上限：图片按自身比例在框内完整显示（不拉伸、不裁切），
+/// 横图吃满宽度、竖图吃满高度，小图不放大。缩略图各调用点共用这一处定义，
+/// 与 Android `WandImage` 的 max 尺寸保持一致，避免各写一套像素值。
+enum WandImageLayout {
+    static let thumbnailMaxWidth: CGFloat = 320
+    static let thumbnailMaxHeight: CGFloat = 360
+}
+
+/// 全屏查看器的起始页下标钳制：分组为空或下标越界都退回第一张，不崩溃。
+/// 分组由调用点给出（同一气泡/同一工具卡片的全部图片）。
+func wandImageViewerStart(index: Int, count: Int) -> Int {
+    guard count > 0 else { return 0 }
+    return min(max(index, 0), count - 1)
+}
+
 // MARK: - 缩略图（聊天里的内联图片）
 
 /// 工具图片与上传附件共享端点认证、缓存隔离、加载/失败反馈及重试。
 struct WandToolImageThumbnail: View {
     let baseURL: URL
     let source: String
-    var maxWidth: CGFloat = 240
-    var maxHeight: CGFloat = 200
+    var maxWidth: CGFloat = WandImageLayout.thumbnailMaxWidth
+    var maxHeight: CGFloat = WandImageLayout.thumbnailMaxHeight
+    /// 同一条消息/同一张卡片里的全部图片（含自己），全屏后左右滑动切换；缺省表示只有当前一张。
+    var group: [String] = []
+    var groupIndex: Int = 0
     @State private var ready = false
     @State private var showFullScreen = false
 
@@ -277,18 +297,81 @@ struct WandToolImageThumbnail: View {
             .accessibilityAddTraits(ready ? .isButton : [])
             .accessibilityAction { if ready { showFullScreen = true } }
             .fullScreenCover(isPresented: $showFullScreen) {
-                WandImageViewer(baseURL: baseURL, path: source, isPresented: $showFullScreen, directSource: true)
+                WandImageViewer(baseURL: baseURL, sources: viewerSources, startIndex: viewerStart,
+                                isPresented: $showFullScreen, directSource: true)
             }
     }
 }
 
-/// 聊天里的内联图片缩略图：最大 240×200、scaledToFit、圆角 + 细边框，点击放大。
+/// 工具图片结果的直出形态：顶部只留文件名，下面按原始比例完整展示图片。
+/// 不再套工具调用卡片，也不再用缩略图上限裁小；点击仍可全屏查看。
+struct WandToolImageFigure: View {
+    let baseURL: URL
+    let source: String
+    let name: String
+    var directSource = true
+    /// 同一次工具结果的全部图片（含自己），全屏后左右滑动切换。
+    var group: [String] = []
+    var groupIndex: Int = 0
+    @State private var ready = false
+    @State private var showFullScreen = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(name)
+                .font(.wand(size: 12, weight: .medium))
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .accessibilityHidden(true)
+            WandRemoteImage(baseURL: baseURL, path: source, directSource: directSource,
+                            onAvailabilityChanged: { ready = $0 })
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .onTapGesture { if ready { showFullScreen = true } }
+                .accessibilityElement(children: ready ? .ignore : .contain)
+                .accessibilityLabel(name)
+                .accessibilityValue(ready ? "已加载，可查看大图" : "正在加载或等待重试")
+                .accessibilityAddTraits(ready ? .isButton : [])
+                .accessibilityAction { if ready { showFullScreen = true } }
+                .fullScreenCover(isPresented: $showFullScreen) {
+                    WandImageViewer(baseURL: baseURL, sources: viewerSources, startIndex: viewerStart,
+                                    isPresented: $showFullScreen, directSource: directSource)
+                }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var viewerSources: [String] { group.isEmpty ? [source] : group }
+    private var viewerStart: Int { wandImageViewerStart(index: groupIndex, count: group.count) }
+}
+
+/// 工具图片展示名：单张 Read 图优先用读取到的文件名，其余取图片 URL 的文件名；
+/// data URI 或没有可用文件名时回退「图片」（多张带序号）。
+func toolImageDisplayName(inputPath: String?, source: String, index: Int, total: Int) -> String {
+    let fallback = total > 1 ? "图片 \(index + 1)" : "图片"
+    if total == 1, let inputPath {
+        let name = (inputPath as NSString).lastPathComponent
+        if !name.isEmpty { return name }
+    }
+    let clean = source.split(whereSeparator: { $0 == "?" || $0 == "#" }).first.map(String.init) ?? source
+    guard !clean.hasPrefix("data:") else { return fallback }
+    let last = (clean as NSString).lastPathComponent
+    guard !last.isEmpty, last != "/", last != "." else { return fallback }
+    return last.removingPercentEncoding ?? last
+}
+
+/// 聊天里的内联图片缩略图：按自身比例在 320×360 上限内完整显示、圆角 + 细边框，点击放大。
 /// 上传附件气泡与 Read 读图卡片共用。
 struct WandImageThumbnail: View {
     let baseURL: URL
     let path: String
-    var maxWidth: CGFloat = 240
-    var maxHeight: CGFloat = 200
+    var maxWidth: CGFloat = WandImageLayout.thumbnailMaxWidth
+    var maxHeight: CGFloat = WandImageLayout.thumbnailMaxHeight
+    /// 同一条消息里的全部图片（含自己），全屏后左右滑动切换；缺省表示只有当前一张。
+    var group: [String] = []
+    var groupIndex: Int = 0
 
     @State private var showFullScreen = false
 
@@ -303,9 +386,20 @@ struct WandImageThumbnail: View {
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .onTapGesture { showFullScreen = true }
             .fullScreenCover(isPresented: $showFullScreen) {
-                WandImageViewer(baseURL: baseURL, path: path, isPresented: $showFullScreen)
+                WandImageViewer(baseURL: baseURL, sources: viewerSources, startIndex: viewerStart,
+                                isPresented: $showFullScreen)
             }
     }
+}
+
+extension WandImageThumbnail {
+    var viewerSources: [String] { group.isEmpty ? [path] : group }
+    var viewerStart: Int { wandImageViewerStart(index: groupIndex, count: group.count) }
+}
+
+extension WandToolImageThumbnail {
+    var viewerSources: [String] { group.isEmpty ? [source] : group }
+    var viewerStart: Int { wandImageViewerStart(index: groupIndex, count: group.count) }
 }
 
 /// 非图片附件 → 小文件块（文件图标 + 文件名）。
@@ -345,6 +439,7 @@ struct PendingAttachmentsPreview: View {
     let attachments: [UploadedFile]
     let onRemove: (UploadedFile) -> Void
     var onPreview: ((UploadedFile) -> Void)? = nil
+    private var imagePaths: [String] { attachments.map(\.savedPath).filter { isImagePath($0) } }
     var body: some View {
         if !attachments.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
@@ -355,7 +450,9 @@ struct PendingAttachmentsPreview: View {
                                 Button { onPreview(file) } label: { WandFileChip(path: file.originalName).frame(minHeight: 44).contentShape(Rectangle()) }
                                     .buttonStyle(.plain).accessibilityLabel("预览附件 \(file.originalName)")
                             } else if isImagePath(file.savedPath) {
-                                WandImageThumbnail(baseURL: baseURL, path: file.savedPath, maxWidth: 96, maxHeight: 72)
+                                WandImageThumbnail(baseURL: baseURL, path: file.savedPath,
+                                                   maxWidth: 96, maxHeight: 72,
+                                                   group: imagePaths, groupIndex: imagePaths.firstIndex(of: file.savedPath) ?? 0)
                             } else { WandFileChip(path: file.originalName).frame(minHeight: 44) }
                             Button { onRemove(file) } label: {
                                 Image(systemName: "xmark.circle.fill").font(.body)
@@ -371,97 +468,212 @@ struct PendingAttachmentsPreview: View {
 
 // MARK: - 全屏图片查看器
 
-/// 简单可缩放 / 平移的全屏图片查看器，点右上角关闭或下滑关闭。
+/// 全屏查看器：黑底、双指缩放 1–5×、放大后可拖动；未放大时左右滑动切换同一组图片，
+/// 垂直下拉关闭。只渲染当前页及左右邻页（有界窗口），不为一条长消息预拉全部图片。
 struct WandImageViewer: View {
     let baseURL: URL
-    let path: String
+    let sources: [String]
+    var startIndex: Int = 0
     @Binding var isPresented: Bool
     var directSource = false
     @Environment(\.accessibilityReduceMotion) private var reduced
 
+    @State private var index: Int
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
+    @State private var pageDrag: CGFloat = 0
+    @State private var dismissDrag: CGFloat = 0
+    @State private var lockedAxis: Axis?
+
+    private enum Axis { case horizontal, vertical }
+
+    init(baseURL: URL, sources: [String], startIndex: Int = 0,
+         isPresented: Binding<Bool>, directSource: Bool = false) {
+        self.baseURL = baseURL
+        self.sources = sources
+        self._isPresented = isPresented
+        self.directSource = directSource
+        _index = State(initialValue: wandImageViewerStart(index: startIndex, count: sources.count))
+    }
+
+    /// 单图入口：附件、工具结果以外的独立图片仍按一张呈现。
+    init(baseURL: URL, path: String, isPresented: Binding<Bool>, directSource: Bool = false) {
+        self.init(baseURL: baseURL, sources: [path], startIndex: 0,
+                  isPresented: isPresented, directSource: directSource)
+    }
+
+    private var visiblePages: [Int] {
+        guard !sources.isEmpty else { return [] }
+        let lower = max(index - 1, 0)
+        let upper = min(index + 1, sources.count - 1)
+        return Array(lower...upper)
+    }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
+            ZStack {
+                Color.black
+                    .opacity(max(0.55, 1 - dismissDrag / 600))
+                    .ignoresSafeArea()
 
-            WandRemoteImage(baseURL: baseURL, path: path, contentMode: .fit, directSource: directSource) {
-                AnyView(ProgressView("加载图片…").tint(.white).foregroundStyle(.white))
-            }
-            .scaleEffect(scale)
-            .offset(offset)
-            .gesture(
-                MagnificationGesture()
-                    .onChanged { value in
-                        scale = max(1, lastScale * value)
-                    }
-                    .onEnded { _ in
-                        lastScale = scale
-                        if scale <= 1 {
-                            withAnimation(reduced ? nil : WandMotion.disclosure) {
-                                scale = 1
-                                lastScale = 1
-                                offset = .zero
-                                lastOffset = .zero
-                            }
-                        }
-                    }
-            )
-            .simultaneousGesture(
-                DragGesture()
-                    .onChanged { value in
-                        offset = CGSize(
-                            width: lastOffset.width + value.translation.width,
-                            height: lastOffset.height + value.translation.height
-                        )
-                    }
-                    .onEnded { value in
-                        let translation = value.translation
-                        // 未放大时垂直下拉超过阈值 → 下滑关闭（对齐类注释承诺的行为）。
-                        if scale <= 1,
-                           translation.height > 90,
-                           abs(translation.height) > abs(translation.width) {
-                            withAnimation(reduced ? nil : WandMotion.scroll) {
-                                offset.height += 80
-                            }
-                            isPresented = false
-                            return
-                        }
-                        lastOffset = offset
-                    }
-            )
-            .onTapGesture(count: 2) {
-                withAnimation(reduced ? nil : WandMotion.disclosure) {
-                    if scale > 1 {
-                        scale = 1; lastScale = 1; offset = .zero; lastOffset = .zero
-                    } else {
-                        scale = 2; lastScale = 2
+                ZStack {
+                    ForEach(visiblePages, id: \.self) { page in
+                        pageView(sources[page])
+                            .frame(width: width)
+                            .offset(x: CGFloat(page - index) * width + (page == index ? pageDrag : 0))
+                            // 相邻页只为滑动预加载，不进无障碍树；当前页报自己的序号。
+                            .accessibilityHidden(page != index)
+                            .accessibilityLabel("图片 \(page + 1)，共 \(sources.count) 张")
                     }
                 }
-            }
-
-            VStack {
-                HStack {
-                    Spacer()
-                    Button {
-                        isPresented = false
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 44, height: 44)
-                            .background(Circle().fill(Color.black.opacity(0.6)))
-                    }.accessibilityLabel("关闭图片预览")
-                    .padding(.trailing, 18)
-                    .padding(.top, 12)
+                .offset(x: offset.width, y: offset.height + dismissDrag)
+                .scaleEffect(scale)
+                .gesture(zoomGesture)
+                .simultaneousGesture(panGesture(width: width))
+                .onTapGesture(count: 2) { toggleZoom() }
+                .accessibilityElement(children: .contain)
+                .accessibilityScrollAction { edge in
+                    switch edge {
+                    case .trailing: step(1)
+                    case .leading: step(-1)
+                    default: break
+                    }
                 }
+
+                overlays
+            }
+            .statusBarHidden(true)
+            .preferredColorScheme(.dark)
+        }
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder private func pageView(_ source: String) -> some View {
+        WandRemoteImage(baseURL: baseURL, path: source, contentMode: .fit, directSource: directSource) {
+            AnyView(ProgressView("加载图片…").tint(.white).foregroundStyle(.white))
+        }
+    }
+
+    @ViewBuilder private var overlays: some View {
+        VStack {
+            HStack {
                 Spacer()
+                Button {
+                    isPresented = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 44, height: 44)
+                        .background(Circle().fill(Color.black.opacity(0.6)))
+                }.accessibilityLabel("关闭图片预览")
+                .padding(.trailing, 18)
+                .padding(.top, 12)
+            }
+            Spacer()
+            if sources.count > 1 {
+                Text("\(index + 1) / \(sources.count)")
+                    .font(.footnote.monospacedDigit().weight(.medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Color.black.opacity(0.6)))
+                    .accessibilityLabel("第 \(index + 1) 张，共 \(sources.count) 张")
+                    .padding(.bottom, 28)
             }
         }
-        .statusBarHidden(true)
-        .preferredColorScheme(.dark)
+    }
+
+    private var zoomGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { value in
+                scale = min(5, max(1, lastScale * value))
+            }
+            .onEnded { _ in
+                lastScale = scale
+                if scale <= 1 {
+                    withAnimation(reduced ? nil : WandMotion.disclosure) {
+                        scale = 1
+                        lastScale = 1
+                        offset = .zero
+                        lastOffset = .zero
+                    }
+                }
+            }
+    }
+
+    private func panGesture(width: CGFloat) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                let translation = value.translation
+                if scale > 1 {
+                    offset = CGSize(
+                        width: lastOffset.width + translation.width,
+                        height: lastOffset.height + translation.height
+                    )
+                    return
+                }
+                if lockedAxis == nil, abs(translation.width) > 10 || abs(translation.height) > 10 {
+                    lockedAxis = abs(translation.width) >= abs(translation.height) ? .horizontal : .vertical
+                }
+                switch lockedAxis {
+                case .horizontal:
+                    let atEdge = (translation.width > 0 && index == 0)
+                        || (translation.width < 0 && index == sources.count - 1)
+                    pageDrag = atEdge ? translation.width * 0.35 : translation.width
+                case .vertical:
+                    dismissDrag = max(0, translation.height)
+                case nil:
+                    break
+                }
+            }
+            .onEnded { value in
+                let translation = value.translation
+                let axis = lockedAxis
+                lockedAxis = nil
+                if scale > 1 {
+                    lastOffset = offset
+                    return
+                }
+                switch axis {
+                case .horizontal:
+                    commitPage(translation: translation.width, predicted: value.predictedEndTranslation.width, width: width)
+                case .vertical:
+                    if dismissDrag > 90 {
+                        isPresented = false
+                        return
+                    }
+                    withAnimation(reduced ? nil : WandMotion.expansion) { dismissDrag = 0 }
+                case nil:
+                    break
+                }
+            }
+    }
+
+    private func commitPage(translation: CGFloat, predicted: CGFloat, width: CGFloat) {
+        let distance = abs(translation)
+        let flick = abs(predicted) > width * 0.6 && predicted * translation > 0
+        let direction = translation < 0 ? 1 : -1
+        if distance > width * 0.28 || flick { step(direction) }
+        withAnimation(reduced ? nil : WandMotion.expansion) { pageDrag = 0 }
+    }
+
+    private func step(_ direction: Int) {
+        let next = min(max(index + direction, 0), sources.count - 1)
+        guard next != index else { return }
+        withAnimation(reduced ? nil : WandMotion.expansion) { index = next }
+    }
+
+    private func toggleZoom() {
+        withAnimation(reduced ? nil : WandMotion.disclosure) {
+            if scale > 1 {
+                scale = 1; lastScale = 1; offset = .zero; lastOffset = .zero
+            } else {
+                scale = 2; lastScale = 2
+            }
+        }
     }
 }
