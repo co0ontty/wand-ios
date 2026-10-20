@@ -425,7 +425,39 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertTrue(activityTimelineEnabled(mode: "wifi", wifiConnected: true))
         XCTAssertFalse(activityTimelineEnabled(mode: "never", wifiConnected: false))
         XCTAssertFalse(activityTimelineEnabled(mode: "never", wifiConnected: true))
+        XCTAssertFalse(activityTimelineEnabled(mode: "never_wifi", wifiConnected: false))
+        XCTAssertFalse(activityTimelineEnabled(mode: "never_wifi", wifiConnected: true))
         XCTAssertFalse(activityTimelineEnabled(mode: "unknown", wifiConnected: true), "未知档位不能回落到按 Wi-Fi 自动展开")
+    }
+
+    /// 手动收放只翻开闭轴：用户选过的网络范围不能被这一下吞掉。
+    func testActivityTimelineManualToggleKeepsNetworkScope() {
+        XCTAssertEqual(activityTimelineScope("wifi"), "wifi")
+        XCTAssertEqual(activityTimelineScope("all"), "all")
+        XCTAssertEqual(activityTimelineScope("never"), "all")
+        XCTAssertEqual(activityTimelineScope("never_wifi"), "wifi")
+        XCTAssertEqual(activityTimelineScope("unknown"), "wifi", "未知档位走保守口径")
+
+        let collapsed = activityTimelineModeAfterToggle("wifi", open: false)
+        XCTAssertEqual(collapsed, "never_wifi")
+        XCTAssertTrue(activityTimelineCollapsed(collapsed))
+        XCTAssertEqual(activityTimelineModeAfterToggle(collapsed, open: true), "wifi")
+
+        let collapsedAll = activityTimelineModeAfterToggle("all", open: false)
+        XCTAssertEqual(collapsedAll, "never")
+        XCTAssertEqual(activityTimelineModeAfterToggle(collapsedAll, open: true), "all")
+    }
+
+    /// 设置页三档与内部存储值的映射：两个折叠档在界面上都是「一直折叠」。
+    func testActivityTimelineSettingsOptionMapping() {
+        XCTAssertEqual(activityTimelineDisplayOption("all"), "all")
+        XCTAssertEqual(activityTimelineDisplayOption("wifi"), "wifi")
+        XCTAssertEqual(activityTimelineDisplayOption("never"), "never")
+        XCTAssertEqual(activityTimelineDisplayOption("never_wifi"), "never")
+        XCTAssertEqual(activityTimelineMode(forOption: "never", current: "wifi"), "never_wifi")
+        XCTAssertEqual(activityTimelineMode(forOption: "never", current: "all"), "never")
+        XCTAssertEqual(activityTimelineMode(forOption: "all", current: "never_wifi"), "all")
+        XCTAssertEqual(activityTimelineMode(forOption: "wifi", current: "never_wifi"), "wifi")
     }
     func testActivityAutoExpansionRequiresLatestRunningGroupAndRespectsViewport() {
         for newest in [false, true] { for running in [false, true] { for allowed in [false, true] {

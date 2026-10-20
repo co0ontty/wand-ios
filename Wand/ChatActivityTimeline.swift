@@ -13,13 +13,49 @@ func activityPanelHeight(viewportHeight: CGFloat) -> CGFloat {
 func activityShouldAutoExpand(newest: Bool, running: Bool, timelineEnabled: Bool) -> Bool {
     newest && running && timelineEnabled
 }
+/// 工具时间线自动展开策略由两个正交维度合成：开闭轴（自动展开 / 一直折叠）×
+/// 网络口径轴（所有网络 / 仅 Wi-Fi）。存储值与 Android ServerStore 同名同义：
+/// all / wifi / never / never_wifi。
+func activityTimelineKnownMode(_ mode: String) -> Bool {
+    mode == "all" || mode == "wifi" || mode == "never" || mode == "never_wifi"
+}
+
+/// 网络口径轴：所有网络 or 仅 Wi-Fi；折叠档沿用最近一次选定的口径。
+func activityTimelineScope(_ mode: String) -> String {
+    (mode == "all" || mode == "never") ? "all" : "wifi"
+}
+
+/// 开闭轴：true = 一直折叠。
+func activityTimelineCollapsed(_ mode: String) -> Bool {
+    mode == "never" || mode == "never_wifi"
+}
+
+/// 「一直折叠」档：保留当前网络口径，手动收放不吞掉用户的流量条件。
+func activityTimelineCollapsedMode(_ mode: String) -> String {
+    activityTimelineScope(mode) == "wifi" ? "never_wifi" : "never"
+}
+
+/// 对话内手动收放：只翻转开闭轴，网络口径保持不变。
+func activityTimelineModeAfterToggle(_ mode: String, open: Bool) -> String {
+    open ? activityTimelineScope(mode) : activityTimelineCollapsedMode(mode)
+}
+
+/// 设置页三档与存储值的映射：折叠档有两个内部值，界面上都算「一直折叠」。
+func activityTimelineDisplayOption(_ mode: String) -> String {
+    activityTimelineCollapsed(mode) ? "never" : activityTimelineScope(mode)
+}
+
+/// 设置页选档 → 存储值：选「一直折叠」时保留当前网络口径。
+func activityTimelineMode(forOption option: String, current: String) -> String {
+    option == "never" ? activityTimelineCollapsedMode(current) : option
+}
+
 /// 与 Android activityTimelineEnabled 同语义：all 一直打开、wifi 仅 Wi-Fi、never 一直折叠。
+/// 未知值不当自动展开。
 func activityTimelineEnabled(mode: String, wifiConnected: Bool) -> Bool {
-    switch mode {
-    case "all": return true
-    case "wifi": return wifiConnected
-    default: return false
-    }
+    guard activityTimelineKnownMode(mode) else { return false }
+    if activityTimelineCollapsed(mode) { return false }
+    return activityTimelineScope(mode) == "all" || wifiConnected
 }
 
 private struct ActivityTimelineRow {
@@ -125,10 +161,10 @@ struct ActivityFoldCard: View {
                 let next = !expanded
                 withAnimation(activityWindowAnimation(reduceMotion)) { expanded = next }
                 if next { pinned = true }
-                // 对话内手动收放同步全局：打开 = 一直打开，收起 = 一直折叠；
-                // 「仅 Wi-Fi」只在设置里手动选择，不由收放写回。
+                // 对话内手动收放同步全局开闭偏好：只翻「自动展开 / 一直折叠」，
+                // 用户选过的网络口径（仅 Wi-Fi）不被这一下吞掉。
                 if timelinePolicyOverride == nil {
-                    trafficMode = next ? "all" : "never"
+                    trafficMode = activityTimelineModeAfterToggle(trafficMode, open: next)
                 }
             } label: {
                 HStack(spacing: 8) {
