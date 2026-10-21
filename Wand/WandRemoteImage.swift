@@ -260,6 +260,35 @@ enum WandImageCache {
 enum WandImageLayout {
     static let thumbnailMaxWidth: CGFloat = 320
     static let thumbnailMaxHeight: CGFloat = 360
+    static let figureWidthFraction: CGFloat = 0.8
+    static let figureHeightFraction: CGFloat = 0.4
+
+    static func figureBounds(availableWidth: CGFloat, viewportHeight: CGFloat) -> CGSize {
+        CGSize(width: min(thumbnailMaxWidth, max(0, availableWidth) * figureWidthFraction),
+               height: viewportHeight > 0 ? min(thumbnailMaxHeight, viewportHeight * figureHeightFraction) : thumbnailMaxHeight)
+    }
+}
+
+/// A bounded proposal, not a fixed aspect ratio: portrait screenshots remain complete
+/// but cannot impersonate a full page. The chat viewport is supplied by its existing owner.
+struct WandImageFigureLayout: Layout {
+    var viewportHeight: CGFloat
+
+    private func proposal(_ width: CGFloat?) -> ProposedViewSize {
+        let bounds = WandImageLayout.figureBounds(availableWidth: width ?? WandImageLayout.thumbnailMaxWidth,
+                                                 viewportHeight: viewportHeight)
+        return ProposedViewSize(bounds)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let limit = self.proposal(proposal.width)
+        let size = subviews.first?.sizeThatFits(limit) ?? .zero
+        return CGSize(width: min(size.width, limit.width ?? 0), height: min(size.height, limit.height ?? 0))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(bounds.size))
+    }
 }
 
 /// 全屏查看器的起始页下标钳制：分组为空或下标越界都退回第一张，不崩溃。
@@ -267,6 +296,70 @@ enum WandImageLayout {
 func wandImageViewerStart(index: Int, count: Int) -> Int {
     guard count > 0 else { return 0 }
     return min(max(index, 0), count - 1)
+}
+
+// MARK: - 当前已加载对话的图片画廊（只投影消息，不额外请求历史）
+
+struct WandImagePage: Hashable {
+    let source: String
+    let directSource: Bool
+}
+
+private struct WandImageGalleryKey: EnvironmentKey {
+    static let defaultValue: () -> [WandImagePage] = { [] }
+}
+
+extension EnvironmentValues {
+    var wandImageGallery: () -> [WandImagePage] {
+        get { self[WandImageGalleryKey.self] }
+        set { self[WandImageGalleryKey.self] = newValue }
+    }
+}
+
+func wandConversationImagePages(_ turns: [ConversationTurn]) -> [WandImagePage] {
+    let blocks = turns.flatMap(\.content)
+    var results: [String: (failed: Bool, images: [String])] = [:]
+    for block in blocks {
+        if case .toolResult(let id, _, let failed, _, let images, _, _) = block { results[id] = (failed, images) }
+    }
+    var pages: [WandImagePage] = []
+    var seen = Set<WandImagePage>()
+    func append(_ source: String, direct: Bool) {
+        let page = WandImagePage(source: source, directSource: direct)
+        if seen.insert(page).inserted { pages.append(page) }
+    }
+    for turn in turns {
+        for block in turn.content {
+            switch block {
+            case .text(let text, _) where turn.role == "user":
+                for path in parseUserAttachmentMessage(text).attachmentPaths where isImagePath(path) { append(path, direct: false) }
+            case .toolUse(let id, let name, _, let input, _):
+                guard let result = results[id], !result.failed else { continue }
+                if !result.images.isEmpty {
+                    for source in result.images { append(source, direct: true) }
+                } else if name == "Read", let path = input["file_path"]?.stringValue ?? input["path"]?.stringValue, isImagePath(path) {
+                    append(path, direct: false)
+                }
+            case .toolResult(_, _, let failed, _, let images, _, _) where !failed:
+                for source in images { append(source, direct: true) }
+            default: break
+            }
+        }
+    }
+    return pages
+}
+
+struct WandImageGallerySelection {
+    var pages: [WandImagePage] = []
+    var startIndex = 0
+}
+
+func wandImageGallerySelection(gallery: [WandImagePage], local: [String], current: String, direct: Bool, localIndex: Int = 0) -> WandImageGallerySelection {
+    let selected = WandImagePage(source: current, directSource: direct)
+    if let index = gallery.firstIndex(of: selected) { return WandImageGallerySelection(pages: gallery, startIndex: index) }
+    let pages = (local.isEmpty ? [current] : local).map { WandImagePage(source: $0, directSource: direct) }
+    let index = pages.indices.contains(localIndex) && pages[localIndex] == selected ? localIndex : pages.firstIndex(of: selected) ?? 0
+    return WandImageGallerySelection(pages: pages, startIndex: index)
 }
 
 // MARK: - 缩略图（聊天里的内联图片）
@@ -282,6 +375,13 @@ struct WandToolImageThumbnail: View {
     var groupIndex: Int = 0
     @State private var ready = false
     @State private var showFullScreen = false
+    @State private var selection = WandImageGallerySelection()
+    @Environment(\.wandImageGallery) private var gallery
+
+    private func openViewer() {
+        selection = wandImageGallerySelection(gallery: gallery(), local: viewerSources, current: source, direct: true, localIndex: groupIndex)
+        showFullScreen = true
+    }
 
     var body: some View {
         WandRemoteImage(baseURL: baseURL, path: source, directSource: true,
@@ -290,31 +390,39 @@ struct WandToolImageThumbnail: View {
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.border, lineWidth: 1))
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .onTapGesture { if ready { showFullScreen = true } }
+            .onTapGesture { if ready { openViewer() } }
             .accessibilityElement(children: ready ? .ignore : .contain)
             .accessibilityLabel("工具返回图片")
             .accessibilityValue(ready ? "已加载，可查看大图" : "正在加载或等待重试")
             .accessibilityAddTraits(ready ? .isButton : [])
-            .accessibilityAction { if ready { showFullScreen = true } }
+            .accessibilityAction { if ready { openViewer() } }
             .fullScreenCover(isPresented: $showFullScreen) {
-                WandImageViewer(baseURL: baseURL, sources: viewerSources, startIndex: viewerStart,
-                                isPresented: $showFullScreen, directSource: true)
+                WandImageViewer(baseURL: baseURL, pages: selection.pages, startIndex: selection.startIndex,
+                                isPresented: $showFullScreen)
             }
     }
 }
 
 /// 工具图片结果的直出形态：顶部只留文件名，下面按原始比例完整展示图片。
-/// 不再套工具调用卡片，也不再用缩略图上限裁小；点击仍可全屏查看。
+/// 不套工具调用卡片；按聊天阅读区占比收口，点击仍可全屏查看。
 struct WandToolImageFigure: View {
     let baseURL: URL
     let source: String
     let name: String
     var directSource = true
+    @Environment(\.chatViewportHeight) private var viewportHeight
     /// 同一次工具结果的全部图片（含自己），全屏后左右滑动切换。
     var group: [String] = []
     var groupIndex: Int = 0
     @State private var ready = false
     @State private var showFullScreen = false
+    @State private var selection = WandImageGallerySelection()
+    @Environment(\.wandImageGallery) private var gallery
+
+    private func openViewer() {
+        selection = wandImageGallerySelection(gallery: gallery(), local: viewerSources, current: source, direct: directSource, localIndex: groupIndex)
+        showFullScreen = true
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -324,27 +432,28 @@ struct WandToolImageFigure: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .accessibilityHidden(true)
-            WandRemoteImage(baseURL: baseURL, path: source, directSource: directSource,
-                            onAvailabilityChanged: { ready = $0 })
-                .frame(maxWidth: .infinity)
+            WandImageFigureLayout(viewportHeight: viewportHeight) {
+                WandRemoteImage(baseURL: baseURL, path: source, directSource: directSource,
+                                onAvailabilityChanged: { ready = $0 })
+            }
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Theme.border, lineWidth: 1))
                 .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .onTapGesture { if ready { showFullScreen = true } }
+                .onTapGesture { if ready { openViewer() } }
                 .accessibilityElement(children: ready ? .ignore : .contain)
                 .accessibilityLabel(name)
                 .accessibilityValue(ready ? "已加载，可查看大图" : "正在加载或等待重试")
                 .accessibilityAddTraits(ready ? .isButton : [])
-                .accessibilityAction { if ready { showFullScreen = true } }
+                .accessibilityAction { if ready { openViewer() } }
                 .fullScreenCover(isPresented: $showFullScreen) {
-                    WandImageViewer(baseURL: baseURL, sources: viewerSources, startIndex: viewerStart,
-                                    isPresented: $showFullScreen, directSource: directSource)
+                    WandImageViewer(baseURL: baseURL, pages: selection.pages, startIndex: selection.startIndex,
+                                    isPresented: $showFullScreen)
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var viewerSources: [String] { group.isEmpty ? [source] : group }
-    private var viewerStart: Int { wandImageViewerStart(index: groupIndex, count: group.count) }
 }
 
 /// 工具图片展示名：单张 Read 图优先用读取到的文件名，其余取图片 URL 的文件名；
@@ -374,6 +483,8 @@ struct WandImageThumbnail: View {
     var groupIndex: Int = 0
 
     @State private var showFullScreen = false
+    @State private var selection = WandImageGallerySelection()
+    @Environment(\.wandImageGallery) private var gallery
 
     var body: some View {
         WandRemoteImage(baseURL: baseURL, path: path, contentMode: .fit)
@@ -384,9 +495,12 @@ struct WandImageThumbnail: View {
                     .stroke(Theme.border, lineWidth: 1)
             )
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .onTapGesture { showFullScreen = true }
+            .onTapGesture {
+                selection = wandImageGallerySelection(gallery: gallery(), local: viewerSources, current: path, direct: false, localIndex: groupIndex)
+                showFullScreen = true
+            }
             .fullScreenCover(isPresented: $showFullScreen) {
-                WandImageViewer(baseURL: baseURL, sources: viewerSources, startIndex: viewerStart,
+                WandImageViewer(baseURL: baseURL, pages: selection.pages, startIndex: selection.startIndex,
                                 isPresented: $showFullScreen)
             }
     }
@@ -466,16 +580,31 @@ struct PendingAttachmentsPreview: View {
     }
 }
 
+func wandImageVisiblePages(index: Int, count: Int, drag: CGFloat) -> [Int] {
+    guard count > 0, (0..<count).contains(index) else { return [] }
+    if drag > 0, index > 0 { return [index - 1, index] }
+    if drag < 0, index + 1 < count { return [index, index + 1] }
+    return [index]
+}
+
+func wandImagePageTarget(index: Int, count: Int, translation: CGFloat, predicted: CGFloat, width: CGFloat) -> Int {
+    let distance = abs(translation)
+    let flick = abs(predicted) > width * 0.6 && predicted * translation > 0
+    guard width > 0, distance > width * 0.28 || flick else { return index }
+    return wandImageViewerStart(index: index + (translation < 0 ? 1 : -1), count: count)
+}
+
 // MARK: - 全屏图片查看器
 
 /// 全屏查看器：黑底、双指缩放 1–5×、放大后可拖动；未放大时左右滑动切换同一组图片，
-/// 垂直下拉关闭。只渲染当前页及左右邻页（有界窗口），不为一条长消息预拉全部图片。
+/// 垂直下拉关闭。静止时只加载当前页；拖向邻页时才挂载该页，不预拉整组图片。
 struct WandImageViewer: View {
     let baseURL: URL
     let sources: [String]
     var startIndex: Int = 0
     @Binding var isPresented: Bool
     var directSource = false
+    private var sourceModes: [Bool] = []
     @Environment(\.accessibilityReduceMotion) private var reduced
 
     @State private var index: Int
@@ -498,6 +627,11 @@ struct WandImageViewer: View {
         _index = State(initialValue: wandImageViewerStart(index: startIndex, count: sources.count))
     }
 
+    init(baseURL: URL, pages: [WandImagePage], startIndex: Int = 0, isPresented: Binding<Bool>) {
+        self.init(baseURL: baseURL, sources: pages.map(\.source), startIndex: startIndex, isPresented: isPresented)
+        sourceModes = pages.map(\.directSource)
+    }
+
     /// 单图入口：附件、工具结果以外的独立图片仍按一张呈现。
     init(baseURL: URL, path: String, isPresented: Binding<Bool>, directSource: Bool = false) {
         self.init(baseURL: baseURL, sources: [path], startIndex: 0,
@@ -506,9 +640,7 @@ struct WandImageViewer: View {
 
     private var visiblePages: [Int] {
         guard !sources.isEmpty else { return [] }
-        let lower = max(index - 1, 0)
-        let upper = min(index + 1, sources.count - 1)
-        return Array(lower...upper)
+        return wandImageVisiblePages(index: index, count: sources.count, drag: pageDrag)
     }
 
     var body: some View {
@@ -521,14 +653,17 @@ struct WandImageViewer: View {
 
                 ZStack {
                     ForEach(visiblePages, id: \.self) { page in
-                        pageView(sources[page])
-                            .frame(width: width)
-                            .offset(x: CGFloat(page - index) * width + (page == index ? pageDrag : 0))
+                        pageView(sources[page], direct: sourceModes.indices.contains(page) ? sourceModes[page] : directSource)
+                            .frame(width: width, height: proxy.size.height)
+                            .offset(x: CGFloat(page - index) * width + pageDrag)
                             // 相邻页只为滑动预加载，不进无障碍树；当前页报自己的序号。
                             .accessibilityHidden(page != index)
                             .accessibilityLabel("图片 \(page + 1)，共 \(sources.count) 张")
                     }
                 }
+                .frame(width: width, height: proxy.size.height)
+                .contentShape(Rectangle())
+                .clipped()
                 .offset(x: offset.width, y: offset.height + dismissDrag)
                 .scaleEffect(scale)
                 .gesture(zoomGesture)
@@ -551,8 +686,8 @@ struct WandImageViewer: View {
         .ignoresSafeArea()
     }
 
-    @ViewBuilder private func pageView(_ source: String) -> some View {
-        WandRemoteImage(baseURL: baseURL, path: source, contentMode: .fit, directSource: directSource) {
+    @ViewBuilder private func pageView(_ source: String, direct: Bool) -> some View {
+        WandRemoteImage(baseURL: baseURL, path: source, contentMode: .fit, directSource: direct) {
             AnyView(ProgressView("加载图片…").tint(.white).foregroundStyle(.white))
         }
     }
@@ -654,14 +789,15 @@ struct WandImageViewer: View {
     }
 
     private func commitPage(translation: CGFloat, predicted: CGFloat, width: CGFloat) {
-        let distance = abs(translation)
-        let flick = abs(predicted) > width * 0.6 && predicted * translation > 0
-        let direction = translation < 0 ? 1 : -1
-        if distance > width * 0.28 || flick { step(direction) }
-        withAnimation(reduced ? nil : WandMotion.expansion) { pageDrag = 0 }
+        let next = wandImagePageTarget(index: index, count: sources.count, translation: translation, predicted: predicted, width: width)
+        withAnimation(reduced ? nil : WandMotion.expansion) {
+            index = next
+            pageDrag = 0
+        }
     }
 
     private func step(_ direction: Int) {
+        guard !sources.isEmpty else { return }
         let next = min(max(index + direction, 0), sources.count - 1)
         guard next != index else { return }
         withAnimation(reduced ? nil : WandMotion.expansion) { index = next }

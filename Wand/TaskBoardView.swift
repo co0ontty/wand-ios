@@ -12,6 +12,8 @@ struct TaskBoardView: View {
     var onOpenTeamRun: ((String) -> Void)? = nil
     var onDismiss: (() -> Void)? = nil
     var embedded: Bool = false
+    /// 列表级入口随列表一起退场，不叠在任务详情返回/标题行上方。
+    var overviewBar: HomeOverviewBar? = nil
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -33,6 +35,8 @@ struct TaskBoardView: View {
     @State private var query = ""
     @State private var filterWorkspaceId = ""
     @State private var selected: WandBoardTask?
+    /// 打开子任务时保留父任务栈：返回时回到上一层，而不是直接退出详情。
+    @State private var taskPath: [WandBoardTask] = []
     @State private var showCreate = false
     @State private var createCwd = ""
     @State private var createWorkspaceID: String?
@@ -59,7 +63,7 @@ struct TaskBoardView: View {
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
                                 Button(selected == nil ? "关闭" : "返回") {
-                                    if selected != nil { selected = nil } else { close() }
+                                    if selected != nil { closeTaskDetail() } else { close() }
                                 }
                             }
                             if selected == nil {
@@ -175,6 +179,15 @@ struct TaskBoardView: View {
 
     @ViewBuilder
     private var boardSurface: some View {
+        VStack(spacing: 0) {
+            if selected == nil { overviewBar }
+            boardContent
+        }
+        .background { WandAmbientBackground() }
+    }
+
+    @ViewBuilder
+    private var boardContent: some View {
         Group {
             if let selected {
                 VStack(spacing: 0) {
@@ -184,6 +197,7 @@ struct TaskBoardView: View {
                     TaskBoardDetailView(
                         api: api,
                         task: selected,
+                        childTasks: childTasks(of: selected),
                         workspaces: workspaces,
                         catalog: catalog,
                         lastAgent: lastAgent,
@@ -204,9 +218,11 @@ struct TaskBoardView: View {
                             }
                         },
                         onOpenSession: openBoardSession,
-                        onClose: { self.selected = nil },
+                        onOpenTask: openTaskDetail,
+                        onClose: { self.selected = nil; self.taskPath = [] },
                         onMoveSession: { session in moveSessionTarget = session }
                     )
+                    .clipped() // Form 滚动内容不能绘制到独立返回/标题栏。
                 }
             } else if loading && tasks.isEmpty {
                 ProgressView().tint(Theme.brand)
@@ -215,13 +231,12 @@ struct TaskBoardView: View {
                 listContent
             }
         }
-        .background { WandAmbientBackground() }
     }
 
     private func boardDetailChrome(title: String) -> some View {
         HStack(spacing: 10) {
             Button {
-                selected = nil
+                closeTaskDetail()
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "chevron.left")
@@ -231,7 +246,7 @@ struct TaskBoardView: View {
                 }
                 .foregroundColor(Theme.brand)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(WandQuietButtonStyle())
             Text(title)
                 .font(.wand(size: 15, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
@@ -416,7 +431,7 @@ struct TaskBoardView: View {
 
             HStack(spacing: 6) {
                 ForEach(
-                    [("", "全部"), ("backlog", "待立项"), ("todo", "待办"), ("doing", "进行中"), ("done", "已完成"), ("archived", "归档")],
+                    [("", "全部"), ("backlog", "待立项"), ("todo", "待办"), ("doing", "进行中"), ("done", "等你确认"), ("archived", "归档")],
                     id: \.0
                 ) { value, label in
                     let active = statusFilter == value
@@ -723,6 +738,25 @@ struct TaskBoardView: View {
         onOpenSession(sessionId)
     }
 
+    /// 当前任务的直接子任务：既是「可引用任务」列表，也是评论里 `#` 能选到的范围。
+    private func childTasks(of task: WandBoardTask) -> [WandBoardTask] {
+        tasks.filter { $0.parentTaskId == task.id }
+    }
+
+    /// 打开子任务详情；父任务留在栈里，返回时逐层回退。
+    private func openTaskDetail(_ task: WandBoardTask) {
+        if let current = selected, current.id != task.id { taskPath.append(current) }
+        selected = task
+    }
+
+    private func closeTaskDetail() {
+        if !taskPath.isEmpty {
+            selected = taskPath.removeLast()
+        } else {
+            selected = nil
+        }
+    }
+
     private func loadContacts() async {
         async let people = try? api.listContactEmployees()
         async let teams = try? api.listContactTeams()
@@ -741,11 +775,12 @@ struct TaskBoardView: View {
             let result: WandBoardDispatchResult
             if let subject { result = try await api.dispatchContactTask(id: task.id, subject: subject, prompt: prompt) }
             else { result = try await api.dispatchBoardTask(id: task.id, agent: agent, prompt: prompt); rememberAgent(agent) }
-            guard result.ok, result.taskId == task.id, !result.sessionId.isEmpty else { throw WandAPI.APIError.network("派发回执无效") }
+            guard result.ok, result.taskId == task.id, result.queued || !result.sessionId.isEmpty else { throw WandAPI.APIError.network("派发回执无效") }
             await refresh(showProgress: false)
             guard activeView, actionGeneration == operationGeneration, selected?.id == task.id, !Task.isCancelled else { return true }
             selected = tasks.first { $0.id == task.id } ?? selected
             busy = false
+            if result.queued { return true }
             if let runID = result.teamRun?.run.id, let onOpenTeamRun { onOpenTeamRun(runID) }
             else { openBoardSession(result.sessionId) }
             return true
@@ -780,6 +815,12 @@ private func wandBoardStatusColor(_ status: String) -> Color {
     case "done": return Theme.info
     default: return Theme.textMuted
     }
+}
+
+/// 任务状态的中文标签；未知状态回落到原值。
+func wandBoardStatusLabel(_ status: String) -> String {
+    guard let status = WandBoardStatus(rawValue: status) else { return status }
+    return status.label
 }
 
 private func wandBoardSwipeActionColor(_ action: WandBoardSwipeAction) -> Color {
@@ -940,7 +981,7 @@ private struct TaskBoardHero: View {
             HStack(spacing: 8) {
                 metricTile("待办", value: stats.todo, color: wandBoardStatusColor("todo"))
                 metricTile("进行中", value: stats.doing, color: wandBoardStatusColor("doing"))
-                metricTile("已完成", value: stats.done, color: wandBoardStatusColor("done"))
+                metricTile("已验收", value: stats.accepted, color: Theme.success)
             }
             .padding(.top, 12)
         }
@@ -1029,6 +1070,9 @@ private struct TaskBoardRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            Text(task.acceptance?.acceptedAt != nil ? "验收通过 · 已完成" : task.acceptance?.blocker.isEmpty == false ? "待处理：\(task.acceptance?.blocker ?? "")" : "未验收")
+                .font(.caption).foregroundStyle(task.acceptance?.acceptedAt != nil ? Theme.success : Theme.textSecondary)
+                .lineLimit(2).padding(.top, 6)
             if let summary = model.body {
                 Text(summary)
                     .font(.wand(size: 12))
@@ -1078,7 +1122,7 @@ private struct TaskBoardRow: View {
             Text(model.title)
                 .font(.wand(size: 16, weight: .semibold))
                 .foregroundColor(done ? Theme.textMuted : Theme.textPrimary)
-                .strikethrough(done)
+                .strikethrough(task.acceptance?.acceptedAt != nil)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1277,7 +1321,7 @@ private struct BoardStatusCheck: View {
             }
         }
         .frame(width: 18, height: 18)
-        .accessibilityLabel(done ? "标为未完成" : "标为已完成")
+        .accessibilityLabel(done ? "重新打开任务" : "转为等你确认")
     }
 }
 
@@ -1310,9 +1354,15 @@ private func boardAgentDotLift(index: Int, now: TimeInterval) -> CGFloat {
     return 0
 }
 
+@MainActor private enum IosTaskAcceptanceDrafts {
+    static var values: [String: (evidence: String, blocker: String)] = [:]
+}
+
 private struct TaskBoardDetailView: View {
     let api: WandAPI
     let task: WandBoardTask
+    /// 当前任务的直接子任务：可引用任务列表与评论里 `#` 的可选范围。
+    let childTasks: [WandBoardTask]
     let workspaces: [Workspace]
     let catalog: ModelsResponse?
     let lastAgent: WandBoardTaskAgent
@@ -1328,6 +1378,7 @@ private struct TaskBoardDetailView: View {
     let onDispatch: (WandBoardTaskAgent, String, ContactExecutionSubject?) async -> Bool
     let onDelete: () async -> Void
     let onOpenSession: (String) -> Void
+    let onOpenTask: (WandBoardTask) -> Void
     let onMoveSession: (WandBoardTaskSession) -> Void
     let onClose: () -> Void
 
@@ -1338,11 +1389,18 @@ private struct TaskBoardDetailView: View {
     @State private var subject: ContactExecutionSubject?
     @State private var commentState = WandTaskCommentState()
     @State private var replyCommentId: String?
+    /// 本次回复是否要派发员工（决定评论框里是否预填 `@`）。
+    @State private var replyDispatches = false
+    /// 正在定位的原评论。
+    @State private var locatedCommentId: String?
     @State private var legacyDispatchOpen = false
+    @State private var acceptanceEvidence: String
+    @State private var acceptanceBlocker: String
 
     init(
         api: WandAPI,
         task: WandBoardTask,
+        childTasks: [WandBoardTask] = [],
         workspaces: [Workspace],
         catalog: ModelsResponse?,
         lastAgent: WandBoardTaskAgent,
@@ -1354,11 +1412,13 @@ private struct TaskBoardDetailView: View {
         onDispatch: @escaping (WandBoardTaskAgent, String, ContactExecutionSubject?) async -> Bool,
         onDelete: @escaping () async -> Void,
         onOpenSession: @escaping (String) -> Void,
+        onOpenTask: @escaping (WandBoardTask) -> Void = { _ in },
         onClose: @escaping () -> Void,
         onMoveSession: @escaping (WandBoardTaskSession) -> Void = { _ in }
     ) {
         self.api = api
         self.task = task
+        self.childTasks = childTasks
         self.workspaces = workspaces
         self.catalog = catalog
         self.lastAgent = lastAgent
@@ -1370,42 +1430,59 @@ private struct TaskBoardDetailView: View {
         self.onDispatch = onDispatch
         self.onDelete = onDelete
         self.onOpenSession = onOpenSession
+        self.onOpenTask = onOpenTask
         self.onClose = onClose
         self.onMoveSession = onMoveSession
         _title = State(initialValue: task.title)
         _description = State(initialValue: task.description)
         _agent = State(initialValue: task.agent ?? lastAgent)
         _subject = State(initialValue: task.executionSubject?.type == "team" ? task.executionSubject : nil)
+        _acceptanceEvidence = State(initialValue: IosTaskAcceptanceDrafts.values[task.id]?.evidence ?? task.acceptance?.evidence ?? "")
+        _acceptanceBlocker = State(initialValue: IosTaskAcceptanceDrafts.values[task.id]?.blocker ?? task.acceptance?.blocker ?? "")
     }
 
     var body: some View {
+        ScrollViewReader { scroll in
+            detailForm(scroll: scroll)
+        }
+        .onChange(of: acceptanceEvidence) { _, _ in cacheAcceptanceDraft() }
+        .onChange(of: acceptanceBlocker) { _, _ in cacheAcceptanceDraft() }
+    }
+
+    private func detailForm(scroll: ScrollViewProxy) -> some View {
         Form {
             if !commentState.visible(taskId: task.id).isEmpty {
-                Section("评论") {
+                Section {
                     ForEach(commentState.visible(taskId: task.id)) { comment in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text(comment.authorName).font(.subheadline.weight(.semibold))
-                                Spacer()
-                                Text(comment.createdAt).font(.caption).foregroundStyle(.secondary)
-                            }
-                            Text(comment.body).textSelection(.enabled)
-                            if let dispatch = comment.dispatch {
-                                HStack {
-                                    Text("@\(dispatch.employeeName) · \(dispatch.label)").font(.caption)
-                                    if let sessionId = dispatch.sessionId { Button("查看执行") { onOpenSession(sessionId) } }
-                                }
-                            }
-                            Button("回复并 @") { replyCommentId = comment.id }.font(.caption)
+                        commentRow(comment)
+                    }
+                    if let cursor = commentState.nextCursor, !cursor.isEmpty {
+                        Button("加载更早的评论") { loadOlderComments(cursor) }
+                            .font(.caption)
+                    }
+                } header: {
+                    HStack {
+                        Text("评论")
+                        Spacer()
+                        Button { Task { await refreshComments() } } label: {
+                            Image(systemName: "arrow.clockwise")
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("刷新评论")
                     }
                 }
             }
             Section("评论与员工派发") {
-                TaskCommentComposer(api: api, taskId: task.id, employees: employees.filter { !$0.archived }.map { (id: $0.id, name: $0.name) }, sourceCommentId: $replyCommentId) {
-                    let request = commentState.begin(taskId: task.id)
-                    if let comments = try? await api.boardTaskComments(id: task.id) { commentState.accept(comments, taskId: task.id, requestId: request) }
-                }.id(task.id)
+                TaskCommentComposer(api: api, taskId: task.id,
+                                    employees: employees.filter { !$0.archived }.map { (id: $0.id, name: $0.name) },
+                                    referenceTasks: referenceTargets,
+                                    sourceCommentId: $replyCommentId,
+                                    replyDispatches: $replyDispatches,
+                                    onRevealSubmit: {
+                                        scroll.scrollTo(TaskCommentComposer.submitAnchor(taskId: task.id), anchor: .bottom)
+                                    }) {
+                    await refreshComments()
+                }.id(TaskCommentComposer.submitAnchor(taskId: task.id))
             }
             Section("内容") {
                 TextField("任务标题", text: $title)
@@ -1415,6 +1492,63 @@ private struct TaskBoardDetailView: View {
                     Task { await onPatch(["title": title.trimmingCharacters(in: .whitespacesAndNewlines), "description": description]) }
                 }
                 .disabled(busy || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            Section("可引用任务") {
+                if childTasks.isEmpty {
+                    Text("当前任务没有子任务。").font(.caption).foregroundStyle(Theme.textMuted)
+                } else {
+                    ForEach(childTasks) { child in
+                        Button { onOpenTask(child) } label: {
+                            HStack(spacing: 8) {
+                                Text("#\(child.identifier)")
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(Theme.brandText)
+                                Text(child.title)
+                                    .font(.callout)
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 4)
+                                Text(child.displayStatusLabel)
+                                    .font(.caption2)
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("打开子任务 \(child.identifier)，\(child.title)，\(child.displayStatusLabel)")
+                    }
+                }
+            }
+            Section("交付与验收") {
+                Text("会话运行中、空闲、结束、失败或归档，都不代表任务验收通过。")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Text(task.acceptance?.acceptedAt != nil ? "验收通过 · 已完成" : task.acceptance?.blocker.isEmpty == false ? "待处理 · 有验收缺口" : "未验收 · 待汇总交付")
+                    .font(.subheadline.weight(.semibold))
+                Text("由任务负责人统一核对各会话产物；等待信息／授权／部署／验收时写明原因与下一步。")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+                TextField("交付证据、产物路径或源会话", text: $acceptanceEvidence, axis: .vertical)
+                    .lineLimit(2...6)
+                TextField("待处理原因、授权或部署阻塞（无则留空）", text: $acceptanceBlocker, axis: .vertical)
+                    .lineLimit(2...4)
+                if task.acceptance?.acceptedAt != nil {
+                    Label("已确认验收通过", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(Theme.success)
+                    Button("保存并重新验收") { saveAcceptance(accepted: false) }
+                } else {
+                    if !childTasks.filter({ $0.acceptance?.acceptedAt == nil }).isEmpty {
+                        Text("仍有子任务未验收通过，主目标不能通过。")
+                            .font(.caption)
+                            .foregroundStyle(Theme.warning)
+                    }
+                    HStack {
+                        Button("保存交付与缺口") { saveAcceptance(accepted: false) }
+                        Button("确认验收通过") { saveAcceptance(accepted: true) }
+                            .disabled(busy || acceptanceEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                      || !acceptanceBlocker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                      || childTasks.contains { $0.acceptance?.acceptedAt == nil })
+                    }
+                }
             }
             Section("属性") {
                 Picker("状态", selection: Binding(
@@ -1507,7 +1641,7 @@ private struct TaskBoardDetailView: View {
                     Text("指派结果未确认，请先核对任务会话。").font(.caption).foregroundStyle(Theme.danger)
                     Button("我已核对，开始新的指派", action: onVerify).font(.caption)
                 }
-                Button(task.sessions.isEmpty ? "派发" : "再派发一次") {
+                Button(task.sessions.isEmpty ? "新建执行会话" : "新建并行会话") {
                     let submitted = composePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
                     let draftAtStart = composePrompt
                     Task { if await onDispatch(agent, submitted, subject), composePrompt == draftAtStart { composePrompt = "" } }
@@ -1516,6 +1650,10 @@ private struct TaskBoardDetailView: View {
               }
             }
             Section("任务内的会话") {
+                Text("\(task.sessions.count) 个关联会话 · \(wandBoardSessionSummary(task.sessions))")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+                Text("独立范围才并行；同目录或同文件重叠先协调串行，或隔离后合并。业务子任务须独立验收，不包含模型内部子 Agent。")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
                 let groups = wandBoardSessionGroups(sessions: task.sessions, assigned: task.agent)
                 if groups.isEmpty {
                     Text("还没有关联会话。在下面输入提示词后再派发，任务描述不会自动带上。")
@@ -1532,26 +1670,30 @@ private struct TaskBoardDetailView: View {
                             } else {
                                 ForEach(group.sessions) { session in
                                     HStack(spacing: 8) {
-                                        Button {
-                                            onOpenSession(session.id)
-                                        } label: {
-                                            HStack {
-                                                BrandLogo(provider: session.provider, color: Theme.textPrimary)
-                                                    .frame(width: 14, height: 14)
-                                                VStack(alignment: .leading, spacing: 2) {
-                                                    Text(session.title.isEmpty ? wandBoardProviderLabel(session.provider) : session.title)
-                                                    Text([wandModelDisplayName(session.provider, session.model, catalog), session.status]
-                                                            .filter { !$0.isEmpty }
-                                                            .joined(separator: " · "))
-                                                        .font(.caption)
+                                        Button { onOpenSession(session.id) } label: {
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                HStack(spacing: 6) {
+                                                    BrandLogo(provider: session.provider, color: Theme.textPrimary)
+                                                        .frame(width: 14, height: 14)
+                                                    Text(session.displayPurpose.isEmpty ? wandBoardProviderLabel(session.provider) : session.displayPurpose)
+                                                        .lineLimit(1)
+                                                    Spacer(minLength: 4)
+                                                    Text(session.activityLabel)
+                                                        .font(.caption2)
                                                         .foregroundColor(Theme.textMuted)
                                                 }
-                                                Spacer()
+                                                Text([session.employeeName, session.cwd, wandModelDisplayName(session.provider, session.model, catalog)]
+                                                    .compactMap { value in value?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                                                    .joined(separator: " · "))
+                                                    .font(.caption)
+                                                    .foregroundColor(Theme.textMuted)
+                                                Text("继续此会话")
+                                                    .font(.caption2.weight(.medium))
+                                                    .foregroundColor(Theme.brand)
                                             }
                                         }
-                                        Button {
-                                            onMoveSession(session)
-                                        } label: {
+                                        .buttonStyle(.plain)
+                                        Button { onMoveSession(session) } label: {
                                             Image(systemName: "folder")
                                                 .font(.system(size: 14, weight: .medium))
                                                 .foregroundColor(Theme.textSecondary)
@@ -1560,7 +1702,11 @@ private struct TaskBoardDetailView: View {
                                         .disabled(busy)
                                         .accessibilityLabel("移动会话到其他任务")
                                     }
+                                    .padding(.vertical, 3)
                                 }
+                                Text("每次派发都会创建独立执行；需要并行处理请新建会话，不把业务子任务当作同一会话继续。")
+                                    .font(.caption2)
+                                    .foregroundColor(Theme.textMuted)
                             }
                         }
                     }
@@ -1577,10 +1723,7 @@ private struct TaskBoardDetailView: View {
         .task(id: task.id) {
             let taskId = task.id
             while !Task.isCancelled {
-                let requestId = commentState.begin(taskId: taskId)
-                if let comments = try? await api.boardTaskComments(id: taskId), !Task.isCancelled {
-                    commentState.accept(comments, taskId: taskId, requestId: requestId)
-                }
+                await refreshComments(taskId: taskId)
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
@@ -1588,7 +1731,9 @@ private struct TaskBoardDetailView: View {
             title = task.title
             description = task.description
             agent = task.agent ?? lastAgent; subject = task.executionSubject?.type == "team" ? task.executionSubject : nil
-            replyCommentId = nil; legacyDispatchOpen = false
+            acceptanceEvidence = IosTaskAcceptanceDrafts.values[task.id]?.evidence ?? task.acceptance?.evidence ?? ""
+            acceptanceBlocker = IosTaskAcceptanceDrafts.values[task.id]?.blocker ?? task.acceptance?.blocker ?? ""
+            replyCommentId = nil; replyDispatches = false; locatedCommentId = nil; legacyDispatchOpen = false
             composePrompt = ""
         }
     }
@@ -1598,6 +1743,112 @@ private struct TaskBoardDetailView: View {
         return subject.type == "team" && task.workspaceId != nil && task.workspaceId != "wand-global" && teams.contains { $0.id == subject.id }
     }
 
+    // MARK: - 评论与引用
+
+    /// 可引用任务：只认当前任务的直接子任务（编号 + 标题 + 状态）。
+    private var referenceTargets: [TaskReferenceTarget] {
+        childTasks.map {
+            TaskReferenceTarget(id: $0.id, identifier: $0.identifier, title: $0.title, status: wandBoardStatusLabel($0.status))
+        }
+    }
+
+    private func employee(for id: String) -> SiliconEmployee? {
+        employees.first { $0.id == id }
+    }
+
+    private func commentRow(_ comment: WandTaskComment) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(comment.authorName).font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(comment.createdAt).font(.caption).foregroundStyle(.secondary)
+            }
+            TaskCommentBodyView(body: comment.body) { identifier in
+                openReferencedTask(identifier)
+            }
+            if let dispatch = comment.dispatch {
+                TaskCommentExecutionCard(api: api, taskId: task.id, comment: comment,
+                                         employee: employee(for: dispatch.employeeId),
+                                         onOpenSession: onOpenSession,
+                                         referencedIdentifiers: TaskCommentReferenceTargets.identifiers(for: comment, children: referenceTargets),
+                                         onOpenReferencedTask: openReferencedTask)
+            }
+            HStack(spacing: 12) {
+                Button("回复") {
+                    replyDispatches = false
+                    replyCommentId = comment.id
+                }
+                .font(.caption)
+                Button("回复并派发") {
+                    replyDispatches = true
+                    replyCommentId = comment.id
+                }
+                .font(.caption)
+                if let dispatch = comment.dispatch {
+                    Button("查看员工执行事项") {
+                        if let sessionId = dispatch.sessionId { onOpenSession(sessionId) }
+                    }
+                    .font(.caption)
+                    .disabled(dispatch.sessionId == nil)
+                }
+                if let sourceCommentId = comment.sourceCommentId, !sourceCommentId.isEmpty {
+                    Button("定位原评论") { locatedCommentId = sourceCommentId }
+                        .font(.caption)
+                }
+            }
+            if locatedCommentId == comment.id {
+                HStack {
+                    Label("原评论", systemImage: "arrow.turn.down.right")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.brandText)
+                    Spacer()
+                    Button("取消定位") { locatedCommentId = nil }.font(.caption2)
+                }
+            }
+        }
+    }
+
+    /// 正文里的 `#TASK-133` 只能跳到本任务的子任务。
+    private func openReferencedTask(_ identifier: String) {
+        guard let child = childTasks.first(where: { $0.identifier == identifier }) else { return }
+        onOpenTask(child)
+    }
+
+    private func cacheAcceptanceDraft() {
+        if IosTaskAcceptanceDrafts.values.count >= 100, let oldest = IosTaskAcceptanceDrafts.values.keys.first { IosTaskAcceptanceDrafts.values.removeValue(forKey: oldest) }
+        IosTaskAcceptanceDrafts.values[task.id] = (acceptanceEvidence, acceptanceBlocker)
+    }
+
+    private func saveAcceptance(accepted: Bool) {
+        let evidence = acceptanceEvidence.trimmingCharacters(in: .whitespacesAndNewlines)
+        let blocker = acceptanceBlocker.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value: [String: Any] = [
+            "evidence": acceptanceEvidence,
+            "blocker": acceptanceBlocker,
+            "acceptedAt": accepted ? ISO8601DateFormatter().string(from: Date()) : NSNull()
+        ]
+        guard !accepted || (!evidence.isEmpty && blocker.isEmpty && !childTasks.contains { $0.acceptance?.acceptedAt == nil }) else { return }
+        Task { await onPatch(["acceptance": value]) }
+    }
+
+    private func refreshComments(taskId: String? = nil) async {
+        let id = taskId ?? task.id
+        let requestId = commentState.begin(taskId: id)
+        if let page = try? await api.boardTaskCommentsPage(id: id), !Task.isCancelled {
+            commentState.mergeFirstPage(page.comments, totalCount: page.totalCount, nextCursor: page.nextCursor,
+                                        taskId: id, requestId: requestId)
+        }
+    }
+
+    /// 翻出更早一页的评论：只校验任务归属，轮询会换请求标识，不能拿它当守卫。
+    private func loadOlderComments(_ cursor: String) {
+        let id = task.id
+        Task {
+            if let page = try? await api.boardTaskCommentsPage(id: id, before: cursor), !Task.isCancelled {
+                commentState.prependOlderPage(page.comments, nextCursor: page.nextCursor, taskId: id)
+            }
+        }
+    }
 }
 
 private struct TaskBoardCreateView: View {

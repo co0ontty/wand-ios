@@ -352,6 +352,180 @@ final class CurrentAndroidParityTests: XCTestCase {
         talk.text = "talk"; task.text = "task"
         XCTAssertEqual(talk.text, "talk"); XCTAssertEqual(task.text, "task"); XCTAssertTrue(store.dispatchIntent.contains("dm_e"))
     }
+    func testTask142ProductionCancelButtonNeverPostsTheDraft() async throws {
+        let fake = ConversationFake()
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults())
+        await store.load("dm_e")
+        let draft = store.composer("dm_e", target: nil); draft.text = "TASK-142 UI 草稿，绝不执行"
+        store.dispatchIntent.insert("dm_e")
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: ConversationDetailView(id: "dm_e", store: store, onOpenSession: { _ in }, onOpenConversation: { _ in }, onEmployee: { _ in }))
+        window.rootViewController = host; window.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; store.shutdown() }
+        try await Task.sleep(for: .milliseconds(300))
+        func editor(in view: UIView) -> ComposerUITextView? {
+            if let view = view as? ComposerUITextView { return view }
+            return view.subviews.lazy.compactMap { editor(in: $0) }.first
+        }
+        let input = try XCTUnwrap(editor(in: host.view))
+        input.becomeFirstResponder()
+        input.setMarkedText("未确认中文组字", selectedRange: NSRange(location: 7, length: 0))
+        XCTAssertNotNil(input.markedTextRange)
+        try await Task.sleep(for: .milliseconds(200))
+        print("TASK142_CANCEL_READY")
+        // Dedicated runner queries the real AX tree and taps the production cancel button.
+        for _ in 0..<600 where store.dispatchIntent.contains("dm_e") {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard !store.dispatchIntent.contains("dm_e") else {
+            throw XCTSkip("运行 scripts/test-dispatch-cancellation.py 进行真实取消按钮触控回归")
+        }
+        XCTAssertEqual(draft.text, "")
+        XCTAssertTrue(draft.attachments.attachments.isEmpty)
+        // UIKit is allowed to retain the old editor during its dismissal animation.
+        // A late marked-text commit from that editor must still be rejected by the owner.
+        input.unmarkText()
+        input.delegate?.textViewDidChange?(input)
+        for dispatch in [false, true] {
+            store.send("dm_e", target: nil, dispatch: dispatch, workspaceID: "project", cwd: nil)
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(draft.text, "", "迟到组字提交不得复活已取消草稿")
+        XCTAssertTrue(fake.posts.isEmpty, "取消不得创建 channel、消息或任务")
+        let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        })
+        screenshot.name = "task142-after-production-cancel"; screenshot.lifetime = .keepAlways; add(screenshot)
+    }
+
+    func testTask143ProductionDefaultsAreReadOnlyAndNavigateAfterDismissal() async throws {
+        let fake = ConversationFake()
+        fake.detail = try parityDecode(ConversationInstance.self, #"{"id":"dm_e","kind":"dm","title":"只读配置验证","peerEmployeeId":"e1"}"#)
+        fake.people = try parityDecode([SiliconEmployee].self, #"[{"id":"e1","name":"验证员工","agents":[{"provider":"codex","model":"default","mode":"default","thinkingEffort":"high"},{"provider":"pi","engine":"core","model":"provider/long-model-name-for-read-only-preview","mode":"default","thinkingEffort":"deep"}]}]"#)
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults())
+        await store.refresh(); await store.load("dm_e")
+        let draft = store.composer("dm_e", target: nil); draft.text = "TASK-143 未发送草稿"
+        store.dispatchIntent.insert("dm_e")
+        var openedEmployeeID: String?
+        var navigatedWhileSheetVisible = false
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: ConversationDetailView(id: "dm_e", store: store,
+            onOpenSession: { _ in }, onOpenConversation: { _ in }, onEmployee: {
+                openedEmployeeID = $0
+                navigatedWhileSheetVisible = window.rootViewController?.presentedViewController != nil
+            }))
+        window.rootViewController = host; window.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; store.shutdown() }
+        try await Task.sleep(for: .milliseconds(300))
+        func editor(in view: UIView) -> ComposerUITextView? {
+            if let view = view as? ComposerUITextView { return view }
+            return view.subviews.lazy.compactMap { editor(in: $0) }.first
+        }
+        let input = try XCTUnwrap(editor(in: host.view))
+        input.becomeFirstResponder()
+        try await Task.sleep(for: .milliseconds(300))
+        print("TASK143_DEFAULTS_READY")
+        for _ in 0..<900 where openedEmployeeID == nil { try await Task.sleep(for: .milliseconds(50)) }
+        guard openedEmployeeID != nil else { throw XCTSkip("运行 scripts/test-dispatch-defaults.py 验证生产浮层真实触控") }
+        XCTAssertEqual(openedEmployeeID, "e1")
+        XCTAssertFalse(navigatedWhileSheetVisible, "关闭只读浮层后才进入真正的编辑入口")
+        XCTAssertEqual(draft.text, "TASK-143 未发送草稿")
+        XCTAssertTrue(store.dispatchIntent.contains("dm_e"))
+        XCTAssertNil(store.executionPreference(for: "dm_e", employeeID: "e1"))
+        XCTAssertEqual(store.employees.first?.agents.map(\.model), ["default", "provider/long-model-name-for-read-only-preview"])
+        XCTAssertTrue(fake.posts.isEmpty, "查看、点候选、关闭和前往配置均不得发送或保存")
+    }
+
+    func testCancelDispatchDiscardsBeforeEitherSendPathCanReadTheDraft() async {
+        let fake = ConversationFake(), api = api()
+        let store = ConversationStore(api: api, service: fake, drafts: SessionDraftStore(), defaults: defaults())
+        let draft = store.composer("dm_e", target: nil)
+        draft.text = "TASK-129 不得执行"
+        draft.requestInitialSend()
+        let oldEditorRevision = draft.discardRevision
+        draft.attachments.attachments = [UploadedFile(originalName: "draft.txt", savedPath: "/draft.txt", size: 3, mimeType: "text/plain")]
+        store.dispatchIntent.insert("dm_e")
+        XCTAssertTrue(store.cancelDispatch("dm_e", target: nil))
+        XCTAssertFalse(store.dispatchIntent.contains("dm_e"))
+        XCTAssertEqual(draft.text, "")
+        XCTAssertTrue(draft.attachments.attachments.isEmpty)
+        XCTAssertFalse(draft.claimInitialSend())
+        draft.setText("迟到的组字", ifDiscardRevision: oldEditorRevision)
+        XCTAssertEqual(draft.text, "")
+        // Even a stale send action after the layout change has no payload to submit.
+        for dispatch in [false, true] {
+            store.send("dm_e", target: nil, dispatch: dispatch, workspaceID: "project", cwd: nil)
+        }
+        await Task.yield()
+        XCTAssertTrue(fake.posts.isEmpty)
+        let reopened = ComposerDraftState(sessionId: store.draftKey("dm_e", target: nil), api: api)
+        XCTAssertEqual(reopened.text, "")
+        XCTAssertTrue(reopened.attachments.attachments.isEmpty)
+    }
+
+    func testCancelDispatchDoesNotAffectOtherTargetsOrOrdinaryDrafts() {
+        let store = ConversationStore(api: api(), service: ConversationFake(), drafts: SessionDraftStore(), defaults: defaults())
+        let target = ConversationTarget(taskId: "t", runId: "r")
+        let talk = store.composer("dm_e", target: nil), reply = store.composer("dm_e", target: target)
+        talk.text = "保留沟通草稿"; reply.text = "取消本轮派发草稿"
+        XCTAssertFalse(store.cancelDispatch("dm_e", target: nil))
+        XCTAssertEqual(talk.text, "保留沟通草稿")
+        store.dispatchIntent.insert("dm_e")
+        XCTAssertTrue(store.cancelDispatch("dm_e", target: target))
+        XCTAssertEqual(talk.text, "保留沟通草稿")
+        XCTAssertEqual(reply.text, "")
+    }
+
+    func testCancelDispatchInvalidatesAnUploadWaitingForItsChannel() async throws {
+        let fake = ConversationFake(); fake.suspendPost = true
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults())
+        let draft = store.composer("dm_e", target: nil); draft.text = "取消附件派发"
+        store.dispatchIntent.insert("dm_e")
+        draft.attachments.handleFileSelection(.success([URL(fileURLWithPath: "/tmp/not-uploaded-task142.txt")]))
+        await settle { fake.postContinuation != nil }
+        XCTAssertTrue(store.cancelDispatch("dm_e", target: nil))
+        XCTAssertFalse(draft.attachments.isUploading)
+        fake.postContinuation?.resume(returning: try parityReceipt(extra: ",\"sessionId\":\"never-upload\""))
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(draft.text, "")
+        XCTAssertTrue(draft.attachments.attachments.isEmpty)
+        XCTAssertEqual(fake.posts.map(\.0), ["/api/conversations/dm_e/channel"])
+    }
+
+    func testOnlyExplicitDispatchSubmitsOnceAndCancelCannotForgetInFlightInput() async throws {
+        let fake = ConversationFake(); fake.suspendPost = true
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults())
+        let draft = store.composer("dm_e", target: nil); draft.text = "明确确认的任务"
+        store.dispatchIntent.insert("dm_e")
+        store.send("dm_e", target: nil, dispatch: true, workspaceID: "project", cwd: nil)
+        XCTAssertFalse(store.cancelDispatch("dm_e", target: nil))
+        XCTAssertEqual(draft.text, "明确确认的任务")
+        store.send("dm_e", target: nil, dispatch: true, workspaceID: "project", cwd: nil)
+        await settle { fake.postContinuation != nil }
+        XCTAssertEqual(fake.posts.count, 1)
+        XCTAssertEqual(fake.posts.first?.0, "/api/conversations/dm_e/tasks")
+        fake.postContinuation?.resume(returning: try parityReceipt())
+        await settle { draft.sendPhase != .sending }
+        XCTAssertEqual(draft.text, "")
+    }
+
+    func testCancelDispatchCannotEraseUnknownDelivery() async {
+        let fake = ConversationFake(); fake.failure = ConversationUnconfirmed(requestId: "unknown")
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults())
+        let draft = store.composer("dm_e", target: nil); draft.text = "核对送达前保留"
+        store.dispatchIntent.insert("dm_e")
+        store.send("dm_e", target: nil, dispatch: true, workspaceID: "project", cwd: nil)
+        await settle { store.hasUnknown("dm_e", target: nil) }
+        XCTAssertFalse(store.cancelDispatch("dm_e", target: nil))
+        XCTAssertEqual(draft.text, "核对送达前保留")
+        XCTAssertTrue(store.dispatchIntent.contains("dm_e"))
+        XCTAssertEqual(fake.posts.count, 1)
+    }
+
     func testGroupOperationRetainsAcceptedStartupFailureRatherThanRepeating() async throws {
         let operation = ConversationOperation(), receipt = try parityReceipt(extra: ",\"startup\":\"failed\",\"error\":\"engine unavailable\"")
         var calls = 0
@@ -502,19 +676,25 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertEqual(ChatTopAttention.resolve(connected: true, blocked: false, sending: false, responding: false, status: "stopped"), .quiet)
     }
 
-    /// 会话页（结构化 + 终端）不再画头像，只保留 IM 私聊的头像版伙伴；两条链路的身份都走
-    /// 同一个 chatTopIdentity，任务名由宿主任务页注入。
+    /// 会话页（结构化 + 终端）不再画大头像伙伴，IM 私聊保留；两条链路的身份都走
+    /// 同一个 chatTopIdentity，任务名由宿主任务页注入。顶栏标题改为胶囊：左侧圆圈头像，右侧标题。
     func testSessionTopBarReplacesAvatarWithTaskIdentity() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let chat = try String(contentsOf: root.appendingPathComponent("Wand/ChatView.swift"), encoding: .utf8)
         let destination = try String(contentsOf: root.appendingPathComponent("Wand/SessionDestinationView.swift"), encoding: .utf8)
         let workspace = try String(contentsOf: root.appendingPathComponent("Wand/WorkspaceTaskView.swift"), encoding: .utf8)
+        let capsule = try String(contentsOf: root.appendingPathComponent("Wand/TopCapsuleTitle.swift"), encoding: .utf8)
         XCTAssertTrue(chat.contains("ChatTopIdentityBar(title: topIdentity.title"))
         XCTAssertFalse(chat.contains("TopChatCompanion"), "结构化会话仍在画头像")
         XCTAssertFalse(chat.contains("companionFace"), "结构化会话残留头像绘制")
         XCTAssertTrue(chat.contains("chatTopIdentity(taskTitle: hostTitle"))
         XCTAssertTrue(destination.contains("chatTopIdentity(taskTitle: hostTitle"), "终端顶栏没走同一份身份判定")
-        XCTAssertFalse(destination.contains("ContactAvatar("), "终端顶栏仍在画头像")
+        XCTAssertTrue(destination.contains("TopCapsuleTitle("), "终端顶栏没用胶囊标题")
+        XCTAssertTrue(workspace.contains("TopCapsuleTitle("), "任务顶栏没用胶囊标题")
+        XCTAssertTrue(capsule.contains("WorkingAvatar("), "胶囊头像没有用 3D 场景")
+        XCTAssertTrue(capsule.contains("activity: activity"), "胶囊头像没有接读/写/思考活动")
+        XCTAssertTrue(chat.contains("activity: avatarActivity"), "会话顶栏没有接读文件活动")
+        XCTAssertTrue(chat.contains("thinking: avatarIsThinking"), "会话顶栏没有接思考状态")
         XCTAssertTrue(workspace.contains("hostTitle: task.name"), "宿主任务名没有注入顶栏")
     }
 
@@ -788,6 +968,42 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertFalse(sessionSwipeShouldGoBack(startX: 12, translation: CGSize(width: -88, height: 6)))
         XCTAssertFalse(sessionSwipeShouldGoBack(startX: 160, translation: CGSize(width: 88, height: 6)))
         XCTAssertFalse(sessionSwipeShouldGoBack(startX: 12, translation: CGSize(width: 40, height: 90)))
+        // 松手去留以「滑过一半」为界：过半返回，不到一半回弹取消（快速右甩例外）。
+        XCTAssertTrue(sessionSwipeShouldCommit(progress: 0.5, velocity: 0))
+        XCTAssertTrue(sessionSwipeShouldCommit(progress: 0.62, velocity: -200))
+        XCTAssertFalse(sessionSwipeShouldCommit(progress: 0.34, velocity: 0))
+        XCTAssertFalse(sessionSwipeShouldCommit(progress: 0.49, velocity: 120))
+        XCTAssertTrue(sessionSwipeShouldCommit(progress: 0.3, velocity: 900), "快速右甩即使没过一半也返回")
+        XCTAssertFalse(sessionSwipeShouldCommit(progress: 0, velocity: 2000), "完全没拖动不能返回")
+        // 隐藏导航栏后系统 interactivePopGestureRecognizer 不会启动，必须由自己的边缘 pan 兜底；
+        // 这里锁住「只装一条、起点限左侧 48pt、松手才 pop」的实现约束。
+        let swipePage = try source("SessionDestinationView.swift")
+        XCTAssertTrue(swipePage.contains("UIPanGestureRecognizer(target: self, action: #selector(handleEdgePan(_:)))"))
+        XCTAssertFalse(swipePage.contains("UIScreenEdgePanGestureRecognizer(target: self"),
+                       "边缘手势与隐藏导航栏导航栈冲突，实测收不到事件")
+        XCTAssertFalse(swipePage.contains("pop.delegate = self"),
+                       "不要再改系统 pop 手势的 delegate，隐藏导航栏下无效")
+        XCTAssertTrue(swipePage.contains("startX <= 48"))
+        XCTAssertTrue(swipePage.contains("shouldRecognizeSimultaneouslyWith"))
+        XCTAssertTrue(swipePage.contains("nav.popViewController(animated: !UIAccessibility.isReduceMotionEnabled)"))
+        // 返回动画：必须是快照图层做跟手位移，不能去改 SwiftUI 托管页面的 frame/transform
+        // （下一次布局会把改动抹掉，表现为方向错位）。
+        XCTAssertTrue(swipePage.contains("renderedSnapshot(of:"))
+        XCTAssertTrue(swipePage.contains("CGAffineTransform(translationX: offset, y: 0)"),
+                      "跟手位移必须按手指位移向右移出")
+        XCTAssertTrue(swipePage.contains("WandMotion.backSwipeParallaxRatio"), "上一页需要视差跟进")
+        XCTAssertTrue(swipePage.contains("usingSpringWithDamping: 1"), "未达阈值要回弹而不是硬切")
+        XCTAssertTrue(swipePage.contains("sessionSwipeShouldCommit(progress: progress, velocity: velocity)"),
+                      "松手去留必须走统一的「一半」判定")
+        XCTAssertTrue(swipePage.contains("usingSpringWithDamping: 0.92"), "取消要回弹而不是硬切")
+        XCTAssertTrue(swipePage.contains("UIAccessibility.isReduceMotionEnabled"), "减少动态效果要退化")
+        XCTAssertFalse(swipePage.contains("topViewController?.view.transform"),
+                       "不能直接改 SwiftUI 托管页面的 transform")
+        XCTAssertFalse(swipePage.contains("SWDBG"), "调试日志不能留在源码里")
+        let motion = try source("Theme.swift")
+        XCTAssertTrue(motion.contains("backSwipeCommit"))
+        XCTAssertTrue(motion.contains("backSwipeCancel"))
+        XCTAssertTrue(motion.contains("backSwipeParallaxRatio"))
     }
 
     func testWorkspaceTaskInlineSessionSelectionStaysSynchronizedAndSheetsBlockCompletionAck() throws {
@@ -1152,6 +1368,60 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertLessThanOrEqual(size.height, WandImageLayout.thumbnailMaxHeight)
     }
 
+    func testImageFiguresStayInsideReadingAreaWithoutCropping() {
+        for viewport in [CGFloat(240), 600, 1000] {
+            for width in [CGFloat(280), 390, 768] {
+                let limit = WandImageLayout.figureBounds(availableWidth: width, viewportHeight: viewport)
+                XCTAssertLessThanOrEqual(limit.width, width * 0.8)
+                XCTAssertLessThanOrEqual(limit.height, viewport * 0.4)
+                for dimensions in [CGSize(width: 900, height: 1950), CGSize(width: 1600, height: 900), CGSize(width: 800, height: 800)] {
+                    let image = UIGraphicsImageRenderer(size: dimensions).image { context in
+                        UIColor.systemTeal.setFill(); context.fill(CGRect(origin: .zero, size: dimensions))
+                    }
+                    let host = UIHostingController(rootView: WandImageFigureLayout(viewportHeight: viewport) {
+                        Image(uiImage: image).resizable().aspectRatio(contentMode: .fit)
+                    })
+                    let size = host.sizeThatFits(in: CGSize(width: width, height: 3000))
+                    XCTAssertGreaterThan(size.width, 0)
+                    XCTAssertLessThanOrEqual(size.width, limit.width + 1)
+                    XCTAssertLessThanOrEqual(size.height, limit.height + 1)
+                    XCTAssertEqual(size.width / size.height, dimensions.width / dimensions.height, accuracy: 0.02)
+                }
+            }
+        }
+    }
+
+    func testLoadedImageFigureHasBoundedNativeGeometry() async throws {
+        let dimensions = CGSize(width: 390, height: 844)
+        let image = UIGraphicsImageRenderer(size: dimensions).image { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(origin: .zero, size: dimensions))
+            ("图片预览 · 不是应用页面" as NSString).draw(at: CGPoint(x: 24, y: 80),
+                withAttributes: [.font: UIFont.systemFont(ofSize: 22), .foregroundColor: UIColor.white])
+        }
+        let data = try XCTUnwrap(image.pngData())
+        let host = UIHostingController(rootView: WandToolImageFigure(baseURL: parityURL,
+            source: "data:image/png;base64," + data.base64EncodedString(), name: "手机截图.png")
+            .environment(\.chatViewportHeight, 600))
+        // Measure the figure, not the phone's top/bottom safe-area padding.
+        host.safeAreaRegions = []
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        try await Task.sleep(for: .milliseconds(300))
+        let size = host.sizeThatFits(in: CGSize(width: 390, height: 3000))
+        // The filename sits above the image; the screenshot itself is at most 240pt tall.
+        XCTAssertGreaterThan(size.height, 200)
+        XCTAssertLessThan(size.height, 280)
+        let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+            host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+        })
+        attachment.name = "bounded-phone-image-figure"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testInlineImagesPageWithinTheirGroup() throws {
         // 起始页钳制：越界与空分组都退回第一张，不崩溃。
         XCTAssertEqual(wandImageViewerStart(index: 2, count: 3), 2)
@@ -1172,6 +1442,64 @@ final class CurrentAndroidParityTests: XCTestCase {
                       "同一气泡的附件图片要作为一组传给查看器")
         XCTAssertTrue(chat.contains("group: images, groupIndex: index"))
         XCTAssertTrue(chat.contains("group: fullImages, groupIndex: index"))
+    }
+
+    func testConversationImageGalleryCrossesToolResultsAndKeepsSourceModes() {
+        let turns = [
+            ConversationTurn(role: "user", content: [.text(text: "[附件已上传，请查看以下文件:\n/work/a.png\n/work/doc.pdf\n]", subagent: nil)]),
+            ConversationTurn(role: "assistant", content: [
+                .toolUse(id: "one", name: "Read", description: nil, input: ["path": .string("/work/b.png")], subagent: nil),
+                .toolResult(toolUseId: "one", text: "", isError: false, truncated: false, images: [], subagent: nil),
+                .toolResult(toolUseId: "two", text: "", isError: false, truncated: false, images: ["/api/image/c", "/api/image/c", "data:image/png;base64,AA"], subagent: nil),
+                .toolResult(toolUseId: "bad", text: "", isError: true, truncated: false, images: ["/api/image/failed"], subagent: nil)
+            ])
+        ]
+        let pages = wandConversationImagePages(turns)
+        XCTAssertEqual(pages, [WandImagePage(source: "/work/a.png", directSource: false),
+                              WandImagePage(source: "/work/b.png", directSource: false),
+                              WandImagePage(source: "/api/image/c", directSource: true),
+                              WandImagePage(source: "data:image/png;base64,AA", directSource: true)])
+        let selection = wandImageGallerySelection(gallery: pages, local: ["/api/image/c"], current: "/api/image/c", direct: true)
+        XCTAssertEqual(selection.pages, pages)
+        XCTAssertEqual(selection.startIndex, 2)
+        let fallback = wandImageGallerySelection(gallery: [], local: ["/a", "/b"], current: "/b", direct: true)
+        XCTAssertEqual(fallback.startIndex, 1)
+        XCTAssertEqual(fallback.pages.count, 2)
+    }
+
+    func testImageViewerDoesNotLoadOffscreenPagesBeforeSwipe() async throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 40)).image { context in
+            UIColor.systemBlue.setFill(); context.fill(CGRect(x: 0, y: 0, width: 40, height: 40))
+        }
+        let state = MessageImageReplayState(data: try XCTUnwrap(image.pngData()))
+        state.install(responses: [200], reset: true)
+        defer { SelfSignedSession.resetEndpoint(state.baseURL) }
+        let host = UIHostingController(rootView: WandImageViewer(baseURL: state.baseURL,
+            sources: ["/lazy-one.png", "/lazy-two.png", "/lazy-three.png"],
+            isPresented: .constant(true), directSource: true))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        for _ in 0..<30 where MessageImageReplayProtocol.requestCount == 0 {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(MessageImageReplayProtocol.requestCount, 1, "打开三张图的画廊时，只允许请求当前图")
+    }
+
+    func testFullscreenImageSwipeTargetsClampAndShortDragCancels() {
+        XCTAssertEqual(wandImageVisiblePages(index: 1, count: 30, drag: 0), [1])
+        XCTAssertEqual(wandImageVisiblePages(index: 1, count: 30, drag: -20), [1, 2])
+        XCTAssertEqual(wandImageVisiblePages(index: 1, count: 30, drag: 20), [0, 1])
+        XCTAssertEqual(wandImageVisiblePages(index: 0, count: 30, drag: 20), [0])
+        XCTAssertEqual(wandImageVisiblePages(index: 0, count: 0, drag: 0), [])
+        XCTAssertEqual(wandImagePageTarget(index: 0, count: 3, translation: -180, predicted: -180, width: 390), 1)
+        XCTAssertEqual(wandImagePageTarget(index: 1, count: 3, translation: 180, predicted: 180, width: 390), 0)
+        XCTAssertEqual(wandImagePageTarget(index: 0, count: 3, translation: 180, predicted: 180, width: 390), 0)
+        XCTAssertEqual(wandImagePageTarget(index: 2, count: 3, translation: -180, predicted: -180, width: 390), 2)
+        XCTAssertEqual(wandImagePageTarget(index: 1, count: 3, translation: -30, predicted: -30, width: 390), 1)
+        XCTAssertEqual(wandImagePageTarget(index: 1, count: 3, translation: -30, predicted: -300, width: 390), 2)
     }
 
     func testImageHTTPFailuresExplainDeniedMissingAndTransientStates() {

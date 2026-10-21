@@ -551,6 +551,7 @@ struct ConversationDetailView: View {
                     Color.clear.frame(height: 1).id("im-tail")
                 }.padding(12).frame(maxWidth: 760).frame(maxWidth: .infinity)
             }
+            .environment(\.wandImageGallery, { wandConversationImagePages(messages.map(\.turn)) })
             .defaultScrollAnchor(.bottom)
             .defaultScrollAnchor(scrollPinned ? .bottom : nil, for: .sizeChanges)
             .onScrollPhaseChange { _, phase in userScrolling = phase == .interacting || phase == .decelerating }
@@ -728,6 +729,7 @@ private struct ConversationComposerView: View {
     @ObservedObject var focus: ComposerFocusController
     @StateObject private var links = ServerFileLinkController()
     @State private var settingsInfo = false
+    @State private var settingsEmployeeID: String?
     @State private var stopConfirm = false
     @State private var composing = false
     @State private var height: CGFloat = 36
@@ -745,6 +747,10 @@ private struct ConversationComposerView: View {
         _action = ObservedObject(wrappedValue: store.operation("action:" + id + ":" + (target?.runId ?? "talk")))
     }
     private var dispatch: Bool { store.dispatchIntent.contains(id) }
+    private var editorText: Binding<String> {
+        let revision = draft.discardRevision
+        return Binding(get: { draft.text }, set: { draft.setText($0, ifDiscardRevision: revision) })
+    }
     private var employee: SiliconEmployee? { store.employees.first { $0.id == detail.peerEmployeeId } }
     private var preferenceEligible: Bool { detail.kind == "dm" && target == nil && !dispatch }
     private var run: ContactRunDetail? { detail.runDetails.first { $0.run.id == target?.runId } }
@@ -757,7 +763,15 @@ private struct ConversationComposerView: View {
             if target != nil || dispatch {
                 HStack {
                     Text(dispatch ? "派发任务" : "回复本轮 · " + (detail.tasks.first { $0.id == target?.taskId }?.task.title ?? "任务")).font(.caption)
-                    Spacer(); Button("取消") { store.dispatchIntent.remove(id); store.targets[id] = nil; contextExpanded = false }
+                    Spacer(); Button {
+                        if dispatch { cancelDispatch() }
+                        else { store.targets[id] = nil; contextExpanded = false }
+                    } label: {
+                        Text("取消").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(draft.sendPhase == .sending || store.hasUnknown(id, target: target))
+                    .accessibilityIdentifier("conversation-cancel-dispatch")
                 }
             }
             if run?.run.status == "awaiting_approval" {
@@ -774,9 +788,11 @@ private struct ConversationComposerView: View {
                         PendingAttachmentsPreview(baseURL: store.api.baseURL, attachments: attachments.attachments, onRemove: attachments.remove,
                             onPreview: { file in focus.borrow("preview", open: true); links.open(serverPath: file.savedPath, api: store.api) })
                         if draft.submissionFailed, let feedback = draft.sendFeedback { Text(feedback).font(.caption).foregroundStyle(Theme.danger) }
-                        IMEAwareComposerTextView(text: $draft.text, placeholder: dispatch ? "任务说明" : "输入消息，回车换行", isFocused: focus.focused,
+                        IMEAwareComposerTextView(text: editorText, placeholder: dispatch ? "任务说明" : "输入消息，回车换行", isFocused: focus.focused,
                             maximumHeight: maximumHeight, submitOnReturn: false, onPasteImages: attachments.handlePastedImageData,
                             onFocusChange: { focus.focused = $0 }, onCompositionChange: { composing = $0 }, onSubmit: send, onHeightChange: { height = $0 })
+                            // Discard also retires UIKit marked text; it must not commit back on blur.
+                            .id(draft.discardRevision)
                             .frame(height: min(maximumHeight, max(34, height)))
                     }
                 }, add: {
@@ -800,10 +816,15 @@ private struct ConversationComposerView: View {
                         SessionComposerSettings(store: execution, focus: focus)
                     } else {
                         Button { focus.borrow("settings", open: true); settingsInfo = true } label: {
-                            ComposerSettingLabel(title: store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) })?.agents.first.map {
+                            Label("员工默认 · " + (store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) })?.agents.first.map {
                                 $0.model == "default" ? "默认模型" : $0.model
-                            } ?? "员工配置")
-                        }.buttonStyle(.plain).accessibilityHint("查看真实配置与生效范围")
+                            } ?? "配置不可用"), systemImage: "info.circle")
+                                .font(.caption).lineLimit(1).truncationMode(.tail)
+                                .frame(minWidth: 44, maxWidth: .infinity, minHeight: 48).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                            .accessibilityLabel("查看员工默认配置，只读")
+                            .accessibilityHint("此处不能选择模型，可前往员工执行配置修改")
+                            .accessibilityIdentifier("conversation-execution-defaults")
                     }
                 }, actionCount: ComposerActionPresentation(phase: composerPhase,
                     turnRunning: running && !dispatch, hasDraft: hasComposerDraft).slotCount)
@@ -828,20 +849,54 @@ private struct ConversationComposerView: View {
         .alert("附件预览失败", isPresented: Binding(get: { links.failure != nil }, set: { if !$0 { links.failure = nil; focus.resume("preview") } })) {
             Button("完成") { links.failure = nil; focus.resume("preview") }
         } message: { Text(links.failure?.message ?? "") }
-        .sheet(isPresented: $settingsInfo, onDismiss: { focus.resume("settings") }) {
+        .sheet(isPresented: $settingsInfo, onDismiss: {
+            if let employeeID = settingsEmployeeID {
+                settingsEmployeeID = nil; focus.collapse(); onEmployee(employeeID)
+            } else { focus.resume("settings") }
+        }) {
             NavigationStack {
-                List {
-                    Text("这里展示员工默认配置，影响后续新工作。私聊可在输入栏本页临时覆盖执行工具、模型和思考深度；覆盖仅随本页有效，不修改员工定义，也不会改写历史会话。权限仍由员工配置决定。")
-                    if let employee = store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) }) {
-                        ForEach(Array(employee.agents.enumerated()), id: \.offset) { index, candidate in
-                            VStack(alignment: .leading) {
-                                Text("候选 \(index + 1) · \(candidate.provider) · \(candidate.model)")
-                                Text("权限：\(composerModeName(candidate.mode)) · 思考：\(composerThinkingName(candidate.thinkingEffort))").font(.caption)
-                            }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: WandLayout.sectionGap) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("只读说明", systemImage: "info.circle").font(.headline)
+                            Text("这里不能选择或切换模型。派发的新工作使用员工默认配置；候选按顺序尝试，不是可选项。")
+                            Text("修改请前往员工执行配置，保存后影响此员工后续新工作，不改变历史会话或正在运行的任务。私聊输入栏的临时选择不用于派发任务。")
+                                .font(.subheadline).foregroundStyle(Theme.textSecondary)
                         }
-                        Button("查看员工执行配置（影响后续消息）") { settingsInfo = false; focus.collapse(); onEmployee(employee.id) }
-                    }
-                }.navigationTitle("当前输入的执行设置").toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { settingsInfo = false } } }
+                        if let employee = store.employees.first(where: { $0.id == (detail.peerEmployeeId ?? detail.leader?.employeeId) }) {
+                            VStack(alignment: .leading, spacing: WandLayout.fieldGap) {
+                                Text(employee.name + " · 默认执行顺序").font(.headline)
+                                if employee.agents.isEmpty {
+                                    Text("尚未配置执行候选，请前往员工执行配置添加。")
+                                        .foregroundStyle(Theme.textSecondary)
+                                }
+                                ForEach(Array(employee.agents.enumerated()), id: \.offset) { index, candidate in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(index == 0 ? "首选" : "降级候选 \(index + 1)").font(.subheadline.weight(.semibold))
+                                        Text(WandAgentTool(provider: candidate.provider, engine: candidate.engine).title + " · " + (candidate.model == "default" ? "默认模型" : candidate.model))
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        Text("权限：\(composerModeName(candidate.mode)) · 思考：\(composerThinkingName(candidate.thinkingEffort))")
+                                            .font(.caption).foregroundStyle(Theme.textSecondary)
+                                    }
+                                    .accessibilityElement(children: .combine)
+                                    .accessibilityIdentifier("conversation-default-candidate-\(index)")
+                                }
+                            }
+                            Button("前往员工执行配置", systemImage: "person.crop.circle") {
+                                settingsEmployeeID = employee.id; settingsInfo = false
+                            }.frame(minHeight: 44)
+                                .accessibilityIdentifier("conversation-edit-execution-defaults")
+                        } else {
+                            Text("员工默认配置暂不可用，请关闭后刷新对话重试。")
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(WandLayout.pageInset)
+                }
+                .navigationTitle("员工默认配置（只读）").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { settingsInfo = false }
+                        .accessibilityIdentifier("conversation-close-execution-defaults")
+                } }
             }
         }
         .confirmationDialog("停止当前任务？", isPresented: $stopConfirm, titleVisibility: .visible) {
@@ -850,6 +905,13 @@ private struct ConversationComposerView: View {
     }
     private func closeComposerActions() {
         composerActionsOpen = false; focus.resume("actions")
+    }
+    private func cancelDispatch() {
+        guard store.cancelDispatch(id, target: target) else { return }
+        store.targets[id] = nil
+        contextExpanded = false
+        closeComposerActions()
+        focus.collapse()
     }
     private var composerActionsPanel: some View {
         ComposerAttachmentPanel(onPhoto: {
@@ -860,8 +922,9 @@ private struct ConversationComposerView: View {
             HStack {
                 Button(dispatch ? "取消派发" : "派发任务", systemImage: "checklist") {
                     closeComposerActions()
-                    if dispatch { store.dispatchIntent.remove(id) } else { store.dispatchIntent.insert(id) }
+                    if dispatch { cancelDispatch() } else { store.dispatchIntent.insert(id) }
                 }.frame(maxWidth: .infinity, minHeight: 44)
+                    .disabled(draft.sendPhase == .sending || store.hasUnknown(id, target: target))
                 Button("派发与目录设置", systemImage: "slider.horizontal.3") {
                     closeComposerActions(); contextExpanded = true
                 }.frame(maxWidth: .infinity, minHeight: 44)

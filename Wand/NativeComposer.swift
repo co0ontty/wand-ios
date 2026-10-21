@@ -382,6 +382,7 @@ final class ComposerDraftState: ObservableObject {
     private(set) var active = true
     private(set) var retired = false
     private(set) var lifecycleRevision = 0
+    @Published private(set) var discardRevision = 0
     private var consumers = Set<UUID>()
     func acquire(_ consumer: UUID) { consumers.insert(consumer); activate() }
     func release(_ consumer: UUID) { consumers.remove(consumer); if consumers.isEmpty { deactivate() } }
@@ -429,6 +430,12 @@ final class ComposerDraftState: ObservableObject {
             persist()
         }
     }
+    /// UIKit may commit marked text after its editor was removed. Only its own discard epoch may write.
+    func setText(_ value: String, ifDiscardRevision revision: Int) {
+        guard !retired, revision == discardRevision else { return }
+        text = value
+    }
+
     private(set) var textRevision = 0
     private var pendingInitialSend = false
     private var initialSendClaimed = false
@@ -436,6 +443,22 @@ final class ComposerDraftState: ObservableObject {
     func bind(api: WandAPI) { attachments.bind(api: api) }
 
     func requestInitialSend() { pendingInitialSend = true; initialSendClaimed = false }
+
+    /// Explicit cancellation is not a send, nor permission to forget an in-flight receipt.
+    @discardableResult
+    func discardUnsentDraft() -> Bool {
+        guard !retired, sendPhase != .sending, unconfirmedInputs.isEmpty else { return false }
+        lifecycleRevision += 1
+        discardRevision += 1
+        finishInitialSend()
+        sendFeedbackTask?.cancel()
+        submissionFailed = false
+        sendFeedback = nil
+        sendPhase = .idle
+        text = ""
+        attachments.discardUnsentAttachments()
+        return true
+    }
 
     /// Atomically adopts the pending page's revision only when this destination is untouched.
     func adoptInitialDraft(text sourceText: String, expectedSourceRevision: Int, expectedText: String,
@@ -751,6 +774,17 @@ final class ComposerAttachmentController: ObservableObject {
         showToast("已移除附件")
     }
 
+    func discardUnsentAttachments() {
+        generation += 1
+        uploadTask?.cancel()
+        uploadTask = nil
+        isUploading = false
+        showFileImporter = false
+        showPhotoPicker = false
+        attachments = []
+        discardStaged()
+    }
+
     func discardStaged() {
         stagedGeneration &+= 1
         stagedInputRevision &+= 1
@@ -1001,6 +1035,10 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
     var disableAutocorrect: Bool = false
     var maximumHeight: CGFloat = ComposerMetrics.expandedInputMaxHeight
     var submitOnReturn: Bool = true
+    var selection: Binding<NSRange>? = nil
+    var accessibilityIdentifier: String? = nil
+    var accessibilityLabel: String = "消息输入"
+    var onHardwareKey: ((UIKeyboardHIDUsage) -> Bool)? = nil
     var onPasteImages: (([(data: Data, name: String?, mimeType: String?)]) -> Void)? = nil
     let onFocusChange: (Bool) -> Void
     let onCompositionChange: (Bool) -> Void
@@ -1053,7 +1091,9 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
         textView.setContentHuggingPriority(.defaultLow, for: .vertical)
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        textView.accessibilityLabel = "消息输入"
+        textView.accessibilityLabel = accessibilityLabel
+        textView.accessibilityIdentifier = accessibilityIdentifier
+        textView.onHardwareKey = { [weak coordinator = context.coordinator] key in coordinator?.parent.onHardwareKey?(key) ?? false }
         context.coordinator.reportHeight(for: textView)
         return textView
     }
@@ -1087,6 +1127,19 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
             context.coordinator.reportHeight(for: textView)
         }
 
+        if !composing, let selection {
+            let requested = selection.wrappedValue
+            let limit = (textView.text as NSString?)?.length ?? 0
+            let location = min(max(0, requested.location), limit)
+            let range = NSRange(location: location, length: min(max(0, requested.length), limit - location))
+            if textView.selectedRange != range {
+                context.coordinator.isApplyingBinding = true
+                textView.selectedRange = range
+                context.coordinator.isApplyingBinding = false
+            }
+        }
+        textView.accessibilityIdentifier = accessibilityIdentifier
+        textView.accessibilityLabel = accessibilityLabel
         context.coordinator.reportHeight(for: textView)
         context.coordinator.reconcileFocus(textView)
     }
@@ -1095,6 +1148,7 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
         coordinator.cancelFocusRetry()
         textView.onMarkedTextChange = nil
         textView.onLayoutSizeChange = nil
+        textView.onHardwareKey = nil
         textView.delegate = nil
     }
 
@@ -1195,11 +1249,18 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
             guard !isApplyingBinding, textView.markedTextRange == nil else { return }
             let committed = textView.text ?? ""
             if parent.text != committed { parent.text = committed }
+            if let selection = parent.selection, selection.wrappedValue != textView.selectedRange {
+                selection.wrappedValue = textView.selectedRange
+            }
             reportHeight(for: textView)
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
             publishComposition(textView.markedTextRange != nil)
+            guard !isApplyingBinding, textView.markedTextRange == nil, parent.selection != nil else { return }
+            // UIKit may notify selection before text. Publish the committed text and
+            // UTF-16 range together so a selection-only refresh cannot restore old text.
+            commitText(from: textView)
         }
 
         func textView(
@@ -1238,7 +1299,16 @@ struct IMEAwareComposerTextView: UIViewRepresentable {
 
 final class ComposerUITextView: UITextView {
     var onLayoutSizeChange: ((ComposerUITextView) -> Void)?
+    var onHardwareKey: ((UIKeyboardHIDUsage) -> Bool)?
     private var lastLayoutSize: CGSize = .zero
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let remaining = presses.filter { press in
+            guard markedTextRange == nil, let key = press.key else { return true }
+            return onHardwareKey?(key.keyCode) != true
+        }
+        if !remaining.isEmpty { super.pressesBegan(Set(remaining), with: event) }
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()

@@ -117,7 +117,7 @@ final class PiResourcesStore: ObservableObject {
                 if body["codemodeOverride"] != nil, ack.codemodeOverride != submitted.codemodeOverride { throw WandAPI.APIError.network("CodeMode 回执无效") }
                 self.response?.settings = ack
                 if draft == submitted { draft = ack }
-                phase = .sent; message = "已保存，下轮生效"
+                phase = .sent; message = "已保存，下轮生效，并成为新建 Pi 会话的默认"
             } catch {
                 guard active, request == revision else { return }
                 uncertain = !isDefiniteInputRejection(error)

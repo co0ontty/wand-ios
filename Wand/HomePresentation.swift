@@ -49,6 +49,7 @@ enum HomePresentation {
 
     static func statusLabel(_ status: String) -> String {
         switch status {
+        case "queued": return "排队中"
         case "running", "thinking": return "在跑"
         case "permission", "permission-blocked", "waiting-input": return "等你"
         case "reconnecting": return "重连中"
@@ -61,7 +62,7 @@ enum HomePresentation {
     static func pulse(_ session: WorkspaceSessionSummary) -> HomeSessionPulse {
         guard session.archived != true else { return .quiet }
         switch session.activityStatus.lowercased().replacingOccurrences(of: "_", with: "-") {
-        case "running", "thinking", "reconnecting": return .running
+        case "queued", "running", "thinking", "reconnecting": return .running
         case "permission", "permission-blocked", "waiting-input", "failed": return .needsYou
         default: return .quiet
         }
@@ -212,7 +213,7 @@ enum HomePresentation {
         WorkspaceTaskSummary(id: task.id, workspaceId: task.workspaceId, name: task.name, worktree: task.worktree,
             layout: task.layout, status: task.status, createdAt: task.createdAt, lastOpenedAt: task.lastOpenedAt,
             cwd: task.cwd, isolated: task.isolated, worktreeError: task.worktreeError, sessions: sessions,
-            totalSessions: task.totalSessions)
+            totalSessions: task.totalSessions, executionStatus: task.executionStatus, queuedExecutionCount: task.queuedExecutionCount)
     }
 
     private static func nonblank(_ value: String?) -> String? {

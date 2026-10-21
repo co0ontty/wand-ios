@@ -229,6 +229,15 @@ final class ConversationStore: ObservableObject {
         return draft
     }
     func hasUnknown(_ id: String, target: ConversationTarget?) -> Bool { unknownRequests[draftKey(id, target: target)] != nil }
+
+    /// Clear the dispatch payload before changing the send button back to ordinary chat.
+    @discardableResult
+    func cancelDispatch(_ id: String, target: ConversationTarget?) -> Bool {
+        guard dispatchIntent.contains(id), !hasUnknown(id, target: target),
+              composer(id, target: target).discardUnsentDraft() else { return false }
+        dispatchIntent.remove(id)
+        return true
+    }
     func send(_ id: String, target: ConversationTarget?, dispatch: Bool, workspaceID: String?, cwd: String?, executionPreference: ConversationExecutionPreference? = nil) {
         let draft = composer(id, target: target)
         let key = draftKey(id, target: target)

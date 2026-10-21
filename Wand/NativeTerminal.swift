@@ -91,11 +91,13 @@ final class NativeTerminalView: TerminalView, TerminalViewDelegate {
     func feedOutput(_ text: String) {
         feeding = true
         let reporting = allowMouseReporting, terminal = getTerminal()
-        let follow = !restoring && (!canScroll || scrollPosition >= 1)
         if !terminal.isCurrentBufferAlternate && terminal.mouseMode == .off { allowMouseReporting = false }
         defer { allowMouseReporting = reporting; feeding = false }
+        // SwiftTerm's feedFinish queues the display update for the next frame and
+        // its scroller callback already keeps a following viewport at the bottom.
+        // Do not force scrolling while a chunk is being parsed: it bypasses the
+        // display batching when the viewport moves and fights manual scrolling.
         feed(text: text)
-        if follow && !terminal.isCurrentBufferAlternate { scroll(toPosition: 1) }
         if reporting && (terminal.isCurrentBufferAlternate || terminal.mouseMode != .off) { selection.active = false }
     }
     @discardableResult
@@ -107,16 +109,22 @@ final class NativeTerminalView: TerminalView, TerminalViewDelegate {
         let terminal = getTerminal(); terminal.resetToInitialState(); selection.active = false
         nativeBackgroundColor = Self.canvasColor; nativeForegroundColor = Self.inkColor
         if let checkpoint = data.terminalState, let screen = checkpoint.data {
-            terminal.resize(cols: checkpoint.cols, rows: checkpoint.rows); feedOutput(screen)
+            resizeKeepingTerminalState(cols: checkpoint.cols, rows: checkpoint.rows); feedOutput(screen)
             for operation in checkpoint.pending ?? [] {
-                if operation.type == "resize", let cols = operation.cols, let rows = operation.rows { terminal.resize(cols: cols, rows: rows) }
-                else if let text = operation.data { feedOutput(text) }
+                if operation.type == "resize", let cols = operation.cols, let rows = operation.rows {
+                    resizeKeepingTerminalState(cols: cols, rows: rows)
+                } else if let text = operation.data { feedOutput(text) }
             }
         } else {
-            if let cols = data.ptyCols, let rows = data.ptyRows, PtyTerminalSnapshot.validSize(cols: cols, rows: rows) { terminal.resize(cols: cols, rows: rows) }
+            if let cols = data.ptyCols, let rows = data.ptyRows, PtyTerminalSnapshot.validSize(cols: cols, rows: rows) {
+                resizeKeepingTerminalState(cols: cols, rows: rows)
+            }
             feedOutput(data.output ?? "")
         }
-        refit(); scroll(toPosition: browsing ? position : 1); setNeedsDisplay()
+        refit(); scroll(toPosition: browsing ? position : 1)
+        // scroll(toPosition:) skips updateScroller when the row is unchanged.
+        // The row-based API also synchronizes contentSize in that case.
+        scrollTo(row: terminal.buffer.yDisp, notifyAccessibility: false); setNeedsDisplay()
         return true
     }
     func refit() {
@@ -124,8 +132,19 @@ final class NativeTerminalView: TerminalView, TerminalViewDelegate {
         guard bounds.width > 0, bounds.height > 0, ideal.width > 0, ideal.height > 0 else { return }
         let cols = max(1, min(1000, Int(bounds.width / (ideal.width / CGFloat(terminal.cols)))))
         let rows = max(1, min(1000, Int(bounds.height / (ideal.height / CGFloat(terminal.rows)))))
-        terminal.resize(cols: cols, rows: rows) // No soft reset: preserve alternate screen and bracketed paste modes.
-        if !restoring { onSizeChange?(cols, rows) }
+        resizeKeepingTerminalState(cols: cols, rows: rows)
+    }
+    /// Resize the emulator without TerminalView.resize(), whose documented
+    /// implementation performs a soft reset. The row-based scroll API also
+    /// updates contentSize when the viewport row itself has not changed.
+    private func resizeKeepingTerminalState(cols: Int, rows: Int) {
+        guard PtyTerminalSnapshot.validSize(cols: cols, rows: rows), cols != getTerminal().cols || rows != getTerminal().rows else { return }
+        getTerminal().resize(cols: cols, rows: rows)
+        if !restoring {
+            scrollTo(row: getTerminal().buffer.yDisp, notifyAccessibility: false)
+            setNeedsDisplay(bounds)
+            onSizeChange?(cols, rows)
+        }
     }
     func setScale(_ scale: Double) {
         font = UIFont(name: "JetBrainsMono-Regular", size: CGFloat(14 * normalizedTerminalScale(scale)))

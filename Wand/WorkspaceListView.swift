@@ -1095,7 +1095,7 @@ struct WorkspaceListView: View {
         }
         if expanded {
             ForEach(TaskListPresentation.orderedTaskSummaries(group.tasks).filter {
-                fold != .running || !HomePresentation.sessions($0.sessions, fold: .running).isEmpty
+                fold != .running || $0.hasActiveExecution || !HomePresentation.sessions($0.sessions, fold: .running).isEmpty
             }) { summary in
                 taskRows(summary, group: group, fold: fold)
             }
@@ -1297,7 +1297,7 @@ struct WorkspaceListView: View {
         if expanded {
             // 归档项从活跃列表拆出去，收进本层自己的折叠区（分一次，不在渲染处过滤）。
             let split = WorkspaceSessionSummary.splitArchived(HomePresentation.sessions(summary.sessions, fold: fold))
-            if split.active.isEmpty && split.archived.isEmpty {
+            if split.active.isEmpty && split.archived.isEmpty && !summary.hasQueuedExecution {
                 Text("还没有终端。点右侧「＋」新建。")
                     .font(.footnote)
                     .foregroundColor(Theme.textMuted)
@@ -1338,6 +1338,11 @@ struct WorkspaceListView: View {
         return layout {
             taskSummaryTitle(summary, workspace: workspace, task: task)
 
+            if summary.hasQueuedExecution {
+                Label("排队中", systemImage: "clock")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+            }
             if summary.status == "done" {
                 Text("已完成")
                     .font(.wand(size: 11, weight: .medium))
@@ -1383,29 +1388,19 @@ struct WorkspaceListView: View {
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundColor(isSelected ? Theme.brand : Theme.textMuted)
                     .frame(width: 22, height: 22)
-            } else if summary.isIsolated {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(Theme.success)
-                    .frame(width: 14, height: 18)
-            }
-            if !isSelecting && !summary.isIsolated {
-                Image(systemName: "checklist")
-                    .font(.system(size: 14))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 18)
-                    .accessibilityHidden(true)
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(summary.name)
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(selected || (isSelecting && isSelected) ? Theme.textPrimary : Theme.textSecondary)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                     .accessibilityIdentifier("task-name-" + summary.id)
-                Text(HomePresentation.sessionSummary(summary.sessions, total: summary.listedSessionCount))
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if summary.listedSessionCount > 0 {
+                    Text(HomePresentation.sessionSummary(summary.sessions, total: summary.listedSessionCount))
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .multilineTextAlignment(.leading)
             Spacer(minLength: 0)

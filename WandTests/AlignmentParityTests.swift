@@ -1,5 +1,7 @@
 import Foundation
 import XCTest
+import UIKit
+import WebKit
 @testable import Wand
 
 final class ThinkingEffortParityTests: XCTestCase {
@@ -1645,6 +1647,109 @@ private final class MockSessionListService: SessionListServing {
 
 @MainActor
 final class SettingsParityTests: XCTestCase {
+    func testSettingsChaptersMatchCurrentAndroidDirectory() {
+        XCTAssertEqual(MobileSettingsSection.allCases.map(\.title), [
+            "当前服务器", "外观与反馈", "流量与实时内容", "应用与更新", "模型分组", "诊断", "关于 Wand",
+        ])
+        XCTAssertEqual(Set(MobileSettingsSection.allCases.map(\.id)).count, 7)
+        XCTAssertTrue(MobileSettingsSection.allCases.allSatisfy { !$0.symbol.isEmpty })
+    }
+
+    func testWebSettingsPreserveProxyPrefixAndNeverAddCredentials() throws {
+        let base = try XCTUnwrap(URL(string: "https://example.test:9443/wand/"))
+        let start = try XCTUnwrap(SettingsWebStore.startURL(base))
+        XCTAssertEqual(start.absoluteString, "https://example.test:9443/wand/settings?client=app")
+        XCTAssertTrue(SettingsWebStore.accepts(start, baseURL: base))
+        for other in [
+            "https://example.test:9444/wand/settings", "http://example.test:9443/wand/settings",
+            "https://foreign.test:9443/wand/settings", "https://example.test:9443/wand-other/settings",
+            "https://example.test:9443/settings", "https://example.test:9443/wand/%252e%252e/settings",
+            "https://user:password@example.test:9443/wand/settings", "file:///tmp/settings", "javascript:alert(1)",
+        ] {
+            XCTAssertFalse(SettingsWebStore.accepts(try XCTUnwrap(URL(string: other)), baseURL: base), other)
+        }
+    }
+
+    func testInstalledWebSettingsLoadsAuthenticatedDirectoryWithoutElevatingNativeAPI() async throws {
+        let pointer = URL(fileURLWithPath: "/tmp/wand-task125-profile-path")
+        guard let path = try? String(contentsOf: pointer, encoding: .utf8) else {
+            throw XCTSkip("Requires explicit private installed-service profile; never probes another connection")
+        }
+        struct Profile: Decodable { let serverURL: URL; let token: String? }
+        let profile = try JSONDecoder().decode(Profile.self, from: Data(contentsOf: URL(fileURLWithPath: path.trimmingCharacters(in: .whitespacesAndNewlines))))
+        let api = WandAPI(baseURL: profile.serverURL, token: profile.token)
+        let web = SettingsWebStore(api: api)
+        defer { web.close() }
+        web.load()
+        for _ in 0..<600 where web.webView == nil && web.error == nil { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertNil(web.error)
+        let view = try XCTUnwrap(web.webView)
+        let window = UIWindow(frame: UIScreen.main.bounds)
+        let controller = UIViewController(); controller.view = view
+        window.rootViewController = controller; window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        for _ in 0..<600 where web.loading { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertFalse(web.loading); XCTAssertNil(web.error)
+        let settingsURL = try XCTUnwrap(WandEndpoint.url(baseURL: api.baseURL, route: "/api/settings"))
+        let status = try await view.callAsyncJavaScript("return (await fetch(settingsURL, {credentials: 'same-origin'})).status;", arguments: ["settingsURL": settingsURL.absoluteString], in: nil, contentWorld: .page) as? Int
+        XCTAssertEqual(status, 200)
+        var directory = false
+        for _ in 0..<100 {
+            directory = (try await view.evaluateJavaScript("document.querySelector('nav[aria-label=\"设置目录\"]') !== null") as? Bool) == true
+            if directory { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertTrue(directory, "Authenticated Web settings must show the real directory, not the empty shell")
+        XCTAssertFalse((api.endpointSession.cookieStorage?.cookies ?? []).contains { $0.name == "wand_settings_access" }, "Web-only grant must never elevate native APIs")
+    }
+
+    func testWebSettingsRequireDedicatedGrantWithoutChangingNativeCookies() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.test/api/settings/webview-session"))
+        let native = try XCTUnwrap(HTTPCookie(properties: [.domain: "example.test", .path: "/", .name: "__Host-wand_session", .value: "fixture-native"]))
+        func response(_ status: Int, grant: Bool) throws -> HTTPURLResponse {
+            try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields:
+                grant ? ["Set-Cookie": "wand_settings_access=fixture-proof; Path=/; Secure; HttpOnly; SameSite=Strict"] : [:]))
+        }
+        let result = try SettingsWebAuthentication.validatedCookies(native: [native], response: response(200, grant: true))
+        XCTAssertEqual(result.map(\.name), ["__Host-wand_session", "wand_settings_access"])
+        XCTAssertEqual(native.value, "fixture-native")
+        XCTAssertThrowsError(try SettingsWebAuthentication.validatedCookies(native: [native], response: response(200, grant: false)))
+        for status in [302, 401, 403, 404, 503] {
+            XCTAssertThrowsError(try SettingsWebAuthentication.validatedCookies(native: [native], response: response(status, grant: true)))
+        }
+    }
+
+    func testWebSettingsCloseCannotResurrectRetiredConnection() async throws {
+        let base = try XCTUnwrap(URL(string: "http://127.0.0.1:31389"))
+        let api = WandAPI(baseURL: base, token: nil)
+        let store = SettingsWebStore(api: api)
+        api.endpointSession.invalidate()
+        store.load(); store.close()
+        await Task.yield()
+        XCTAssertNil(store.webView)
+        XCTAssertFalse(store.loading)
+        XCTAssertNil(store.error)
+        store.load()
+        for _ in 0..<100 where store.loading { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertNil(store.webView)
+        XCTAssertNotNil(store.error)
+        store.close()
+        SelfSignedSession.resetEndpoint(base)
+    }
+
+    func testRemovedCreationPagesAreNotCompiledOrRouted() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let legacy = try String(contentsOf: root.appendingPathComponent("Wand/NewSessionView.swift"), encoding: .utf8)
+        XCTAssertFalse(legacy.contains("struct NewSessionView:"))
+        XCTAssertTrue(legacy.contains("struct DirectoryBrowserView:"))
+        XCTAssertTrue(legacy.contains("final class NewSessionEndpointMutationQueue"))
+        let project = try String(contentsOf: root.appendingPathComponent("Wand.xcodeproj/project.pbxproj"), encoding: .utf8)
+        XCTAssertFalse(project.contains("UnifiedSessionListView.swift"))
+        let settings = try String(contentsOf: root.appendingPathComponent("Wand/SettingsView.swift"), encoding: .utf8)
+        XCTAssertFalse(settings.contains("confirmDisconnect"))
+        XCTAssertTrue(settings.contains("SettingsWebView(api: api)"))
+    }
+
     func testHapticPreferenceDefaultsToEnabledAndSurvivesReload() throws {
         let suite = "SettingsParityTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

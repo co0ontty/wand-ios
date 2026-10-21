@@ -68,11 +68,31 @@ final class ContactsTests: XCTestCase {
         draft.systemSessionLimitInput = ""
         XCTAssertTrue(draft.body(builtin: true)["systemSessionLimit"] is NSNull)
     }
-    func testBuiltinEmployeeMutationContainsOnlyCandidatesAndRetention() throws {
+    func testMaxConcurrentTasksDefaultsToTwoAndValidatesPayload() throws {
+        for limit: Any in [NSNull(), 1, 3, 100] {
+            let data = try JSONSerialization.data(withJSONObject: ["id": "e_queue", "maxConcurrentTasks": limit])
+            let employee = try JSONDecoder().decode(SiliconEmployee.self, from: data)
+            let draft = EmployeeDraft(employee)
+            let expected = (limit as? Int) ?? employeeDefaultMaxConcurrentTasks
+            XCTAssertEqual(employee.maxConcurrentTasks, expected)
+            XCTAssertEqual(draft.maxConcurrentTasksInput, String(expected))
+            for builtin in [true, false] {
+                XCTAssertEqual(draft.body(builtin: builtin)["maxConcurrentTasks"] as? Int, expected)
+            }
+        }
+        var draft = EmployeeDraft()
+        for value in ["0", "101", "-1", "1.5", "abc"] {
+            draft.maxConcurrentTasksInput = value
+            XCTAssertNotNil(draft.validationError(builtin: true))
+        }
+        draft.maxConcurrentTasksInput = ""
+        XCTAssertEqual(draft.body(builtin: true)["maxConcurrentTasks"] as? Int, employeeDefaultMaxConcurrentTasks)
+    }
+    func testBuiltinEmployeeMutationContainsOnlyCandidatesAndLimits() throws {
         var draft = EmployeeDraft(try employee(system: "wand-default"))
         draft.name = "not a permitted rename"; draft.prompt = "never submit a locked field"
         let body = draft.body(builtin: true)
-        XCTAssertEqual(Set(body.keys), ["agents", "systemSessionLimit"])
+        XCTAssertEqual(Set(body.keys), ["agents", "systemSessionLimit", "maxConcurrentTasks"])
         XCTAssertNil(draft.validationError(builtin: true))
         let agents = try XCTUnwrap(body["agents"] as? [[String: Any]])
         XCTAssertEqual(agents[0]["kind"] as? String, "structured")

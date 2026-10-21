@@ -89,6 +89,7 @@ struct NativeRootView: View {
     @StateObject private var workspaceStore: WorkspaceStore
     @StateObject private var contactsStore: ContactsStore
     @StateObject private var conversations: ConversationStore
+    @StateObject private var homeKeyboard = KeyboardObserver()
     @State private var selectedConversationID: String?
     @State private var selectedContactEmployeeID: String?
     @State private var showingContacts = false
@@ -296,7 +297,10 @@ struct NativeRootView: View {
                 selectedWorkspaceTask = nil; selectedContactRunID = nil
                 openCompletionIntent(snapshot.id)
                 selectedSessionID = snapshot.id; selectedSnapshot = snapshot
-            }, onOpenRun: openTeamRun)
+            }, onOpenRun: openTeamRun,
+                serverDisplayName: profile.displayName,
+                onOpenSettings: { showSettings = true },
+                onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) })
         } else if let marker, marker.hasPrefix("wand:team-run:") {
             ContactRunView(runId: String(marker.dropFirst("wand:team-run:".count)), api: api,
                 onOpenSession: openSessionFromMissions, onCompletionVisible: { snapshot in
@@ -469,23 +473,8 @@ struct NativeRootView: View {
                             .padding(.top, 8)
                             .padding(.bottom, 4)
                     }
-                    if homeListMode == .sessions || showingBoard {
-                    HomeOverviewBar(
-                        serverDisplayName: profile.displayName,
-                        showNewTask: !showingBoard,
-                        onNewTask: {
-                            pendingNewConversationCwd = ""
-                            pendingNewConversationWorkspaceID = nil
-                            pendingNewConversationTaskID = nil
-                            initialNewConversationEmployeeID = nil
-                            presentNewConversation = true
-                        },
-                        onOpenSettings: { showSettings = true },
-                        onSwitchServer: {
-                            NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
-                        }
-                    )
-                    .disabled(homeMutationBusy)
+                    if homeListMode == .sessions {
+                        homeOverviewBar.disabled(homeMutationBusy)
                     }
                     if homeListMode == .im {
                         ConversationListView(store: conversations, onSelect: openConversation,
@@ -502,7 +491,9 @@ struct NativeRootView: View {
                                 initialNewConversationEmployeeID = employeeID
                                 presentNewConversation = true
                             },
-                            onOpenConversation: openConversation, onTeamConversation: openPresetConversation, embedded: true)
+                            onOpenConversation: openConversation, onTeamConversation: openPresetConversation, embedded: true,
+                            serverDisplayName: profile.displayName, onOpenSettings: { showSettings = true },
+                            onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) })
                             .transition(.opacity)
                     } else if showingBoard {
                         TaskBoardView(
@@ -512,7 +503,8 @@ struct NativeRootView: View {
                             onOpenSession: openSessionFromMissions,
                             onOpenBoundSession: openBoardBoundSession,
                             onOpenTeamRun: openTeamRun,
-                            embedded: true
+                            embedded: true,
+                            overviewBar: homeOverviewBar
                         )
                     } else {
                         WorkspaceListView(
@@ -611,16 +603,21 @@ struct NativeRootView: View {
                     }
                 }
                 .animation(reducedMotion ? nil : WandMotion.stateSwap, value: homeListMode)
-                .safeAreaInset(edge: .bottom) {
-                    HStack {
-                        Spacer(minLength: 8)
-                        HomeMenuPill(mode: homeListMode, onMode: setHomeListMode) {
-                            guard !contactsStore.busy, !homeMutationBusy else { return }
-                            selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
-                            selectedContactRunID = nil; setHomeListMode(.contacts)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    // The Form owns keyboard avoidance. Root navigation must not become
+                    // a second toolbar above a docked keyboard (floating keyboards keep it).
+                    if homeKeyboard.lift == 0 {
+                        HStack {
+                            Spacer(minLength: 8)
+                            HomeMenuPill(mode: homeListMode, onMode: setHomeListMode) {
+                                guard !contactsStore.busy, !homeMutationBusy else { return }
+                                selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
+                                selectedContactRunID = nil; setHomeListMode(.contacts)
+                            }
+                            .disabled(homeMutationBusy)
+                            Spacer(minLength: 8)
                         }
-                        .disabled(homeMutationBusy)
-                        Spacer(minLength: 8)
+                        .transition(.opacity)
                     }
                 }
                 .navigationTitle("")
@@ -628,6 +625,24 @@ struct NativeRootView: View {
                 .toolbar(.hidden, for: .navigationBar)
             }
         }
+    }
+
+    private var homeOverviewBar: HomeOverviewBar {
+        HomeOverviewBar(
+            serverDisplayName: profile.displayName,
+            showNewTask: !showingBoard,
+            onNewTask: {
+                pendingNewConversationCwd = ""
+                pendingNewConversationWorkspaceID = nil
+                pendingNewConversationTaskID = nil
+                initialNewConversationEmployeeID = nil
+                presentNewConversation = true
+            },
+            onOpenSettings: { showSettings = true },
+            onSwitchServer: {
+                NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
+            }
+        )
     }
 
     /// 详情：任务工作窗口优先；未分组会话 / 合并 Agent 仍可直接打开。
@@ -1278,7 +1293,7 @@ struct NativeRootView: View {
 }
 
 /// 对齐 Android HomeOverviewCard：服务器名 + 会话/任务模式芯片 + 新建 + 溢出菜单。
-private struct HomeOverviewBar: View {
+struct HomeOverviewBar: View {
     let serverDisplayName: String
     let showNewTask: Bool
     let onNewTask: () -> Void

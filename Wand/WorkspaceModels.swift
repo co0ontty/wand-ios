@@ -346,6 +346,7 @@ struct HomeTeamStepIdentity: Codable, Equatable {
 }
 
 struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
+    var executionStatus: String? = nil
     let id: String
     let provider: String?
     let sessionKind: String?
@@ -386,6 +387,9 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
         ptyBusy = snapshot.ptyBusy
         providerCliActive = snapshot.providerCliActive
         inFlight = snapshot.structuredState?.inFlight
+        executionStatus = snapshot.structuredState?.inFlight != true && snapshot.archived != true
+            && snapshot.status != "failed" && snapshot.structuredState?.lastError == nil
+            && !(snapshot.queuedMessages ?? []).isEmpty ? "queued" : nil
         archived = snapshot.archived
         archivedAt = snapshot.archivedAt
         completionRevision = snapshot.completionRevision
@@ -414,6 +418,7 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
     }
 
     var activityStatus: String {
+        if archived != true && inFlight != true && ptyBusy != true && permissionBlocked != true && status != "failed" && executionStatus == "queued" { return "queued" }
         if permissionBlocked == true { return "permission" }
         if !["permission", "permission-blocked", "waiting-input", "waiting_input", "failed", "reconnecting"].contains(status ?? "") {
             if archived != true && (ptyBusy == true || inFlight == true || status == "thinking") {
@@ -475,6 +480,10 @@ struct WorkspaceTask: Codable, Equatable, Identifiable {
 
 /// GET /api/tasks 聚合行：任务 + 运行期派生字段；目录信息在 TaskDirectoryGroup 上。
 struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
+    var executionStatus: String? = nil
+    var queuedExecutionCount: Int? = nil
+    var hasQueuedExecution: Bool { executionStatus == "queued" }
+    var hasActiveExecution: Bool { executionStatus == "queued" || executionStatus == "running" }
     let id: String
     let workspaceId: String
     let name: String
@@ -505,7 +514,9 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
         isolated: Bool?,
         worktreeError: String?,
         sessions: [WorkspaceSessionSummary],
-        totalSessions: Int? = nil
+        totalSessions: Int? = nil,
+        executionStatus: String? = nil,
+        queuedExecutionCount: Int? = nil
     ) {
         self.id = id
         self.workspaceId = workspaceId
@@ -520,6 +531,8 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
         self.worktreeError = worktreeError
         self.sessions = sessions
         self.totalSessions = totalSessions ?? sessions.count
+        self.executionStatus = executionStatus
+        self.queuedExecutionCount = queuedExecutionCount
     }
 
     func asTask() -> WorkspaceTask {
@@ -743,11 +756,11 @@ enum TaskListPresentation {
 
     static func hasLiveActivity(_ group: TaskDirectoryGroup) -> Bool {
         group.standaloneSessions.contains(where: hasLiveActivity)
-            || group.tasks.contains { $0.sessions.contains(where: hasLiveActivity) }
+            || group.tasks.contains { $0.hasActiveExecution || $0.sessions.contains(where: hasLiveActivity) }
     }
 
     static func hasLiveActivity(_ session: WorkspaceSessionSummary) -> Bool {
-        session.inFlight == true || ["running", "thinking", "permission", "waiting-input", "reconnecting"].contains(session.activityStatus)
+        session.inFlight == true || ["queued", "running", "thinking", "permission", "waiting-input", "reconnecting"].contains(session.activityStatus)
     }
 
     /// 占位标题（空 / 会话 / 裸 CLI 名 / 「CLI N」）不是会话标题。

@@ -44,6 +44,13 @@ enum WandMotion {
     static let scan = Animation.linear(duration: 2.2).repeatForever(autoreverses: false)
     static let activityPulse = Animation.smooth(duration: 1.2, extraBounce: 0).repeatForever(autoreverses: true)
     static let activityTick: TimeInterval = 0.05
+    /// 交互式侧滑返回：跟手阶段不用动画，松手后才用这条曲线补齐剩余位移。
+    /// 提交与回弹共用同一组时长/曲线，保证「收起是展开的倒放」的观感一致。
+    static let backSwipeCommit = Animation.easeOut(duration: 0.26)
+    static let backSwipeCancel = Animation.interactiveSpring(response: 0.28, dampingFraction: 1, blendDuration: 0)
+    /// 上一页视差：跟随时只露出一小段并轻微变暗，不整体平移一屏。
+    static let backSwipeParallaxRatio: CGFloat = 0.28
+    static let backSwipeDimOpacity: CGFloat = 0.14
     static func keyboard(duration: Double) -> Animation? { UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: max(0, duration)) }
 }
 

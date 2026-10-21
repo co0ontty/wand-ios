@@ -1,5 +1,8 @@
 import Foundation
 
+/// 未设置并发上限时的默认值；服务端与各客户端保持一致。
+let employeeDefaultMaxConcurrentTasks = 2
+
 struct ContactCandidate: Codable, Equatable {
     var provider = "claude"
     var model = "default"
@@ -40,6 +43,8 @@ struct SiliconEmployee: Decodable, Identifiable, Equatable {
     let createdAt: String
     var tags: [String]
     var systemSessionLimit: Int?
+    /// 同时执行的任务上限；旧响应缺省时按默认值 2。超出的派发留在任务里排队。
+    var maxConcurrentTasks: Int
     var archived: Bool { !(archivedAt ?? "").isEmpty }
     var builtin: Bool { !(systemKey ?? "").isEmpty }
     var displayTags: [String] {
@@ -49,7 +54,7 @@ struct SiliconEmployee: Decodable, Identifiable, Equatable {
         default: return tags
         }
     }
-    private enum CodingKeys: String, CodingKey { case id, name, duty, prompt, avatar, agents, systemKey, archivedAt, tags, createdAt, systemSessionLimit }
+    private enum CodingKeys: String, CodingKey { case id, name, duty, prompt, avatar, agents, systemKey, archivedAt, tags, createdAt, systemSessionLimit, maxConcurrentTasks }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
@@ -59,6 +64,7 @@ struct SiliconEmployee: Decodable, Identifiable, Equatable {
         avatar = try c.decodeIfPresent(String.self, forKey: .avatar) ?? ""
         agents = try c.decodeIfPresent([ContactCandidate].self, forKey: .agents) ?? []
         systemSessionLimit = try c.decodeIfPresent(Int.self, forKey: .systemSessionLimit)
+        maxConcurrentTasks = try c.decodeIfPresent(Int.self, forKey: .maxConcurrentTasks) ?? employeeDefaultMaxConcurrentTasks
         systemKey = try c.decodeIfPresent(String.self, forKey: .systemKey)
         archivedAt = try c.decodeIfPresent(String.self, forKey: .archivedAt)
         tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
@@ -75,12 +81,15 @@ struct EmployeeDraft: Equatable {
     var tagInput = ""
     var systemSessionLimitInput = ""
     var systemSessionLimit: Int? { Int(systemSessionLimitInput) }
+    var maxConcurrentTasksInput = ""
+    var maxConcurrentTasks: Int? { Int(maxConcurrentTasksInput) }
     init() {}
     init(_ employee: SiliconEmployee) {
         name = employee.name; duty = employee.duty; prompt = employee.prompt
         avatar = employee.avatar; agents = employee.agents
         tagInput = employee.displayTags.joined(separator: "，")
         systemSessionLimitInput = employee.systemSessionLimit.map(String.init) ?? ""
+        maxConcurrentTasksInput = String(employee.maxConcurrentTasks)
     }
     var tags: [String] {
         var seen = Set<String>()
@@ -91,6 +100,9 @@ struct EmployeeDraft: Equatable {
     func validationError(builtin: Bool) -> String? {
         if !systemSessionLimitInput.isEmpty && (systemSessionLimitInput.contains(where: { !$0.isASCII || !$0.isNumber }) || systemSessionLimit == nil || !(0...10000).contains(systemSessionLimit ?? -1)) {
             return "系统调用历史保留上限必须是 0 到 10000 的整数；留空表示不限。"
+        }
+        if !maxConcurrentTasksInput.isEmpty && (maxConcurrentTasksInput.contains(where: { !$0.isASCII || !$0.isNumber }) || maxConcurrentTasks == nil || !(1...100).contains(maxConcurrentTasks ?? -1)) {
+            return "并发任务上限必须是 1 到 100 的整数；留空表示默认 2。"
         }
         if !builtin {
             if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写员工名字。" }
@@ -105,11 +117,13 @@ struct EmployeeDraft: Equatable {
     func body(builtin: Bool) -> [String: Any] {
         let candidates = agents.map { $0.body() }
         let retention: Any = systemSessionLimit.map { $0 as Any } ?? NSNull()
-        if builtin { return ["agents": candidates, "systemSessionLimit": retention] }
+        let concurrency: Any = maxConcurrentTasks ?? employeeDefaultMaxConcurrentTasks
+        if builtin { return ["agents": candidates, "systemSessionLimit": retention, "maxConcurrentTasks": concurrency] }
         return ["name": name.trimmingCharacters(in: .whitespacesAndNewlines),
                 "duty": duty.trimmingCharacters(in: .whitespacesAndNewlines),
                 "prompt": prompt.trimmingCharacters(in: .whitespacesAndNewlines),
-                "avatar": avatar, "tags": tags, "agents": candidates, "systemSessionLimit": retention]
+                "avatar": avatar, "tags": tags, "agents": candidates, "systemSessionLimit": retention,
+                "maxConcurrentTasks": concurrency]
     }
 }
 

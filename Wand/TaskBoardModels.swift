@@ -61,8 +61,31 @@ struct WandBoardTaskSession: Codable, Equatable, Identifiable {
     let cwd: String
     let model: String
     let thinkingEffort: String
+    let employeeId: String?
+    let employeeName: String?
+    let employeeAvatar: String?
+    let purpose: String?
+    let permissionBlocked: Bool?
+    let archived: Bool?
+    let executionStatus: String?
+    let inFlight: Bool?
+    let queuedMessageCount: Int?
+    let taskCommentId: String?
     var engine: String? = nil
+    var mode: String? = nil
     var toolLabel: String { provider == "pi" && engine == "sdk" ? "Wand Agent" : wandBoardProviderLabel(provider) }
+    var displayPurpose: String { purpose?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? purpose! : title }
+    var activityLabel: String {
+        if archived == true { return "已归档" }
+        if permissionBlocked == true { return "等待授权" }
+        if ["waiting-input", "waiting_input", "needs_input"].contains(status) { return "等待输入" }
+        if executionStatus == "running" || inFlight == true || (inFlight == nil && ["running", "thinking"].contains(status)) { return "运行中" }
+        if status == "failed" { return "失败" }
+        if ["exited", "stopped"].contains(status) { return "已结束" }
+        if executionStatus == "queued" || status == "queued" { return "排队中" }
+        if status == "idle" { return "空闲" }
+        return "状态未确认"
+    }
 
     var isStructured: Bool { sessionKind != "pty" && sessionKind != "shell" }
 
@@ -76,9 +99,32 @@ struct WandBoardTaskSession: Codable, Equatable, Identifiable {
         cwd = (try? container.decode(String.self, forKey: .cwd)) ?? ""
         model = (try? container.decode(String.self, forKey: .model)) ?? ""
         thinkingEffort = (try? container.decode(String.self, forKey: .thinkingEffort)) ?? "off"
-        engine = try? container.decode(String.self, forKey: .engine)
+        employeeId = try? container.decodeIfPresent(String.self, forKey: .employeeId)
+        employeeName = try? container.decodeIfPresent(String.self, forKey: .employeeName)
+        employeeAvatar = try? container.decodeIfPresent(String.self, forKey: .employeeAvatar)
+        purpose = try? container.decodeIfPresent(String.self, forKey: .purpose)
+        permissionBlocked = try? container.decodeIfPresent(Bool.self, forKey: .permissionBlocked)
+        archived = try? container.decodeIfPresent(Bool.self, forKey: .archived)
+        executionStatus = try? container.decodeIfPresent(String.self, forKey: .executionStatus)
+        inFlight = try? container.decodeIfPresent(Bool.self, forKey: .inFlight)
+        queuedMessageCount = try? container.decodeIfPresent(Int.self, forKey: .queuedMessageCount)
+        taskCommentId = try? container.decodeIfPresent(String.self, forKey: .taskCommentId)
+        engine = try? container.decodeIfPresent(String.self, forKey: .engine)
+        mode = try? container.decodeIfPresent(String.self, forKey: .mode)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, provider, sessionKind, title, status, cwd, model, thinkingEffort
+        case employeeId, employeeName, employeeAvatar, purpose, permissionBlocked, archived, executionStatus, inFlight, queuedMessageCount, taskCommentId, engine, mode
     }
 }
+
+struct WandTaskAcceptance: Codable, Equatable {
+    let evidence: String
+    let blocker: String
+    let acceptedAt: String?
+}
+
 
 struct WandBoardDispatchResult: Decodable {
     let ok: Bool
@@ -87,6 +133,8 @@ struct WandBoardDispatchResult: Decodable {
     let provider: String
     let cwd: String
     let teamRun: ContactRunDetail?
+    /// 员工并发上限已满：派发已记录为排队，暂无会话可打开。
+    let queued: Bool
 
     private struct Session: Decodable {
         let id: String?
@@ -94,12 +142,13 @@ struct WandBoardDispatchResult: Decodable {
         let cwd: String?
     }
 
-    private enum CodingKeys: String, CodingKey { case ok, taskId, session, teamRun }
+    private enum CodingKeys: String, CodingKey { case ok, taskId, session, teamRun, queued }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         ok = (try? container.decode(Bool.self, forKey: .ok)) ?? true
         taskId = (try? container.decode(String.self, forKey: .taskId)) ?? ""
+        queued = (try? container.decode(Bool.self, forKey: .queued)) ?? false
         let session = try? container.decode(Session.self, forKey: .session)
         sessionId = session?.id ?? ""
         provider = session?.provider ?? ""
@@ -114,7 +163,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         case taskDescription = "description"
         case status, priority, labels, dueDate
         case sortOrder, agent, createdAt, updatedAt, sessionIds, sessions, workspace
-        case milestone, workspaceTaskId, executionSubject
+        case milestone, workspaceTaskId, parentTaskId, executionSubject, acceptance, queuedCommentCount, executionStatus, queuedExecutionCount
     }
 
     let id: String
@@ -139,7 +188,21 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
     let milestone: WandBoardMilestone?
     /// 侧栏任务 ID：卡片与会话树共用同一套任务分组，打开会话时要带回真实工作区/任务上下文。
     let workspaceTaskId: String?
+    /// 父任务 ID：只有子任务有值，决定「可引用任务」的范围。
+    let parentTaskId: String?
     let executionSubject: ContactExecutionSubject?
+    let acceptance: WandTaskAcceptance?
+    /// 该任务还有多少条派发在员工并发上限后排队；任务仍留在活动列。
+    let queuedCommentCount: Int
+    let executionStatus: String?
+    let queuedExecutionCount: Int?
+    var pendingExecutionCount: Int { queuedExecutionCount ?? queuedCommentCount }
+    var hasQueuedExecution: Bool {
+        executionStatus == "queued" || (executionStatus == nil && queuedCommentCount > 0 && !sessions.contains { $0.status == "running" })
+    }
+    var displayStatusLabel: String {
+        status == "doing" && hasQueuedExecution ? "排队中" : (WandBoardStatus(rawValue: status)?.label ?? status)
+    }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -163,7 +226,13 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         milestone = try? container.decodeIfPresent(WandBoardMilestone.self, forKey: .milestone)
         let rawWorkspaceTaskId = (try? container.decodeIfPresent(String.self, forKey: .workspaceTaskId)) ?? nil
         workspaceTaskId = (rawWorkspaceTaskId?.isEmpty == false) ? rawWorkspaceTaskId : nil
+        let rawParentTaskId = (try? container.decodeIfPresent(String.self, forKey: .parentTaskId)) ?? nil
+        parentTaskId = (rawParentTaskId?.isEmpty == false) ? rawParentTaskId : nil
         executionSubject = try? container.decodeIfPresent(ContactExecutionSubject.self, forKey: .executionSubject)
+        acceptance = try? container.decodeIfPresent(WandTaskAcceptance.self, forKey: .acceptance)
+        queuedCommentCount = max(0, (try? container.decode(Int.self, forKey: .queuedCommentCount)) ?? 0)
+        executionStatus = try? container.decodeIfPresent(String.self, forKey: .executionStatus)
+        queuedExecutionCount = try? container.decodeIfPresent(Int.self, forKey: .queuedExecutionCount)
     }
 }
 
@@ -175,7 +244,7 @@ enum WandBoardStatus: String, CaseIterable, Identifiable {
         case .backlog: return "待立项"
         case .todo: return "待办"
         case .doing: return "进行中"
-        case .done: return "已完成"
+        case .done: return "等你确认"
         }
     }
     var empty: String {
@@ -183,7 +252,7 @@ enum WandBoardStatus: String, CaseIterable, Identifiable {
         case .backlog: return "还没有待立项任务"
         case .todo: return "还没有待办任务"
         case .doing: return "暂无进行中的任务"
-        case .done: return "还没有完成的任务"
+        case .done: return "还没有等你确认的任务"
         }
     }
 }
@@ -659,13 +728,24 @@ func wandBoardTodayIso(now: Date = Date()) -> String {
 
 private let wandBoardDatePattern = try! NSRegularExpression(pattern: "^\\d{4}-\\d{2}-\\d{2}$")
 
+func wandBoardSessionSummary(_ sessions: [WandBoardTaskSession]) -> String {
+    let counts = Dictionary(grouping: sessions, by: \.activityLabel)
+    return ["运行中", "等待输入", "等待授权", "排队中", "空闲", "已结束", "失败", "已归档", "状态未确认"].compactMap { label in
+        guard let count = counts[label]?.count, count > 0 else { return nil }
+        return "\(label) \(count)"
+    }.joined(separator: " · ")
+}
+
 func wandBoardProcessingLabel(_ task: WandBoardTask) -> String? {
     guard task.status == "doing" else { return nil }
-    let running = task.sessions.contains { wandBoardSessionRunning($0.status) }
-    let finished = !task.sessions.isEmpty && task.sessions.allSatisfy { wandBoardSessionFinished($0.status) }
+    if task.acceptance?.acceptedAt != nil { return "验收通过 · 已完成" }
+    if let blocker = task.acceptance?.blocker, !blocker.isEmpty { return "待处理：\(blocker)" }
+    let running = task.executionStatus == "running" || task.sessions.contains { $0.activityLabel == "运行中" }
     if running { return "正在处理..." }
-    if finished { return "等待验收" }
-    if !task.sessions.isEmpty { return "暂停处理" }
+    if task.pendingExecutionCount > 0 {
+        return task.pendingExecutionCount == 1 ? "排队中 · 等待执行" : "排队中 · \(task.pendingExecutionCount) 条等待执行"
+    }
+    if !task.sessions.isEmpty { return wandBoardSessionSummary(task.sessions) + " · 尚待验收" }
     return "等待派发"
 }
 
@@ -678,6 +758,7 @@ struct WandBoardTaskStats: Equatable {
     var todo: Int
     var doing: Int
     var done: Int
+    var accepted: Int
     var remaining: Int
     var high: Int
 }
@@ -686,6 +767,7 @@ func wandBoardTaskStats(_ tasks: [WandBoardTask]) -> WandBoardTaskStats {
     var todo = 0
     var doing = 0
     var done = 0
+    var accepted = 0
     var high = 0
     for task in tasks {
         switch task.status {
@@ -694,6 +776,7 @@ func wandBoardTaskStats(_ tasks: [WandBoardTask]) -> WandBoardTaskStats {
         case "done": done += 1
         default: break
         }
+        if task.acceptance?.acceptedAt != nil { accepted += 1 }
         if task.priority == "high" || task.priority == "urgent" {
             high += 1
         }
@@ -703,6 +786,7 @@ func wandBoardTaskStats(_ tasks: [WandBoardTask]) -> WandBoardTaskStats {
         todo: todo,
         doing: doing,
         done: done,
+        accepted: accepted,
         remaining: todo + doing,
         high: high
     )

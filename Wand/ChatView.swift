@@ -236,7 +236,13 @@ struct ChatView: View {
             if showsNavigationChrome {
                 ZStack(alignment: .top) {
                     ChatTopIdentityBar(title: topIdentity.title, subtitle: topIdentity.subtitle,
-                        attention: topAttention, statusText: visibleIdentityStatus)
+                        attention: topAttention, statusText: visibleIdentityStatus,
+                        avatarID: topAvatarIdentity.id, avatarName: topAvatarIdentity.name,
+                        avatarValue: topAvatarIdentity.avatar,
+                        activity: avatarActivity,
+                        thinking: avatarIsThinking(messages: store.messages,
+                            executing: store.isResponding && store.status == "running" &&
+                                !store.permissionBlocked && store.pendingEscalation == nil))
                     floatingChatControls
                 }
             }
@@ -427,6 +433,7 @@ struct ChatView: View {
         .environment(\.cardExpandDefaults, store.cardDefaults)
         .environment(\.chatAPI, api)
         .environment(\.chatSessionID, sessionId)
+        .environment(\.wandImageGallery, { wandConversationImagePages(store.messages) })
         .environment(\.chatDecisionCards, store.decisionCards)
         .environment(\.chatToolContentDidLoad, { [weak store] loaded in store?.applyLoadedToolContent(loaded) })
         .environment(\.serverFileLinkController, serverFileLinks)
@@ -1430,11 +1437,19 @@ struct ChatView: View {
             attachments.showFileImporter || attachments.showPhotoPicker || serverFileLinks.previewItem != nil
     }
     /// 顶栏身份：主标题是任务名（独立会话回落会话标题），小字是「员工名 · 目录缩写」。
-    /// 头像不再出现在这条栏上，员工身份由小字行承载。
+    /// 胶囊左侧头像用当前会话的员工；没有员工时回落到默认伙伴。
     private var topIdentity: (title: String, subtitle: String) {
         chatTopIdentity(taskTitle: hostTitle, sessionTitle: store.displayTitle,
             employeeName: store.displayEmployeeName ?? store.snapshot?.providerLabel,
             cwd: store.snapshot?.cwd)
+    }
+    /// 胶囊头像身份：员工优先，没有员工时是默认伙伴。
+    private var topAvatarIdentity: (id: String, name: String, avatar: String) {
+        let employeeID = store.displayEmployee?.id ?? store.snapshot?.employeeId ?? ""
+        if !employeeID.isEmpty {
+            return (employeeID, store.displayEmployeeName ?? "", store.displayEmployeeAvatar ?? "")
+        }
+        return ("e_wand_default", "赛博虎妞", "plush-cat:v1:silver")
     }
     private var topAttention: ChatTopAttention {
         ChatTopAttention.resolve(connected: store.connected,
@@ -1513,7 +1528,7 @@ struct ChatView: View {
 
     // MARK: - 控制行徽标（模式 / 模型·思考）
 
-    /// 执行模式选项（与 NewSessionView.sessionModes 一致）。Codex 锁 full-access；
+    /// 执行模式选项沿用共享 provider 能力。Codex 锁 full-access；
     /// OpenCode 仅支持 default / full-access / managed。
     private static let sessionModes = [
         (id: "managed", label: "托管"),

@@ -65,6 +65,8 @@ SIMULATOR_ID=<udid> ./scripts/run-tests.sh               # 指定模拟器
 DERIVED_DATA=/path ./scripts/run-tests.sh                # 自定义派生数据
 ```
 
+@ 提及候选的真实无障碍回归使用 `SIMULATOR_ID=<udid> DERIVED_DATA=<外置派生目录> python3 scripts/test-mention-accessibility.py`（需安装 `idb`）。它连接模拟器 AX 服务、核对 9 个候选的名称/独立按钮/稳定员工 ID，再由 XCTest 调用原生无障碍激活并检查选人、关闭与重新打开后的选中态。没有活动 AX 客户端时，普通 XCTest 会明确跳过该用例，不能把跳过当作无障碍验收通过。
+
 脚本固定传 `-parallel-testing-enabled NO`：`Wand.xcscheme` 的 `parallelizable` 已是 `NO`，但命令行参数能重新打开并行，那样 xcodebuild 会克隆多个模拟器把整机 CPU/IO 打满（曾实测克隆 5 个、约 1086 个模拟器子进程、load average 877）。脚本先 `build-for-testing` 再 `test-without-building`，编译失败立即退出、不复用旧产物；模拟器设备集不可用时编译仍会完成并明确报错，不会假装测试通过。
 
 Release 构建遵循上方本机 Ad Hoc 签名配置；未配置签名时产物未签名，不代表可 OTA 安装。
@@ -191,7 +193,8 @@ ios/
     ├── SessionListView.swift  # 会话列表（/api/sessions 轮询 + 下拉刷新 + 滑动删除）
     ├── ChatView.swift         # 聊天视图：消息块渲染 + 原生输入栏+ 权限审批卡片
     ├── ChatStore.swift        # 单会话状态机：WS 订阅、增量合流、发送/停止/权限决策
-    ├── NewSessionView.swift   # 新建会话（Claude/Codex/OpenCode / 最近路径 / 类型与模式）
+    ├── NewConversationView.swift # 唯一的新建对话入口（草稿首发后创建）
+    ├── NewSessionView.swift   # 共享端点 mutation 队列与目录浏览器
     ├── WandAPI.swift          # REST 客户端（401 自动用 appToken 重登重试）
     ├── WandSocket.swift       # /ws 客户端：seq 间隙 resync、心跳看门狗、退避重连
     ├── WandModels.swift       # 协议 Codable 模型（SessionSnapshot / ConversationTurn / WS 消息）

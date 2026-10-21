@@ -711,7 +711,10 @@ final class WorkspaceStore: ObservableObject {
                     cwd: summary.cwd,
                     isolated: summary.isolated,
                     worktreeError: summary.worktreeError,
-                    sessions: summary.sessions
+                    sessions: summary.sessions,
+                    totalSessions: summary.totalSessions,
+                    executionStatus: summary.executionStatus,
+                    queuedExecutionCount: summary.queuedExecutionCount
                 )
             }
             return TaskDirectoryGroup(

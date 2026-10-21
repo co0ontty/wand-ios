@@ -311,6 +311,14 @@ struct EmployeeProfilePanel: View {
                         Text("0–10000，留空不限，0 不保留。仅保留标题生成等系统辅助功能的最新 N 条已结束记录，保存后永久清理超出部分。任务派发、agent 间调用（含决策）、手动聊天与运行中会话不计入，也不会清理。")
                             .font(.caption).foregroundStyle(Theme.textSecondary)
                     }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("并发任务上限").font(.subheadline)
+                        TextField("默认 2", text: $model.draft.maxConcurrentTasksInput)
+                            .keyboardType(.numberPad)
+                            .accessibilityIdentifier("employee-max-concurrent-tasks")
+                        Text("默认 2，可设 1–100；留空保存时恢复默认 2。超出上限的新派发显示为「排队中」，任务仍留在活动任务里；前序任务结束后按先后顺序自动开始。同一任务的多条派发不额外占用名额。")
+                            .font(.caption).foregroundStyle(Theme.textSecondary)
+                    }
                     DisclosureGroup("角色设定", isExpanded: $roleExpanded) {
                         if model.builtin {
                             Text(model.draft.prompt).font(.caption).textSelection(.enabled)

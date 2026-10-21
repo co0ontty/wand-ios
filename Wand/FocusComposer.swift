@@ -239,7 +239,7 @@ func chatTopReadback(title: String, subtitle: String, status: String) -> String 
     [title, subtitle, status].filter { !$0.isEmpty }.joined(separator: "，")
 }
 
-/// 会话顶栏身份区：不放头像，主标题是任务名，小字是「员工名 · 目录缩写」。
+/// 会话顶栏身份区：胶囊里左侧是圆圈头像，右侧主标题是任务名，小字是「员工名 · 目录缩写」。
 /// 运行与异常只以一个状态点呈现，具体文案交给权限卡、连接横幅和进度条，这条栏不再重复说话。
 struct ChatTopIdentityBar: View {
     let title: String
@@ -247,22 +247,26 @@ struct ChatTopIdentityBar: View {
     let attention: ChatTopAttention
     /// 读屏仍播报完整状态，视觉做减法不代表信息丢失。
     var statusText: String = ""
+    /// 胶囊左侧头像的身份；没有员工时用默认伙伴。
+    var avatarID: String = "e_wand_default"
+    var avatarName: String = ""
+    var avatarValue: String = ""
+    /// 头像活动效果：思考落定、查看文件、编写文件（与 Web `fileActivity` / `thinking` 同口径）。
+    var activity: AvatarFileActivity = .idle
+    var thinking = false
+    var speaking = false
     private var identityMetrics = ChatIdentityLayoutMetrics()
 
     var body: some View {
         GeometryReader { area in
             let band = ChatTopLayout.identityBand(width: area.size.width)
-            VStack(spacing: 2) {
-                HStack(spacing: 5) {
-                    if attention != .quiet { dot }
-                    Text(title)
-                        .font(.caption.weight(.semibold)).foregroundStyle(Theme.textPrimary)
-                        .lineLimit(1).truncationMode(.tail)
-                }.frame(height: identityMetrics.titleLine)
-                Text(subtitle)
-                    .font(.caption2).foregroundStyle(Theme.textSecondary)
-                    .lineLimit(1).truncationMode(.middle)
-                    .frame(height: identityMetrics.statusLine)
+            HStack(spacing: 6) {
+                if attention != .quiet { dot }
+                TopCapsuleTitle(title: title, subtitle: subtitle,
+                    avatarID: avatarID, avatarName: avatarName, avatarValue: avatarValue,
+                    avatarSize: 30, titleSize: 13, subtitleSize: 11,
+                    titleWidth: max(80, band.width - 48),
+                    activity: activity, thinking: thinking, speaking: speaking)
             }
             // 身份文字只在返回键与右侧两枚按钮之间的带子里排布，长标题省略号不会压到按钮。
             .frame(width: band.width)

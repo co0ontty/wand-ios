@@ -55,6 +55,9 @@ struct ContactsView: View {
     var onOpenConversation: ((String) -> Void)? = nil
     var onTeamConversation: ((String) -> Void)? = nil
     var embedded = false
+    var serverDisplayName: String? = nil
+    var onOpenSettings: (() -> Void)? = nil
+    var onSwitchServer: (() -> Void)? = nil
     @State private var query = ""
     @State private var createChooser = false
     @State private var dispatching = false
@@ -175,15 +178,34 @@ struct ContactsView: View {
                     Button { requestPanelChange(onBack) } label: { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
                         .disabled(store.busy).accessibilityLabel("返回通讯录上级")
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("通讯录").font(.headline)
-                }.frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    if let onSwitchServer { requestPanelChange(onSwitchServer) }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("通讯录").font(.headline).foregroundStyle(Theme.textPrimary)
+                        if let serverDisplayName {
+                            Text(serverDisplayName).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: WandLayout.controlTouch, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(onSwitchServer == nil || store.busy)
+                .accessibilityLabel(serverDisplayName.map { "切换服务器：" + $0 } ?? "通讯录")
                 ContactMorphButton(expanded: dispatching, symbol: "paperplane", label: dispatching ? "关闭派工" : "派工", disabled: store.busy) {
                     requestPanelChange { let next = !dispatching; clearPanels(); dispatching = next }
                 }
                 ContactMorphButton(expanded: creationOpen, symbol: "plus", label: creationOpen ? "关闭创建面板" : "创建联系人", disabled: store.busy) {
                     if creationOpen { closePanels() }
                     else { requestPanelChange { clearPanels(); searchFocused = false; createChooser = true } }
+                }
+                if let onOpenSettings {
+                    Menu {
+                        Button("设置", systemImage: "gearshape") { requestPanelChange(onOpenSettings) }
+                    } label: {
+                        Image(systemName: "ellipsis").frame(width: WandLayout.controlTouch, height: WandLayout.controlTouch)
+                    }
+                    .disabled(store.busy).accessibilityLabel("更多通讯录功能")
                 }
             }
             HStack(spacing: 8) {

@@ -858,6 +858,10 @@ final class WandAPI: SessionInputTransport {
     // MARK: - 任务管理
 
     func postBoardTaskComment(id: String, requestId: String, body: String, employeeId: String?, sourceCommentId: String?) async throws -> WandTaskComment {
+        // An unfinished mention must never fall through to the ordinary-comment route.
+        if employeeId?.isEmpty != false, let message = TaskCommentMention.validationMessage(body, name: "") {
+            throw APIError.server(status: 400, message: message)
+        }
         struct Response: Decodable { let comment: WandTaskComment }
         var payload: [String: Any] = ["requestId": requestId, "body": body]
         if let employeeId { payload["employeeId"] = employeeId }
@@ -875,6 +879,35 @@ final class WandAPI: SessionInputTransport {
         } catch APIError.server(let status, _) where status == 404 {
             return [] // Older servers have no comment endpoint.
         }
+    }
+
+    /// 分页读取评论：返回最新一页（按时间从早到晚）以及翻更早一页用的游标。
+    func boardTaskCommentsPage(id: String, limit: Int = 50, before: String? = nil) async throws -> WandTaskCommentsResponse {
+        var queryItems = [URLQueryItem(name: "limit", value: String(max(1, min(limit, 100))))]
+        if let before, !before.isEmpty { queryItems.append(URLQueryItem(name: "before", value: before)) }
+        do {
+            return try await request(
+                WandTaskCommentsResponse.self,
+                method: "GET",
+                path: "/api/wand-tasks/\(percentEncodePathComponent(id))/comments",
+                queryItems: queryItems
+            )
+        } catch APIError.server(let status, _) where status == 404 {
+            return WandTaskCommentsResponse(comments: [], totalCount: 0, nextCursor: nil) // Older servers have no comment endpoint.
+        }
+    }
+
+    /// 一次评论执行的本轮结果：冻结的执行区间（动作、思考、回复）。
+    func boardTaskCommentResult(taskId: String, commentId: String, limit: Int = 40, offset: Int = 0) async throws -> WandTaskCommentResult {
+        try await request(
+            WandTaskCommentResult.self,
+            method: "GET",
+            path: "/api/wand-tasks/\(percentEncodePathComponent(taskId))/comments/\(percentEncodePathComponent(commentId))/result",
+            queryItems: [
+                URLQueryItem(name: "limit", value: String(max(1, min(limit, 100)))),
+                URLQueryItem(name: "offset", value: String(max(0, offset)))
+            ]
+        )
     }
 
     func listBoardTasks(workspaceId: String? = nil) async throws -> [WandBoardTask] {

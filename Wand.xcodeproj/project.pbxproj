@@ -10,6 +10,7 @@
 		FB4100000000000000000020 /* ChatComposerCatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000021 /* ChatComposerCatTests.swift */; };
 		FB4100000000000000000010 /* PlushScene in Resources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000011 /* PlushScene */; };
 		FB4100000000000000000005 /* ChatDesignPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000006 /* ChatDesignPreview.swift */; };
+		FB4100000000000000000030 /* TopCapsuleTitle.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000031 /* TopCapsuleTitle.swift */; };
 		FB4100000000000000000001 /* SharedPlushScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000002 /* SharedPlushScene.swift */; };
 		FA3000000000000000000004 /* LiveActivityExperienceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000005 /* LiveActivityExperienceTests.swift */; };
 		FA3000000000000000000001 /* SessionActivityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA3000000000000000000002 /* SessionActivityViews.swift */; };
@@ -85,7 +86,7 @@
 		F6000000000000000000AC02 /* SessionListStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC02 /* SessionListStore.swift */; };
 		A1000000000000000000AC11 /* TerminalShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC11 /* TerminalShortcuts.swift */; };
 		A1000000000000000000AC06 /* SessionDestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000BC06 /* SessionDestinationView.swift */; };
-		F6000000000000000000AC03 /* UnifiedSessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC03 /* UnifiedSessionListView.swift */; };
+		C12500000000000000000001 /* SettingsWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C12500000000000000000002 /* SettingsWebView.swift */; };
 		F6000000000000000000AC04 /* WandEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC04 /* WandEndpoint.swift */; };
 		F6000000000000000000AC05 /* ServerFileLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC05 /* ServerFileLink.swift */; };
 		F6000000000000000000AC06 /* AlignmentParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6000000000000000000BC06 /* AlignmentParityTests.swift */; };
@@ -113,6 +114,9 @@
 		F8020000000000000000AC01 /* ClientFeedbackTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8020000000000000000BC01 /* ClientFeedbackTransport.swift */; };
 		F8030000000000000000AC01 /* TaskComments.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8030000000000000000BC01 /* TaskComments.swift */; };
 		F8030000000000000000AC02 /* TaskCommentComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8030000000000000000BC02 /* TaskCommentComposer.swift */; };
+		F8030000000000000000AC03 /* TaskCommentReferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8030000000000000000BC03 /* TaskCommentReferences.swift */; };
+		F8030000000000000000AC04 /* TaskCommentExecutionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8030000000000000000BC04 /* TaskCommentExecutionCard.swift */; };
+		F8050000000000000000AC02 /* TaskCommentReferencesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8050000000000000000BC02 /* TaskCommentReferencesTests.swift */; };
 		F8040000000000000000AC01 /* ClientFeedbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8040000000000000000BC01 /* ClientFeedbackTests.swift */; };
 		F8050000000000000000AC01 /* TaskCommentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8050000000000000000BC01 /* TaskCommentsTests.swift */; };
 		F8060000000000000000AC01 /* ClientFeedbackTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8060000000000000000BC01 /* ClientFeedbackTransportTests.swift */; };
@@ -158,6 +162,7 @@
 		FB4100000000000000000021 /* ChatComposerCatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatComposerCatTests.swift; sourceTree = "<group>"; };
 		FB4100000000000000000011 /* PlushScene */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PlushScene; sourceTree = "<group>"; };
 		FB4100000000000000000006 /* ChatDesignPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDesignPreview.swift; sourceTree = "<group>"; };
+		FB4100000000000000000031 /* TopCapsuleTitle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopCapsuleTitle.swift; sourceTree = "<group>"; };
 		FB4100000000000000000002 /* SharedPlushScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedPlushScene.swift; sourceTree = "<group>"; };
 		FA3000000000000000000005 /* LiveActivityExperienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityExperienceTests.swift; sourceTree = "<group>"; };
 		FA3000000000000000000002 /* SessionActivityViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActivityViews.swift; sourceTree = "<group>"; };
@@ -236,7 +241,7 @@
 		F6000000000000000000BC02 /* SessionListStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListStore.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC11 /* TerminalShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalShortcuts.swift; sourceTree = "<group>"; };
 		A1000000000000000000BC06 /* SessionDestinationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionDestinationView.swift; sourceTree = "<group>"; };
-		F6000000000000000000BC03 /* UnifiedSessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnifiedSessionListView.swift; sourceTree = "<group>"; };
+		C12500000000000000000002 /* SettingsWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWebView.swift; sourceTree = "<group>"; };
 		F6000000000000000000BC04 /* WandEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WandEndpoint.swift; sourceTree = "<group>"; };
 		F6000000000000000000BC05 /* ServerFileLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerFileLink.swift; sourceTree = "<group>"; };
 		F6000000000000000000BC06 /* AlignmentParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlignmentParityTests.swift; sourceTree = "<group>"; };
@@ -265,6 +270,9 @@
 		F8020000000000000000BC01 /* ClientFeedbackTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedbackTransport.swift; sourceTree = "<group>"; };
 		F8030000000000000000BC01 /* TaskComments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskComments.swift; sourceTree = "<group>"; };
 		F8030000000000000000BC02 /* TaskCommentComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCommentComposer.swift; sourceTree = "<group>"; };
+		F8030000000000000000BC03 /* TaskCommentReferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCommentReferences.swift; sourceTree = "<group>"; };
+		F8030000000000000000BC04 /* TaskCommentExecutionCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCommentExecutionCard.swift; sourceTree = "<group>"; };
+		F8050000000000000000BC02 /* TaskCommentReferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCommentReferencesTests.swift; sourceTree = "<group>"; };
 		F8040000000000000000BC01 /* ClientFeedbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedbackTests.swift; sourceTree = "<group>"; };
 		F8050000000000000000BC01 /* TaskCommentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCommentsTests.swift; sourceTree = "<group>"; };
 		F8060000000000000000BC01 /* ClientFeedbackTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientFeedbackTransportTests.swift; sourceTree = "<group>"; };
@@ -327,6 +335,8 @@
 				A1000000000000000000BC02 /* WandAPI.swift */,
 				F8030000000000000000BC01 /* TaskComments.swift */,
 				F8030000000000000000BC02 /* TaskCommentComposer.swift */,
+				F8030000000000000000BC03 /* TaskCommentReferences.swift */,
+				F8030000000000000000BC04 /* TaskCommentExecutionCard.swift */,
 				F8020000000000000000BC01 /* ClientFeedbackTransport.swift */,
 				F8010000000000000000BC01 /* ClientFeedback.swift */,
 				A1000000000000000000BC03 /* WandSocket.swift */,
@@ -349,6 +359,7 @@
 				A1000000000000000000BC05 /* ChatView.swift */,
 				FB4100000000000000000011 /* PlushScene */,
 				FB4100000000000000000006 /* ChatDesignPreview.swift */,
+				FB4100000000000000000031 /* TopCapsuleTitle.swift */,
 				FB4100000000000000000002 /* SharedPlushScene.swift */,
 				FA1000000000000000000B10 /* ChatActivityTimeline.swift */,
 				FA1000000000000000000B07 /* PiResources.swift */,
@@ -384,7 +395,7 @@
 				F6000000000000000000BC02 /* SessionListStore.swift */,
 				A1000000000000000000BC11 /* TerminalShortcuts.swift */,
 				A1000000000000000000BC06 /* SessionDestinationView.swift */,
-				F6000000000000000000BC03 /* UnifiedSessionListView.swift */,
+				C12500000000000000000002 /* SettingsWebView.swift */,
 				F6000000000000000000BC04 /* WandEndpoint.swift */,
 				F6000000000000000000BC05 /* ServerFileLink.swift */,
 				E7000000000000000000BC01 /* WorkspaceModels.swift */,
@@ -446,6 +457,7 @@
 				D5010000000000000000BC01 /* TaskBoardTests.swift */,
 				F8060000000000000000BC01 /* ClientFeedbackTransportTests.swift */,
 				F8050000000000000000BC01 /* TaskCommentsTests.swift */,
+				F8050000000000000000BC02 /* TaskCommentReferencesTests.swift */,
 				F8040000000000000000BC01 /* ClientFeedbackTests.swift */,
 			);
 			path = WandTests;
@@ -624,6 +636,8 @@
 				A1000000000000000000AC02 /* WandAPI.swift in Sources */,
 				F8030000000000000000AC01 /* TaskComments.swift in Sources */,
 				F8030000000000000000AC02 /* TaskCommentComposer.swift in Sources */,
+				F8030000000000000000AC03 /* TaskCommentReferences.swift in Sources */,
+				F8030000000000000000AC04 /* TaskCommentExecutionCard.swift in Sources */,
 				F8020000000000000000AC01 /* ClientFeedbackTransport.swift in Sources */,
 				F8010000000000000000AC01 /* ClientFeedback.swift in Sources */,
 				A1000000000000000000AC03 /* WandSocket.swift in Sources */,
@@ -643,6 +657,7 @@
 				A1000000000000000000AC10 /* SessionTimeFormatting.swift in Sources */,
 				A1000000000000000000AC05 /* ChatView.swift in Sources */,
 				FB4100000000000000000005 /* ChatDesignPreview.swift in Sources */,
+				FB4100000000000000000030 /* TopCapsuleTitle.swift in Sources */,
 				FB4100000000000000000001 /* SharedPlushScene.swift in Sources */,
 				FA1000000000000000000A10 /* ChatActivityTimeline.swift in Sources */,
 				FA1000000000000000000A07 /* PiResources.swift in Sources */,
@@ -678,7 +693,7 @@
 				F6000000000000000000AC02 /* SessionListStore.swift in Sources */,
 				A1000000000000000000AC11 /* TerminalShortcuts.swift in Sources */,
 				A1000000000000000000AC06 /* SessionDestinationView.swift in Sources */,
-				F6000000000000000000AC03 /* UnifiedSessionListView.swift in Sources */,
+				C12500000000000000000001 /* SettingsWebView.swift in Sources */,
 				F6000000000000000000AC04 /* WandEndpoint.swift in Sources */,
 				F6000000000000000000AC05 /* ServerFileLink.swift in Sources */,
 				E7000000000000000000AC01 /* WorkspaceModels.swift in Sources */,
@@ -728,6 +743,7 @@
 				D5010000000000000000AC01 /* TaskBoardTests.swift in Sources */,
 				F8060000000000000000AC01 /* ClientFeedbackTransportTests.swift in Sources */,
 				F8050000000000000000AC01 /* TaskCommentsTests.swift in Sources */,
+				F8050000000000000000AC02 /* TaskCommentReferencesTests.swift in Sources */,
 				F8040000000000000000AC01 /* ClientFeedbackTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

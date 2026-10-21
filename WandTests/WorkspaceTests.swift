@@ -30,6 +30,23 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertFalse(source.contains("WorkspaceTargetPicker(store: store, taskId: task.id, embedded"))
     }
 
+    /// 对话顶部归会话自身所有；宿主不能再按归档会话数插入一条常驻栏。
+    func testTaskHostDoesNotAddArchivedSessionChromeAboveConversation() throws {
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Wand/WorkspaceTaskView.swift"), encoding: .utf8)
+        XCTAssertFalse(source.contains("archivedSessions("))
+        XCTAssertFalse(source.contains("archivedSessionsExpanded"))
+        XCTAssertFalse(source.contains("已归档会话"))
+        XCTAssertTrue(source.contains("if !presentsSession, let warning = store.layoutWarning"))
+        let list = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Wand/WorkspaceListView.swift"), encoding: .utf8)
+        XCTAssertTrue(list.contains("已归档会话"), "归档浏览仍由工作区列表承载，不能删用户历史")
+        XCTAssertTrue(list.contains("恢复会话"), "原有恢复入口必须保留")
+        XCTAssertTrue(list.contains("store.archiveSession(session.id, archived: target)"))
+    }
+
     /// 内嵌绑定的任务不依赖任务列表：列表未加载或暂未包含它时归属仍然有效，避免误建未分组会话。
     func testBoundTaskStaysSelectableBeforeTaskListLoads() {
         XCTAssertTrue(pendingConversationTaskAvailable(boundTaskID: "t1", selectedTaskID: "t1",
@@ -166,11 +183,79 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertFalse(global.isSynthetic)
     }
 
-    func testTaskDetailIsSessionDirectoryAndDoesNotDependOnATabSelection() {
+    func testTaskSessionChoicesDoNotDependOnATabSelection() {
         let sessions = [summary(id: "session-1", startedAt: "2026-08-09T00:00:01Z"),
                         summary(id: "session-2", startedAt: "2026-08-09T00:00:02Z")]
         XCTAssertEqual(workspaceTaskVisibleSessions(sessions).map(\.id), ["session-1", "session-2"])
         XCTAssertTrue(workspaceTaskVisibleSessions([]).isEmpty)
+    }
+
+    /// TASK-99: 多会话也直接呈现当前目的地，不能因数量或窗口布局重新出现顶部 Tab。
+    func testMultiSessionTaskRendersWithoutTopTabs() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        func descendants(_ object: NSObject, seen: inout Set<ObjectIdentifier>) -> [NSObject] {
+            guard seen.insert(ObjectIdentifier(object)).inserted else { return [] }
+            var result = [object]
+            if let view = object as? UIView {
+                for child in view.subviews { result += descendants(child, seen: &seen) }
+            }
+            for index in 0..<max(0, object.accessibilityElementCount()) {
+                if let child = object.accessibilityElement(at: index) as? NSObject {
+                    result += descendants(child, seen: &seen)
+                }
+            }
+            return result
+        }
+        for kind in ["structured", "pty"] {
+            for width: CGFloat in [320, 768] {
+                let service = MockWorkspaceService()
+                let workspace = try workspace(id: "no-tabs-workspace")
+                let task = try task(id: "no-tabs-task", workspaceId: workspace.id)
+                let sessions = try decode([WorkspaceSessionSummary].self, from: """
+                    [{"id":"current","title":"当前窗口","provider":"pi","sessionKind":"\(kind)"},
+                     {"id":"sibling","title":"不应常驻顶部的另一窗口","provider":"pi","sessionKind":"structured"},
+                     {"id":"archived","title":"不应常驻顶部的归档窗口","provider":"pi","archived":true}]
+                    """)
+                service.taskDetails[task.id] = try taskDetail(id: task.id, workspaceId: workspace.id, sessions: sessions)
+                service.sessions["current"] = try decode(SessionSnapshot.self, from:
+                    "{\"id\":\"current\",\"provider\":\"pi\",\"sessionKind\":\"\(kind)\",\"status\":\"idle\"}")
+                let store = WorkspaceStore(api: service, serverID: "task-99-\(kind)-\(width)")
+                let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
+                let host = UIHostingController(rootView: NavigationStack {
+                    WorkspaceTaskView(workspace: workspace, task: task, api: api, store: store, initialSessionId: "current")
+                })
+                let window = UIWindow(windowScene: scene)
+                window.frame = CGRect(x: 0, y: 0, width: width, height: 956)
+                window.rootViewController = host
+                window.makeKeyAndVisible()
+                defer { window.isHidden = true }
+                for _ in 0..<100 {
+                    if store.visibleSnapshot?.id == "current" { break }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                try await Task.sleep(for: .milliseconds(350))
+                host.view.layoutIfNeeded()
+                XCTAssertEqual(store.visibleSnapshot?.id, "current")
+                XCTAssertEqual(service.createRequests.count, 0, "只读呈现不能启动新会话")
+                var seen = Set<ObjectIdentifier>()
+                let nodes = descendants(host.view, seen: &seen)
+                XCTAssertFalse(nodes.contains { $0 is UISegmentedControl || $0 is UITabBar }, "\(kind)/\(width)")
+                XCTAssertFalse(nodes.contains { $0.accessibilityTraits.contains(.tabBar) }, "不能用自绘 Tab 代替原生 Tab")
+                if kind == "structured" {
+                    XCTAssertTrue(nodes.contains { $0 is ComposerUITextView }, "必须已挂载聊天输入 owner，不能用空白页通过检查")
+                } else {
+                    XCTAssertTrue(nodes.contains { $0 is NativeTerminalView }, "必须已挂载原生终端，不能用空白页通过检查")
+                }
+                XCTAssertFalse(nodes.contains { ($0 as? UIAccessibilityIdentification)?.accessibilityIdentifier == "task-session-directory" }, "目录仅在显式打开更多菜单后呈现")
+                let image = UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+                    window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+                }
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "task-99-no-tabs-\(kind)-\(Int(width))"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+        }
     }
 
     func testNewTaskRoutingMatchesAndroidForEmptyPromptsEmployeesAndRegisteredDirectories() {

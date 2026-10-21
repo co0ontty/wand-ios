@@ -4,6 +4,67 @@ import SwiftUI
 @testable import Wand
 
 final class TaskBoardTests: XCTestCase {
+    func testServerOverviewBelongsToBoardListNotRootOrDetail() throws {
+        let directory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Wand")
+        let root = try String(contentsOf: directory.appendingPathComponent("NativeRootView.swift"), encoding: .utf8)
+        let board = try String(contentsOf: directory.appendingPathComponent("TaskBoardView.swift"), encoding: .utf8)
+        XCTAssertTrue(root.contains("if homeListMode == .sessions {\n                        homeOverviewBar.disabled(homeMutationBusy)"))
+        XCTAssertFalse(root.contains("if homeListMode == .sessions || showingBoard"))
+        XCTAssertTrue(root.contains("overviewBar: homeOverviewBar"))
+        XCTAssertTrue(board.contains("if selected == nil { overviewBar }"))
+        XCTAssertTrue(board.contains("boardDetailChrome(title:"))
+        XCTAssertFalse(board.contains("onDetailPresentationChanged"), "详情状态不应复制到根视图才能隐藏列表入口")
+    }
+
+    /// 外部原生触控驱动使用已安装服务，只读任务；不会派发或修改任务。
+    @MainActor
+    func testEmbeddedBoardServerSwitchIsolation() async throws {
+        guard let path = ProcessInfo.processInfo.environment["WAND_BOARD_TOUCH_CONNECTION"] else {
+            throw XCTSkip("Requires installed service and native touch driver")
+        }
+        let connection = try JSONDecoder().decode(Task144Connection.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        let url = try XCTUnwrap(URL(string: connection.serverURL))
+        let decoded = try XCTUnwrap(WandAuth.decodeConnectCode(connection.connectionCode))
+        let api = WandAPI(baseURL: url, token: decoded.token)
+        let store = WorkspaceStore(api: api, serverID: "task-144-read-only")
+        let finished = expectation(description: "list, detail, child, return and explicit switch checks")
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: Task144TouchHarness(api: api, store: store) { count in
+            XCTAssertEqual(count, 2, "只有列表上的两次显式点击可以触发切换")
+            finished.fulfill()
+        })
+        window.windowLevel = .alert + 1
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        print("TASK144_BOARD_READY")
+        await fulfillment(of: [finished], timeout: 180)
+    }
+
+    @MainActor
+    func testQueuedExecutionIsVisibleAndStillAnActiveTask() throws {
+        let card = try JSONDecoder().decode(WandBoardTask.self, from: Data("""
+        {"id":"queued","status":"doing","executionStatus":"queued","queuedExecutionCount":2,"sessions":[]}
+        """.utf8))
+        XCTAssertEqual(card.status, "doing")
+        XCTAssertEqual(card.displayStatusLabel, "排队中")
+        XCTAssertEqual(card.pendingExecutionCount, 2)
+        let summary = try JSONDecoder().decode(WorkspaceTaskSummary.self, from: Data("""
+        {"id":"queued","workspaceId":"w","name":"排队任务","status":"active","createdAt":"2026-01-01","cwd":"/tmp","sessions":[],"executionStatus":"queued","queuedExecutionCount":2}
+        """.utf8))
+        XCTAssertTrue(summary.hasActiveExecution)
+        XCTAssertTrue(summary.hasQueuedExecution)
+        let pending = try JSONDecoder().decode(WorkspaceSessionSummary.self, from: Data("""
+        {"id":"pending","sessionKind":"structured","status":"idle","executionStatus":"queued"}
+        """.utf8))
+        XCTAssertEqual(pending.activityStatus, "queued")
+        XCTAssertTrue(HomePresentation.isActive(pending))
+        let copied = HomePresentation.replacing(summary, sessions: [])
+        XCTAssertTrue(copied.hasQueuedExecution)
+        XCTAssertEqual(HomePresentation.statusLabel(pending.activityStatus), "排队中")
+    }
+
     @MainActor
     func testCreateFromPresentedSheet() async throws {
         guard let raw = ProcessInfo.processInfo.environment["WAND_CREATE_TOUCH_URL"],
@@ -113,6 +174,44 @@ final class TaskBoardTests: XCTestCase {
         XCTAssertTrue(task.sessions.first?.isStructured == true)
     }
 
+    func testParallelTurnQueueAndPermissionPrecedence() throws {
+        let task = try decodeTask(#"""
+        {"id":"parallel","status":"doing","sessions":[
+          {"id":"a","status":"exited"},
+          {"id":"b","status":"idle","inFlight":true,"queuedMessageCount":1},
+          {"id":"c","status":"idle","inFlight":true,"permissionBlocked":true}
+        ]}
+        """#)
+        XCTAssertEqual(task.sessions.map(\.activityLabel), ["已结束", "运行中", "等待授权"])
+        XCTAssertTrue(wandBoardSessionSummary(task.sessions).contains("等待授权 1"))
+        XCTAssertEqual(wandBoardTaskStats([task]).accepted, 0)
+    }
+
+    func testTaskAcceptanceIsIndependentFromSessionLifecycle() throws {
+        let task = try decodeTask(#"{"id":"t-accept","title":"交付","status":"done","acceptance":{"evidence":"PR #12","blocker":"","acceptedAt":null},"sessions":[{"id":"s","provider":"claude","title":"执行","status":"exited","cwd":"/repo","employeeName":"员工甲","purpose":"修复登录"}]}"#)
+        XCTAssertEqual(task.acceptance?.evidence, "PR #12")
+        XCTAssertNil(task.acceptance?.acceptedAt)
+        XCTAssertEqual(task.sessions.first?.displayPurpose, "修复登录")
+        XCTAssertEqual(task.sessions.first?.employeeName, "员工甲")
+        XCTAssertEqual(task.sessions.first?.activityLabel, "已结束")
+        XCTAssertEqual(wandBoardTaskStats([task]).accepted, 0, "done 不得自动计为验收")
+
+        let accepted = try decodeTask(#"{"id":"t-accepted","status":"archived","acceptance":{"evidence":"截图","blocker":"","acceptedAt":"2026-01-01T00:00:00Z"}}"#)
+        XCTAssertEqual(wandBoardTaskStats([accepted]).accepted, 1)
+    }
+
+    func testSessionSummaryKeepsQueuedRunningIdleAndFailedDistinct() throws {
+        let task = try decodeTask(#"""
+        {"id":"t","sessions":[
+          {"id":"q","status":"idle","executionStatus":"queued","queuedMessageCount":1,"cwd":"/q","title":"并行"},
+          {"id":"r","status":"running","inFlight":true,"cwd":"/r","title":"继续"},
+          {"id":"f","status":"failed","cwd":"/f","title":"失败"}
+        ]}
+        """#)
+        XCTAssertEqual(task.sessions.map(\.activityLabel), ["排队中", "运行中", "失败"])
+        XCTAssertEqual(task.sessions.map(\.cwd), ["/q", "/r", "/f"])
+    }
+
     func testBoardTaskDecoderAllowsUnassignedProjectAndAgent() throws {
         let json = #"{"id":"task-2","title":"草稿"}"#.data(using: .utf8)!
         let task = try JSONDecoder().decode(WandBoardTask.self, from: json)
@@ -146,7 +245,7 @@ final class TaskBoardTests: XCTestCase {
     func testBoardLabelsCoverColumns() {
         XCTAssertEqual(WandBoardStatus.todo.label, "待办")
         XCTAssertEqual(WandBoardStatus.doing.label, "进行中")
-        XCTAssertEqual(WandBoardStatus.done.label, "已完成")
+        XCTAssertEqual(WandBoardStatus.done.label, "等你确认")
         XCTAssertEqual(WandBoardPriority.urgent.label, "紧急")
         XCTAssertEqual(wandBoardProviderLabel("pi"), "Pi")
         XCTAssertEqual(wandBoardEffortLabel("deep"), "深入")
@@ -409,6 +508,28 @@ final class TaskBoardTests: XCTestCase {
 
     private func decodeTask(_ json: String) throws -> WandBoardTask {
         try JSONDecoder().decode(WandBoardTask.self, from: Data(json.utf8))
+    }
+}
+
+private struct Task144Connection: Decodable {
+    let serverURL: String
+    let connectionCode: String
+}
+
+private struct Task144TouchHarness: View {
+    let api: WandAPI
+    @ObservedObject var store: WorkspaceStore
+    let finished: (Int) -> Void
+    @State private var switchCount = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TaskBoardView(api: api, workspaceStore: store, onOpenSession: { _ in }, embedded: true,
+                overviewBar: HomeOverviewBar(serverDisplayName: "TASK-144 只读验收", showNewTask: false,
+                    onNewTask: {}, onOpenSettings: {}, onSwitchServer: { switchCount += 1 }))
+            Text("服务器切换次数：\(switchCount)").accessibilityIdentifier("task144-switch-count")
+            Button("完成顶栏验收") { finished(switchCount) }.frame(minHeight: 44)
+        }
     }
 }
 

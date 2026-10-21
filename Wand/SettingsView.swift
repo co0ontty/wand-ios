@@ -2,7 +2,34 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// 原生设置页：服务器信息 / 功能开关 / 关于。
+/// 与 Android 相同的设置目录；设备能力保留 iOS 原生实现。
+enum MobileSettingsSection: String, CaseIterable, Identifiable {
+    case server, appearance, traffic, updates, models, diagnostics, about
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .server: return "当前服务器"
+        case .appearance: return "外观与反馈"
+        case .traffic: return "流量与实时内容"
+        case .updates: return "应用与更新"
+        case .models: return "模型分组"
+        case .diagnostics: return "诊断"
+        case .about: return "关于 Wand"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .server: return "server.rack"
+        case .appearance: return "paintpalette"
+        case .traffic: return "network"
+        case .updates: return "arrow.triangle.2.circlepath"
+        case .models: return "slider.horizontal.3"
+        case .diagnostics: return "square.and.arrow.up"
+        case .about: return "info.circle"
+        }
+    }
+}
+
 struct SettingsView: View {
     let serverURL: URL
     let token: String?
@@ -11,12 +38,12 @@ struct SettingsView: View {
     @EnvironmentObject private var appUpdater: AppUpdateController
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage(WandAppearanceMode.storageKey) private var appearanceModeRaw = WandAppearanceMode.system.rawValue
     @AppStorage(WandFeedback.storageKey) private var hapticEnabled = true
     @AppStorage("wand.trafficTimelineMode") private var trafficTimelineMode = "wifi"
 
     @State private var serverVersion: String?
-    @State private var confirmDisconnect = false
     @State private var confirmRemoveServer = false
     @State private var notificationStatus = "读取中…"
     @State private var logShare: LogShareItem?
@@ -26,25 +53,21 @@ struct SettingsView: View {
     private var iosUpdate: IosIpaUpdateInfo? { appUpdater.info }
     private var iosUpdateChecking: Bool { appUpdater.checking }
     private var iosUpdateError: String? { appUpdater.error }
+    @State private var expandedSection: MobileSettingsSection?
+    @State private var showWebSettings = false
     @State private var showModelGroups = false
+    @Environment(\.accessibilityReduceMotion) private var reducedMotion
 
     private var api: WandAPI { WandAPI(baseURL: serverURL, token: token) }
 
     var body: some View {
         NavigationStack {
             Form {
-                settingsOverview
-                appearanceSection
-                featureSection
-                serverSection
-                Section("执行配置") { Button("模型分组") { showModelGroups = true } }
-                diagnosticsSection
-                clientUpdateSection
-                aboutSection
+                settingsDirectory
             }
             .scrollContentBackground(.hidden)
             .background(WandAmbientBackground())
-            .navigationTitle("系统设置")
+            .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -66,17 +89,6 @@ struct SettingsView: View {
             guard phase == .active else { return }
             Task { await refreshNotificationStatus() }
         }
-        .confirmationDialog("返回连接页？", isPresented: $confirmDisconnect, titleVisibility: .visible) {
-            Button("返回连接页") {
-                dismiss()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    store.disconnect()
-                }
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("已保存服务器及各自认证信息会保留，可随时一键重新连接。")
-        }
         .confirmationDialog("移除当前服务器？", isPresented: $confirmRemoveServer, titleVisibility: .visible) {
             Button("移除服务器", role: .destructive) {
                 guard let id = store.activeServerID else { return }
@@ -86,6 +98,9 @@ struct SettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("将从这台设备移除该服务器及认证信息，重新连接需要连接码。服务端会话和文件保留。")
+        }
+        .sheet(isPresented: $showWebSettings) {
+            SettingsWebView(api: api)
         }
         .sheet(isPresented: $showModelGroups) { ModelGroupsView(api: api) }
         .sheet(item: $logShare) { item in
@@ -118,7 +133,9 @@ struct SettingsView: View {
                 key: .escape,
                 modifiers: []
             ) {
-                dismiss()
+                if showWebSettings { showWebSettings = false }
+                else if expandedSection != nil { expandedSection = nil }
+                else { dismiss() }
             },
             WandKeyboardShortcutAction(
                 id: "close-settings",
@@ -133,45 +150,77 @@ struct SettingsView: View {
 
     // MARK: - 区块
 
-    /// Android 端同样先交代设备、连接和外观；这里保持 iOS Form 的原生信息密度。
-    private var settingsOverview: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 12) {
-                    WandBrandMark(size: 46)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("系统设置")
-                            .font(.wand(size: 19, weight: .semibold))
-                            .foregroundStyle(Theme.textPrimary)
-                        Text("连接、设备和工作流偏好都在这里调整。")
-                            .font(.wand(size: 12))
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                    Spacer(minLength: 8)
-                    Text(appVersion)
-                        .font(.wand(size: 11, design: .monospaced))
-                        .foregroundStyle(Theme.textSecondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Theme.surface.opacity(0.82)))
-                }
-                HStack(spacing: 7) {
-                    settingsStatePill(
-                        token?.isEmpty == false ? "已安全连接" : "已连接",
-                        color: Theme.success
-                    )
-                    settingsStatePill("iOS 原生", color: Theme.brand)
-                    settingsStatePill(currentAppearance.title, color: Theme.brandStrong)
+    private var settingsDirectory: some View {
+        Group {
+            Section {
+                settingsChapter(.server, detail: store.activeProfile?.displayName ?? "当前服务器") {
+                    serverSection
                 }
             }
-            .padding(.vertical, 6)
+            Section("此设备") {
+                settingsChapter(.appearance, detail: currentAppearance.title) { appearanceSection }
+                settingsChapter(.traffic) { trafficSection }
+                settingsChapter(.updates, detail: appVersion) {
+                    clientUpdateSection
+                    featureSection
+                }
+            }
+            Section("服务配置") {
+                Button { showModelGroups = true } label: {
+                    Label(MobileSettingsSection.models.title, systemImage: MobileSettingsSection.models.symbol)
+                        .frame(minHeight: WandLayout.controlTouch, alignment: .leading)
+                }
+                .accessibilityIdentifier("settings-models")
+                Button { showWebSettings = true } label: {
+                    Label("完整 Web 设置", systemImage: "globe")
+                        .frame(minHeight: WandLayout.controlTouch, alignment: .leading)
+                }
+                .accessibilityIdentifier("settings-web")
+            }
+            Section("帮助与关于") {
+                settingsChapter(.diagnostics) { diagnosticsSection }
+                settingsChapter(.about) { aboutSection }
+            }
         }
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
+    }
+
+    /// 目录与 Android 同序；短设置在触发点下方展开，避免又加一层页面或模态。
+    private func settingsChapter<Content: View>(_ section: MobileSettingsSection, detail: String? = nil,
+                                               @ViewBuilder content: @escaping () -> Content) -> some View {
+        DisclosureGroup(isExpanded: Binding(
+            get: { expandedSection == section },
+            set: { open in
+                withAnimation(reducedMotion ? nil : WandMotion.expansion) {
+                    expandedSection = open ? section : nil
+                }
+            }
+        )) {
+            content()
+        } label: {
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: WandLayout.fieldGap) {
+                        Label(section.title, systemImage: section.symbol)
+                        if let detail { Text(detail).font(.caption).foregroundStyle(Theme.textSecondary) }
+                    }
+                } else {
+                    HStack(alignment: .firstTextBaseline) {
+                        Label(section.title, systemImage: section.symbol)
+                        if let detail {
+                            Spacer(minLength: 8)
+                            Text(detail).font(.caption).foregroundStyle(Theme.textSecondary)
+                                .lineLimit(2).multilineTextAlignment(.trailing)
+                        }
+                    }
+                }
+            }
+            .frame(minHeight: WandLayout.controlTouch, alignment: .leading)
+        }
+        .accessibilityIdentifier("settings-" + section.rawValue)
     }
 
     private var serverSection: some View {
-        Section("服务器") {
+        Group {
             if let profile = store.activeProfile {
                 infoRow("名称", profile.displayName)
             }
@@ -194,13 +243,7 @@ struct SettingsView: View {
                     NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil)
                 }
             } label: {
-                Label("切换服务器", systemImage: "server.rack")
-                    .font(.wand(size: 15))
-            }
-            Button(role: .destructive) {
-                confirmDisconnect = true
-            } label: {
-                Label("返回连接页", systemImage: "rectangle.portrait.and.arrow.right")
+                Label("管理服务器", systemImage: "server.rack")
                     .font(.wand(size: 15))
             }
             Button(role: .destructive) {
@@ -213,7 +256,7 @@ struct SettingsView: View {
     }
 
     private var appearanceSection: some View {
-        Section {
+        Group {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Label("主题", systemImage: currentAppearance.icon)
@@ -223,16 +266,21 @@ struct SettingsView: View {
                         .font(.wand(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
-                Picker("主题", selection: $appearanceModeRaw) {
-                    ForEach(WandAppearanceMode.allCases) { mode in
-                        Text(mode.title).tag(mode.rawValue)
-                    }
+                if dynamicTypeSize.isAccessibilitySize {
+                    appearancePicker.pickerStyle(.menu)
+                } else {
+                    appearancePicker.pickerStyle(.segmented).labelsHidden()
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
             }
             .padding(.vertical, 6)
             Toggle("触感反馈", isOn: $hapticEnabled)
+            Text("选择明亮、黑暗，或跟随 iOS 系统外观。")
+                .font(.caption).foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    private var trafficSection: some View {
+        Group {
             Picker("实时工具时间线", selection: Binding(
                 get: { activityTimelineDisplayOption(trafficTimelineMode) },
                 set: { option in
@@ -244,13 +292,14 @@ struct SettingsView: View {
                 Text("一直折叠").tag("never")
             }
                 .tint(Theme.brand)
-        } header: {
-            Text("外观与反馈")
-        } footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("选择明亮、黑暗，或跟随 iOS 系统外观。")
-                Text("实时工具时间线：仅 Wi-Fi 时自动展开，或一直打开 / 一直折叠；在对话里手动收放会同步这里的开关，但不会改掉你选过的网络范围。")
-            }
+            Text("选择工具时间线自动展开的网络范围，或一直折叠。历史详情始终可点击查看；在对话里手动收放不改变已选网络范围。")
+                .font(.caption).foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    private var appearancePicker: some View {
+        Picker("主题", selection: $appearanceModeRaw) {
+            ForEach(WandAppearanceMode.allCases) { mode in Text(mode.title).tag(mode.rawValue) }
         }
     }
 
@@ -259,7 +308,7 @@ struct SettingsView: View {
     }
 
     private var featureSection: some View {
-        Section {
+        Group {
             Toggle("回复完成 / 等待授权通知", isOn: $store.notificationsEnabled)
                 .tint(Theme.brand)
                 .onChange(of: store.notificationsEnabled) { _, enabled in
@@ -299,30 +348,26 @@ struct SettingsView: View {
                 Label("发送测试通知", systemImage: "bell.and.waves.left.and.right")
             }
             .disabled(notificationStatus != "已开启")
-        } header: {
-            Text("通知")
-        } footer: {
             Text("系统通知会在 App 位于后台时提醒回复完成或等待授权。若权限关闭，请到 iOS 设置 → Wand 开启。App 被系统彻底挂起后，通知会暂停更新。")
+                .font(.caption).foregroundStyle(Theme.textSecondary)
         }
     }
 
     private var diagnosticsSection: some View {
-        Section {
+        Group {
             Button {
                 exportLogs()
             } label: {
                 Label("导出最近 5 分钟日志", systemImage: "square.and.arrow.up.on.square")
                     .font(.wand(size: 15))
             }
-        } header: {
-            Text("诊断")
-        } footer: {
-            Text("会话打开后空白、连接异常等偶发问题时，复现后立即来这里导出日志（会话加载 / WebSocket / 网络请求等事件），发给开发者排查。日志只存在本机内存，不含密码。")
+            Text("复现问题后导出最近 5 分钟日志，通过系统分享或存储到文件。日志只存在本机内存，不含密码。")
+                .font(.caption).foregroundStyle(Theme.textSecondary)
         }
     }
 
     private var clientUpdateSection: some View {
-        Section {
+        Group {
             HStack(spacing: 12) {
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 17, weight: .semibold))
@@ -365,10 +410,7 @@ struct SettingsView: View {
                     .font(.wand(size: 15))
             }
             .disabled(iosUpdateChecking || appUpdater.opening)
-        } header: {
-            Text("应用与更新")
-        } footer: {
-            Text(iosUpdateFooter)
+            Text(iosUpdateFooter).font(.caption).foregroundStyle(Theme.textSecondary)
         }
     }
 
@@ -409,8 +451,9 @@ struct SettingsView: View {
     }
 
     private var aboutSection: some View {
-        Section("关于") {
+        Group {
             infoRow("App 版本", appVersion, mono: true)
+            if let serverVersion { infoRow("服务端版本", "v\(serverVersion)", mono: true) }
             Link(destination: URL(string: "https://github.com/co0ontty/wand")!) {
                 Label("GitHub 仓库", systemImage: "link")
                     .font(.wand(size: 15))
@@ -427,22 +470,6 @@ struct SettingsView: View {
             return "v\(short)"
         }
         return "v\(short)+\(stamp)"
-    }
-
-    private func settingsStatePill(_ label: String, color: Color) -> some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(color)
-                .frame(width: 6, height: 6)
-            Text(label)
-                .lineLimit(1)
-        }
-        .font(.wand(size: 11, weight: .medium))
-        .foregroundStyle(Theme.textPrimary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(color.opacity(0.10)))
-        .overlay(Capsule().stroke(color.opacity(0.18), lineWidth: 0.6))
     }
 
     private func refreshNotificationStatus() async {
@@ -469,7 +496,7 @@ struct SettingsView: View {
             Text(value)
                 .font(.wand(size: 13, design: mono ? .monospaced : .default))
                 .foregroundStyle(.primary)
-                .lineLimit(1)
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                 .truncationMode(.middle)
         } label: {
             Text(label)

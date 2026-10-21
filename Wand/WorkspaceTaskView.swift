@@ -87,11 +87,9 @@ struct WorkspaceTaskView: View {
     @State private var deleteSessionBusy = false
     @State private var deleteSessionError: String?
     @State private var visibleCompletionSnapshot: SessionSnapshot?
-    @State private var archivedSessionsExpanded = false
     @State private var presentedSessionID: String?
     @State private var initialSessionIntentConsumed = false
     @State private var sessionSwitcherPresented = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -239,6 +237,11 @@ struct WorkspaceTaskView: View {
             actions.append(SessionHostAction(id: "new-window", title: "新建工作窗口", symbol: "plus.circle",
                                              isEnabled: !store.creating) { store.presentTargetPicker() })
         }
+        if canSwitchWorkWindows {
+            actions.append(SessionHostAction(id: "switch-window", title: "切换工作窗口", symbol: "rectangle.stack") {
+                sessionSwitcherPresented = true
+            })
+        }
         if let onOpenChat {
             actions.append(SessionHostAction(id: "chat", title: "打开聊天", symbol: "bubble.left.and.bubble.right", action: onOpenChat))
         }
@@ -257,21 +260,34 @@ struct WorkspaceTaskView: View {
         return actions
     }
 
+    /// 顶部不再常驻切换控件，切换入口收进任务「更多」菜单。
+    private var canSwitchWorkWindows: Bool {
+        guard store.currentTask?.id == task.id else { return false }
+        return workspaceTaskVisibleSessions(currentDetail?.sessions ?? []).count > 1
+    }
+
+    /// 顶栏标题做成胶囊：左侧是圆圈里的头像，允许略微探出胶囊边缘，右侧是当前标题。
     private var workspaceNavigationTitle: some View {
         let chrome = workspaceTaskNavigationChrome(taskName: task.name, workspaceName: workspace.name)
-        return VStack(spacing: 1) {
-            Text(chrome.title)
-                .font(.wand(size: 15, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
-                .lineLimit(1)
-            if let subtitle = chrome.subtitle {
-                Text(subtitle)
-                    .font(.wand(size: 11, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
-            }
+        let identity = titleAvatarIdentity
+        return TopCapsuleTitle(title: chrome.title, subtitle: chrome.subtitle,
+            avatarID: identity.id, avatarName: identity.name, avatarValue: identity.avatar,
+            avatarSize: 30, titleSize: 15, subtitleSize: 11)
+            .accessibilityLabel(chrome.subtitle.map { "\(chrome.title)，\($0)" } ?? chrome.title)
+    }
+
+    /// 优先用当前呈现会话的员工作为头像身份；没有会话时回落到默认伙伴。
+    private var titleAvatarIdentity: (id: String, name: String, avatar: String) {
+        let sessions = currentDetail?.sessions ?? []
+        let visible = store.visibleSessionID.flatMap { id in sessions.first { $0.id == id } }
+        if let visible, let employeeID = visible.employeeId, !employeeID.isEmpty {
+            return (employeeID, visible.employeeName ?? "", visible.employeeAvatar ?? "")
         }
-        .accessibilityElement(children: .combine)
+        if let first = sessions.first(where: { ($0.employeeId ?? "").isEmpty == false }),
+           let employeeID = first.employeeId {
+            return (employeeID, first.employeeName ?? "", first.employeeAvatar ?? "")
+        }
+        return ("e_wand_default", "赛博虎妞", "plush-cat:v1:silver")
     }
 
     private var pickerBinding: Binding<Bool> {
@@ -293,18 +309,14 @@ struct WorkspaceTaskView: View {
                 errorState(message)
             case .empty(let detail):
                 emptyTask(detail)
-            case .ready(let detail):
-                readyTask(detail)
+            case .ready:
+                readyTask
             }
         }
     }
 
     private func emptyTask(_ detail: WorkspaceTaskDetail) -> some View {
         VStack(spacing: 0) {
-            if !WorkspaceSessionSummary.splitArchived(detail.sessions).archived.isEmpty {
-                archivedSessions(detail.sessions)
-                    .padding(.horizontal, 12)
-            }
             if let warning = detail.worktreeError, !warning.isEmpty {
                 Label(warning, systemImage: "exclamationmark.triangle")
                     .font(.footnote)
@@ -335,57 +347,16 @@ struct WorkspaceTaskView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func readyTask(_ detail: WorkspaceTaskDetail) -> some View {
+    // 会话顶部只由 SessionDestinationView 持有；宿主不得再叠归档、切换或状态条。
+    private var readyTask: some View {
         VStack(spacing: 0) {
-            archivedSessions(detail.sessions)
-                .padding(.horizontal, 12)
-            if let warning = store.layoutWarning {
+            if !presentsSession, let warning = store.layoutWarning {
                 warningBanner(warning)
-            }
-            if workspaceTaskVisibleSessions(detail.sessions).count > 1 {
-                Button("切换工作窗口", systemImage: "rectangle.stack") {
-                    sessionSwitcherPresented = true
-                }
-                .padding(.vertical, 8)
             }
             sessionContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    @ViewBuilder private func archivedSessions(_ sessions: [WorkspaceSessionSummary]) -> some View {
-        let archived = WorkspaceSessionSummary.splitArchived(sessions).archived
-        if let error = deleteSessionError, pendingDeleteSession == nil {
-            Text(error).font(.footnote).foregroundColor(Theme.danger).padding(.vertical, 6)
-        }
-        if !archived.isEmpty {
-            Button {
-                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { archivedSessionsExpanded.toggle() }
-            } label: {
-                HStack {
-                    Label("已归档会话 \(archived.count)", systemImage: "archivebox")
-                    Spacer()
-                    Image(systemName: "chevron.down").rotationEffect(.degrees(archivedSessionsExpanded ? 0 : -90))
-                }.font(.footnote).foregroundColor(Theme.textMuted).padding(.vertical, 8)
-            }.buttonStyle(.plain)
-            if archivedSessionsExpanded {
-                ForEach(Array(archived.enumerated()), id: \.element.id) { index, session in
-                    HStack {
-                        Text(sessionLabel(session, index: index)).font(.footnote).lineLimit(1)
-                        Spacer()
-                        Button("恢复") { Task { await restoreSession(session) } }
-                            .font(.footnote).foregroundColor(Theme.brand)
-                            .accessibilityLabel("恢复会话 \(sessionLabel(session, index: index))")
-                    }.padding(.vertical, 6)
-                }
-            }
-        }
-    }
-
-    private func restoreSession(_ session: WorkspaceSessionSummary) async {
-        do { try await store.archiveSession(session.id, archived: false); deleteSessionError = nil }
-        catch { deleteSessionError = error.localizedDescription }
     }
 
     private func switchTaskSession(_ session: WorkspaceSessionSummary) {

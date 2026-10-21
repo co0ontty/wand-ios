@@ -6,9 +6,46 @@ import SwiftTerm
 /// Explicit acceptance input only. Never executes an AI provider or guesses/deletes user sessions.
 @MainActor
 final class InstalledNativeTerminalTests: XCTestCase {
+    func testNativeRefitKeepsTerminalModesAndViewGeometryInSync() {
+        let view = NativeTerminalView()
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 600)
+        view.layoutIfNeeded()
+        view.feedOutput("\u{1b}[?1049h\u{1b}[?2004h")
+        XCTAssertTrue(view.getTerminal().isCurrentBufferAlternate)
+        XCTAssertTrue(view.getTerminal().bracketedPasteMode)
+
+        view.frame = CGRect(x: 0, y: 0, width: 260, height: 400)
+        view.refit()
+
+        XCTAssertTrue(view.getTerminal().isCurrentBufferAlternate)
+        XCTAssertTrue(view.getTerminal().bracketedPasteMode)
+        XCTAssertEqual(view.contentSize.width, view.getOptimalFrameSize().width, accuracy: 0.5)
+        XCTAssertEqual(view.contentSize.height, view.getOptimalFrameSize().height, accuracy: 0.5)
+    }
+
+    func testNativeStreamingKeepsFollowingAndPreservesManualHistory() async throws {
+        let view = NativeTerminalView()
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 300)
+        view.layoutIfNeeded(); view.refit()
+        view.feedOutput((0..<100).map { "line \($0)\r\n" }.joined())
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let terminal = view.getTerminal()
+        XCTAssertGreaterThan(terminal.buffer.yDisp, 0)
+        XCTAssertEqual(view.scrollPosition, 1)
+        view.scrollTo(row: 5, notifyAccessibility: false)
+        view.feedOutput((100..<120).map { "line \($0)\r\n" }.joined())
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(terminal.buffer.yDisp, 5, "live output must not steal the history viewport")
+        view.scrollTo(row: Int.max, notifyAccessibility: false)
+        view.feedOutput("tail\r\n")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(view.scrollPosition, 1)
+    }
+
     func testInstalledServerNativePTYUsesRealReplayInputAndAck() async throws {
         let pointer = URL(fileURLWithPath: "/tmp/wand-ios-continued-acceptance-profile-path")
-        guard let path = try? String(contentsOf: pointer, encoding: .utf8) else { throw XCTSkip("Requires an explicitly prepared private installed-service profile") }
+        guard let path = ProcessInfo.processInfo.environment["WAND_PTY_ACCEPTANCE_PROFILE"]
+            ?? (try? String(contentsOf: pointer, encoding: .utf8)) else { throw XCTSkip("Requires an explicitly prepared private installed-service profile") }
         struct Profile: Decodable { let baseUrl: String; let token: String; let cwd: String }
         let data = try Data(contentsOf: URL(fileURLWithPath: path)); XCTAssertLessThan(data.count, 16384)
         let profile = try JSONDecoder().decode(Profile.self, from: data)
