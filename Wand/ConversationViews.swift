@@ -545,6 +545,16 @@ struct ConversationDetailView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
+                    if detail.history?.hasEarlier == true {
+                        Button(store.historyLoading.contains(id) ? "加载中…" : "加载更早消息") {
+                            scrollPinned = false
+                            let anchor = messages.first?.id
+                            Task {
+                                await store.load(id, older: true)
+                                if let anchor { scrollScheduler.request { proxy.scrollTo(anchor, anchor: .top) } }
+                            }
+                        }.buttonStyle(WandSecondaryButtonStyle()).disabled(store.historyLoading.contains(id))
+                    }
                     ForEach(Array(messages.enumerated()), id: \.element.id) { _, message in
                         messageView(message, detail: detail).id(message.id)
                     }

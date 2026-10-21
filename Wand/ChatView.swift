@@ -179,14 +179,14 @@ struct ChatView: View {
 
     init(sessionId: String, api: WandAPI, showsNavigationChrome: Bool = true,
          onCompletionVisible: ((SessionSnapshot) -> Void)? = nil, sharedStore: ChatStore? = nil,
-         hostActions: [SessionHostAction] = [], hostTitle: String? = nil) {
+         initialSnapshot: SessionSnapshot? = nil, hostActions: [SessionHostAction] = [], hostTitle: String? = nil) {
         self.sessionId = sessionId
         self.api = api
         self.showsNavigationChrome = showsNavigationChrome
         self.hostActions = hostActions
         self.hostTitle = hostTitle
         self.onCompletionVisible = onCompletionVisible
-        let chatStore = sharedStore ?? ChatStore(sessionId: sessionId, api: api)
+        let chatStore = sharedStore ?? ChatStore(sessionId: sessionId, api: api, initialSnapshot: initialSnapshot)
         _store = StateObject(wrappedValue: chatStore)
         _sessionFiles = StateObject(wrappedValue: SessionFilesStore(service: api))
         _composerDraft = StateObject(wrappedValue: chatStore.composerDraft)

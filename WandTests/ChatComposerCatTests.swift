@@ -3,6 +3,160 @@ import SwiftUI
 import XCTest
 @testable import Wand
 
+private final class ChatLoadingURLProtocol: URLProtocol {
+    static var respond: ((URLRequest) -> (String, TimeInterval))?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let (body, delay) = Self.respond?(request) ?? ("{}", 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [self] in
+            client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200,
+                httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+    override func stopLoading() {}
+}
+
+@MainActor final class ChatLoadingTests: XCTestCase {
+
+    func testSharedChatWireIsolatesSessionsAndRetainsOtherLeases() throws {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9")!, token: nil)
+        let a = WandSocket.sharedChat(api: api), b = WandSocket.sharedChat(api: api)
+        XCTAssertTrue(a.sharedConnection === b.sharedConnection)
+        var receivedA: [Int] = [], receivedB: [Int] = []
+        a.onEvent = { receivedA.append($0.seq ?? 0) }; b.onEvent = { receivedB.append($0.seq ?? 0) }
+        a.subscribe(sessionId: "a", ptyAck: false); b.subscribe(sessionId: "b", ptyAck: false)
+        a.connect(); b.connect()
+        defer { a.close(); b.close() }
+        func frame(_ id: String, _ type: String, _ seq: Int) throws {
+            a.sharedConnection.handle(try JSONSerialization.data(withJSONObject:
+                ["type": type, "sessionId": id, "seq": seq, "data": ["id": id, "messages": []]]))
+        }
+        XCTAssertEqual(a.activeChatLeases, 2)
+        try frame("a", "init", 1); try frame("b", "init", 1)
+        try frame("a", "output", 2); try frame("b", "output", 2)
+        XCTAssertEqual(receivedA, [1, 2]); XCTAssertEqual(receivedB, [1, 2])
+        a.close()
+        XCTAssertEqual(b.activeChatLeases, 1)
+        try frame("a", "output", 3); try frame("b", "output", 3)
+        XCTAssertEqual(receivedA, [1, 2]); XCTAssertEqual(receivedB, [1, 2, 3])
+        b.close(); XCTAssertEqual(a.activeChatLeases, 0)
+        // Re-entering the same store starts a fresh sequence boundary on the same pool.
+        a.connect(); try frame("a", "init", 1); try frame("a", "output", 2)
+        XCTAssertEqual(receivedA, [1, 2, 1, 2])
+        let otherAPI = WandAPI(baseURL: api.baseURL, token: "different-test-identity")
+        let other = WandSocket.sharedChat(api: otherAPI)
+        XCTAssertFalse(other.sharedConnection === a.sharedConnection)
+    }
+
+
+    func testSyncBufferMergesOldEditsDeletionAndOlderPages() async throws {
+        let buffer = ConversationSyncBuffer()
+        let first = try await buffer.read("c") { suffix in
+            XCTAssertEqual(suffix, "/sync")
+            return Data(#"{"id":"c","reset":true,"detail":{"id":"c","kind":"dm"},"messageOrder":["b"],"messages":[{"messageId":"b","content":[]}],"history":{"revision":"one","from":"anchor","hasEarlier":true,"total":2}}"#.utf8)
+        }
+        XCTAssertFalse(first.isEmpty)
+        let older = try await buffer.read("c", older: true) { suffix in
+            XCTAssertTrue(suffix.contains("since=one")); XCTAssertTrue(suffix.contains("older=1"))
+            return Data(#"{"id":"c","messageOrder":["a","b"],"messages":[{"messageId":"a","content":[]}],"history":{"revision":"two","from":"start","hasEarlier":false,"total":2}}"#.utf8)
+        }
+        let page = try XCTUnwrap(try JSONSerialization.jsonObject(with: older) as? [String: Any])
+        XCTAssertEqual((page["messages"] as? [[String: Any]])?.count, 2)
+        let changed = try await buffer.read("c") { _ in
+            Data(#"{"id":"c","messageOrder":["a"],"messages":[{"messageId":"a","content":[{"type":"text","text":"edited"}]}],"history":{"revision":"three","from":"start","hasEarlier":false,"total":1}}"#.utf8)
+        }
+        let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: changed) as? [String: Any])
+        XCTAssertEqual((result["messages"] as? [[String: Any]])?.count, 1)
+        let same = try await buffer.read("c") { _ in
+            Data(#"{"id":"c","unchanged":true,"history":{"revision":"three","from":"start","hasEarlier":false,"total":1}}"#.utf8)
+        }
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: same) as? NSDictionary, result as NSDictionary)
+    }
+
+    private func api() -> WandAPI {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9/loading-" + UUID().uuidString)!, token: nil)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ChatLoadingURLProtocol.self]
+        api.endpointSession.session = URLSession(configuration: config, delegate: api.endpointSession, delegateQueue: nil)
+        return api
+    }
+
+    func testCompactFirstPageAndFullPendingToolDetailUseDifferentProjection() async throws {
+        let api = api()
+        defer { ChatLoadingURLProtocol.respond = nil; SelfSignedSession.resetEndpoint(api.baseURL) }
+        ChatLoadingURLProtocol.respond = { request in
+            if request.url!.path.contains("/tool-content/") {
+                XCTAssertNil(request.value(forHTTPHeaderField: "X-Wand-Tool-Projection"))
+                return (#"{"tool_use_id":"tool","input":{"command":"pwd"},"resultAvailable":false}"#, 0)
+            }
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Wand-Tool-Projection"), "compact")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+            XCTAssertEqual(query.first { $0.name == "blockBudget" }?.value, "12")
+            XCTAssertEqual(query.first { $0.name == "byteBudget" }?.value, "98304")
+            XCTAssertEqual(query.first { $0.name == "output" }?.value, "omit")
+            return (#"{"id":"session","sessionKind":"structured","messages":[]}"#, 0)
+        }
+        _ = try await api.getSession(id: "session")
+        let detail = try await api.fetchToolContent(id: "session", toolUseId: "tool")
+        XCTAssertEqual(detail.input["command"]?.stringValue, "pwd")
+        XCTAssertFalse(detail.resultAvailable, "Pending tool parameters must be available before its result")
+        let socket = WandSocket(baseURL: api.baseURL)
+        socket.blockBudget = WandAPI.chatBlockWindow; socket.byteBudget = WandAPI.chatByteWindow
+        socket.subscribe(sessionId: "session")
+        let payload = try XCTUnwrap(socket.subscriptionPayload())
+        XCTAssertEqual(payload["compactTools"] as? Bool, true)
+        XCTAssertEqual(payload["omitStructuredOutput"] as? Bool, true)
+        XCTAssertEqual(payload["byteBudget"] as? Int, 98304)
+    }
+
+    func testNavigationSnapshotPaintsImmediatelyWithoutAnotherDetailRead() async throws {
+        let api = api()
+        let auxiliary = expectation(description: "auxiliary request started")
+        let duplicate = expectation(description: "no duplicate session read"); duplicate.isInverted = true
+        ChatLoadingURLProtocol.respond = { request in
+            if request.url!.path.hasSuffix("/api/sessions/session") { duplicate.fulfill() }
+            if request.url!.path.hasSuffix("/api/models") { auxiliary.fulfill() }
+            return ("{}", 0)
+        }
+        let seed = try JSONDecoder().decode(SessionSnapshot.self,
+            from: Data(#"{"id":"session","sessionKind":"structured","status":"idle","title":"seed","messages":[]}"#.utf8))
+        let store = ChatStore(sessionId: "session", api: api, drafts: SessionDraftStore(), initialSnapshot: seed)
+        defer { store.shutdown(); store.composerDraft.retire(); ChatLoadingURLProtocol.respond = nil; SelfSignedSession.resetEndpoint(api.baseURL) }
+        store.start()
+        XCTAssertFalse(store.loading)
+        XCTAssertEqual(store.snapshot?.title, "seed")
+        await fulfillment(of: [auxiliary, duplicate], timeout: 0.3)
+    }
+
+    func testLateRestCannotReplaceNewerRealtimeSnapshot() async throws {
+        let api = api()
+        let rest = expectation(description: "REST started")
+        let auxiliary = expectation(description: "REST settled")
+        ChatLoadingURLProtocol.respond = { request in
+            if request.url!.path.hasSuffix("/api/sessions/session") {
+                rest.fulfill()
+                return (#"{"id":"session","sessionKind":"structured","status":"idle","title":"old","messages":[]}"#, 0.15)
+            }
+            if request.url!.path.hasSuffix("/api/models") { auxiliary.fulfill() }
+            return ("{}", 0)
+        }
+        let store = ChatStore(sessionId: "session", api: api, drafts: SessionDraftStore())
+        defer { store.shutdown(); store.composerDraft.retire(); ChatLoadingURLProtocol.respond = nil; SelfSignedSession.resetEndpoint(api.baseURL) }
+        store.start()
+        await fulfillment(of: [rest], timeout: 2)
+        let event = try JSONDecoder().decode(WsIncoming.self,
+            from: Data(#"{"type":"init","sessionId":"session","data":{"id":"session","sessionKind":"structured","status":"running","title":"new","messages":[]}}"#.utf8))
+        store.handle(event)
+        await fulfillment(of: [auxiliary], timeout: 2)
+        XCTAssertEqual(store.snapshot?.title, "new")
+        XCTAssertEqual(store.status, "running")
+        XCTAssertFalse(store.loading)
+    }
+}
+
 @MainActor final class ChatComposerCatTests: XCTestCase {
     func testSocketDecodeIsAsynchronousAndDeliversFramesInOrderOnMainThread() async throws {
         let socket = WandSocket(baseURL: URL(string: "http://127.0.0.1:9")!)

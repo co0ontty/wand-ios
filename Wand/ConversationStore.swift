@@ -102,15 +102,17 @@ final class ConversationStore: ObservableObject {
         previewSocket?.close(); previewSocket = nil
         heldSessions.forEach { sessionStores[$0]?.detachView() }; heldSessions.removeAll()
         guard let id, active else { return }
-        let socket = WandSocket(baseURL: api.baseURL)
+        let socket = WandSocket.sharedChat(api: api)
         socket.onConversationPreview = { [weak self] update in
             MainActor.assumeIsolated { self?.applyPreview(update) }
         }
+        socket.onConversationChanged = { [weak self] in MainActor.assumeIsolated { self?.scheduleRefresh() } }
+        socket.onConnectionChange = { [weak self] up in if up { MainActor.assumeIsolated { self?.scheduleRefresh() } } }
         previewSocket = socket; socket.connect()
         detailTask = Task {
             while !Task.isCancelled, active, selectedID == id {
                 await load(id)
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
             }
         }
     }
@@ -120,13 +122,14 @@ final class ConversationStore: ObservableObject {
         refreshTask = Task {
             while !Task.isCancelled, active {
                 await refresh()
-                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
             }
         }
         if let selectedID { select(selectedID) }
     }
     func shutdown() {
         active = false; listRevision += 1
+        refreshNotice?.cancel(); refreshNotice = nil
         refreshTask?.cancel(); detailTask?.cancel(); previewSocket?.close(); previewSocket = nil
         heldSessions.forEach { sessionStores[$0]?.detachView() }; heldSessions.removeAll()
         ownedDraftKeys.forEach { drafts.draft(sessionId: $0, api: api).deactivate() }
@@ -148,10 +151,13 @@ final class ConversationStore: ObservableObject {
             error = nil
         } catch { if !Task.isCancelled { self.error = error.localizedDescription } }
     }
-    func load(_ id: String) async {
+    @Published private(set) var historyLoading = Set<String>()
+    func load(_ id: String, older: Bool = false) async {
+        if older { guard historyLoading.insert(id).inserted else { return } }
+        defer { if older { historyLoading.remove(id) } }
         let revision = (generations[id] ?? 0) + 1; generations[id] = revision
         do {
-            let detail = try await service.conversation(id)
+            let detail = try await service.conversationPage(id, older: older)
             guard generations[id] == revision, !Task.isCancelled else { return }
             details[id] = detail; error = nil
             detailAccessOrder.removeAll { $0 == id }; detailAccessOrder.append(id)
@@ -161,7 +167,20 @@ final class ConversationStore: ObservableObject {
             if selectedID == id { syncExecutionStores(detail) }
         } catch { if generations[id] == revision, !Task.isCancelled { self.error = error.localizedDescription } }
     }
+    private var refreshNotice: Task<Void, Never>?
+    private func scheduleRefresh() {
+        guard active, refreshNotice == nil else { return }
+        refreshNotice = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard let self else { return }
+            defer { refreshNotice = nil }
+            guard !Task.isCancelled, active else { return }
+            if let id = selectedID { await load(id) }
+            await refresh()
+        }
+    }
     func applyPreview(_ update: ConversationSessionUpdate) {
+        scheduleRefresh()
         guard selectedID == update.conversationId, var detail = details[update.conversationId] else { return }
         detail.messages = detail.messages.map { message in
             var message = message

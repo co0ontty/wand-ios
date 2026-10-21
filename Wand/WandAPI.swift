@@ -13,7 +13,8 @@ private extension Data {
 /// 的每个请求上自动携带；遇到 401 时用存储的 appToken 重新登录一次再重试。
 final class WandAPI: SessionInputTransport {
     /// 聊天块级窗口默认预算：打开会话只拉最近这么多个内容块，更早的滚动到顶时按需翻页。
-    static let chatBlockWindow = 60
+    static let chatBlockWindow = 12
+    static let chatByteWindow = 96 * 1024
 
     let baseURL: URL
     let token: String?
@@ -21,6 +22,7 @@ final class WandAPI: SessionInputTransport {
     /// 侧栏、任务看板、任务详情用同一份无效化信号对齐（对齐 Android 的 TaskChangeSource）。
     let taskChanges = PassthroughSubject<Void, Never>()
     let conversationRequests: ConversationRequestLedger
+    let conversationSync = ConversationSyncBuffer()
     /// Captured once so resetting an endpoint retires this client instead of letting a stale
     /// owner recreate a session and authenticate again with an obsolete token.
     let endpointSession: SelfSignedSession
@@ -64,6 +66,9 @@ final class WandAPI: SessionInputTransport {
         req.httpMethod = method
         req.timeoutInterval = timeout
         req.cachePolicy = .reloadIgnoringLocalCacheData
+        if !path.contains("/tool-content/") {
+            req.setValue("compact", forHTTPHeaderField: "X-Wand-Tool-Projection")
+        }
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -314,8 +319,8 @@ final class WandAPI: SessionInputTransport {
     /// 块级窗口：带 blockBudget 时服务端只回最近这么多个内容块（必要时切掉最旧 turn 的头部），
     /// 根治「单条 turn 上百块/1MB」长任务的打开慢。blockBudget=0 退回 turn 级窗口。
     func getSession(id: String, blockBudget: Int = WandAPI.chatBlockWindow) async throws -> SessionSnapshot {
-        var path = "/api/sessions/\(id)?format=chat"
-        if blockBudget > 0 { path += "&blockBudget=\(blockBudget)" }
+        var path = "/api/sessions/\(id)?format=chat&output=omit"
+        if blockBudget > 0 { path += "&blockBudget=\(blockBudget)&byteBudget=\(Self.chatByteWindow)" }
         return try await request(SessionSnapshot.self, method: "GET", path: path)
     }
 
@@ -328,7 +333,7 @@ final class WandAPI: SessionInputTransport {
     /// 块级翻页：取某条 turn 的 [start, blockOffset) 段内容块（start = max(0, blockOffset - blockLimit)）。
     func fetchEarlierBlocks(id: String, turn: Int, blockOffset: Int, blockLimit: Int) async throws -> BlocksPage {
         try await request(BlocksPage.self, method: "GET",
-                          path: "/api/sessions/\(id)/messages?turn=\(turn)&blockOffset=\(blockOffset)&blockLimit=\(blockLimit)")
+                          path: "/api/sessions/\(id)/messages?turn=\(turn)&blockOffset=\(blockOffset)&blockLimit=\(blockLimit)&blockBudget=\(Self.chatBlockWindow)&byteBudget=\(Self.chatByteWindow)")
     }
 
     /// 按需取回被消息窗口截断的完整 tool_result 内容。

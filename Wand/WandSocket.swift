@@ -17,12 +17,100 @@ protocol PtySocketTransport: AnyObject {
 }
 
 final class WandSocket: PtySocketTransport {
+
+    // Chat/notification leases share one wire for the exact endpoint identity.
+    // PTY transports never opt in: their ACK/input/backpressure lifecycle remains independent.
+    private final class WeakPeer { weak var value: WandSocket?; init(_ value: WandSocket) { self.value = value } }
+    private final class WeakHub { weak var value: ChatHub?; init(_ value: ChatHub) { self.value = value } }
+    private static var chatHubs: [ObjectIdentifier: WeakHub] = [:]
+    private var chatHub: ChatHub?
+    /// Internal diagnostics also allow protocol tests to drive the real shared wire.
+    var sharedConnection: WandSocket { chatHub?.host ?? self }
+    var activeChatLeases: Int { chatHub?.peers.values.compactMap(\.value).filter { !$0.closed }.count ?? 0 }
+    private let leaseID = UUID()
+    private var wireFrame: ((DecodedFrame) -> Void)?
+    private var wireReady: (() -> Void)?
+
+    static func sharedChat(api: WandAPI) -> WandSocket {
+        let owner: AnyObject = api
+        chatHubs = chatHubs.filter { $0.value.value != nil }
+        let key = ObjectIdentifier(owner)
+        let hub: ChatHub
+        if let existing = chatHubs[key]?.value, existing.owner === owner { hub = existing }
+        else {
+            hub = ChatHub(owner: owner, host: WandSocket(baseURL: api.baseURL))
+            chatHubs[key] = WeakHub(hub)
+        }
+        let peer = WandSocket(baseURL: api.baseURL)
+        peer.chatHub = hub
+        return peer
+    }
+    private final class ChatHub {
+        weak var owner: AnyObject?
+        let host: WandSocket
+        var peers: [UUID: WeakPeer] = [:]
+        private var lastRecovery = Date.distantPast
+        init(owner: AnyObject, host: WandSocket) {
+            self.owner = owner; self.host = host
+            host.wireFrame = { [weak self] frame in
+                guard let self else { return }
+                for peer in peers.values.compactMap(\.value) where !peer.closed { peer.deliver(frame) }
+            }
+            host.wireReady = { [weak self] in
+                guard let self else { return }
+                for peer in peers.values.compactMap(\.value) where !peer.closed { peer.sendSubscription() }
+            }
+            host.onConnectionChange = { [weak self] up in
+                guard let self else { return }
+                for peer in peers.values.compactMap(\.value) where !peer.closed {
+                    peer.connected = up
+                    if !up { peer.awaitingSnapshot = true; peer.lastSeq = nil }
+                    peer.onConnectionChange?(up)
+                }
+            }
+            host.onError = { [weak self] error in
+                for peer in self?.peers.values.compactMap(\.value) ?? [] { peer.onError?(error) }
+            }
+        }
+        func add(_ peer: WandSocket) {
+            peers[peer.leaseID] = WeakPeer(peer)
+            if host.closed { host.connect() }
+            else { peer.connected = host.connected; peer.onConnectionChange?(host.connected); peer.sendSubscription() }
+        }
+        func release(_ id: String) {
+            if !peers.values.contains(where: { $0.value?.subscribedSessionId == id && $0.value?.closed == false }) {
+                host.sendJSON(["type": "unsubscribe", "sessionId": id])
+            }
+        }
+        func remove(_ peer: WandSocket) {
+            peers.removeValue(forKey: peer.leaseID)
+            peers = peers.filter { $0.value.value != nil }
+            if let id = peer.subscribedSessionId, !peers.values.contains(where: { $0.value?.subscribedSessionId == id && $0.value?.closed == false }) {
+                host.sendJSON(["type": "unsubscribe", "sessionId": id])
+            }
+            if peers.isEmpty { host.close() }
+        }
+        func send(_ payload: [String: Any]) {
+            var payload = payload
+            if payload["type"] as? String == "subscribe" { payload["mode"] = "add" }
+            host.sendJSON(payload)
+        }
+        func recover(_ peer: WandSocket) {
+            if host.connected && Date().timeIntervalSince(host.lastMessageAt) < 35 { peer.requestResync(); return }
+            guard Date().timeIntervalSince(lastRecovery) > 1 else { return }
+            lastRecovery = Date()
+            host.invalidateConnection(); host.openSocket(); host.startWatchdog()
+        }
+    }
+
     var onEvent: ((WsIncoming) -> Void)?
+    var onConversationChanged: (() -> Void)?
     var onConversationPreview: ((ConversationSessionUpdate) -> Void)?
     var onConnectionChange: ((Bool) -> Void)?
     var onResync: (() -> Void)?
     var onError: ((String) -> Void)?
     var blockBudget = 0
+    var byteBudget = 0
     let endpointSession: SelfSignedSession
     private let baseURL: URL
     private let prepareConnection: (() async throws -> Void)?
@@ -50,27 +138,39 @@ final class WandSocket: PtySocketTransport {
         endpointSession = SelfSignedSession.forEndpoint(baseURL)
     }
     deinit {
+        chatHub?.remove(self)
         preparation?.cancel(); watchdog?.invalidate()
         task?.cancel(with: .goingAway, reason: nil)
     }
     func connect() {
         guard closed, !endpointSession.isRetired else { return }
-        closed = false; openSocket(); startWatchdog()
+        closed = false
+        if let chatHub { chatHub.add(self); return }
+        openSocket(); startWatchdog()
     }
     func close() {
-        closed = true; watchdog?.invalidate(); watchdog = nil; invalidateConnection()
+        closed = true
+        if let chatHub { chatHub.remove(self); connected = false; awaitingSnapshot = true; return }
+        watchdog?.invalidate(); watchdog = nil; invalidateConnection()
     }
     func subscribe(sessionId: String, ptyAck: Bool = false) {
+        let previous = subscribedSessionId
         subscribedSessionId = sessionId; self.ptyAck = ptyAck
+        if let previous, previous != sessionId { chatHub?.release(previous) }
         awaitingSnapshot = true; lastSeq = nil; sendSubscription()
     }
     func subscriptionPayload() -> [String: Any]? {
         guard let id = subscribedSessionId else { return nil }
-        var payload: [String: Any] = ["type": "subscribe", "sessionId": id, "capabilities": ["ptyAck": ptyAck]]
-        if blockBudget > 0 { payload["blockBudget"] = blockBudget }
+        var payload: [String: Any] = ["type": "subscribe", "sessionId": id, "compactTools": true,
+                                      "capabilities": ["ptyAck": ptyAck]]
+        if blockBudget > 0 {
+            payload["blockBudget"] = blockBudget
+            payload["omitStructuredOutput"] = true
+        }
+        if byteBudget > 0 { payload["byteBudget"] = byteBudget }
         return payload
     }
-    private func sendSubscription() { if let payload = subscriptionPayload() { sendJSON(payload) } }
+    private func sendSubscription() { if !closed, let payload = subscriptionPayload() { sendJSON(payload) } }
     func requestResync() {
         guard let id = subscribedSessionId else { return }
         awaitingSnapshot = true; onResync?()
@@ -98,6 +198,7 @@ final class WandSocket: PtySocketTransport {
     }
     func reconnectForForeground() {
         guard !closed, !endpointSession.isRetired else { return }
+        if let chatHub { chatHub.recover(self); return }
         invalidateConnection(); reconnectDelay = 1; openSocket(); startWatchdog()
     }
     private func openSocket() {
@@ -113,6 +214,7 @@ final class WandSocket: PtySocketTransport {
                 // Render permits a 64 MiB checkpoint; Node also wraps it in a bounded session DTO.
                 socket.maximumMessageSize = 80 * 1024 * 1024
                 task = socket; lastMessageAt = Date(); socket.resume()
+                wireReady?()
                 sendSubscription(); receiveNext(socket, generation: gen)
             } catch {
                 guard !closed, gen == generation else { return }
@@ -176,7 +278,9 @@ final class WandSocket: PtySocketTransport {
     private func deliver(_ frame: DecodedFrame) {
         let incoming = frame.incoming
         if incoming.type == "ping" { sendJSON(["type": "pong", "t": incoming.t ?? 0]); return }
+        if let wireFrame { wireFrame(frame); return }
         if let preview = frame.preview { onConversationPreview?(preview) }
+        if incoming.type == "notification", ["conversations-changed", "ai-team-run", "silicon-employee-definition", "ai-team-definition"].contains(incoming.data?.kind ?? "") { onConversationChanged?() }
         guard incoming.sessionId == nil || incoming.sessionId == "__system__" || incoming.sessionId == subscribedSessionId else { return }
         switch incoming.type {
         case "resync_required": requestResync(); return
@@ -193,7 +297,10 @@ final class WandSocket: PtySocketTransport {
         }
         onEvent?(incoming)
     }
-    private func sendJSON(_ payload: [String: Any]) { _ = enqueue([payload]) }
+    private func sendJSON(_ payload: [String: Any]) {
+        if let chatHub { if !closed { chatHub.send(payload) }; return }
+        _ = enqueue([payload])
+    }
     @discardableResult
     private func enqueue(_ payloads: [[String: Any]]) -> Bool {
         guard task != nil, !closed, !endpointSession.isRetired else { return false }

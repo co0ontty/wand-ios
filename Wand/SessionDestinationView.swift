@@ -368,7 +368,7 @@ struct SessionDestinationView: View {
             if session.isStructured {
                 ChatView(sessionId: session.id, api: api, showsNavigationChrome: showsNavigationChrome,
                          onCompletionVisible: onCompletionVisible, sharedStore: sharedChatStore,
-                         hostActions: hostActions, hostTitle: hostTitle)
+                         initialSnapshot: session, hostActions: hostActions, hostTitle: hostTitle)
             } else {
                 PtySessionView(session: session, api: api, showsNavigationChrome: showsNavigationChrome,
                                onCompletionVisible: onCompletionVisible, hostActions: hostActions,

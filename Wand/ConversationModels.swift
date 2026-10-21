@@ -161,10 +161,11 @@ struct ConversationInstance: Decodable, Identifiable {
     let pinnedAt: String?
     let dissolvedAt: String?
     let deleting: Bool
+    var history: ConversationHistory? = nil
     private enum CodingKeys: String, CodingKey {
         case id, kind, title, peerEmployeeId, team, sourceTemplateId, memberVersion, joinedVersions,
              sessionId, communicationSessionId, preview, messageAt, unavailableReason, memberUnavailableReasons,
-             tasks, messages, runDetails, pinnedAt, dissolvedAt, deleting
+             tasks, messages, runDetails, pinnedAt, dissolvedAt, deleting, history
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -191,6 +192,7 @@ struct ConversationInstance: Decodable, Identifiable {
         pinnedAt = try c.decodeIfPresent(String.self, forKey: .pinnedAt)
         dissolvedAt = try c.decodeIfPresent(String.self, forKey: .dissolvedAt)
         deleting = try c.decodeIfPresent(Bool.self, forKey: .deleting) ?? false
+        history = try c.decodeIfPresent(ConversationHistory.self, forKey: .history)
     }
     var leader: ContactTeamMember? { team?.members.first { $0.isLeader } }
     var identityStatus: String {

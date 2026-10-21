@@ -112,6 +112,7 @@ final class ChatStore: ObservableObject {
     private var started = false
     private var active = false
     private var initialLoadInProgress = false
+    private var navigationSnapshot: SessionSnapshot?
     /// NavigationStack / 任务窗口会在布局时误触发 onDisappear+onAppear。立刻关 socket
     /// 会把「未连上」画成红条，而且下一次 onAppear 若被跳过就只能退出再进才能恢复。
     private var shutdownTask: Task<Void, Never>?
@@ -146,17 +147,20 @@ final class ChatStore: ObservableObject {
         api: WandAPI,
         inputTransport: (any SessionInputTransport)? = nil,
         drafts: SessionDraftStore? = nil,
-        queueRetrievalTransport: (any QueueRetrievalTransport)? = nil
+        queueRetrievalTransport: (any QueueRetrievalTransport)? = nil,
+        initialSnapshot: SessionSnapshot? = nil
     ) {
         self.sessionId = sessionId
         self.api = api
+        self.navigationSnapshot = initialSnapshot?.id == sessionId ? initialSnapshot : nil
         self.composerDraft = (drafts ?? .shared).draft(sessionId: sessionId, api: api)
         self.inputTransport = inputTransport ?? api
         self.queueRetrievalTransport = queueRetrievalTransport ?? api
         self.serverID = ServerProfiles.stableID(for: api.baseURL)
-        self.socket = WandSocket(baseURL: api.baseURL)
+        self.socket = WandSocket.sharedChat(api: api)
         // init/resync/全量快照也按块级窗口下发（与 REST getSession 的 blockBudget 对齐）。
         self.socket.blockBudget = WandAPI.chatBlockWindow
+        self.socket.byteBudget = WandAPI.chatByteWindow
         composerDraft.$sendPhase.sink { [weak self] phase in
             guard let self else { return }
             inputFeedback = phase
@@ -218,17 +222,30 @@ final class ChatStore: ObservableObject {
 
         // 实时连接不能被模型目录、卡片默认值等辅助请求挡住。WS init 本身能提供一份
         // 会话快照；即使 REST 短暂失败，详情也有机会自行恢复。
+        // The navigation request already fetched this exact page. Hand it off once;
+        // WS still subscribes immediately and is authoritative for all newer state.
+        let seed = navigationSnapshot
+        navigationSnapshot = nil
+        if let seed { apply(snapshot: seed); loading = false }
+        let initialRealtimeRevision = realtimeRevision
         connectSocket()
 
         Task {
-            let initialRealtimeRevision = realtimeRevision
             var initialSnapshot: SessionSnapshot?
             do {
-                let snap = try await api.getSession(id: sessionId)
-                if realtimeRevision == initialRealtimeRevision {
-                    apply(snapshot: snap)
-                } else {
-                    wlog("session", "忽略晚到 REST 快照 session=\(sessionId) revision=\(initialRealtimeRevision)→\(realtimeRevision)")
+                let snap: SessionSnapshot
+                if let seed { snap = seed }
+                else {
+                    // Only a fallback deadline: a WS init paints immediately. No REST
+                    // duplicate on a healthy connection; blocked WS still has a bounded repair.
+                    try await Task.sleep(nanoseconds: 400_000_000)
+                    try Task.checkCancellation()
+                    if let realtime = snapshot { snap = realtime }
+                    else { snap = try await api.getSession(id: sessionId) }
+                }
+                if seed == nil {
+                    if realtimeRevision == initialRealtimeRevision { apply(snapshot: snap) }
+                    else { wlog("session", "忽略晚到 REST 快照 session=\(sessionId) revision=\(initialRealtimeRevision)→\(realtimeRevision)") }
                 }
                 initialSnapshot = snapshot ?? snap
                 wlog("session", "REST 快照 session=\(sessionId) msgs=\(snap.messages?.count ?? -1) status=\(snap.status ?? "?") structured=\(snap.isStructured) responding=\(snap.isResponding)")
