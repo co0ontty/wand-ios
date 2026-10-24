@@ -140,6 +140,25 @@ struct ConversationTask: Decodable, Identifiable {
     var id: String { task.id }
 }
 
+struct DingTalkGroupBinding: Decodable, Identifiable {
+    let id: String
+    let employeeId: String
+    let state: String
+}
+struct DingTalkGroupOrigin: Decodable {
+    let provider: String
+    let groupId: String
+    let syncState: String
+    let syncError: String?
+    let historyComplete: Bool?
+    let bindings: [DingTalkGroupBinding]?
+    var statusText: String {
+        if syncState == "live" { return "钉钉群 · \(bindings?.count ?? 0) 名已接入员工" }
+        if syncState == "at_only" { return "钉钉群 · 仅同步 @消息" }
+        return "钉钉群 · 消息同步尚未就绪"
+    }
+}
+
 struct ConversationInstance: Decodable, Identifiable {
     let id: String
     let kind: String
@@ -162,10 +181,11 @@ struct ConversationInstance: Decodable, Identifiable {
     let dissolvedAt: String?
     let deleting: Bool
     var history: ConversationHistory? = nil
+    let external: DingTalkGroupOrigin?
     private enum CodingKeys: String, CodingKey {
         case id, kind, title, peerEmployeeId, team, sourceTemplateId, memberVersion, joinedVersions,
              sessionId, communicationSessionId, preview, messageAt, unavailableReason, memberUnavailableReasons,
-             tasks, messages, runDetails, pinnedAt, dissolvedAt, deleting, history
+             tasks, messages, runDetails, pinnedAt, dissolvedAt, deleting, history, external
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -193,10 +213,12 @@ struct ConversationInstance: Decodable, Identifiable {
         dissolvedAt = try c.decodeIfPresent(String.self, forKey: .dissolvedAt)
         deleting = try c.decodeIfPresent(Bool.self, forKey: .deleting) ?? false
         history = try c.decodeIfPresent(ConversationHistory.self, forKey: .history)
+        external = try c.decodeIfPresent(DingTalkGroupOrigin.self, forKey: .external)
     }
     var leader: ContactTeamMember? { team?.members.first { $0.isLeader } }
     var identityStatus: String {
         if deleting { return "正在删除对话" }
+        if let external { return external.statusText }
         if dissolvedAt != nil { return "群聊已解散" }
         if unavailableReason?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { return "当前对象暂不可用" }
         let runs = tasks.flatMap(\.runs)
@@ -246,6 +268,33 @@ struct ConversationSessionUpdate: Decodable {
 struct ConversationUnconfirmed: LocalizedError {
     let requestId: String
     var errorDescription: String? { "送达未确认，请先核对记录，勿重复提交。" }
+}
+
+/// Group management never maps an external mirror to a real group dissolution.
+enum ConversationManagementAction: String, Identifiable {
+    case dissolve, restore, delete
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .dissolve: return "解散群聊"; case .restore: return "恢复群聊"; case .delete: return "删除群聊" }
+    }
+    var symbol: String {
+        switch self { case .dissolve: return "person.3.sequence"; case .restore: return "arrow.uturn.backward"; case .delete: return "trash" }
+    }
+    static func available(for item: ConversationInstance) -> [Self] {
+        guard item.kind == "group", !item.deleting else { return [] }
+        return item.external == nil ? [item.dissolvedAt == nil ? .dissolve : .restore, .delete] : [.delete]
+    }
+    func title(for item: ConversationInstance) -> String {
+        self == .delete && item.external != nil ? "删除本地群镜像" : title
+    }
+    func explanation(for item: ConversationInstance) -> String {
+        if self == .delete {
+            return item.external != nil
+                ? "仅删除 Wand 中的本地群镜像、消息和关联执行；不退出或解散钉钉群，也不删除其他群共用的机器人。此操作无法撤销。"
+                : "将删除这个群聊、所有关联任务，以及它们的消息、执行记录和资源文件。不会删除其他对话或工作区。此操作无法撤销。"
+        }
+        return "解散后保留历史记录和关联任务，恢复后可继续聊天。已在执行的任务不会因此停止。"
+    }
 }
 
 enum ConversationListTier: String, CaseIterable {

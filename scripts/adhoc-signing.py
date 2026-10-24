@@ -57,7 +57,8 @@ def validate_profile(profile, udid, now=None):
   if not certificates:
     raise ValueError("Profile has no signing certificate")
   return {"bundleId": bundle_id, "team": teams[0], "uuid": uuid,
-          "applicationIdentifier": app_identifier, "certificates": sorted(certificates)}
+          "applicationIdentifier": app_identifier, "certificates": sorted(certificates),
+          "apnsEnvironment": entitlements.get("aps-environment")}
 
 
 def validate_pair(app, widget):
@@ -69,11 +70,18 @@ def validate_pair(app, widget):
     raise ValueError("App and Widget have no common distribution certificate")
 
 
+def require_apns_environment(app):
+  if app.get("apnsEnvironment") != "production":
+    raise ValueError("Main Ad Hoc profile must enable Push Notifications with aps-environment=production")
+  return "production"
+
+
 def prepare(args):
   profiles = [pathlib.Path(args.app_profile).resolve(), pathlib.Path(args.widget_profile).resolve()]
   facts = [validate_profile(decode_profile(p), args.udid) for p in profiles]
   app, widget = facts
   validate_pair(app, widget)
+  apns_environment = require_apns_environment(app)
   identities = run("security", "find-identity", "-v", "-p", "codesigning").decode()
   common = set(app["certificates"]) & set(widget["certificates"])
   available = [c for c in sorted(common) if re.search(r"\b" + c + r'\s+"Apple Distribution:', identities)]
@@ -96,6 +104,7 @@ def prepare(args):
   config = [
     "CODE_SIGNING_ALLOWED = YES", "CODE_SIGNING_REQUIRED = YES", "CODE_SIGN_STYLE = Manual",
     "CODE_SIGN_IDENTITY = " + identity, "DEVELOPMENT_TEAM = " + app["team"],
+    "WAND_APNS_ENVIRONMENT = " + apns_environment,
     "WAND_BUNDLE_Wand = " + app["bundleId"], "WAND_BUNDLE_WandWidgets = " + widget["bundleId"],
     "WAND_PROFILE_Wand = " + app["uuid"], "WAND_PROFILE_WandWidgets = " + widget["uuid"],
     "PRODUCT_BUNDLE_IDENTIFIER = $(WAND_BUNDLE_$(TARGET_NAME))",
@@ -170,6 +179,9 @@ def verify(args):
       if ent.get("get-task-allow", False):
         raise ValueError("Exported distribution app is debuggable")
       check_entitlements(ent, profile["Entitlements"])
+      if key == "app" and (require_apns_environment(checked) != ent.get("aps-environment")
+                           or info.get("WandAPNSEnvironment") != "production"):
+        raise ValueError("Exported App APNs entitlement/Info environment mismatch")
       cert_dir = root / (key + "-certificates")
       cert_dir.mkdir()
       run("codesign", "-d", "--extract-certificates=" + str(cert_dir / "cert"), str(bundle))
@@ -183,7 +195,7 @@ def verify(args):
       run(*command)
       records.append({"target": key, "bundleId": fact["bundleId"], "team": fact["team"],
                       "profileExpires": str(profile["ExpirationDate"]), "signatureVerified": True,
-                      "targetDeviceIncluded": True})
+                      "targetDeviceIncluded": True, "apnsEnvironment": ent.get("aps-environment")})
     digest = hashlib.sha256()
     with ipa.open("rb") as source:
       for chunk in iter(lambda: source.read(1024 * 1024), b""):

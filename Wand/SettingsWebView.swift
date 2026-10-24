@@ -76,10 +76,13 @@ final class SettingsWebStore: NSObject, ObservableObject, WKNavigationDelegate {
     private var revision = 0
     private var preparation: Task<Void, Never>?
 
-    init(api: WandAPI) { self.api = api }
+    private let initialSection: String?
+    init(api: WandAPI, initialSection: String? = nil) { self.api = api; self.initialSection = initialSection == "connectors" ? initialSection : nil }
 
-    static func startURL(_ baseURL: URL) -> URL? {
-        WandEndpoint.url(baseURL: baseURL, route: "/settings", queryItems: [URLQueryItem(name: "client", value: "app")])
+    static func startURL(_ baseURL: URL, section: String? = nil) -> URL? {
+        var query = [URLQueryItem(name: "client", value: "app")]
+        if section == "connectors" { query.append(URLQueryItem(name: "section", value: "connectors")) }
+        return WandEndpoint.url(baseURL: baseURL, route: "/settings", queryItems: query)
     }
 
     static func accepts(_ url: URL, baseURL: URL) -> Bool {
@@ -94,7 +97,7 @@ final class SettingsWebStore: NSObject, ObservableObject, WKNavigationDelegate {
             guard let self else { return }
             do {
                 guard !api.endpointSession.isRetired,
-                      let url = Self.startURL(api.baseURL),
+                      let url = Self.startURL(api.baseURL, section: initialSection),
                       let json = WandEndpointContentBoundary.contentRuleListJSON(baseURL: api.baseURL) else {
                     throw WandAPI.APIError.invalidURL
                 }
@@ -199,8 +202,8 @@ struct SettingsWebView: View {
     @Environment(\.dismiss) private var dismiss
     private let connectionIdentity: String?
 
-    init(api: WandAPI, connectionIdentity: String? = ServerStore.shared.activeProfile?.connectionIdentity) {
-        _store = StateObject(wrappedValue: SettingsWebStore(api: api))
+    init(api: WandAPI, section: String? = nil, connectionIdentity: String? = ServerStore.shared.activeProfile?.connectionIdentity) {
+        _store = StateObject(wrappedValue: SettingsWebStore(api: api, initialSection: section))
         self.connectionIdentity = connectionIdentity
     }
     var body: some View {

@@ -39,8 +39,25 @@ private final class ConversationFake: ConversationService {
     }
     func conversationReceipt(_ id: String) async throws -> ConversationReceipt { receipt }
     func pendingConversationRequests() async -> [String] { pending }
-    func updateConversationListState(_ id: String, patch: [String: Bool]) async throws -> ConversationInstance { detail }
-    func deleteConversation(_ id: String) async throws {}
+    var managementFailure: Error?
+    var applyManagementPatches = false
+    var listPatches: [(String, [String: Bool])] = []
+    var deletedIDs: [String] = []
+    func updateConversationListState(_ id: String, patch: [String: Bool]) async throws -> ConversationInstance {
+        listPatches.append((id, patch))
+        if let managementFailure { throw managementFailure }
+        if applyManagementPatches {
+            var body: [String: Any] = ["id": detail.id, "kind": detail.kind, "title": detail.title]
+            if patch["dissolved"] == true { body["dissolvedAt"] = "2026-10-24T10:00:00Z" }
+            detail = try JSONDecoder().decode(ConversationInstance.self, from: JSONSerialization.data(withJSONObject: body))
+            rows = [detail]
+        }
+        return detail
+    }
+    func deleteConversation(_ id: String) async throws {
+        deletedIDs.append(id)
+        if let managementFailure { throw managementFailure }
+    }
 }
 
 @MainActor
@@ -212,7 +229,7 @@ private struct AppleNamedIdentityFixture: View {
                 TopChatCompanion(title: "小试 · 相同头像的长名称项目协作负责人", status: "等待你的确认") { size in
                     WorkingAvatar(id: "e_wand_default", name: "小试", avatar: "plush-cat:v1:silver", size: size)
                 }
-                FloatingChatControls(onBack: {}) { FloatingChatIcon(symbol: "folder"); FloatingChatIcon(symbol: "ellipsis") }
+                FloatingChatControls(onBack: {}) { FloatingChatIcon(symbol: "ellipsis") }
             }
         }
     }
@@ -534,6 +551,84 @@ final class CurrentAndroidParityTests: XCTestCase {
         operation.submit({ calls += 1; return receipt }, accepted: { _ in })
         XCTAssertEqual(calls, 1); XCTAssertFalse(operation.canSubmit); XCTAssertEqual(operation.phase, .sent)
     }
+    func testGroupManagementNativeReplay() async throws {
+        guard ProcessInfo.processInfo.environment["WAND_GROUP_MANAGEMENT_TOUCH"] == "1" else {
+            throw XCTSkip("Requires explicit native touch driver; never mutates real groups")
+        }
+        let fake = ConversationFake()
+        fake.detail = try parityDecode(ConversationInstance.self, #"{"id":"group-replay","kind":"group","title":"群聊管理验收"}"#)
+        fake.rows = [fake.detail]; fake.applyManagementPatches = true
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults())
+        await store.refresh()
+        let draft = store.composer(fake.detail.id, target: nil); draft.text = "解散及失败后保留的草稿"
+        let finished = expectation(description: "native management replay complete")
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView: VStack(spacing: 0) {
+            HStack {
+                Button("模拟失败") { fake.managementFailure = URLError(.notConnectedToInternet) }
+                Button("恢复网络") { fake.managementFailure = nil }
+                Button("结束验收") { finished.fulfill() }
+            }.font(.caption).frame(minHeight: 44)
+            NavigationStack {
+                NavigationLink("打开验收群聊") {
+                    ConversationDetailView(id: fake.detail.id, store: store, onOpenSession: { _ in }, onOpenConversation: { _ in }, onEmployee: { _ in })
+                }
+            }
+        }.environment(\.usesSystemHomeNavigation, false))
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; store.shutdown() }
+        await fulfillment(of: [finished], timeout: 240)
+        XCTAssertEqual(fake.listPatches.map { $0.1 }, [["dissolved": true], ["dissolved": false]])
+        XCTAssertEqual(fake.deletedIDs, ["group-replay", "group-replay"])
+        XCTAssertNil(store.details["group-replay"]); XCTAssertNil(store.selectedID)
+        XCTAssertTrue(fake.posts.isEmpty)
+    }
+
+    func testGroupManagementActionsRespectLifecycleAndExternalBoundary() throws {
+        let group = try parityDecode(ConversationInstance.self, #"{"id":"g","kind":"group"}"#)
+        let dissolved = try parityDecode(ConversationInstance.self, #"{"id":"g","kind":"group","dissolvedAt":"now"}"#)
+        let deleting = try parityDecode(ConversationInstance.self, #"{"id":"g","kind":"group","deleting":true}"#)
+        let dm = try parityDecode(ConversationInstance.self, #"{"id":"dm","kind":"dm"}"#)
+        let external = try parityDecode(ConversationInstance.self, #"{"id":"ext","kind":"group","external":{"provider":"dingtalk","groupId":"g","syncState":"live"}}"#)
+        XCTAssertEqual(ConversationManagementAction.available(for: group), [.dissolve, .delete])
+        XCTAssertEqual(ConversationManagementAction.available(for: dissolved), [.restore, .delete])
+        XCTAssertTrue(ConversationManagementAction.available(for: deleting).isEmpty)
+        XCTAssertTrue(ConversationManagementAction.available(for: dm).isEmpty)
+        XCTAssertEqual(ConversationManagementAction.available(for: external), [.delete])
+        XCTAssertEqual(ConversationManagementAction.delete.title(for: external), "删除本地群镜像")
+        XCTAssertTrue(ConversationManagementAction.delete.explanation(for: external).contains("不退出或解散钉钉群"))
+        XCTAssertTrue(ConversationManagementAction.dissolve.explanation(for: group).contains("不会因此停止"))
+    }
+
+    func testGroupManagementFailureRetainsDetailDraftAndSelectionThenDeleteCleansUp() async throws {
+        let fake = ConversationFake()
+        fake.detail = try parityDecode(ConversationInstance.self, #"{"id":"g","kind":"group","title":"管理回归"}"#)
+        fake.rows = [fake.detail]
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults())
+        defer { store.shutdown() }
+        await store.refresh(); store.select("g"); await store.load("g")
+        let draft = store.composer("g", target: nil); draft.text = "保留输入"
+        fake.managementFailure = URLError(.notConnectedToInternet)
+        let updated = await store.update("g", patch: ["dissolved": true])
+        XCTAssertFalse(updated)
+        do { try await store.remove("g"); XCTFail("failed delete must throw") } catch {}
+        XCTAssertNotNil(store.details["g"]); XCTAssertEqual(store.selectedID, "g")
+        XCTAssertEqual(draft.text, "保留输入"); XCTAssertFalse(store.mutationBusy)
+        fake.managementFailure = nil
+        fake.detail = try parityDecode(ConversationInstance.self, #"{"id":"g","kind":"group","dissolvedAt":"now"}"#)
+        let dissolved = await store.update("g", patch: ["dissolved": true])
+        XCTAssertTrue(dissolved); XCTAssertNotNil(store.details["g"]?.dissolvedAt)
+        XCTAssertEqual(draft.text, "保留输入")
+        fake.detail = try parityDecode(ConversationInstance.self, #"{"id":"g","kind":"group"}"#)
+        let restored = await store.update("g", patch: ["dissolved": false])
+        XCTAssertTrue(restored); XCTAssertNil(store.details["g"]?.dissolvedAt)
+        XCTAssertEqual(fake.listPatches.last?.1, ["dissolved": false])
+        try await store.remove("g")
+        XCTAssertNil(store.details["g"]); XCTAssertFalse(store.items.contains { $0.id == "g" }); XCTAssertNil(store.selectedID)
+        XCTAssertEqual(fake.deletedIDs, ["g", "g"])
+    }
+
     func testPrivateAndDissolvedListTiersUseActualInstanceState() throws {
         let dm = try parityDecode(ConversationInstance.self, #"{"id":"dm_e","kind":"dm"}"#)
         let group = try parityDecode(ConversationInstance.self, #"{"id":"g","kind":"group","dissolvedAt":"now"}"#)
@@ -698,13 +793,35 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertTrue(workspace.contains("hostTitle: task.name"), "宿主任务名没有注入顶栏")
     }
 
-    /// 排队条数只由输入栏上方的 QueueBar 承载（Android 也只有「已排队 N 条消息」一处），
-    /// 「查看执行进度」行不再重复一份计数。
+    /// TODO、队列和输入区按同一层级排列；输入组件只拥有自身附件操作。
+    /// 尺寸、滚动和背景由 InputOpeningTests 的真实共享组件布局验证。
     func testQueuedCountHasSingleOwnerAboveComposer() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         let chat = try String(contentsOf: root.appendingPathComponent("Wand/ChatView.swift"), encoding: .utf8)
         XCTAssertFalse(chat.contains("\"待发 \\(store.queuedMessages.count)\""), "进度行与队列条重复计数")
-        XCTAssertTrue(chat.contains("Text(\"待发送 \\(items.count) 条\")"))
+        let bottomStart = try XCTUnwrap(chat.range(of: "private var bottomBar: some View"))
+        let bottomEnd = try XCTUnwrap(chat.range(of: "private var accessoryMaximumHeight:", range: bottomStart.upperBound..<chat.endIndex))
+        let bottom = String(chat[bottomStart.lowerBound..<bottomEnd.lowerBound])
+        let todo = try XCTUnwrap(bottom.range(of: "TodoProgressBar("))
+        let queue = try XCTUnwrap(bottom.range(of: "composerQueueAccessory"))
+        let input = try XCTUnwrap(bottom.range(of: "inputBar"))
+        XCTAssertLessThan(todo.lowerBound, queue.lowerBound)
+        XCTAssertLessThan(queue.lowerBound, input.lowerBound)
+        XCTAssertTrue(bottom.contains(".background(Theme.workspaceReading)"))
+        XCTAssertFalse(bottom.contains("workspaceInputDock"))
+        XCTAssertEqual(chat.components(separatedBy: "composerQueueAccessory").count - 1, 2,
+            "Queue content has one declaration and one dock use, outside the text field")
+        XCTAssertTrue(chat.contains("if !store.queuedMessages.isEmpty || composerDraft.queueRecoveryText != nil"),
+            "A recovered message must remain visible after the queue itself becomes empty")
+        XCTAssertTrue(chat.contains("recovery: composerDraft.queueRecoveryText == nil ? nil : AnyView(queueRecoveryAccessory)"),
+            "Recovery content belongs to the same bounded queue list")
+        let accessoryStart = try XCTUnwrap(chat.range(of: "private var composerAccessories: some View"))
+        let accessoryEnd = try XCTUnwrap(chat.range(of: "private var growingTextField:", range: accessoryStart.upperBound..<chat.endIndex))
+        XCTAssertFalse(chat[accessoryStart.lowerBound..<accessoryEnd.lowerBound].contains("composerQueueAccessory"))
+        let queueStart = try XCTUnwrap(chat.range(of: "struct QueueBar: View"))
+        XCTAssertTrue(chat[queueStart.lowerBound...].contains("ComposerAccessoryHeader("))
+        XCTAssertTrue(chat[queueStart.lowerBound...].contains(".accessibilityValue(\"待发送 \\(items.count) 条，\""),
+            "The icon-and-summary layout keeps its complete VoiceOver queue count")
     }
     func testPendingFullToolFetchCannotFabricateSuccessOrEraseKnownResult() throws {
         let pending = try parityDecode(ToolContentResponse.self, #"{"tool_use_id":"t","input":{"query":"full"},"content":"","pending":true,"resultAvailable":false}"#)
@@ -946,15 +1063,25 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertTrue(conversation.contains("MarkdownText(text: text.isEmpty"))
         XCTAssertTrue(conversation.contains("MarkdownText(text: message.taskPreview?"))
         XCTAssertTrue(conversation.contains(".environment(\\.serverFileLinkController, messageLinks)"))
-        XCTAssertFalse(try source("NativeRootView.swift").contains(".toolbar(.visible, for: .navigationBar)"), "The navigation parent must not override chat's floating chrome")
+        let nativeRoot = try source("NativeRootView.swift")
+        XCTAssertTrue(nativeRoot.contains("usesSystemNavigation && enabled"),
+                      "The workspace toolbar must be scoped to its system-owned destination")
+        XCTAssertTrue(nativeRoot.contains("else if !usesSystemNavigation"),
+                      "Inline navigation hiding must not suppress a system-owned child title")
         XCTAssertTrue(try source("SessionDestinationView.swift").contains(".toolbar(showsNavigationChrome ? .visible : .automatic, for: .navigationBar)"))
-        // 任务模式单层化：会话可见时任务页隐藏自己的系统栏，任务动作改挂会话「更多」菜单。
+        // 单层导航：普通布局隐藏任务栏；Duo 系统布局继承会话标题与动作。
         let taskPage = try source("WorkspaceTaskView.swift")
-        XCTAssertTrue(taskPage.contains(".toolbar(presentsSession ? .hidden : .visible, for: .navigationBar)"),
-                      "任务页会话可见时不能再叠第二条顶栏")
+        XCTAssertTrue(taskPage.contains(".toolbar(presentsSession && !usesSystemNavigation ? .hidden : .visible, for: .navigationBar)"),
+                      "普通会话布局不叠第二条顶栏，系统布局保留会话原生栏")
+        XCTAssertTrue(taskPage.contains("TaskNavigationTitle(inheritsSessionTitle: usesSystemNavigation && presentsSession)"),
+                      "系统模式必须继承当前会话标题，不能被任务容器清空")
         XCTAssertTrue(taskPage.contains("hostActions: taskActions"))
-        XCTAssertTrue(try source("ChatView.swift").contains("Section(\"任务\")"))
-        XCTAssertTrue(try source("SessionDestinationView.swift").contains("Section(\"任务\")"))
+        for name in ["ChatView.swift", "SessionDestinationView.swift"] {
+            let destination = try source(name)
+            XCTAssertTrue(destination.contains("SessionActionPalette(actions: hostActions.map(\\.menuAction))"),
+                          "Host task actions must keep their callbacks and disabled state in the shared native icon menu: " + name)
+        }
+        XCTAssertTrue(conversation.contains("SessionActionPalette(actions: conversationMenuActions)"))
         for name in ["ChatView.swift", "SessionDestinationView.swift", "WorkspaceTaskView.swift", "ConversationViews.swift"] {
             let page = try source(name)
             XCTAssertFalse(page.contains("sessionStrip("), name)
@@ -964,46 +1091,18 @@ final class CurrentAndroidParityTests: XCTestCase {
         XCTAssertTrue(try source("ChatView.swift").contains("SessionBackSwipeEnabler()"))
         XCTAssertTrue(try source("SessionDestinationView.swift").contains("SessionBackSwipeEnabler()"))
         XCTAssertTrue(try source("ConversationViews.swift").contains("SessionBackSwipeEnabler()"))
-        XCTAssertTrue(sessionSwipeShouldGoBack(startX: 12, translation: CGSize(width: 88, height: 6)))
-        XCTAssertFalse(sessionSwipeShouldGoBack(startX: 12, translation: CGSize(width: -88, height: 6)))
-        XCTAssertFalse(sessionSwipeShouldGoBack(startX: 160, translation: CGSize(width: 88, height: 6)))
-        XCTAssertFalse(sessionSwipeShouldGoBack(startX: 12, translation: CGSize(width: 40, height: 90)))
-        // 松手去留以「滑过一半」为界：过半返回，不到一半回弹取消（快速右甩例外）。
-        XCTAssertTrue(sessionSwipeShouldCommit(progress: 0.5, velocity: 0))
-        XCTAssertTrue(sessionSwipeShouldCommit(progress: 0.62, velocity: -200))
-        XCTAssertFalse(sessionSwipeShouldCommit(progress: 0.34, velocity: 0))
-        XCTAssertFalse(sessionSwipeShouldCommit(progress: 0.49, velocity: 120))
-        XCTAssertTrue(sessionSwipeShouldCommit(progress: 0.3, velocity: 900), "快速右甩即使没过一半也返回")
-        XCTAssertFalse(sessionSwipeShouldCommit(progress: 0, velocity: 2000), "完全没拖动不能返回")
-        // 隐藏导航栏后系统 interactivePopGestureRecognizer 不会启动，必须由自己的边缘 pan 兜底；
-        // 这里锁住「只装一条、起点限左侧 48pt、松手才 pop」的实现约束。
         let swipePage = try source("SessionDestinationView.swift")
-        XCTAssertTrue(swipePage.contains("UIPanGestureRecognizer(target: self, action: #selector(handleEdgePan(_:)))"))
-        XCTAssertFalse(swipePage.contains("UIScreenEdgePanGestureRecognizer(target: self"),
-                       "边缘手势与隐藏导航栏导航栈冲突，实测收不到事件")
-        XCTAssertFalse(swipePage.contains("pop.delegate = self"),
-                       "不要再改系统 pop 手势的 delegate，隐藏导航栏下无效")
-        XCTAssertTrue(swipePage.contains("startX <= 48"))
-        XCTAssertTrue(swipePage.contains("shouldRecognizeSimultaneouslyWith"))
-        XCTAssertTrue(swipePage.contains("nav.popViewController(animated: !UIAccessibility.isReduceMotionEnabled)"))
-        // 返回动画：必须是快照图层做跟手位移，不能去改 SwiftUI 托管页面的 frame/transform
-        // （下一次布局会把改动抹掉，表现为方向错位）。
-        XCTAssertTrue(swipePage.contains("renderedSnapshot(of:"))
-        XCTAssertTrue(swipePage.contains("CGAffineTransform(translationX: offset, y: 0)"),
-                      "跟手位移必须按手指位移向右移出")
-        XCTAssertTrue(swipePage.contains("WandMotion.backSwipeParallaxRatio"), "上一页需要视差跟进")
-        XCTAssertTrue(swipePage.contains("usingSpringWithDamping: 1"), "未达阈值要回弹而不是硬切")
-        XCTAssertTrue(swipePage.contains("sessionSwipeShouldCommit(progress: progress, velocity: velocity)"),
-                      "松手去留必须走统一的「一半」判定")
-        XCTAssertTrue(swipePage.contains("usingSpringWithDamping: 0.92"), "取消要回弹而不是硬切")
-        XCTAssertTrue(swipePage.contains("UIAccessibility.isReduceMotionEnabled"), "减少动态效果要退化")
-        XCTAssertFalse(swipePage.contains("topViewController?.view.transform"),
-                       "不能直接改 SwiftUI 托管页面的 transform")
-        XCTAssertFalse(swipePage.contains("SWDBG"), "调试日志不能留在源码里")
-        let motion = try source("Theme.swift")
-        XCTAssertTrue(motion.contains("backSwipeCommit"))
-        XCTAssertTrue(motion.contains("backSwipeCancel"))
-        XCTAssertTrue(motion.contains("backSwipeParallaxRatio"))
+        XCTAssertTrue(swipePage.contains("nav.interactivePopGestureRecognizer"))
+        XCTAssertTrue(swipePage.contains("originalDelegate = pop.delegate"))
+        XCTAssertTrue(swipePage.contains("pop.delegate = originalDelegate") || swipePage.contains("gesture.delegate = originalDelegate"))
+        XCTAssertFalse(swipePage.contains("handleEdgePan"), "UIKit, not an app pan, must drive the interactive pop")
+        XCTAssertFalse(swipePage.contains("renderedSnapshot"), "Back navigation must reveal the live previous page")
+        XCTAssertFalse(swipePage.contains("SessionBackSwipePreview"), "No cached list image is a navigation destination")
+        XCTAssertFalse(swipePage.contains("UIImageView"), "No app-owned bitmap layers may imitate either page")
+        let nativeNavigationSource = try source("NativeRootView.swift")
+        XCTAssertTrue(nativeNavigationSource.contains("NavigationStack(path: systemNavigationPath)"))
+        XCTAssertFalse(nativeNavigationSource.contains("systemSidebarPreview"))
+
     }
 
     func testWorkspaceTaskInlineSessionSelectionStaysSynchronizedAndSheetsBlockCompletionAck() throws {
@@ -1101,6 +1200,57 @@ final class CurrentAndroidParityTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(200))
         capture(window, name: "confirmed-empty")
         window.isHidden = true; empty.shutdown()
+    }
+
+    func testFirstConversationReplyKeepsShortTranscriptAtTop() async throws {
+        let fake = ConversationFake()
+        func detail(_ text: String) throws -> ConversationInstance {
+            let payload: [String: Any] = ["id": "dm_e", "kind": "dm", "title": "首轮滚动验证", "messages": [
+                ["messageId": "user", "role": "user", "content": [["type": "text", "text": "你好"]]],
+                ["messageId": "reply", "role": "assistant", "content": [["type": "text", "text": text]]]
+            ]]
+            return try JSONDecoder().decode(ConversationInstance.self, from: JSONSerialization.data(withJSONObject: payload))
+        }
+        fake.detail = try detail("开始回复")
+        let store = ConversationStore(api: api(), service: fake, drafts: SessionDraftStore(), defaults: defaults())
+        await store.load("dm_e")
+        let host = UIHostingController(rootView: ConversationDetailView(id: "dm_e", store: store,
+            onOpenSession: { _ in }, onOpenConversation: { _ in }, onEmployee: { _ in }))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; store.shutdown() }
+        func scrollViews(_ root: UIView) -> [UIScrollView] {
+            (root is UITextView ? [] : (root as? UIScrollView).map { [$0] } ?? []) + root.subviews.flatMap(scrollViews)
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        let scroll = try XCTUnwrap(scrollViews(host.view).max { $0.bounds.height < $1.bounds.height })
+        var shortSamples = 0
+        var overflowSamples = 0
+        for chunk in 1...32 {
+            fake.detail = try detail(Array(repeating: "首条回复增长时不应把整段对话上下推拉。", count: chunk).joined(separator: "\n"))
+            await store.load("dm_e")
+            try await Task.sleep(for: .milliseconds(60))
+            let top = -scroll.adjustedContentInset.top
+            let bottom = max(top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            print("IM-FIRST-REPLY chunk=\(chunk) content=\(scroll.contentSize.height) viewport=\(scroll.bounds.height) offset=\(scroll.contentOffset.y)")
+            if scroll.contentSize.height < scroll.bounds.height - 1 {
+                shortSamples += 1
+                // A bottom-aligned ScrollView synthesizes a positive top inset;
+                // comparing against -adjustedContentInset.top would wrongly accept
+                // the very drift this test must catch. This list has no top inset.
+                XCTAssertEqual(scroll.contentOffset.y, 0, accuracy: 1, "Like Android, short conversations stay at the top during streaming")
+            } else if bottom > top {
+                overflowSamples += 1
+                XCTAssertEqual(scroll.contentOffset.y, bottom, accuracy: 14, "Long conversations still follow the tail with 12pt padding")
+            }
+        }
+        XCTAssertGreaterThan(shortSamples, 2)
+        XCTAssertGreaterThan(overflowSamples, 2)
+        let screenshot = XCTAttachment(image: UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        })
+        screenshot.name = "first-reply-streamed-tail"; screenshot.lifetime = .keepAlways; add(screenshot)
     }
 
     func testColdConversationFillsViewportBeforeDetailArrives() {
@@ -1420,6 +1570,150 @@ final class CurrentAndroidParityTests: XCTestCase {
         attachment.name = "bounded-phone-image-figure"
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    func testMarkdownImagesPreserveTextAndSupportBalancedDestinations() {
+        XCTAssertEqual(splitMarkdownImages("前文 ![聊天详情](/Users/test/chat.png) 后文"),
+                       [.text("前文 "), .image(alt: "聊天详情", source: "/Users/test/chat.png"), .text(" 后文")])
+        XCTAssertEqual(splitMarkdownImages("![页[二]](</work/a (2).png> \"截图\")"),
+                       [.image(alt: "页[二]", source: "/work/a (2).png")])
+        XCTAssertEqual(splitMarkdownImages("![A\\]](/work/a(b).png '截图')"),
+                       [.image(alt: "A]", source: "/work/a(b).png")])
+        XCTAssertEqual(splitMarkdownImages("![](/work/a\\ b.png)"), [.image(alt: "", source: "/work/a b.png")])
+    }
+
+    func testMarkdownImageCodeEscapesAndIncompleteSyntaxStayText() {
+        for raw in ["`![例](/a.png)`", "`` `![例](/a.png)` ``", "\\![例](/a.png)", "![未结束](/a.png", "[普通链接](/a.txt)"] {
+            XCTAssertEqual(splitMarkdownImages(raw), [.text(raw)])
+        }
+        XCTAssertEqual(splitMarkdownImages("`未配对 ![图](/a.png)"), [.text("`未配对 "), .image(alt: "图", source: "/a.png")])
+    }
+
+    func testMarkdownImageSourcesUseTheConnectedServerAndRejectUnsafeURLs() {
+        for source in ["//other.test/a.png", "file:///tmp/a.png", "javascript:alert(1)", "content://a", "data:text/html;base64,AA", "../a.png", "a.png", "https://u:p@host.test/a.png", "/a\nb.png"] {
+            XCTAssertNil(markdownImagePage(source), source)
+        }
+        XCTAssertEqual(markdownImagePage("/Users/test/a%20+%20b.png"), WandImagePage(source: "/Users/test/a + b.png", directSource: false))
+        for source in ["https://host.test/a?size=2#preview", "/api/file-raw?path=%2Ftmp%2Fa.png", "data:image/png;base64,AA"] {
+            XCTAssertEqual(markdownImagePage(source), WandImagePage(source: source, directSource: true))
+        }
+    }
+
+    func testMarkdownImageGalleryIncludesRenderedBlocksButNotCodeExamples() {
+        let text = "# 截图\n\n![聊天](/work/chat.png)\n\n- ![任务](/work/tasks.png)\n\n> ![设置](https://host.test/settings.png)\n\n```md\n![代码](/not.png)\n```\n\n`![例](/inline.png)`"
+        let expected = [WandImagePage(source: "/work/chat.png", directSource: false), WandImagePage(source: "/work/tasks.png", directSource: false), WandImagePage(source: "https://host.test/settings.png", directSource: true)]
+        XCTAssertEqual(MarkdownText.imagePages(text), expected)
+        let pages = wandConversationImagePages([ConversationTurn(role: "assistant", content: [.text(text: text, subagent: nil)])])
+        XCTAssertEqual(pages, expected)
+        XCTAssertEqual(wandImageGallerySelection(gallery: pages, local: [], current: "/work/tasks.png", direct: false).startIndex, 1)
+        let five = ["chat", "tasks", "workspace", "contacts", "settings"].map { "![\($0)](/Users/test/wand/output/architecture-stage2/duo-adaptation-analysis/key-pages/\($0).png)" }.joined(separator: "\n\n")
+        XCTAssertEqual(MarkdownText.imagePages(five).count, 5)
+    }
+
+    func testMarkdownImageActuallyLoadsThroughTheSharedAuthenticatedImageView() async throws {
+        for (label, source) in [("查看优化效果", "/work/preview.png"), ("截图", "/work/preview%2Epng"),
+                                ("下载", "https://host.test/preview.JPG?size=2#view"),
+                                ("原图", "/api/file-raw?path=%2Fwork%2Fpreview.png")] {
+            XCTAssertEqual(splitMarkdownImages("前文 [\(label)](\(source)) 后文"),
+                [.text("前文 "), .image(alt: label, source: source), .text(" 后文")])
+        }
+        for raw in ["[图片](/work/notes.md)", "[图片](https://host.test/page)", "[图片](javascript:bad.png)",
+                    "[图片](//host.test/a.png)", "[图片](../a.png)", "`[预览](/work/a.png)`", "\\![例](/a.png)", "\\[例](/a.png)"] {
+            XCTAssertEqual(splitMarkdownImages(raw), [.text(raw)])
+        }
+        let delivery = "[查看优化效果](</work/a (2).png>)\n\n[记录](/work/log.md)\n\n```md\n[示例](/work/code.png)\n```"
+        XCTAssertEqual(MarkdownText.imagePages(delivery), [WandImagePage(source: "/work/a (2).png", directSource: false)])
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 280)).image { context in
+            UIColor.systemTeal.setFill(); context.fill(CGRect(x: 0, y: 0, width: 400, height: 280))
+        }
+        let data = try XCTUnwrap(image.pngData())
+        let state = MessageImageReplayState(data: data)
+        state.install(responses: [200], reset: true)
+        let host = UIHostingController(rootView: MarkdownText(text: "**正文图片**\n\n[聊天详情](/work/markdown-chat.png)")
+            .environment(\.chatAPI, WandAPI(baseURL: state.baseURL, token: nil))
+            .environment(\.chatViewportHeight, 600))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; SelfSignedSession.resetEndpoint(state.baseURL) }
+        for _ in 0..<40 where MessageImageReplayProtocol.requestCount == 0 { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertEqual(MessageImageReplayProtocol.requestCount, 1, "Markdown images must reach the existing endpoint image loader")
+        try await Task.sleep(for: .milliseconds(150))
+        host.view.layoutIfNeeded()
+        let size = host.sizeThatFits(in: CGSize(width: 320, height: 3000))
+        XCTAssertGreaterThan(size.height, 100)
+        XCTAssertLessThan(size.height, 400)
+        let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+            host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+        })
+        attachment.name = "markdown-image-native-render"; attachment.lifetime = .keepAlways; add(attachment)
+    }
+
+    func testMarkdownInstalledServiceReplyImages() async throws {
+        // Opt-in pointer contains only a connection-file path and source session id, never credentials.
+        let marker = URL(fileURLWithPath: "/tmp/wand-markdown-installed-acceptance-path")
+        guard let pointer = try? Data(contentsOf: marker),
+              let config = try JSONSerialization.jsonObject(with: pointer) as? [String: String],
+              let connectionFile = config["connectionFile"], let sessionId = config["sessionId"] else {
+            throw XCTSkip("Requires explicit installed-service acceptance pointer")
+        }
+        let connection = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: connectionFile))) as? [String: String])
+        let code = try XCTUnwrap(connection["connectionCode"])
+        let decoded = try XCTUnwrap(WandAuth.decodeConnectCode(code))
+        let baseURL = try XCTUnwrap(URL(string: try XCTUnwrap(connection["serverURL"])))
+        let session = SelfSignedSession.forEndpoint(baseURL)
+        defer { SelfSignedSession.resetEndpoint(baseURL) }
+        let loginSucceeded: Bool = await withCheckedContinuation { continuation in
+            WandAuth.loginWithToken(serverURL: baseURL, appToken: decoded.token, endpointSession: session) { result in
+                if case .success = result { continuation.resume(returning: true) }
+                else { continuation.resume(returning: false) }
+            }
+        }
+        XCTAssertTrue(loginSucceeded, "Installed-service scoped login must succeed")
+        guard loginSucceeded else { return }
+        let endpoint = try XCTUnwrap(WandEndpoint.url(baseURL: baseURL, route: "/api/sessions/\(sessionId)", queryItems: [URLQueryItem(name: "format", value: "chat"), URLQueryItem(name: "blockBudget", value: "2000"), URLQueryItem(name: "byteBudget", value: "4000000"), URLQueryItem(name: "output", value: "omit")]))
+        let (body, response) = try await session.session.data(from: endpoint)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let detail = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let turns = try XCTUnwrap(detail["messages"] as? [[String: Any]])
+        // The user may continue this live session while acceptance is running. Select the original reply, not the latest turn.
+        let needle = try XCTUnwrap(config["messageContains"])
+        let text = try XCTUnwrap(turns.flatMap { $0["content"] as? [[String: Any]] ?? [] }
+            .compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+            .last { $0.contains(needle) })
+        let pages = MarkdownText.imagePages(text)
+        XCTAssertEqual(pages.count, Int(config["expectedImages"] ?? "") ?? 5)
+        for page in pages {
+            let url = try XCTUnwrap(page.directSource ? URL(string: page.source, relativeTo: baseURL) : WandEndpoint.url(baseURL: baseURL, route: "/api/file-raw", queryItems: [URLQueryItem(name: "path", value: page.source)]))
+            let (data, response) = try await session.session.data(from: url)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertNotNil(UIImage(data: data), "The actual installed-service image must decode on iOS")
+        }
+        let host = UIHostingController(rootView: ScrollView {
+            MarkdownText(text: text).padding(16)
+        }.environment(\.chatAPI, WandAPI(baseURL: baseURL, token: nil)).environment(\.chatViewportHeight, 600))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        let keys = pages.map { "\(session.resourceCacheNamespace)|\(baseURL.absoluteString)|\($0.directSource)|\($0.source)" as NSString }
+        for _ in 0..<100 {
+            if keys.allSatisfy({ WandImageCache.shared.object(forKey: $0) != nil }) { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertTrue(keys.allSatisfy { WandImageCache.shared.object(forKey: $0) != nil },
+            "Reply images must load automatically through the rendered view, without tapping a link")
+        host.view.layoutIfNeeded()
+        let rendered = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+            host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: rendered)
+        attachment.name = "markdown-installed-service-reply"; attachment.lifetime = .keepAlways; add(attachment)
+        try rendered.pngData()?.write(to: URL(fileURLWithPath: "/tmp/wand-markdown-installed-reply.png"))
+        window.isHidden = true
+        var logout = URLRequest(url: try XCTUnwrap(WandEndpoint.url(baseURL: baseURL, route: "/api/logout")))
+        logout.httpMethod = "POST"
+        _ = try await session.session.data(for: logout)
     }
 
     func testInlineImagesPageWithinTheirGroup() throws {

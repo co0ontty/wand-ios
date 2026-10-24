@@ -169,10 +169,17 @@ struct ContactTeamProfilePanel: View {
             }
             if model.ready {
                 VStack(alignment: .leading, spacing: 10) {
-                    TextField("团队名字", text: $model.draft.name).accessibilityIdentifier("contact-team-name")
-                    TextField("团队说明", text: $model.draft.description, axis: .vertical).lineLimit(2...4)
+                    WandFormField("团队名字") {
+                        TextField("团队名字", text: $model.draft.name).accessibilityIdentifier("contact-team-name")
+                    }
+                    WandFormField("团队说明") {
+                        TextField("描述团队负责什么", text: $model.draft.description, axis: .vertical).lineLimit(2...4)
+                            .accessibilityLabel("团队说明")
+                    }
                     DisclosureGroup("协作指令", isExpanded: $instructionsExpanded) {
-                        TextEditor(text: $model.draft.instructions).frame(height: 120)
+                        TextField("说明协作方式与交付要求", text: $model.draft.instructions, axis: .vertical)
+                            .lineLimit(4...10).textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("协作指令").padding(.top, WandLayout.fieldGap)
                     }
                     Toggle("首个计划需批准", isOn: $model.draft.requirePlanApproval)
                     Stepper("步数上限 \(model.draft.maxSteps)", value: $model.draft.maxSteps, in: 5...200)
@@ -209,8 +216,8 @@ struct ContactTeamProfilePanel: View {
         }
         .padding(16).background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
         .buttonStyle(WandQuietButtonStyle())
-        .animation(reduced ? nil : WandMotion.stateSwap, value: instructionsExpanded)
-        .animation(reduced ? nil : WandMotion.stateSwap, value: inviteOpen)
+        .animation(reduced ? nil : WandMotion.expansion, value: instructionsExpanded)
+        .animation(reduced ? nil : WandMotion.expansion, value: inviteOpen)
         .task {
             if let project = directory.teamWorkspace { model.selectedWorkspaceID = project.id }
             await model.load(); directory.editorDirty = model.hasUnsavedChanges
@@ -237,10 +244,15 @@ struct ContactTeamProfilePanel: View {
                 }.foregroundStyle(Theme.danger).disabled(model.draft.members.count <= 2)
             }
             if item.employeeId == nil {
-                TextField("成员名字", text: $model.draft.members[index].name)
+                WandFormField("成员名字") {
+                    TextField("成员名字", text: $model.draft.members[index].name)
+                }
             }
-            TextField("团队分工", text: $model.draft.members[index].duty, axis: .vertical).lineLimit(2...4)
-            HStack {
+            WandFormField("团队分工") {
+                TextField("描述这位成员的分工", text: $model.draft.members[index].duty, axis: .vertical).lineLimit(2...4)
+                    .accessibilityLabel("团队分工")
+            }
+            VStack(alignment: .leading, spacing: WandLayout.fieldGap) {
                 Button(item.isLeader ? "✓ 负责人" : "设为负责人") {
                     for position in model.draft.members.indices { model.draft.members[position].isLeader = position == index }
                 }
@@ -331,8 +343,10 @@ struct ContactTeamProfilePanel: View {
                     Text("原项目已不可用，请重新选择项目。").font(.caption).foregroundStyle(Theme.danger)
                 }
             }
-            TextField("开工说明：要做什么？成员会按职责分工执行", text: $model.note, axis: .vertical)
-                .lineLimit(3...8).accessibilityIdentifier("contact-team-start-note")
+            WandFormField("开工说明") {
+                TextField("要做什么？成员会按职责分工执行", text: $model.note, axis: .vertical)
+                    .lineLimit(3...8).accessibilityLabel("开工说明").accessibilityIdentifier("contact-team-start-note")
+            }
             Text("\(model.note.trimmingCharacters(in: .whitespacesAndNewlines).utf16.count)/4000字符")
                 .font(.caption).foregroundStyle(Theme.textSecondary)
             ContactActionButton(title: "开工", phase: model.startPhase,

@@ -110,7 +110,7 @@ private struct ActivityStateLabel: View {
         }
         .foregroundStyle(isStale ? ActivityPresentation.quiet : ActivityPresentation.tint(state.aggregateStateRaw))
         .padding(.horizontal, 8).padding(.vertical, 4)
-        .background((isStale ? Color.white : ActivityPresentation.tint(state.aggregateStateRaw)).opacity(0.12), in: Capsule())
+        .glassEffect(.regular.tint((isStale ? Color.white : ActivityPresentation.tint(state.aggregateStateRaw)).opacity(0.12)), in: Capsule())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(ActivityPresentation.accessibility(state, isStale: isStale))
     }

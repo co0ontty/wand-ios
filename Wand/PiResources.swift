@@ -143,12 +143,18 @@ struct PiResourcesView: View {
                     if let reason = response.resourceCatalog?.reason, !reason.isEmpty { Text(reason).font(.caption) }
                     Section("Skills") {
                         ForEach(response.resourceCatalog?.skills ?? []) { skill in
-                            VStack(alignment: .leading) {
-                                Picker(skill.name, selection: Binding(get: { store.skillMode(skill.id) }, set: { store.setSkill(skill.id, mode: $0) })) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(skill.name).font(.body.weight(.medium))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Picker("使用方式", selection: Binding(get: { store.skillMode(skill.id) }, set: { store.setSkill(skill.id, mode: $0) })) {
                                     Text("关闭").tag("off"); Text("启用").tag("on")
                                     if response.skillLocksAvailable == true { Text("锁定").tag("locked") }
                                 }
-                                if let description = skill.description { Text(description).font(.caption).foregroundStyle(Theme.textSecondary) }
+                                .accessibilityLabel("\(skill.name)使用方式")
+                                if let description = skill.description {
+                                    Text(description).font(.caption).foregroundStyle(Theme.textSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                             }
                         }
                     }.disabled(!response.editable || store.phase == .sending)
@@ -172,6 +178,9 @@ struct PiResourcesView: View {
                 }
                 Button("重新读取") { if store.dirty { confirmReload = true } else { Task { await store.load() } } }.disabled(store.phase == .sending)
             }
+            .scrollContentBackground(.hidden)
+            .scrollDismissesKeyboard(.interactively)
+            .background(Theme.background)
             .navigationTitle("工具与资源").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("关闭") { if store.dirty { confirmClose = true } else { dismiss() } }.disabled(store.phase == .sending) }

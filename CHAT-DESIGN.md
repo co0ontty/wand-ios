@@ -22,7 +22,9 @@ ChatDesignPreview为可操作DEBUG离线原生夹具，包含空态、键盘、1
 
 用户最新决定：移动端输入区状态行不重复显示员工名字，只展示状态。聊天标题/员工选择继续承载身份，状态行保留员工身份的VoiceOver标签；不改iOS系统状态栏。
 
-聊天页最新简化：正常聊天隐藏占整行的导航表面，沿用NavigationStack的返回栈；左侧48pt悬浮返回，另由 `SessionBackSwipeEnabler` 补一条左边缘右滑返回（隐藏导航栏时系统 interactivePopGestureRecognizer 不会启动，只改它的 delegate 无效，故用导航视图上的普通 pan 自判 48pt 边缘起点、与内部滚动同时识别、松手 ≥72pt 才 pop，嵌套导航栈只让最内层响应）；返回带跟手动画：当前页与上一页各渲染成快照图层，当前页 1:1 右移并带投影、上一页按 `backSwipeParallaxRatio` 视差跟进由暗转亮，松手按已拖比例判定（`sessionSwipeShouldCommit`，过半返回、不到一半 spring 回弹、快速右甩例外）并从当前位置补完位移再无动画 pop，`reduceMotion` 下不做位移；不能改 SwiftUI 托管页面的 frame/transform（下次布局会抹掉），右侧文件/更多（36pt圆形视觉）。更多保留当前员工与目录辨认、原模型/模式/目录入口、Pi资源和Git；换员工回原会话选择，不改历史目标。消息视口顶部56pt避让，首条和滚动文字均不被图标遮住；按钮实色Theme.surface保证浅深色可读。顶端不忽略刘海安全区，键盘/底部安全区维持原owner。嵌入任务页时整屏仍只有一条栏：会话可见就由会话独占这条栏（`showsNavigationChrome=true`），宿主任务页用`taskPresentsSession`隐藏自己的系统导航栏，并把任务动作（新建工作窗口、打开聊天、并行任务、任务管理、刷新、复制目录）经`hostActions`并进会话「更多」菜单的「任务」分区，不因单层化丢入口；未呈现会话、快照未到位或切到别的任务时任务栏照旧保留。系统返回手势、VoiceOver与手动阅读仍须实机/可操作系统验收，锁屏宿主未人工操作。
+Duo 的列表、父页面和会话详情放在同一个真实 `NavigationStack` 中，以系统返回按钮和 UIKit 原生交互 pop 显示仍然存在的上一页；普通 iPad 保留自己的双栏布局。禁止用截图、缓存位图、复制页面或自定义平移图层冒充底层。普通隐藏栏聊天只通过 `SessionBackSwipeEnabler` 桥接原生手势资格，不替换 UIKit 的 targets、driver 或 navigation delegate；取消与完成由系统处理。验收必须通过真实触摸拖拽，检查 transition 中同一个目标 controller/真实 view 的挂载及活内容更新，不能只比较彩色像素或最终路由。
+
+聊天页最新简化：普通布局隐藏占整行的导航表面，沿用 NavigationStack 的原生返回栈与左侧48pt悬浮返回；Duo 保留系统返回按钮和工具栏，减少动态效果也交给系统导航处理。右侧更多（36pt圆形视觉），文件归入原生图标菜单。更多以最多三项一行的原生图标菜单保留文件、上下文和Git；完整名称保留给无障碍与系统交互；换员工回原会话选择，不改历史目标。消息视口顶部56pt避让，首条和滚动文字均不被图标遮住；按钮实色Theme.surface保证浅深色可读。顶端不忽略刘海安全区，键盘/底部安全区维持原owner。嵌入任务页时整屏仍只有一条栏：会话可见就由会话独占这条栏（`showsNavigationChrome=true`），宿主任务页用`taskPresentsSession`隐藏自己的系统导航栏，并把任务动作（新建工作窗口、打开聊天、并行任务、任务管理、刷新、复制目录）经`hostActions`并进会话「更多」图标菜单的独立任务操作分组，不因单层化丢入口；未呈现会话、快照未到位或切到别的任务时任务栏照旧保留。系统返回手势、VoiceOver与手动阅读仍须实机/可操作系统验收，锁屏宿主未人工操作。
 
 辅助无障碍大字号时上下文入口只呈图标，完整accessibilityLabel保留，48pt触控不缩，避免文字挤掉发送/停止。最终完整XCTest357通过、2跳过、0失败；真实深色accessibility-large像素已核对，操作行完整可见。
 
@@ -61,7 +63,7 @@ ChatDesignPreview为可操作DEBUG离线原生夹具，包含空态、键盘、1
 - 头像取消：`ChatView` 不再画 `TopChatCompanion`/`WorkingAvatar`，随之删掉顶部伙伴的左右拖动与点按聚焦入口（`catSideRaw`/`catDragOffset`/`catGesture`），点输入区聚焦的原有路径不变。IM 私聊仍以头像为身份，继续用 `TopChatCompanion`。
 - 运行与异常只以一个 6pt 状态点呈现（品牌色=运行、permission=等待确认、danger=异常，静止表示空闲），复用 `topicTitleRhythm` 呼吸而不是自起定时器；文案不进视觉，但 `chatTopReadback` 仍把「标题，小字，状态」完整交给读屏，`chat-visible-identity` 标识保留。
 - 高度改为两行文字的 `identityClearance`（56pt 起，随 Dynamic Type 增长），不再为头像占 114pt，消息视口相应变长。
-- 水平位置不再按屏幕居中：`ChatTopLayout.identityBand` 用返回键（60pt）与文件/更多两枚按钮（112pt）算出可用带子，身份区在带子里居中，长标题的省略号不会压到右侧按钮；Android 侧同一份几何是 `FloatingControlsBackInset`/`FloatingControlsActionsInset`。
+- 水平位置按合并后的控件居中：`ChatTopLayout.identityBand` 用返回键（60pt）与更多按钮（60pt）算出对称可用带子，身份区在带子里居中，长标题的省略号不会压到右侧按钮；Android 侧同一份几何是 `FloatingControlsBackInset`/`FloatingControlsActionsInset`。
 - 结构化会话与终端会话（`PtySessionView.titleStatus`）走同一个 `chatTopIdentity`，两条链路都不再画头像；终端顶栏原来的完整路径 `WandPathRevealText` 换成同一条「员工名 · 目录缩写」。
 
 判定与归属由 `CurrentAndroidParityTests`（`chatTopIdentity`/`ChatTopAttention`/源码单一归属）与 `ChatComposerCatTests`（`testSessionIdentityBarKeepsStableHeightAndFullReadback` 高度不随标题长度变化、盖住控件触控安全区；`testIdentityBandStaysBetweenTopControls` 带子左右边界）覆盖。模拟器实机验收：已安装服务 + 真实任务会话，顶栏为「状态点 + 任务名 / 赛博虎妞 · wand」单层，读屏标签为 `iOS对话界面多项布局与交互优化，赛博虎妞 · wand`，身份区右边界 278pt、`会话文件` 按钮左边界 308pt 不重叠；IM 私聊仍为头像版。
@@ -72,7 +74,7 @@ ChatDesignPreview为可操作DEBUG离线原生夹具，包含空态、键盘、1
 
 ### 任务模式单层顶栏与队列计数单一归属（2026-10-19）
 
-任务模式进入会话时，宿主任务页原先无条件保留系统导航栏，会话又画自己那条悬浮栏，整屏出现两条栏（「Web 性能优化 / wand」+「正在执行」）。Android 侧会话是独立路由，只有一条栏，iOS 现按同一语义收敛：会话独占那条栏，任务页在 `taskPresentsSession` 为真时隐藏自己的系统栏，任务级动作改由 `SessionHostAction` 注入会话「更多」菜单的「任务」分区；加载态、无会话态或切到别的任务时任务栏不变。底部「查看执行进度」行也不再重复 `待发 N`，排队条数只由输入框上方的 `QueueBar`「待发送 N 条」呈现，与 Android `ChatScreen` 的单一归属一致；回归见 `CurrentAndroidParityTests.testQueuedCountHasSingleOwnerAboveComposer`。
+任务模式进入会话时，宿主任务页原先无条件保留系统导航栏，会话又画自己那条悬浮栏，整屏出现两条栏（「Web 性能优化 / wand」+「正在执行」）。Android 侧会话是独立路由，只有一条栏，iOS 现按同一语义收敛：会话独占那条栏，任务页在 `taskPresentsSession` 为真时隐藏自己的系统栏，任务级动作改由 `SessionHostAction` 注入会话「更多」图标菜单的独立任务操作分组；加载态、无会话态或切到别的任务时任务栏不变。底部「查看执行进度」行也不再重复 `待发 N`，排队条数只由输入框上方的 `QueueBar`「待发送 N 条」呈现，与 Android `ChatScreen` 的单一归属一致；回归见 `CurrentAndroidParityTests.testQueuedCountHasSingleOwnerAboveComposer`。
 
 ### 图片自适应放大与全屏查看器翻页（2026-10-19）
 
@@ -107,3 +109,22 @@ ChatDesignPreview为可操作DEBUG离线原生夹具，包含空态、键盘、1
 「取消」与「取消派发」先由会话草稿所有者原子丢弃未发送正文、附件及待发送意图，使迟到上传失效，再退出派发模式；不能保留同一负载并降级为可发送的普通消息。取消不调用发送/创建会话。已明确提交或送达未知时禁用取消并保留核对入口，不能将其伪装成未发送。附件菜单、目录设置及键盘的普通收起仍只改变展示，不等同取消派发。只有明确「确认派发任务」可提交任务；关闭面板不能触发派发。Android 同语义。
 
 回归：`CurrentAndroidParityTests` 的取消/迟到上传/明确确认/未知送达用例；真实按钮触控用 `scripts/test-dispatch-cancellation.py`（spy 隔离真实执行）。
+
+### 打开会话先补满两屏再谈贴底（2026-10-22）
+
+首屏窗口只有 12 个可感知块和 96KB，实测长任务会话往往只回最新一条 assistant turn（`messageOffset = total-1`、`leadingBlockOffset` 上百），工具块默认折叠后渲染高度远不足一屏；SwiftUI `ScrollView` 对不足视口的内容按顶部对齐，于是最新消息孤零零贴在屏幕最上方、下面整片空白，用户以为历史丢了。旧补页条件要求 `scrollMode == .manual`（用户正在往历史方向拖），首屏永远等不到补页。现按 Android `shouldLoadEarlierPage` 补齐：列表真实内容高度不足 `chatEarlierTargetScreens = 2` 屏时静默往前翻上一页（每轮最多 8 页，与 Android `MAX_EARLIER_PAGES_PER_ROUND` 一致），补满自然停止；贴底模式不记录阅读锚点，补页后由贴底逻辑重新落到底部，只有用户真在阅读历史时才锚定位置。上一页失败或返回空页时几何不变，由 `loadingEarlier` 回落重新评估，避免卡在半屏。真正的短会话（已翻到最早）仍按顶部排列，与 Android 一致，Web/Mac 的 `column-reverse` 底部锚定是另一套语义。
+
+回归：`WandProtocolTests.testUnderFilledViewportSilentlyPagesEarlierWithoutManualScroll`、`testEarlierMessagesAutoLoadOnlyAtTopWhileBrowsingHistory`。
+
+
+## 工作区 v5（2026-10-23 用户批准实施）
+工作区导航/上下文以蓝灰区域、当前会话以独立阅读面区分；输入与进度外围沿用会话阅读面，仅输入框本身保留可见表面和描边。Theme.workspace*是唯一运行时颜色源，并提供深色模式对应值。目录头区与任务/所属会话保持连续分组，不逐行套卡片；会话只对当前选择使用局部底色，任务字重退后，长名称自然换行。原搜索、筛选、创建、归档等动作与状态所有者保持不变，最近对话始终在工作区目录之前，创建对象明确为任务/工作区。
+执行进度采用当前running且有未完成Todo的既有判定，默认胶囊紧贴输入上方；点击向上展开有界滚动，再次点击收起。完成/非running隐藏，失败仍沿用原会话错误反馈，不自动重试或取消。子Agent交互仍归原消息流。系统共享栏继续由NativeRootView检测真实系统能力，不按设备名/概念画板尺寸判断，不伪绘状态栏。Android当前源码仍是消息流进度，已核对；本轮显式授权的实施范围是iOS，Android尚未同步实现或验收。
+
+
+## 输入框可识别性（2026-10-23 用户明确修正）
+聊天与新建任务保留明确的圆角输入框：FocusComposerSurface统一复用wandInputSurface的实色表面、边界与真实焦点反馈，空态“发消息…”左对齐；底部语义底色和轻顶分隔只界定停靠区域，不能替代输入框边界。isEmbeddedInDock仅表示外部间距由父级提供，不再关闭字段表面。原输入、焦点、草稿、附件、配置和发送动作保持原owner；执行进度仍是输入框上方独立可折叠胶囊，不移除其交互。
+
+### 输入上方的状态摘要与同色停靠区（2026-10-23）
+
+TODO与待发消息共同位于输入框外上方，按「进度→队列→输入」排序；共用紧凑摘要，点击展开有界列表，同一时刻只展开一个，读屏保留完整进度及队列发送时机。列表高度按视口、键盘与真实输入高度限制。新建和运行对话取消外层灰底与顶分隔线，与主阅读区同色；字段自身描边、表面及焦点反馈保持。队列取回/未知送达、草稿附件、当前轮TODO判定不改。Android同语义同步。

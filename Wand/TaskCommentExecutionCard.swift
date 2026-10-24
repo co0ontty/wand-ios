@@ -164,7 +164,7 @@ struct TaskCommentExecutionCard: View {
             .font(.caption2)
             .padding(.horizontal, 8)
             .padding(.vertical, 2)
-            .background((done ? Theme.successSoft : running ? Theme.warning.opacity(0.14) : Theme.surfaceSoft), in: Capsule())
+            .wandGlassCapsule(tint: done ? Theme.success : running ? Theme.warning : nil)
             .foregroundStyle(done ? Theme.success : running ? Theme.warning : Theme.textSecondary)
     }
 

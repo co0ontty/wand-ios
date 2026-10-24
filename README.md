@@ -13,10 +13,11 @@ Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权
 - `SessionCapabilities.swift` 区分 Pi CLI 与 Wand Agent（SDK）；创建、切换、员工候选、工作区与任务派发使用真实 provider + engine。`PiResources.swift` 按服务端实际能力配置 Skills / MCP、锁定、自动资源与 CodeMode；`ModelGroups.swift` 在管理认证后按原配置 CAS 保存分组，不把付费模型放进免费池。
 - `TeamDispatch.swift` 先建议、再人工确认项目和名单开工，未知启动不重复执行。工作区顺序支持原生拖放、键盘/无障碍可用的上移/下移与保存重试。
 - `NativeTerminal.swift` 使用固定 SwiftTerm 1.18.0、与 Android 同源 JetBrains Mono/ANSI 调色板；回放 Render checkpoint 的有序数据/resize，消费后 ACK，重连不重发输入。原生 IME、选择/复制/粘贴、50%–200%四分之一档缩放；远端 OSC52 不能读写剪贴板。
-- `SessionActivityViews.swift` 与 WidgetKit 共用布局；灵动岛区分运行/后台收尾/等待输入/权限/失败/停止/完成与过期状态，多会话可精确链接，计时取服务端本轮锚点。完成停留12秒、失败30秒，标题/详情标记 privacySensitive，状态载荷有4KB预算保护。**信息密度约定**：展开态状态胶囊已说明「待授权/等你回复/已完成」，详情行不再复述，只显示真实在做的事；待授权时优先显示 escalation 的 scope+target（要授权什么）；计时器有界（`59:59` 后转 `1h02`、超 99 小时为 `99h+`），不会长到挤掉状态；已完成但仍在保留期的兄弟会话不再单独占一行。
+- `SessionActivityViews.swift` 与 WidgetKit 共用布局；灵动岛区分运行/后台收尾/等待输入/权限/失败/停止/完成与过期状态，多会话可精确链接，计时取服务端本轮锚点。完成停留12秒、失败30秒，标题/详情标记 privacySensitive，状态载荷有4KB预算保护。**信息密度约定**：展开态状态胶囊已说明「待授权/等你回复/已完成」，详情行不再复述，只显示真实在做的事；本地待授权时优先显示 escalation 的 scope+target（要授权什么）；远程状态不上传权限目标/工具参数，完整原因回 App 查看；计时器有界（`59:59` 后转 `1h02`、超 99 小时为 `99h+`），不会长到挤掉状态；已完成但仍在保留期的兄弟会话不再单独占一行。
+- `LiveActivityPush.swift` 为已在前台创建的聚合活动申请专属 ActivityKit token，复用 APNs 后台更新/结束；按当前服务器与不可变凭据指纹绑定，完成时间按条目保存，App 重开不会被整体刷新续期。旧服务/未配置推送时保留本地更新，不包含后台 Push-to-Start。完整配置与验证见主仓 `docs/ios-apns.md`。
 - `ChatActivityTimeline.swift` 独立持有只读工具/思考时间线：稳定身份、真实时间排序、空思考轮过滤、唯一运行标记、按需调用详情、上翻不抢阅读位置；自动展开网络偏好位于设置。主界面灰白蓝 token 对齐当前 Android，终端保留两端共同的暖深色。
 
-验证：`WandTests/CurrentAndroidParityTests.swift` 覆盖协议、竞态和原生渲染。安装服务只读验收必须显式提供私密测试输入，常规 CI 不访问用户服务；凭据不进入构建参数、环境变量值、仓库或附件。未签名 IPA与无连接真机是当前验收边界，不能因此宣称已完成签名真机验收或所有平台实现完全相同。
+验证：`WandTests/CurrentAndroidParityTests.swift` 覆盖协议、竞态和原生渲染。安装服务只读验收必须显式提供私密测试输入，常规 CI 不访问用户服务；凭据不进入构建参数、环境变量值、仓库或附件。签名包校验与真实设备显示/触控验收分别进行；未签名构建或无设备验证不能宣称已完成可安装交付、真机送达或所有平台实现完全相同。
 
 支持付费 Apple Developer 的 Ad Hoc 签名与自建服务器更新，同时保留免费 Apple ID 侧载用途。付费签名与一次配置说明见 [ADHOC.md](ADHOC.md)。
 
@@ -52,7 +53,7 @@ Wand 的 iOS **原生 SwiftUI 客户端**：会话列表、聊天、输入、权
 - 上报独立于业务，无重试/重放，绝对 5 秒截止，最多 2 个并发、每分钟 10 条、相同错误 5 分钟去重；取消不报。iOS 系统托管安装没有结果回调，只能确认安装器是否打开，不能据此判断安装成功/失败。
 - 任务详情在有内容时原位只读展示最近评论；旧服务端评论接口 404 视为空，切换任务后的迟到响应不能覆盖当前任务。
 
-无需设备安装/启动的定点单测：`bash scripts/test-feedback.sh`。
+无需设备安装/启动的反馈传输单测：`bash scripts/test-feedback.sh`。该 Foundation harness 不收集依赖 UIKit 的任务评论测试；评论与提及回归使用 `./scripts/run-tests.sh TaskCommentsTests`（模拟器）。
 
 模拟器 XCTest 统一用 `./scripts/run-tests.sh [测试过滤]`，不要各处手拼 `xcodebuild`：
 

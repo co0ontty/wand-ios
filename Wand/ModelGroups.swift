@@ -129,6 +129,8 @@ struct ModelGroupsView: View {
                 if !store.ready {
                     Section("管理认证") {
                         SecureField("管理密码", text: $password)
+                            .textContentType(.password).submitLabel(.go)
+                            .onSubmit { if !password.isEmpty { login() } }
                         Button(loginBusy ? "认证中" : "登录并读取") { login() }.disabled(loginBusy || password.isEmpty)
                         if let loginMessage { Text(loginMessage).font(.caption).foregroundStyle(Theme.danger) }
                     }
@@ -148,6 +150,9 @@ struct ModelGroupsView: View {
                     Button("重新读取") { if store.dirty { confirmReload = true } else { Task { await load() } } }.disabled(store.phase == .sending)
                 }
             }
+            .scrollContentBackground(.hidden)
+            .scrollDismissesKeyboard(.interactively)
+            .background(Theme.background)
             .navigationTitle("模型分组").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("关闭") { if store.dirty { confirmClose = true } else { dismiss() } }.disabled(store.phase == .sending) }
@@ -167,16 +172,26 @@ struct ModelGroupsView: View {
     }
     private func groupEditor(_ index: Int) -> some View {
         let group = store.draft[index]
-        return VStack(alignment: .leading, spacing: 8) {
-            TextField("分组名称", text: $store.draft[index].name).disabled(group.builtIn || store.phase == .sending)
+        return VStack(alignment: .leading, spacing: WandLayout.fieldGap) {
+            WandFormField("分组名称") {
+                TextField("分组名称", text: $store.draft[index].name).disabled(group.builtIn || store.phase == .sending)
+            }
             ForEach(Array(group.models.enumerated()), id: \.element) { row, model in
-                HStack {
-                    Text(model).font(.caption.monospaced()).lineLimit(2)
-                    Spacer()
-                    Button { if row > 0 { store.draft[index].models.swapAt(row, row - 1) } } label: { Image(systemName: "arrow.up").frame(width: 44, height: 44) }.disabled(row == 0).accessibilityLabel("模型上移")
-                    Button { if row + 1 < group.models.count { store.draft[index].models.swapAt(row, row + 1) } } label: { Image(systemName: "arrow.down").frame(width: 44, height: 44) }.disabled(row + 1 == group.models.count).accessibilityLabel("模型下移")
-                    if !group.builtIn { Button("移除") { store.draft[index].models.removeAll { $0 == model } } }
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(model).font(.subheadline.monospaced())
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    HStack {
+                        Button { if row > 0 { store.draft[index].models.swapAt(row, row - 1) } } label: { Image(systemName: "arrow.up").frame(width: 44, height: 44) }.disabled(row == 0).accessibilityLabel("\(model)上移")
+                        Button { if row + 1 < group.models.count { store.draft[index].models.swapAt(row, row + 1) } } label: { Image(systemName: "arrow.down").frame(width: 44, height: 44) }.disabled(row + 1 == group.models.count).accessibilityLabel("\(model)下移")
+                        Spacer(minLength: 0)
+                        if !group.builtIn {
+                            Button("移除") { store.draft[index].models.removeAll { $0 == model } }
+                                .frame(minHeight: WandLayout.controlTouch).accessibilityLabel("移除\(model)")
+                        }
+                    }.buttonStyle(.borderless)
                 }
+                if row < group.models.count - 1 { Divider() }
             }
             if !group.builtIn {
                 Menu("添加具体模型") {
@@ -188,7 +203,9 @@ struct ModelGroupsView: View {
                 }
                 Button("删除分组", role: .destructive) { store.draft.remove(at: index); expandedID = nil }
             } else { Text("免费池成员由服务端维护；这里只调整优先顺序。").font(.caption).foregroundStyle(Theme.textSecondary) }
-        }.disabled(store.phase == .sending)
+        }
+        .padding(.top, WandLayout.fieldGap)
+        .disabled(store.phase == .sending)
     }
     private func load() async {
         do { let catalog = try await api.models(); self.catalog = catalog; await store.load(catalog: catalog) }

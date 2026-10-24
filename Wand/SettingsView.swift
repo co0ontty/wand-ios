@@ -4,13 +4,14 @@ import UserNotifications
 
 /// 与 Android 相同的设置目录；设备能力保留 iOS 原生实现。
 enum MobileSettingsSection: String, CaseIterable, Identifiable {
-    case server, appearance, traffic, updates, models, diagnostics, about
+    case server, appearance, traffic, notifications, updates, models, diagnostics, about
     var id: String { rawValue }
     var title: String {
         switch self {
         case .server: return "当前服务器"
         case .appearance: return "外观与反馈"
         case .traffic: return "流量与实时内容"
+        case .notifications: return "通知与后台"
         case .updates: return "应用与更新"
         case .models: return "模型分组"
         case .diagnostics: return "诊断"
@@ -22,6 +23,7 @@ enum MobileSettingsSection: String, CaseIterable, Identifiable {
         case .server: return "server.rack"
         case .appearance: return "paintpalette"
         case .traffic: return "network"
+        case .notifications: return "bell.badge"
         case .updates: return "arrow.triangle.2.circlepath"
         case .models: return "slider.horizontal.3"
         case .diagnostics: return "square.and.arrow.up"
@@ -46,6 +48,8 @@ struct SettingsView: View {
     @State private var serverVersion: String?
     @State private var confirmRemoveServer = false
     @State private var notificationStatus = "读取中…"
+    @ObservedObject private var remoteNotifications = RemoteNotificationController.shared
+    @ObservedObject private var liveActivityPush = LiveActivityPushController.shared
     @State private var logShare: LogShareItem?
     @State private var logExportEmpty = false
     @State private var showRenameServer = false
@@ -55,6 +59,7 @@ struct SettingsView: View {
     private var iosUpdateError: String? { appUpdater.error }
     @State private var expandedSection: MobileSettingsSection?
     @State private var showWebSettings = false
+    @State private var webSettingsSection: String? = nil
     @State private var showModelGroups = false
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
 
@@ -66,7 +71,8 @@ struct SettingsView: View {
                 settingsDirectory
             }
             .scrollContentBackground(.hidden)
-            .background(WandAmbientBackground())
+            .scrollDismissesKeyboard(.interactively)
+            .background(Theme.background)
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -75,8 +81,6 @@ struct SettingsView: View {
                         .fontWeight(.semibold)
                 }
             }
-            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
         }
         .tint(Theme.brand)
         .wandPreferredAppearance()
@@ -100,7 +104,7 @@ struct SettingsView: View {
             Text("将从这台设备移除该服务器及认证信息，重新连接需要连接码。服务端会话和文件保留。")
         }
         .sheet(isPresented: $showWebSettings) {
-            SettingsWebView(api: api)
+            SettingsWebView(api: api, section: webSettingsSection)
         }
         .sheet(isPresented: $showModelGroups) { ModelGroupsView(api: api) }
         .sheet(item: $logShare) { item in
@@ -160,10 +164,8 @@ struct SettingsView: View {
             Section("此设备") {
                 settingsChapter(.appearance, detail: currentAppearance.title) { appearanceSection }
                 settingsChapter(.traffic) { trafficSection }
-                settingsChapter(.updates, detail: appVersion) {
-                    clientUpdateSection
-                    featureSection
-                }
+                settingsChapter(.notifications) { featureSection }
+                settingsChapter(.updates, detail: appVersion) { clientUpdateSection }
             }
             Section("服务配置") {
                 Button { showModelGroups = true } label: {
@@ -171,7 +173,12 @@ struct SettingsView: View {
                         .frame(minHeight: WandLayout.controlTouch, alignment: .leading)
                 }
                 .accessibilityIdentifier("settings-models")
-                Button { showWebSettings = true } label: {
+                Button { webSettingsSection = "connectors"; showWebSettings = true } label: {
+                    Label("钉钉群聊接入", systemImage: "person.3")
+                        .frame(minHeight: WandLayout.controlTouch, alignment: .leading)
+                }
+                .accessibilityIdentifier("settings-dingtalk")
+                Button { webSettingsSection = nil; showWebSettings = true } label: {
                     Label("完整 Web 设置", systemImage: "globe")
                         .frame(minHeight: WandLayout.controlTouch, alignment: .leading)
                 }
@@ -235,7 +242,7 @@ struct SettingsView: View {
                 showRenameServer = true
             } label: {
                 Label("重命名当前服务器", systemImage: "pencil")
-                    .font(.wand(size: 15))
+                    .font(.subheadline).frame(minHeight: WandLayout.controlTouch)
             }
             Button {
                 dismiss()
@@ -341,14 +348,19 @@ struct SettingsView: View {
                 }
             }
             .buttonStyle(.plain)
-            .font(.system(size: 14))
+            .font(.subheadline)
+            .frame(minHeight: WandLayout.controlTouch)
             Button {
                 SessionNotificationController.shared.sendTestNotification()
             } label: {
                 Label("发送测试通知", systemImage: "bell.and.waves.left.and.right")
             }
             .disabled(notificationStatus != "已开启")
-            Text("系统通知会在 App 位于后台时提醒回复完成或等待授权。若权限关闭，请到 iOS 设置 → Wand 开启。App 被系统彻底挂起后，通知会暂停更新。")
+            Text(liveActivityPush.status)
+                .font(.caption).foregroundStyle(Theme.textSecondary)
+            Text(remoteNotifications.status)
+                .font(.caption).foregroundStyle(Theme.textSecondary)
+            Text("启用 APNs 后，App 被挂起仍可收到回复完成或等待授权提醒。服务器或安装包未启用推送时使用本地通知，挂起后暂停。灵动岛先在前台创建，已注册的活动可由服务器远程更新与结束。")
                 .font(.caption).foregroundStyle(Theme.textSecondary)
         }
     }

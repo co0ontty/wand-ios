@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run the production Foundation-only feedback/comment logic without installing or launching a device app.
+# Run production Foundation-only feedback transport logic without a device app.
+# TaskCommentsTests now imports UIKit; run it with ./scripts/run-tests.sh TaskCommentsTests.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 - <<'PY'
@@ -18,9 +19,9 @@ PY
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/wand-ios-feedback-tests.XXXXXX")"
 trap 'rm -rf "$TEMP"' EXIT
 mkdir -p "$TEMP/Sources/Wand" "$TEMP/Tests/WandTests"
-cp Wand/ClientFeedback.swift Wand/ClientFeedbackTransport.swift Wand/TaskComments.swift Wand/SelfSignedSession.swift Wand/WandEndpoint.swift "$TEMP/Sources/Wand/"
+cp Wand/ClientFeedback.swift Wand/ClientFeedbackTransport.swift Wand/SelfSignedSession.swift Wand/WandEndpoint.swift "$TEMP/Sources/Wand/"
 cp scripts/feedback-test-support.swift "$TEMP/Sources/Wand/"
-cp WandTests/ClientFeedbackTests.swift WandTests/ClientFeedbackTransportTests.swift WandTests/TaskCommentsTests.swift "$TEMP/Tests/WandTests/"
+cp WandTests/ClientFeedbackTests.swift WandTests/ClientFeedbackTransportTests.swift "$TEMP/Tests/WandTests/"
 cat > "$TEMP/Package.swift" <<'SWIFT'
 // swift-tools-version: 5.9
 import PackageDescription
@@ -30,3 +31,4 @@ let package = Package(name: "WandFeedbackTests", targets: [
 ])
 SWIFT
 swift test --package-path "$TEMP"
+printf "%s\n" "TaskCommentsTests requires UIKit: run ./scripts/run-tests.sh TaskCommentsTests (not executed by this Foundation harness)."

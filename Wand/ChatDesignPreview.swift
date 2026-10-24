@@ -1,8 +1,53 @@
 #if DEBUG
 import SwiftUI
 import UIKit
+import Combine
 
 /// Interactive native fixture. No session or API mutation.
+/// Read-only production Todo display fixture. No API, credentials or task mutations.
+struct TodoDisplayPreview: View {
+    @State private var scenario = "混合状态"
+    @State private var detail = false
+    private let cases = ["混合状态", "多项长文", "全部完成", "空列表"]
+    private var todos: [TodoItem] {
+        if scenario == "空列表" { return [] }
+        let content = ["核对详情页现有布局与返回路径", "优化 Todo 显示：清楚区分进行中、待处理和已完成，保留长文本完整换行，不改变真实任务状态", "在 iPhone SE 小屏和最大辅助字号下实际检查列表，重复打开、关闭并返回", "重新编译安装并保存真实截图"]
+        let count = scenario == "多项长文" ? 12 : 4
+        return (0..<count).map { index in
+            TodoItem(content: (scenario == "多项长文" ? "第\(index + 1)项 · " : "") + content[index % 4],
+                status: scenario == "全部完成" || index == 0 ? "completed" : index == 1 ? "in_progress" : "pending", activeForm: nil)
+        }
+    }
+    private var input: [String: JSONValue] {
+        ["todos": .array(todos.map { .object(["content": .string($0.content), "status": .string($0.status)]) })]
+    }
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("隔离显示回放 · 不修改任务").font(.caption).foregroundStyle(Theme.textSecondary)
+                    Picker("数据场景", selection: $scenario) {
+                        ForEach(cases, id: \.self) { Text($0).tag($0) }
+                    }.pickerStyle(.menu).accessibilityLabel("Todo 数据场景")
+                    TodoProgressBar(todos: todos)
+                    Button("打开 Todo 工具详情") { detail = true }
+                        .frame(minHeight: 44).accessibilityIdentifier("todo-open-detail")
+                }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            }.background(Theme.background).navigationTitle("Todo 显示回放").navigationBarTitleDisplayMode(.inline)
+                .sheet(isPresented: $detail) {
+                    NavigationStack {
+                        ScrollView {
+                            AssistantItemView(item: .tool(id: "todo-fixture", name: "TodoWrite", description: "更新本轮待办", input: input, subagent: nil,
+                                result: ToolResultInfo(toolUseId: "todo-fixture", text: "隔离回放：待办已更新", isError: false, truncated: false)),
+                                showSubagentTags: false, forceExpanded: true).padding(16)
+                        }.background(Theme.background).navigationTitle("Todo 工具详情").navigationBarTitleDisplayMode(.inline)
+                            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { detail = false } } }
+                    }.presentationDetents([.large]).presentationDragIndicator(.visible)
+                }
+        }.wandPreferredAppearance()
+    }
+}
+
 struct ChatDesignPreview: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     private var identityMetrics = ChatIdentityLayoutMetrics()
@@ -66,8 +111,12 @@ struct ChatDesignPreview: View {
                             thinking: thinking, size: size).overlay { Color.clear.modifier(fixtureGesture) }
                     }
                     FloatingChatControls(onBack: { stage = "返回会话列表（预览）" }) {
-                        Button { stage = "会话文件（预览）" } label: { FloatingChatIcon(symbol: "folder") }.accessibilityLabel("会话文件预览")
                         Menu {
+                            SessionActionPalette(actions: [
+                                SessionMenuAction(id: "files", title: "会话文件（预览）", symbol: "folder") {
+                                    stage = "会话文件（预览）"
+                                }
+                            ])
                             if running { Button("停止当前任务", role: .destructive) { running = false; activity = .idle; thinking = false } }
                             Button("猫头控件间居中") { sideRaw = "left" }
                             Button("猫头向右微移") { sideRaw = "right" }
@@ -208,7 +257,7 @@ struct ChatDesignPreview: View {
                 }, settings: {
                     ComposerSettingsStrip(model: selectedModel, mode: selectedMode, thinking: selectedThinking,
                         onModel: { openSetting("模型") }, onMode: { openSetting("权限模式") }, onThinking: { openSetting("思考深度") })
-                }, actionCount: ComposerActionPresentation(phase: .idle, turnRunning: running,
+                }, isFocused: focused, actionCount: ComposerActionPresentation(phase: .idle, turnRunning: running,
                     hasDraft: !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty).slotCount)
         }
         .onChange(of: keyboard.isVisible) { old, visible in if old && !visible { composerFocus.keyboardHidden() } }
@@ -307,4 +356,310 @@ struct MobileOperationParityPreview: View {
         }.background(Theme.background)
     }
 }
+
+// UI-test-only harness. It observes UIKit's real interactive transition and
+// changes a retained label while the finger is down. It never draws a back page.
+@MainActor
+final class LiveBackAcceptanceModel: ObservableObject {
+    final class WeakController {
+        weak var value: UIViewController?
+        init(_ value: UIViewController) { self.value = value }
+    }
+    final class WeakLabel {
+        weak var value: UILabel?
+        init(_ value: UILabel) { self.value = value }
+    }
+    @Published var selection: String?
+    @Published var parents: [String] = []
+    @Published var revisions: [String: Int] = [:]
+    @Published var offsets: [String: Int] = [:]
+    @Published var proof = "waiting for native gesture"
+    @Published var diagnostic = ""
+    let mode: String
+    var controllers: [String: WeakController] = [:]
+    var labels: [String: WeakLabel] = [:]
+    var transitions = Set<ObjectIdentifier>()
+    var configuredWindow = false
+    var writtenProofs = Set<String>()
+    let evidenceRun = UUID(uuidString: ProcessInfo.processInfo.environment["WAND_DEBUG_LIVE_BACK_RUN"] ?? "")?.uuidString ?? UUID().uuidString
+    var pending: (id: ObjectIdentifier, role: String, revision: Int, identity: Bool, attached: Bool, stable: Bool)?
+
+    init(mode: String) { self.mode = mode }
+    var system: Bool { mode != "hidden" }
+    var route: String { selection ?? parents.last ?? "list" }
+    func register(_ role: String, controller: UIViewController) {
+        if controllers[role] == nil { controllers[role] = WeakController(controller) }
+    }
+    func register(_ role: String, label: UILabel) {
+        labels[role] = WeakLabel(label)
+    }
+    func role(of controller: UIViewController) -> String? {
+        controllers.first { $0.value.value === controller }?.key
+    }
+}
+
+struct LiveBackAcceptance: View {
+    @StateObject private var model: LiveBackAcceptanceModel
+    init(mode: String) { _model = StateObject(wrappedValue: LiveBackAcceptanceModel(mode: mode)) }
+    var body: some View {
+        Group {
+            if model.system {
+                SystemHomeNavigation(mode: .sessions, enabled: true,
+                    navigationVisible: model.route == "list", onSelect: { _ in }) { pages }
+            } else {
+                pages.environment(\.usesSystemHomeNavigation, false)
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.route).accessibilityIdentifier("native-route-state")
+                Text(model.proof).accessibilityIdentifier("live-transition-proof")
+                Text(model.diagnostic).accessibilityIdentifier("native-diagnostic")
+                Text(String(model.offsets["list"] ?? 0)).accessibilityIdentifier("list-scroll-offset")
+                Button("Reset proof") { model.proof = "waiting"; model.transitions.removeAll(); model.pending = nil }
+                    .accessibilityIdentifier("reset-proof")
+            }.font(.caption2).padding(6).background(.regularMaterial)
+        }
+    }
+    private var pages: some View {
+        AdaptiveNavigationContainer(selection: $model.selection, parents: $model.parents) {
+            LiveBackAcceptancePanel(model: model, role: "list")
+        } detail: { marker in
+            LiveBackAcceptancePanel(model: model, role: marker ?? "empty")
+        }
+    }
+}
+
+private struct LiveBackAcceptancePanel: View {
+    @ObservedObject var model: LiveBackAcceptanceModel
+    let role: String
+    @Environment(\.usesSystemHomeNavigation) private var system
+    var body: some View {
+        VStack(spacing: 12) {
+            LiveBackAcceptanceLabel(model: model, role: role, eligible: system == model.system)
+                .frame(height: 48)
+            if role == "list" {
+                Button("Open parent") { model.selection = "parent" }
+                    .accessibilityIdentifier("open-parent").disabled(system != model.system)
+            } else if role == "parent" {
+                Button("Open detail") { model.parents = ["parent"]; model.selection = "detail" }
+                    .accessibilityIdentifier("open-detail")
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    ForEach(0..<100) { index in Text("\(role) row \(index)").frame(maxWidth: .infinity, alignment: .leading) }
+                }.padding()
+            }
+            .accessibilityIdentifier("live-\(role)-scroll")
+            .onScrollGeometryChange(for: Int.self) { Int($0.contentOffset.y) } action: { _, value in
+                if model.offsets[role] != value { model.offsets[role] = value }
+            }
+        }
+        .padding(12)
+        .background(role == "list" ? Color.green : role == "parent" ? Color.blue : Color.red)
+        .navigationTitle(role)
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(!system)
+        .toolbar(system ? .visible : .hidden, for: .navigationBar)
+        .background {
+            LiveBackAcceptanceObserver(model: model, role: role, eligible: system == model.system)
+                .allowsHitTesting(false)
+        }
+        .background { if !system { SessionBackSwipeEnabler().allowsHitTesting(false) } }
+    }
+}
+
+private final class LiveBackAcceptanceNativeLabel: UILabel {
+    var subscription: AnyCancellable?
+}
+
+private struct LiveBackAcceptanceLabel: UIViewRepresentable {
+    @ObservedObject var model: LiveBackAcceptanceModel
+    let role: String
+    let eligible: Bool
+    func makeUIView(context: Context) -> LiveBackAcceptanceNativeLabel {
+        let label = LiveBackAcceptanceNativeLabel()
+        label.textColor = .white
+        label.font = .preferredFont(forTextStyle: .title2)
+        label.accessibilityIdentifier = "live-\(role)-value"
+        // A native label consumes the model directly, even while SwiftUI suspends
+        // offscreen body reconciliation during an interactive transition.
+        label.subscription = model.$revisions.sink { [weak label, role = role] revisions in
+            let revision = revisions[role] ?? 0
+            label?.text = "\(role) revision \(revision)"
+            label?.backgroundColor = revision == 0 ? .clear : revision.isMultiple(of: 2) ? .cyan : .yellow
+            label?.textColor = revision == 0 ? .white : .black
+        }
+        return label
+    }
+    func updateUIView(_ label: LiveBackAcceptanceNativeLabel, context: Context) {
+        if eligible { model.register(role, label: label) }
+    }
+}
+
+private struct LiveBackAcceptanceObserver: UIViewControllerRepresentable {
+    let model: LiveBackAcceptanceModel
+    let role: String
+    let eligible: Bool
+    func makeUIViewController(context: Context) -> LiveBackAcceptanceObserverController {
+        LiveBackAcceptanceObserverController(model: model, role: role)
+    }
+    func updateUIViewController(_ controller: LiveBackAcceptanceObserverController, context: Context) {
+        controller.eligible = eligible
+        controller.scheduleRefresh()
+    }
+}
+
+private final class LiveBackAcceptanceObserverController: UIViewController {
+    let model: LiveBackAcceptanceModel
+    let role: String
+    var eligible = false
+    private var displayLink: CADisplayLink?
+    private var gestures: [UIGestureRecognizer] = []
+    private var observingInteraction = false
+    init(model: LiveBackAcceptanceModel, role: String) {
+        self.model = model; self.role = role
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func viewDidLoad() {
+        super.viewDidLoad(); view.backgroundColor = .clear; view.isUserInteractionEnabled = false
+    }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated); refreshBindings()
+    }
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews(); refreshBindings()
+    }
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        guard eligible, let nav = navigationController else { return }
+        DispatchQueue.main.async {
+            guard let transition = nav.transitionCoordinator, transition.isInteractive else { return }
+            self.observingInteraction = true
+            self.startDisplayLink()
+            self.observeTransition()
+            let id = ObjectIdentifier(transition as AnyObject)
+            transition.animate(alongsideTransition: nil) { context in
+                self.observingInteraction = false
+                self.displayLink?.invalidate(); self.displayLink = nil
+                if let pending = self.model.pending, pending.id == id,
+                   let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                    let key = "\(self.model.mode)-\(self.role)-\(pending.role)-\(pending.revision)"
+                    let file = documents.appendingPathComponent("live-back-proof").appendingPathComponent(self.model.evidenceRun)
+                        .appendingPathComponent(key + ".ended.json")
+                    let record: [String: Any] = ["cancelled": context.isCancelled, "route": self.model.route]
+                    try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]).write(to: file, options: .atomic)
+                }
+            }
+        }
+    }
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if !observingInteraction { displayLink?.invalidate(); displayLink = nil }
+        for gesture in gestures { gesture.removeTarget(self, action: #selector(nativeGestureChanged(_:))) }
+        gestures = []
+    }
+    private func startDisplayLink() {
+        guard displayLink == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(observeTransition))
+        link.add(to: .main, forMode: .common); displayLink = link
+    }
+    func scheduleRefresh() {
+        DispatchQueue.main.async { [weak self] in self?.refreshBindings() }
+    }
+    private func owningPage() -> UIViewController {
+        var page: UIViewController = self
+        while let parent = page.parent, !(parent is UINavigationController) { page = parent }
+        return page
+    }
+    private func refreshBindings() {
+        guard eligible, viewIfLoaded?.window != nil, let nav = navigationController else { return }
+        if !model.configuredWindow, let root = view.window?.rootViewController {
+            model.configuredWindow = true
+            root.traitOverrides.horizontalSizeClass = model.mode == "system-regular" ? .regular : .compact
+        }
+        model.register(role, controller: owningPage())
+        let next = [nav.interactivePopGestureRecognizer, nav.interactiveContentPopGestureRecognizer].compactMap { $0 }
+        if next.map(ObjectIdentifier.init) != gestures.map(ObjectIdentifier.init) {
+            for gesture in gestures { gesture.removeTarget(self, action: #selector(nativeGestureChanged(_:))) }
+            gestures = next
+            for gesture in gestures { gesture.addTarget(self, action: #selector(nativeGestureChanged(_:))) }
+        }
+        observeTransition()
+    }
+    @objc private func nativeGestureChanged(_ gesture: UIGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed:
+            startDisplayLink()
+            observeTransition()
+        case .ended, .cancelled, .failed:
+            observeTransition()
+            if !observingInteraction { displayLink?.invalidate(); displayLink = nil }
+        default: break
+        }
+    }
+    @objc private func observeTransition() {
+        guard eligible, let nav = navigationController else { return }
+        let page = owningPage()
+        if let transition = nav.transitionCoordinator, transition.isInteractive {
+            guard transition.viewController(forKey: .from) === page else { return }
+            let diagnostic = "interactive=1 fromMatches=\(transition.viewController(forKey: .from) === page) toKnown=\(transition.viewController(forKey: .to).flatMap { model.role(of: $0) } ?? "none")"
+            if model.diagnostic != diagnostic { model.diagnostic = diagnostic }
+        } else if !model.diagnostic.hasPrefix("interactive=1") {
+            let edge = nav.interactivePopGestureRecognizer
+            let content = nav.interactiveContentPopGestureRecognizer
+            let diagnostic = "depth=\(nav.viewControllers.count) hidden=\(nav.isNavigationBarHidden) backHidden=\(nav.topViewController?.navigationItem.hidesBackButton ?? false) edge=\(edge?.isEnabled ?? false) content=\(content?.isEnabled ?? false) edges=\((edge as? UIScreenEdgePanGestureRecognizer)?.edges.rawValue ?? 0)"
+            if model.diagnostic != diagnostic { model.diagnostic = diagnostic }
+        }
+        guard let transition = nav.transitionCoordinator, transition.isInteractive,
+              let from = transition.viewController(forKey: .from), from === page,
+              let to = transition.viewController(forKey: .to),
+              let previous = model.role(of: to) else { return }
+        let id = ObjectIdentifier(transition as AnyObject)
+        if !model.transitions.contains(id) {
+            model.transitions.insert(id)
+            let revision = (model.revisions[previous] ?? 0) + 1
+            let retained = model.controllers[previous]?.value === to
+            let attached = to.view.isDescendant(of: transition.containerView)
+            model.pending = (id, previous, revision, retained, attached, model.route == role)
+            model.revisions[previous] = revision
+        }
+        if let pending = model.pending, pending.id == id,
+           let label = model.labels[pending.role]?.value {
+            let diagnostic = "interactive=1 percent=\(Int(transition.percentComplete * 100)) route=\(model.route) label=\(label.text ?? "nil") expected=\(pending.revision)"
+            if !model.diagnostic.contains("expected=") { model.diagnostic = diagnostic }
+        }
+        if let pending = model.pending, pending.id == id,
+           let label = model.labels[pending.role]?.value,
+           label.text == "\(pending.role) revision \(pending.revision)" {
+            let live = label.isDescendant(of: to.view) && label.window != nil && !to.view.isHidden
+            let sourceLayer = from.view.layer.presentation() ?? from.view.layer
+            let containerLayer = transition.containerView.layer.presentation() ?? transition.containerView.layer
+            let offset = sourceLayer.convert(sourceLayer.bounds, to: containerLayer).minX
+            let moved = abs(offset) > 12 && abs(offset) < transition.containerView.bounds.width * 0.95
+            let attached = to.view.isDescendant(of: transition.containerView)
+            let proof = "from=\(role) to=\(previous) updated=1 live=\(live ? 1 : 0) identity=\(pending.identity ? 1 : 0) attached=\(attached ? 1 : 0) stable=\(pending.stable ? 1 : 0) moved=\(moved ? 1 : 0) revision=\(pending.revision)"
+            if model.proof != proof { model.proof = proof }
+            if !moved && !model.diagnostic.contains("offset=") { model.diagnostic += " offset=\(Int(offset))" }
+            let key = "\(model.mode)-\(role)-\(previous)-\(pending.revision)"
+            if !model.writtenProofs.contains(key),
+               let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                let directory = documents.appendingPathComponent("live-back-proof").appendingPathComponent(model.evidenceRun)
+                let record: [String: Any] = ["mode": model.mode, "from": role, "to": previous,
+                    "revision": pending.revision, "live": live, "identity": pending.identity,
+                    "attached": attached, "routeStable": pending.stable, "nativeInteractive": true,
+                    "label": label.text ?? "", "offset": Double(offset),
+                    "gestureStates": gestures.map { String(describing: $0.state) }]
+                do {
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+                        .write(to: directory.appendingPathComponent(key + ".json"), options: .atomic)
+                    model.writtenProofs.insert(key)
+                } catch { model.diagnostic = "Could not save native transition proof" }
+            }
+        }
+    }
+}
+
 #endif

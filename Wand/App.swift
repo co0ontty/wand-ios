@@ -10,6 +10,11 @@ struct WandApp: App {
 
     init() {
 #if DEBUG
+        if ProcessInfo.processInfo.environment["WAND_DEBUG_LIVE_BACK"] != nil || ProcessInfo.processInfo.environment["WAND_DEBUG_ACCEPTANCE_PROFILE"] == "1" {
+            // This isolated gesture harness must not request notification permission.
+            ServerStore.shared.notificationsEnabled = false
+            ServerStore.shared.liveActivityEnabled = false
+        }
         // Explicit simulator QA bootstrap. Credentials never enter process arguments,
         // environment values, URLs, logs or screenshots. Release builds omit this hook.
         guard ProcessInfo.processInfo.environment["WAND_DEBUG_ACCEPTANCE_PROFILE"] == "1" else { return }
@@ -28,7 +33,11 @@ struct WandApp: App {
         WindowGroup {
             Group {
 #if DEBUG
-            if let scenario = mobileOperationParityScenario() {
+            if let mode = ProcessInfo.processInfo.environment["WAND_DEBUG_LIVE_BACK"], !mode.isEmpty {
+                LiveBackAcceptance(mode: mode)
+            } else if ProcessInfo.processInfo.environment["WAND_DEBUG_TODO_PREVIEW"] == "1" {
+                TodoDisplayPreview()
+            } else if let scenario = mobileOperationParityScenario() {
                 MobileOperationParityPreview(scenario: scenario)
             } else if ProcessInfo.processInfo.environment["WAND_DEBUG_CHAT_DESIGN"] == "1" {
                 ChatDesignPreview()
@@ -86,13 +95,16 @@ struct WandApp: App {
         let environment = ProcessInfo.processInfo.environment
         if let sessionId = environment["WAND_DEBUG_OPEN_SESSION"], !sessionId.isEmpty {
             let serverID = environment["WAND_DEBUG_OPEN_SERVER"]
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            QuickActionCoordinator.shared.enqueue(
-                .openSession(
-                    id: sessionId,
-                    serverID: serverID?.isEmpty == false ? serverID : nil
+            // Login latency varies with the server; re-announce until the shell is ready.
+            for _ in 0..<5 {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                QuickActionCoordinator.shared.enqueue(
+                    .openSession(
+                        id: sessionId,
+                        serverID: serverID?.isEmpty == false ? serverID : nil
+                    )
                 )
-            )
+            }
         }
         guard let scenario = environment["WAND_MOCK_LIVE_ACTIVITY"],
               !scenario.isEmpty,

@@ -232,6 +232,26 @@ final class ComposerToolParityTests: XCTestCase {
     }
 
     @MainActor
+    func testQueueReceiptAppliesDuringUnrelatedOutputButNeverOverwritesQueuePush() async throws {
+        for queuePayload in ["", ",\"queuedMessages\":[\"newer queued message\"]", ",\"queuedMessages\":[]"] {
+            let transport = QueueRetrievalStub()
+            let store = ChatStore(sessionId: "queue", api: api, drafts: SessionDraftStore(), queueRetrievalTransport: transport)
+            store.queuedMessages = ["original", "remaining"]
+            let request = Task { await store.retrieveQueued(index: 0) }
+            while transport.resume == nil { await Task.yield() }
+            store.handle(try decode(WsIncoming.self,
+                "{\"type\":\"output\",\"sessionId\":\"queue\",\"data\":{\"title\":\"Still responding\"" + queuePayload + "}}"))
+            transport.resume?.resume(returning: try decode(SessionSnapshot.self,
+                #"{"id":"queue","sessionKind":"structured","status":"running","queuedMessages":["remaining"]}"#))
+            let confirmed = await request.value
+            XCTAssertTrue(confirmed)
+            let expected = queuePayload.isEmpty ? ["remaining"] : queuePayload.contains("newer") ? ["newer queued message"] : []
+            XCTAssertEqual(store.queuedMessages, expected)
+            XCTAssertFalse(store.queueMutationPending)
+        }
+    }
+
+    @MainActor
     func testUnknownQueueDeleteKeepsSourceAndNeverRetriesOrRefills() async {
         let transport = QueueRetrievalStub()
         let store = ChatStore(sessionId: "unknown-queue", api: api, drafts: SessionDraftStore(), queueRetrievalTransport: transport)
@@ -415,6 +435,23 @@ final class ComposerToolParityTests: XCTestCase {
         let result = try decode(ContentBlock.self, #"{"type":"tool_result","tool_use_id":"t","content":"","preview":"bounded result","_truncated":true}"#)
         guard case .toolResult(_, let text, _, _, _, _, let projection) = result else { return XCTFail("Expected result") }
         XCTAssertEqual(toolResultPreview(text: text, projection: projection), "bounded result")
+    }
+
+    func testActivitySummaryUsesProjectionWithoutExposingBridgeMetadata() throws {
+        func input(_ json: String) throws -> [String: JSONValue] {
+            guard case .toolUse(_, _, _, let input, _) = try decode(ContentBlock.self, json) else {
+                throw NSError(domain: "Expected tool invocation", code: 1)
+            }
+            return input
+        }
+        let projected = try input(#"{"type":"tool_use","id":"t","name":"Bash","preview":"Build completed","activity":{"kind":"command"},"input":{}}"#)
+        XCTAssertEqual(activityToolSummary(description: nil, input: projected), "Build completed")
+        XCTAssertEqual(toolInputDetail(projected), "")
+        let metadataOnly = try input(#"{"type":"tool_use","id":"t","name":"Bash","occurredAt":"2026-10-23T01:00:00Z","input":{}}"#)
+        XCTAssertEqual(activityToolSummary(description: nil, input: metadataOnly), "")
+        let realArgument = try input(#"{"type":"tool_use","id":"t","name":"Custom","activity":{"kind":"other"},"input":{"value":"__wandToolActivity is user content"}}"#)
+        XCTAssertEqual(activityToolSummary(description: nil, input: realArgument), "value: __wandToolActivity is user content")
+        XCTAssertTrue(toolInputDetail(realArgument).contains("__wandToolActivity is user content"))
     }
 
     /// 时间线时钟的取值顺序与 Android 一致：activity 自带时间优先，其次块级 occurredAt，两者都没有时不造假。

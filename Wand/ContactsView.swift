@@ -1,22 +1,28 @@
 import SwiftUI
+import UIKit
 
 struct ContactMorphButton: View {
     let expanded: Bool
     let symbol: String
     let label: String
     var disabled = false
+    var title: String? = nil
     let action: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduced
     var body: some View {
         Button(action: action) {
+            HStack(spacing: 4) {
             ZStack {
                 Image(systemName: symbol).opacity(expanded ? 0 : 1).rotationEffect(.degrees(reduced || !expanded ? 0 : -45))
                 Image(systemName: "xmark").opacity(expanded ? 1 : 0).rotationEffect(.degrees(reduced || expanded ? 0 : 45))
             }
             .font(.system(size: 17, weight: .semibold))
-            .frame(width: 44, height: 44).contentShape(Rectangle())
+            .frame(width: title == nil ? 24 : 20, height: 24).contentShape(Rectangle())
+            if let title { Text(title).font(.subheadline.weight(.medium)) }
+            }.frame(minHeight: 28)
             .animation(reduced ? nil : WandMotion.stateSwap, value: expanded)
-        }.buttonStyle(WandQuietButtonStyle()).disabled(disabled).accessibilityLabel(label)
+        }.buttonStyle(.glass).buttonBorderShape(title == nil ? .circle : .capsule)
+            .disabled(disabled).accessibilityLabel(label)
     }
 }
 
@@ -58,6 +64,7 @@ struct ContactsView: View {
     var serverDisplayName: String? = nil
     var onOpenSettings: (() -> Void)? = nil
     var onSwitchServer: (() -> Void)? = nil
+    @State private var revealedRowID: String?
     @State private var query = ""
     @State private var createChooser = false
     @State private var dispatching = false
@@ -67,6 +74,7 @@ struct ContactsView: View {
     @State private var pendingPanelChange: (() -> Void)?
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduced
+    @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
     private var creationOpen: Bool { createChooser || createKind != nil }
     var body: some View {
         VStack(spacing: 0) {
@@ -144,14 +152,42 @@ struct ContactsView: View {
                 .animation(reduced ? nil : WandMotion.stateSwap, value: createKind)
                 .animation(reduced ? nil : WandMotion.stateSwap, value: createChooser)
             }
+            .homeSwipeDismissal($revealedRowID)
+            .onChange(of: query) { _, _ in revealedRowID = nil }
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
                 if !store.busy && !store.editorDirty { clearPanels(); await store.refresh() }
             }
         }
         .background(Theme.background)
-        .toolbar(.hidden, for: .navigationBar)
-        .navigationBarBackButtonHidden(store.busy)
+        .navigationTitle(usesSystemNavigation ? "通讯录" : "")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(usesSystemNavigation ? .visible : .hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(store.busy || store.editorDirty || (!embedded && !usesSystemNavigation))
+        .toolbar {
+            if usesSystemNavigation {
+                if !embedded && (store.busy || store.editorDirty) {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("返回", systemImage: "chevron.left") { requestPanelChange(onBack) }
+                            .disabled(store.busy)
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(creationOpen ? "关闭创建面板" : "创建联系人",
+                           systemImage: creationOpen ? "xmark" : "plus", action: toggleCreation)
+                        .disabled(store.busy)
+                }
+                if #available(iOS 27.1, *) {
+                    ToolbarOverflowMenu {
+                        if let serverDisplayName {
+                            Section(serverDisplayName) { headerMenuItems.disabled(store.busy) }
+                        } else {
+                            headerMenuItems.disabled(store.busy)
+                        }
+                    }
+                }
+            }
+        }
         .task { store.activate(); await store.refresh() }
         .onDisappear { store.close() }
         .confirmationDialog("放弃未保存的资料修改？", isPresented: Binding(
@@ -173,63 +209,59 @@ struct ContactsView: View {
     }
     private var header: some View {
         VStack(spacing: 4) {
-            HStack(spacing: 6) {
-                if !embedded {
-                    Button { requestPanelChange(onBack) } label: { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
-                        .disabled(store.busy).accessibilityLabel("返回通讯录上级")
-                }
-                Button {
-                    if let onSwitchServer { requestPanelChange(onSwitchServer) }
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("通讯录").font(.headline).foregroundStyle(Theme.textPrimary)
-                        if let serverDisplayName {
-                            Text(serverDisplayName).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
-                        }
+            if !usesSystemNavigation {
+                HStack(spacing: 6) {
+                    if !embedded {
+                        Button { requestPanelChange(onBack) } label: { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
+                            .disabled(store.busy).accessibilityLabel("返回通讯录上级")
                     }
-                    .frame(maxWidth: .infinity, minHeight: WandLayout.controlTouch, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain).disabled(onSwitchServer == nil || store.busy)
-                .accessibilityLabel(serverDisplayName.map { "切换服务器：" + $0 } ?? "通讯录")
-                ContactMorphButton(expanded: dispatching, symbol: "paperplane", label: dispatching ? "关闭派工" : "派工", disabled: store.busy) {
-                    requestPanelChange { let next = !dispatching; clearPanels(); dispatching = next }
-                }
-                ContactMorphButton(expanded: creationOpen, symbol: "plus", label: creationOpen ? "关闭创建面板" : "创建联系人", disabled: store.busy) {
-                    if creationOpen { closePanels() }
-                    else { requestPanelChange { clearPanels(); searchFocused = false; createChooser = true } }
-                }
-                if let onOpenSettings {
-                    Menu {
-                        Button("设置", systemImage: "gearshape") { requestPanelChange(onOpenSettings) }
+                    Button {
+                        if let onSwitchServer { requestPanelChange(onSwitchServer) }
                     } label: {
-                        Image(systemName: "ellipsis").frame(width: WandLayout.controlTouch, height: WandLayout.controlTouch)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("通讯录").font(.title2.weight(.bold)).foregroundStyle(Theme.textPrimary)
+                            if let serverDisplayName {
+                                Text(serverDisplayName).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: WandLayout.controlTouch, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
-                    .disabled(store.busy).accessibilityLabel("更多通讯录功能")
+                    .buttonStyle(.plain).disabled(onSwitchServer == nil || store.busy)
+                    .accessibilityLabel(serverDisplayName.map { "切换服务器：" + $0 } ?? "通讯录")
+                    ContactMorphButton(expanded: creationOpen, symbol: "plus", label: creationOpen ? "关闭创建面板" : "创建联系人",
+                        disabled: store.busy, title: creationOpen ? "收起" : "新建", action: toggleCreation)
+                    Menu {
+                        headerMenuItems
+                    } label: {
+                        Text("更多").font(.subheadline.weight(.medium)).frame(minWidth: 44, minHeight: 44)
+                    }.disabled(store.busy).accessibilityLabel("更多通讯录功能")
                 }
+                .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             }
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(Theme.textSecondary)
-                TextField("搜索名字、职责、标签、团队成员", text: $query)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .focused($searchFocused).disabled(store.busy || store.editorDirty)
-                    .accessibilityIdentifier("contact-search-input")
-                Button { query = ""; searchFocused = true } label: {
-                    Image(systemName: "xmark.circle.fill").frame(width: 36, height: 36)
-                }.buttonStyle(.plain).disabled(store.busy || query.isEmpty)
-                    .opacity(query.isEmpty ? 0 : 1).accessibilityHidden(query.isEmpty)
-                    .accessibilityLabel("清空搜索")
-            }.padding(.horizontal, 12).frame(minHeight: 44)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-                .padding(.horizontal, 12).padding(.bottom, 10)
-        }.background(Theme.elevated)
+            HomeSearchField(placeholder: "搜索名字、职责、标签、团队成员", text: $query,
+                focused: $searchFocused, identifier: "contact-search-input")
+                .disabled(store.busy || store.editorDirty)
+        }.padding(.horizontal, WandLayout.pageInset).padding(.vertical, 4)
+            .background(Theme.background)
+    }
+    @ViewBuilder private var headerMenuItems: some View {
+        Button(dispatching ? "收起派工" : "派工", systemImage: "paperplane") {
+            requestPanelChange { let next = !dispatching; clearPanels(); dispatching = next }
+        }
+        if let onOpenSettings { Button("设置", systemImage: "gearshape") { requestPanelChange(onOpenSettings) } }
+        if let onSwitchServer { Button("切换服务器", systemImage: "server.rack") { requestPanelChange(onSwitchServer) } }
+    }
+    private func toggleCreation() {
+        if creationOpen { closePanels() }
+        else { requestPanelChange { clearPanels(); searchFocused = false; createChooser = true } }
     }
     private func closeSearch() { query = ""; searchFocused = false }
     private func requestPanelChange(_ action: @escaping () -> Void) {
         guard !store.busy else { return }
         if store.editorDirty { pendingPanelChange = action } else { action() }
     }
-    private func clearPanels() { createChooser = false; createKind = nil; expandedID = nil; dispatching = false }
+    private func clearPanels() { revealedRowID = nil; createChooser = false; createKind = nil; expandedID = nil; dispatching = false }
     private func closePanels() { requestPanelChange(clearPanels) }
     @ViewBuilder private func uncertainty(_ key: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -239,6 +271,17 @@ struct ContactsView: View {
                 .font(.caption).disabled(store.busy)
         }.padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
     }
+    private func contactActions(key: String, onMessage: @escaping () -> Void) -> [HomeRowAction] {
+        [
+            HomeRowAction(id: "message", title: "聊天", symbol: "bubble.left", perform: {
+                requestPanelChange { clearPanels(); onMessage() }
+            }),
+            HomeRowAction(id: "profile", title: "资料", symbol: "person.crop.circle", tint: Theme.info) {
+                requestPanelChange { clearPanels(); expandedID = key }
+            }
+        ]
+    }
+
     @ViewBuilder private func employeeRow(_ employee: SiliconEmployee) -> some View {
         let key = "employee:" + employee.id
         VStack(alignment: .leading, spacing: 10) {
@@ -266,6 +309,11 @@ struct ContactsView: View {
                 }.buttonStyle(.plain).disabled(store.busy || store.unconfirmedActions.contains(key))
                     .accessibilityLabel("进入员工对话：\(employee.name)")
             }
+            .homeSwipeActions(id: key, revealedID: $revealedRowID, actions: contactActions(key: key, onMessage: {
+                if let onOpenConversation { onOpenConversation(ConversationStore.employeeID(employee.id)) }
+                else if let onNewConversation { onNewConversation(employee.id) }
+                else { store.openEmployee(employee.id, onOpen: onOpenSession) }
+            }), enabled: !store.busy && !store.editorDirty)
             if let error = store.rowErrors[key] {
                 if store.unconfirmedActions.contains(key) { uncertainty(key) }
                 else { Text(error).font(.caption).foregroundStyle(Theme.danger) }
@@ -308,6 +356,10 @@ struct ContactsView: View {
                 }.buttonStyle(.plain).disabled(store.busy || store.unconfirmedActions.contains(key))
                     .accessibilityLabel("新建团队群聊：\(team.name)")
             }
+            .homeSwipeActions(id: key, revealedID: $revealedRowID, actions: contactActions(key: key, onMessage: {
+                if let onTeamConversation { onTeamConversation(team.id) }
+                else { store.openTeam(team.id, onOpen: onOpenRun) }
+            }), enabled: !store.busy && !store.editorDirty)
             if let error = store.rowErrors[key] {
                 if store.unconfirmedActions.contains(key) { uncertainty(key) }
                 else { Text(error).font(.caption).foregroundStyle(Theme.danger) }
@@ -321,55 +373,72 @@ struct ContactsView: View {
     }
 }
 
-/// Only the two home views are selected tabs; Contacts is a navigation action.
-struct HomeMenuPill: View {
+/// Four persistent root destinations; compact native navigation does not scale like page content.
+/// UIKit owns the material, selected indicator, animation, sizing and accessibility.
+struct HomeMenuPill: UIViewRepresentable {
     let mode: HomeListMode
     let onMode: (HomeListMode) -> Void
     let onContacts: () -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduced
-    @State private var leadingIndex = 0
-    @State private var trailingIndex = 0
-    @ScaledMetric(relativeTo: .caption) private var itemHeight: CGFloat = 56
-    private var modeIndex: Int {
-        switch mode { case .im: return 0; case .contacts: return 1; case .sessions: return 2; case .board: return 3 }
+    var canSelect: (HomeListMode) -> Bool = { _ in true }
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.colorScheme) private var scheme
+    private static let modes: [HomeListMode] = [.im, .contacts, .sessions, .board]
+    private static let symbols = ["bubble.left.and.bubble.right", "person.crop.rectangle", "folder", "square.grid.2x2"]
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UITabBar {
+        let bar = UITabBar()
+        bar.delegate = context.coordinator
+        bar.itemPositioning = .fill
+        bar.items = Self.modes.enumerated().map { index, mode in
+            let item = UITabBarItem(title: mode.label, image: UIImage(systemName: Self.symbols[index]),
+                selectedImage: UIImage(systemName: Self.symbols[index] + ".fill"))
+            item.tag = index
+            item.accessibilityIdentifier = "home-tab-" + mode.label
+            return item
+        }
+        updateUIView(bar, context: context)
+        return bar
     }
-    var body: some View {
-        HStack(spacing: 0) {
-            item("聊天", symbol: "bubble.left.and.bubble.right", active: mode == .im) { onMode(.im) }
-            item("通讯录", symbol: "person.crop.rectangle", active: mode == .contacts, action: onContacts)
-            item("工作区", symbol: "folder", active: mode == .sessions) { onMode(.sessions) }
-            item("任务", symbol: "square.grid.2x2", active: mode == .board) { onMode(.board) }
-        }
-        .background(alignment: .bottomLeading) {
-            GeometryReader { proxy in
-                let cell = proxy.size.width / 4
-                Capsule().fill(Theme.brand)
-                    .frame(width: CGFloat(abs(leadingIndex - trailingIndex) + 1) * cell - 28, height: 3)
-                    .offset(x: CGFloat(min(leadingIndex, trailingIndex)) * cell + 14, y: proxy.size.height - 5)
-            }.allowsHitTesting(false)
-        }
-        .background(Theme.elevated, in: Capsule()).overlay(Capsule().stroke(Theme.border.opacity(0.6)))
-        .frame(maxWidth: 440).frame(minHeight: itemHeight).padding(.bottom, 8)
-        .onAppear {
-            let index = modeIndex
-            leadingIndex = index; trailingIndex = index
-        }
-        .onChange(of: mode) { _, _ in
-            let target = modeIndex
-            if reduced { leadingIndex = target; trailingIndex = target }
-            else {
-                // The front edge starts first, the rear edge follows using the shared token.
-                withAnimation(WandMotion.tabFront) { leadingIndex = target }
-                withAnimation(WandMotion.tabRear) { trailingIndex = target }
+
+    func updateUIView(_ bar: UITabBar, context: Context) {
+        context.coordinator.mode = mode
+        context.coordinator.onMode = onMode
+        context.coordinator.onContacts = onContacts
+        context.coordinator.canSelect = canSelect
+        context.coordinator.enabled = enabled
+        bar.overrideUserInterfaceStyle = scheme == .dark ? .dark : .light
+        bar.tintColor = UIColor(Theme.brandText)
+        bar.items?.forEach { $0.isEnabled = enabled }
+        let index = Self.modes.firstIndex(of: mode) ?? 0
+        if bar.selectedItem?.tag != index { bar.selectedItem = bar.items?[index] }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITabBar, context: Context) -> CGSize? {
+        let width = min(440, proposal.width ?? 440)
+        let fitted = uiView.sizeThatFits(CGSize(width: width, height: proposal.height ?? 0))
+        return CGSize(width: width, height: fitted.height)
+    }
+
+    static func dismantleUIView(_ bar: UITabBar, coordinator: Coordinator) { bar.delegate = nil }
+
+    final class Coordinator: NSObject, UITabBarDelegate {
+        var mode = HomeListMode.im
+        var onMode: (HomeListMode) -> Void = { _ in }
+        var onContacts: () -> Void = {}
+        var canSelect: (HomeListMode) -> Bool = { _ in true }
+        var enabled = true
+        func position(for bar: UIBarPositioning) -> UIBarPosition { .bottom }
+        func tabBar(_ tabBar: UITabBar, didSelect item: UITabBarItem) {
+            let modes = HomeMenuPill.modes
+            guard modes.indices.contains(item.tag) else { return }
+            let requested = modes[item.tag]
+            guard enabled && canSelect(requested) else {
+                tabBar.selectedItem = tabBar.items?[modes.firstIndex(of: mode) ?? 0]
+                return
             }
+            if requested == .contacts { onContacts() } else { onMode(requested) }
         }
-    }
-    private func item(_ title: String, symbol: String, active: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 3) {
-                Image(systemName: symbol).font(.body.weight(.medium))
-                Text(title).font(.caption.weight(.semibold))
-            }.foregroundStyle(active ? Theme.brand : Theme.textSecondary).frame(maxWidth: .infinity).frame(minHeight: itemHeight)
-        }.buttonStyle(.plain).accessibilityLabel(title).accessibilityAddTraits(active ? .isSelected : [])
     }
 }

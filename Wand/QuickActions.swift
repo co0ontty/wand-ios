@@ -117,6 +117,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         skipPermissionPrompts = false
 #endif
         SessionNotificationController.shared.configure(requestPermission: !skipPermissionPrompts)
+        if !skipPermissionPrompts {
+            RemoteNotificationController.shared.configure()
+            LiveActivityPushController.shared.configure()
+        }
 #if DEBUG
         guard !skipPermissionPrompts else {
             return true
@@ -128,6 +132,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             LocalNetworkPermission.triggerPromptIfNeeded()
         }
         return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        RemoteNotificationController.shared.registered(deviceToken: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        // Raw system errors can include device identifiers. Only expose a fixed, non-secret status.
+        RemoteNotificationController.shared.registrationFailed()
     }
 
     func application(

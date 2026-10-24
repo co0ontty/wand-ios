@@ -26,6 +26,31 @@ import SwiftUI
     }
 }
 
+/// One detail viewport for pending and running conversations. Creation supplies only
+/// its options and submit action; it does not own a second page or keyboard layout.
+struct ChatDetailLayout<Content: View, Composer: View>: View {
+    var topClearance: CGFloat = 0
+    var keyboardLift: CGFloat = 0
+    var onReadingTap: () -> Void = {}
+    @ViewBuilder let content: () -> Content
+    @ViewBuilder let composer: () -> Composer
+
+    var body: some View {
+        VStack(spacing: 0) {
+            content()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+                .padding(.top, topClearance)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onReadingTap)
+            composer()
+                .padding(.bottom, keyboardLift)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.workspaceReading)
+    }
+}
+
 /// The text view stays mounted, including while the small capsule hides its editing area.
 struct FocusComposerSurface<Editor: View, Add: View, Send: View, Settings: View>: View {
     let expanded: Bool
@@ -35,6 +60,10 @@ struct FocusComposerSurface<Editor: View, Add: View, Send: View, Settings: View>
     @ViewBuilder let add: () -> Add
     @ViewBuilder let send: () -> Send
     @ViewBuilder let settings: () -> Settings
+    var surfaceColor: Color? = nil
+    // The dock may own outer spacing; it must not remove the text-field surface.
+    var isEmbeddedInDock = false
+    var isFocused = false
     var actionCount = 0
     var accessory: AnyView? = nil
     @Environment(\.accessibilityReduceMotion) private var reduced
@@ -45,7 +74,8 @@ struct FocusComposerSurface<Editor: View, Add: View, Send: View, Settings: View>
                 capsule
                 if actionCount > 0 { send().frame(width: actionWidth, height: 48).padding(.trailing, 4) }
             }
-        }.padding(.horizontal, 12).padding(.bottom, 6)
+        }.padding(.horizontal, isEmbeddedInDock ? 0 : 12)
+            .padding(.bottom, isEmbeddedInDock ? 0 : 6)
     }
     private var capsule: some View {
         VStack(spacing: 0) {
@@ -60,16 +90,17 @@ struct FocusComposerSurface<Editor: View, Add: View, Send: View, Settings: View>
                     Button(action: onFocus) {
                         HStack(spacing: 4) {
                             if hasDraft { Circle().fill(Theme.brand).frame(width: 6, height: 6) }
-                            Text(hasDraft ? "草稿 · 未发送" : "发消息…").font(.subheadline).lineLimit(1)
-                        }.frame(maxWidth: .infinity, minHeight: 48).contentShape(Rectangle())
+                            Text(hasDraft ? "草稿 · 未发送" : "发消息…").font(.body).lineLimit(1)
+                        }.padding(.leading, 8).padding(.trailing, 12)
+                            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading).contentShape(Rectangle())
                     }.buttonStyle(.plain).accessibilityLabel(hasDraft ? "编辑未发送草稿及附件" : "展开文字输入")
                         .frame(height: expanded ? 0 : nil).clipped()
                         .opacity(expanded ? 0 : 1).allowsHitTesting(!expanded).accessibilityHidden(expanded)
             }.padding(.horizontal, 4)
         }
         .foregroundStyle(Theme.textSecondary)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: expanded ? 20 : 24))
-        .overlay(RoundedRectangle(cornerRadius: expanded ? 20 : 24).stroke(Theme.border, lineWidth: 0.8))
+        .wandInputSurface(focused: isFocused, cornerRadius: expanded ? 20 : 24,
+            fill: surfaceColor ?? Theme.surface)
         // The editor uses full width; only the bottom toolbar reserves the send slot.
         .frame(maxWidth: .infinity)
         .animation(reduced ? nil : WandMotion.disclosure, value: expanded)
@@ -138,10 +169,10 @@ private struct ComposerCapsuleToolbarLayout: Layout {
     }
 }
 
-/// Default is the middle of the free slot between back and the two trailing controls.
+/// Default is centered between the back and consolidated menu controls.
 func topCompanionCenter(width: CGFloat, size: CGFloat, side: CatComposerSide, drag: CGFloat) -> CGFloat {
-    let minimum = 64 + size / 2
-    let maximum = max(minimum, width - 116 - size / 2)
+    let minimum = ChatTopLayout.backInset + ChatTopLayout.controlRowInset + size / 2
+    let maximum = max(minimum, width - ChatTopLayout.actionsInset - ChatTopLayout.controlRowInset - size / 2)
     let center = (minimum + maximum) / 2
     let resting = side == .left ? center : min(maximum, center + 24)
     return min(maximum, max(minimum, resting + drag))
@@ -156,10 +187,10 @@ enum ChatTopLayout {
     static func clearance(compact: Bool) -> CGFloat {
         max(controlsClearance, compact ? 56 : 100)
     }
-    /// 顶栏身份区可用的水平带子：左侧让开返回键，右侧让开文件与更多两枚按钮，
+    /// 顶栏身份区可用的水平带子：左侧让开返回键，右侧让开合并后的更多按钮，
     /// 与 Android `FloatingControlsBackInset` / `FloatingControlsActionsInset` 同一份几何。
     static let backInset = horizontalInset + controlTouch
-    static let actionsInset = horizontalInset + controlTouch * 2 + controlRowInset
+    static let actionsInset = horizontalInset + controlTouch
     static func identityBand(width: CGFloat) -> (center: CGFloat, width: CGFloat) {
         let usable = max(48, width - backInset - actionsInset)
         return (backInset + usable / 2, usable)
@@ -265,7 +296,7 @@ struct ChatTopIdentityBar: View {
                 TopCapsuleTitle(title: title, subtitle: subtitle,
                     avatarID: avatarID, avatarName: avatarName, avatarValue: avatarValue,
                     avatarSize: 30, titleSize: 13, subtitleSize: 11,
-                    titleWidth: max(80, band.width - 48),
+                    titleWidth: max(48, band.width - 67),
                     activity: activity, thinking: thinking, speaking: speaking)
             }
             // 身份文字只在返回键与右侧两枚按钮之间的带子里排布，长标题省略号不会压到按钮。
@@ -297,13 +328,13 @@ struct TopChatCompanion<Face: View>: View {
     var body: some View {
         GeometryReader { area in
             let size: CGFloat = title == nil ? (verticalSizeClass == .compact ? 48 : 88) : identityMetrics.faceSize
-            let footprint = title != nil && identityMetrics.compact ? max(48, area.size.width - 180) : size
+            let footprint = title != nil && identityMetrics.compact ? max(48, ChatTopLayout.identityBand(width: area.size.width).width - ChatTopLayout.controlRowInset * 2) : size
             let center = topCompanionCenter(width: area.size.width, size: footprint, side: side, drag: dragOffset)
             if title != nil && identityMetrics.compact {
                 HStack(spacing: 8) {
                     face(size).frame(width: size, height: size)
                     identityText.frame(maxWidth: .infinity, alignment: .leading)
-                }.frame(width: max(48, area.size.width - 180), height: identityMetrics.clearance)
+                }.frame(width: max(48, ChatTopLayout.identityBand(width: area.size.width).width - ChatTopLayout.controlRowInset * 2), height: identityMetrics.clearance)
                     .position(x: center, y: identityMetrics.clearance / 2)
             } else {
                 face(size).frame(width: size, height: size).position(x: center, y: size / 2 + 4)
@@ -330,22 +361,17 @@ struct TopChatCompanion<Face: View>: View {
 
 struct ComposerSettingLabel: View {
     let title: String
-    var symbol: String? = nil
+    @Environment(\.isEnabled) private var enabled
     var body: some View {
-        Group {
-            if let symbol {
-                Image(systemName: symbol).font(.system(size: 16)).frame(width: 44, height: 48)
-            } else {
-                HStack(spacing: 3) {
-                    Text(title).font(.caption).lineLimit(1).truncationMode(.tail)
-                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-                }.frame(minWidth: 44, maxWidth: .infinity, minHeight: 48)
-            }
-        }.contentShape(Rectangle())
+        Text(title).font(.caption.weight(.medium)).foregroundStyle(Theme.textSecondary)
+            .lineLimit(1).truncationMode(.tail)
+            .frame(minWidth: 44, maxWidth: .infinity, minHeight: 48)
+            .opacity(enabled ? 1 : 0.45)
+            .contentShape(Rectangle())
     }
 }
 
-/// Reuse native buttons; narrow toolbars keep the model name and two independent icons.
+/// Closed options show only their current values; full labels belong to the picker.
 struct ComposerSettingsStrip: View {
     let model: String
     let mode: String
@@ -354,23 +380,15 @@ struct ComposerSettingsStrip: View {
     let onMode: () -> Void
     let onThinking: () -> Void
     var modeName: String = "权限模式"
-    var modeSymbol: String = "lock"
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                setting(model, accessibility: "模型：\(model)", action: onModel)
-                setting(mode, accessibility: "\(modeName)：\(mode)", action: onMode)
-                setting(thinking, accessibility: "思考深度：\(thinking)", action: onThinking)
-            }.fixedSize(horizontal: true, vertical: false)
-            HStack(spacing: 0) {
-                setting(model, accessibility: "模型：\(model)", action: onModel)
-                setting(mode, symbol: modeSymbol, accessibility: "\(modeName)：\(mode)", action: onMode)
-                setting(thinking, symbol: "brain", accessibility: "思考深度：\(thinking)", action: onThinking)
-            }
-        }.buttonStyle(.plain).foregroundStyle(Theme.textSecondary)
+        HStack(spacing: 4) {
+            setting(model, accessibility: "模型：\(model)", action: onModel)
+            setting(mode, accessibility: "\(modeName)：\(mode)", action: onMode)
+            setting(thinking, accessibility: "思考深度：\(thinking)", action: onThinking)
+        }.buttonStyle(WandQuietButtonStyle(tint: Theme.textSecondary))
     }
-    private func setting(_ label: String, symbol: String? = nil, accessibility: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { ComposerSettingLabel(title: label, symbol: symbol) }
+    private func setting(_ label: String, accessibility: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { ComposerSettingLabel(title: label) }
             .accessibilityLabel(accessibility).accessibilityHint("打开完整选项")
     }
 }

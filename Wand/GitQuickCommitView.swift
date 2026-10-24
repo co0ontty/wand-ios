@@ -33,53 +33,18 @@ final class QuickCommitFeedbackController: ObservableObject {
     }
 }
 
-struct GitChangesToolbarButton: View {
+/// The compact Git action now lives in the same native symbol menu as files.
+/// Keep the original visibility and in-flight gate when projecting it into a palette.
+struct GitQuickCommitMenuAction {
     let status: GitStatusResult?
     var phase: QuickCommitToolbarPhase = .idle
     let action: () -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    @ViewBuilder
-    var body: some View {
-        if shouldShow {
-            Button(action: action) {
-                Group {
-                    switch phase {
-                    case .loading:
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(Theme.brand)
-                            .accessibilityLabel("快捷提交执行中")
-                    case .done:
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 13, weight: .bold))
-                            .accessibilityLabel("快捷提交完成")
-                    case .idle:
-                        HStack(spacing: 4) {
-                            Image(systemName: "arrow.triangle.branch")
-                            if totalChanges > 0 {
-                                Text("~\(counts.modified)")
-                                Text("-\(counts.deleted)")
-                                    .foregroundColor(Theme.danger)
-                                Text("+\(counts.added)")
-                                    .foregroundColor(Theme.success)
-                            } else {
-                                Text("↑\(status?.ahead ?? 0)")
-                            }
-                        }
-                    }
-                }
-                .font(.wand(size: 9, weight: .semibold, design: .monospaced))
-                .foregroundColor(phase == .done ? Theme.success : (phase == .idle ? Theme.textSecondary : Theme.brand))
-                .frame(minWidth: 44, minHeight: 32)
-                .contentShape(Rectangle())
-                .transition(.opacity.combined(with: .scale(scale: 0.92)))
-                .id(phase)
-            }
-            .disabled(phase != .idle)
-            .animation(reduceMotion ? nil : WandMotion.disclosure, value: phase)
-            .accessibilityLabel(accessibilityLabel)
-        }
+    var item: SessionMenuAction? {
+        guard shouldShow else { return nil }
+        return SessionMenuAction(id: "git", title: accessibilityLabel,
+            symbol: phase == .done ? "checkmark" : phase == .loading ? "hourglass" : "arrow.triangle.branch",
+            isEnabled: phase == .idle, action: action)
     }
 
     private var shouldShow: Bool {
@@ -98,7 +63,7 @@ struct GitChangesToolbarButton: View {
         case .done:
             return "快捷提交完成"
         case .idle:
-            return "Git 修改 \(counts.modified)，删除 \(counts.deleted)，新增 \(counts.added)"
+            return "变更与提交，修改 \(counts.modified)，删除 \(counts.deleted)，新增 \(counts.added)，未推送 \(status?.ahead ?? 0)"
         }
     }
 
@@ -382,14 +347,14 @@ struct GitQuickCommitView: View {
                     if generating {
                         ProgressView().controlSize(.small)
                     } else {
-                        Text("✦").font(.wand(size: 12))
+                        Image(systemName: "sparkles").font(.wand(size: 12))
                     }
                     Text(generating ? "生成中…" : "AI").font(.wand(size: 12, weight: .medium))
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
-                .background(Capsule().stroke(Theme.border, lineWidth: 1))
-            }
+                            }
+            .buttonStyle(.glass).buttonBorderShape(.capsule)
             .foregroundColor(Theme.brand)
             .disabled(generating || committing || !hasChanges)
         }
@@ -542,7 +507,7 @@ struct GitQuickCommitView: View {
                     .foregroundColor(Theme.success)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
-                    .background(Capsule().fill(Theme.success.opacity(0.12)))
+                    .wandGlassCapsule(tint: Theme.success)
             }
         }
         .padding(12)
@@ -578,7 +543,7 @@ struct GitQuickCommitView: View {
             .foregroundColor(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(Capsule().fill(color.opacity(0.12)))
+            .wandGlassCapsule(tint: color)
     }
 
     // MARK: - 结果面板
@@ -625,9 +590,8 @@ struct GitQuickCommitView: View {
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
-                            .background(Capsule().fill(Theme.brand))
-                            .foregroundColor(.white)
                         }
+                        .buttonStyle(.glassProminent).buttonBorderShape(.capsule).tint(Theme.brand)
                         .disabled(pushing)
                     }
                 }
@@ -941,8 +905,7 @@ private struct MagneticDockView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
-        .background(Capsule().fill(active ? color.opacity(0.16) : Theme.surface))
-        .overlay(Capsule().stroke(color.opacity(active ? 0.7 : 0.32), lineWidth: 1.2))
+        .wandGlassCapsule(tint: active ? color : nil)
         .background(
             GeometryReader { geo in
                 Color.clear.preference(key: ChipSizeKey.self, value: [id: geo.size])

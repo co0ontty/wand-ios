@@ -10,6 +10,33 @@ enum HomeFoldMode: String, CaseIterable, Identifiable {
 
 enum HomeSessionPulse: Equatable { case running, needsYou, quiet }
 
+/// Execution facts, never inferred from a task's business column or process liveness.
+enum HomeExecutionState: String, CaseIterable {
+    case running, queued, needsYou, failed, completed, idle, archived
+    var label: String {
+        switch self {
+        case .running: return "运行中"
+        case .queued: return "排队中"
+        case .needsYou: return "待处理"
+        case .failed: return "失败"
+        case .completed: return "已完成"
+        case .idle: return "未运行"
+        case .archived: return "已归档"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .running: return "play.fill"
+        case .queued: return "clock"
+        case .needsYou: return "hand.raised.fill"
+        case .failed: return "exclamationmark.circle.fill"
+        case .completed: return "checkmark.circle.fill"
+        case .idle: return "pause.circle"
+        case .archived: return "archivebox"
+        }
+    }
+}
+
 struct HomeSessionCounts: Equatable {
     var running = 0
     var needsYou = 0
@@ -36,6 +63,35 @@ struct HomeRecentGroup: Identifiable {
 }
 
 enum HomePresentation {
+    static func executionState(_ task: WandBoardTask) -> HomeExecutionState {
+        let sessions = task.sessions.filter { $0.archived != true }
+        if sessions.contains(where: { $0.permissionBlocked == true || ["waiting-input", "waiting_input"].contains($0.status) }) { return .needsYou }
+        if sessions.contains(where: { $0.status == "failed" }) { return .failed }
+        if task.executionStatus == "running" || sessions.contains(where: {
+            $0.executionStatus == "running" || $0.inFlight == true ||
+                ($0.isStructured && $0.inFlight == nil && ["running", "thinking"].contains($0.status))
+        }) { return .running }
+        if task.hasQueuedExecution || sessions.contains(where: { $0.executionStatus == "queued" || $0.status == "queued" }) { return .queued }
+        return task.status == "archived" ? .archived : task.status == "done" ? .completed : .idle
+    }
+
+    static func executionState(_ session: WorkspaceSessionSummary) -> HomeExecutionState {
+        if session.archived == true { return .archived }
+        if session.activityStatus == "failed" { return .failed }
+        if pulse(session) == .needsYou { return .needsYou }
+        if session.activityStatus == "queued" { return .queued }
+        if pulse(session) == .running { return .running }
+        return session.isJustCompleted ? .completed : .idle
+    }
+
+    static func executionState(_ task: WorkspaceTaskSummary) -> HomeExecutionState {
+        let states = task.sessions.filter { $0.archived != true }.map(executionState)
+        if states.contains(.needsYou) { return .needsYou }
+        if states.contains(.failed) { return .failed }
+        if task.executionStatus == "running" || states.contains(.running) { return .running }
+        if task.hasQueuedExecution || states.contains(.queued) { return .queued }
+        return task.status == "done" ? .completed : .idle
+    }
     static func sessionSummary(_ sessions: [WorkspaceSessionSummary], total: Int? = nil) -> String {
         var seen = Set<String>()
         let unique = sessions.filter { seen.insert($0.id).inserted }

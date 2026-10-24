@@ -329,10 +329,7 @@ struct FloatingChatIcon: View {
     var body: some View {
         Image(systemName: symbol).font(.system(size: 17, weight: .semibold))
             .foregroundStyle(Theme.textPrimary)
-            .frame(width: 36, height: 36)
-            .background(Theme.surface, in: Circle())
-            .overlay(Circle().stroke(Theme.border.opacity(0.55), lineWidth: 0.8))
-            .frame(width: ChatTopLayout.controlTouch, height: ChatTopLayout.controlTouch).contentShape(Rectangle())
+            .frame(width: 24, height: 24)
     }
 }
 
@@ -342,10 +339,90 @@ struct FloatingChatControls<Actions: View>: View {
     var body: some View {
         HStack(spacing: 4) {
             Button(action: onBack) { FloatingChatIcon(symbol: "chevron.left") }
-                .buttonStyle(.plain).accessibilityLabel("返回会话列表")
+                .buttonStyle(.glass).buttonBorderShape(.circle)
+                .frame(width: ChatTopLayout.controlTouch, height: ChatTopLayout.controlTouch)
+                .accessibilityLabel("返回会话列表")
             Spacer(minLength: 0)
             actions()
-        }.padding(.horizontal, ChatTopLayout.horizontalInset).padding(.top, ChatTopLayout.controlRowInset)
+        }
+        .buttonStyle(.glass).buttonBorderShape(.circle)
+        .padding(.horizontal, ChatTopLayout.horizontalInset).padding(.top, ChatTopLayout.controlRowInset)
+    }
+}
+
+/// A menu action keeps its semantic label even when the native palette shows only its symbol.
+struct SessionMenuAction: Identifiable {
+    let id: String
+    let title: String
+    let symbol: String
+    var isEnabled = true
+    var role: ButtonRole? = nil
+    let action: () -> Void
+}
+
+/// Native menu shelves own hit testing, dismissal, VoiceOver and placement.
+/// Three icons per shelf keep long task action sets usable on the narrow outer display.
+struct SessionActionPalette: View {
+    let actions: [SessionMenuAction]
+
+    var body: some View {
+        ForEach(Array(stride(from: 0, to: actions.count, by: 3)), id: \.self) { start in
+            ControlGroup {
+                ForEach(Array(actions[start..<min(start + 3, actions.count)])) { item in
+                    Button(item.title, systemImage: item.symbol, role: item.role, action: item.action)
+                        .disabled(!item.isEnabled)
+                        .accessibilityLabel(item.title)
+                        .accessibilityIdentifier("session-menu-" + item.id)
+                }
+            }
+            .controlGroupStyle(.palette)
+            .labelStyle(.iconOnly)
+            .menuActionDismissBehavior(.enabled)
+        }
+    }
+}
+
+/// Budget only the expanded list; summaries and the real input keep their space.
+func composerAccessoryMaximumHeight(viewportHeight: CGFloat, keyboardLift: CGFloat = 0,
+                                    inputHeight: CGFloat = 48, accessibility: Bool = false) -> CGFloat {
+    let summaries: CGFloat = accessibility ? 176 : 104
+    let remaining = max(0, viewportHeight - keyboardLift - inputHeight - summaries - 16)
+    return min(160, remaining, max(44, remaining - 64))
+}
+
+struct ComposerAccessoryViewportState: Equatable {
+    let keyboardVisible: Bool
+    let maximumHeight: CGFloat
+}
+
+/// Shared quiet summary for progress and queued messages, outside the input field.
+struct ComposerAccessoryHeader: View {
+    let title: String
+    let summary: String
+    let count: String
+    let symbol: String
+    let expanded: Bool
+    var busy = false
+    var tint: Color = Theme.textSecondary
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol).font(.system(size: 16, weight: .medium))
+                .foregroundStyle(tint).frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.footnote.weight(.semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                Text(summary).font(.footnote).foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1)
+            }.fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if busy { ProgressView().controlSize(.small) }
+            Text(count).font(.caption.monospacedDigit()).foregroundStyle(Theme.textSecondary)
+                .fixedSize()
+            Image(systemName: expanded ? "chevron.down" : "chevron.up")
+                .font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.textSecondary)
+        }
+        .padding(.horizontal, 4).padding(.vertical, 6)
+        .frame(minHeight: 44).fixedSize(horizontal: false, vertical: true).contentShape(Rectangle())
     }
 }
 

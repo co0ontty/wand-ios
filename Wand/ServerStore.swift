@@ -411,7 +411,7 @@ final class ServerStore: ObservableObject {
     @Published var liveActivityEnabled: Bool {
         didSet { defaults.set(liveActivityEnabled, forKey: liveActivityKey) }
     }
-    /// 会话回复完成 / 等待授权的本地通知，默认开。
+    /// 会话回复完成 / 等待授权通知（APNs 优先，本地兼容回退），默认开。
     @Published var notificationsEnabled: Bool {
         didSet { defaults.set(notificationsEnabled, forKey: notificationsKey) }
     }

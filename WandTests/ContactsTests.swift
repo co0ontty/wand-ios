@@ -518,6 +518,143 @@ final class ContactsTests: XCTestCase {
     }
 }
 
+/// Native layout regression coverage for the shared form treatment and real
+/// candidate/choice controls. Fixtures never send employee mutations or AI work.
+@MainActor
+final class SettingsFormLayoutTests: XCTestCase {
+    func testInlineFormsFitNarrowDuoTabletAndAccessibilityText() async throws {
+        let variants: [(String, CGSize, DynamicTypeSize, ColorScheme)] = [
+            ("phone", CGSize(width: 320, height: 820), .large, .light),
+            ("duo", CGSize(width: 466, height: 678), .large, .light),
+            ("tablet", CGSize(width: 768, height: 1024), .large, .dark),
+            ("large-text", CGSize(width: 320, height: 820), .accessibility3, .dark),
+        ]
+        for (name, size, type, scheme) in variants {
+            let probe = SettingsFormProbe()
+            let host = UIHostingController(rootView: SettingsFormFixture(probe: probe)
+                .environment(\.dynamicTypeSize, type).environment(\.colorScheme, scheme))
+            let window = try makeWindow(host, size: size)
+            defer { window.isHidden = true }
+            try await Task.sleep(for: .milliseconds(150))
+            host.view.layoutIfNeeded()
+            let fields = descendants(host.view).compactMap { $0 as? UITextField }
+            XCTAssertFalse(fields.isEmpty, name)
+            for field in fields {
+                let rect = field.convert(field.bounds, to: host.view)
+                XCTAssertGreaterThan(rect.width, 60, name)
+                XCTAssertGreaterThanOrEqual(rect.minX, -1, name)
+                XCTAssertLessThanOrEqual(rect.maxX, size.width + 1, name)
+            }
+            // SwiftUI's accessibility identifier belongs to its semantic node,
+            // not necessarily the private UIKit input below that node.
+            let nameField = try XCTUnwrap(fields.first { $0.text == probe.name })
+            XCTAssertEqual(nameField.text, "赛博虎妞")
+            nameField.text = "新的名字"
+            nameField.sendActions(for: .editingChanged)
+            try await Task.sleep(for: .milliseconds(50))
+            XCTAssertEqual(nameField.text, "新的名字", "Editing must keep the same native input instance")
+            XCTAssertEqual(probe.name, "新的名字", "The native edit must reach the original form binding")
+            try capture(window, name: "form-" + name)
+        }
+    }
+
+    func testChoicesKeepLongSelectedAndDisabledOptionsReadable() async throws {
+        let sheet = SearchableChoiceSheet(title: "模型", sections: [SearchableChoiceSection(id: "model", items: [
+            SearchableChoiceItem(id: "default", label: "默认 · 跟随服务端"),
+            SearchableChoiceItem(id: "long-model", label: "provider/reasoning-model-with-a-very-long-name · 完整模型名称与上下文说明"),
+            SearchableChoiceItem(id: "disabled", label: "当前不可用的模型", enabled: false),
+        ], selectedId: "long-model", searchable: true)], notice: "目录加载失败时保留当前选择，可以重试。", onRetry: {}) { _, _ in
+            XCTFail("Rendering choices must not change session settings")
+        }
+        let host = UIHostingController(rootView: sheet.environment(\.dynamicTypeSize, .accessibility1))
+        let window = try makeWindow(host, size: CGSize(width: 320, height: 820))
+        defer { window.isHidden = true }
+        try await Task.sleep(for: .milliseconds(200))
+        let searchFields = descendants(host.view).compactMap { $0 as? UITextField }
+        XCTAssertEqual(searchFields.count, 1)
+        let search = try XCTUnwrap(searchFields.first)
+        search.text = "不存在的选项"
+        search.sendActions(for: .editingChanged)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(search.text, "不存在的选项")
+        search.text = ""; search.sendActions(for: .editingChanged)
+        try await Task.sleep(for: .milliseconds(100))
+        try capture(window, name: "choices-large-text")
+    }
+
+    func testInstalledCatalogRenderingWhenExplicitSnapshotProvided() async throws {
+        let path = "/tmp/wand-settings-catalog-66dbad35.json"
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw XCTSkip("Requires a read-only model catalog from the installed Wand service")
+        }
+        let catalog = try JSONDecoder().decode(ModelsResponse.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        let models = catalog.models + catalog.codexModels + catalog.piModels
+        XCTAssertFalse(models.isEmpty)
+        let longest = try XCTUnwrap(models.max { $0.label.count < $1.label.count })
+        let sheet = SearchableChoiceSheet(title: "模型", sections: [SearchableChoiceSection(id: "model",
+            items: [SearchableChoiceItem(id: longest.id, label: longest.label)], selectedId: longest.id, searchable: true)]) { _, _ in
+                XCTFail("Read-only acceptance must not change model settings")
+            }
+        let host = UIHostingController(rootView: sheet)
+        let window = try makeWindow(host, size: CGSize(width: 320, height: 820))
+        defer { window.isHidden = true }
+        try await Task.sleep(for: .milliseconds(200))
+        try capture(window, name: "installed-catalog")
+        print("Installed model catalog: \(models.count) models decoded and longest label rendered")
+    }
+
+    private func makeWindow<V: View>(_ host: UIHostingController<V>, size: CGSize) throws -> UIWindow {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(origin: .zero, size: size)
+        window.rootViewController = host
+        window.makeKeyAndVisible(); host.view.frame = window.bounds; host.view.layoutIfNeeded()
+        return window
+    }
+    private func descendants(_ view: UIView) -> [UIView] {
+        [view] + view.subviews.flatMap(descendants)
+    }
+    private func capture(_ window: UIWindow, name: String) throws {
+        let image = UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: image); attachment.name = name; attachment.lifetime = .keepAlways
+        add(attachment)
+        try image.pngData()?.write(to: URL(fileURLWithPath: "/tmp/wand-settings-" + name + ".png"))
+    }
+}
+
+@MainActor
+private final class SettingsFormProbe: ObservableObject {
+    @Published var name = "赛博虎妞"
+}
+
+private struct SettingsFormFixture: View {
+    @ObservedObject var probe: SettingsFormProbe
+    @State private var duty = "负责产品设计与研发，保持多端体验一致。"
+    @State private var tags = "开发，设计"
+    @State private var candidates = [ContactCandidate()]
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: WandLayout.sectionGap) {
+                Text("员工资料").font(.headline)
+                WandFormField("员工名字") {
+                    TextField("员工名字", text: $probe.name).accessibilityIdentifier("form-fixture-name")
+                }
+                WandFormField("职责") {
+                    TextField("描述这位员工负责什么", text: $duty, axis: .vertical).lineLimit(2...5)
+                }
+                WandFormField("标签", hint: "用逗号分隔，最多 8 个，每个 20 字。") {
+                    TextField("例如：开发，测试，设计", text: $tags)
+                }
+                Divider()
+                Text("执行候选 · 按顺序降级").font(.headline)
+                ContactCandidateEditor(agents: $candidates, catalog: nil)
+            }.padding(WandLayout.pageInset)
+        }.background(Theme.background).buttonStyle(WandQuietButtonStyle())
+    }
+}
+
 @MainActor
 private final class EmployeeEditingStub: EmployeeEditingService {
     let employee: SiliconEmployee

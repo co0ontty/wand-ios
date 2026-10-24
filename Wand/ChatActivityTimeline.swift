@@ -100,6 +100,7 @@ struct ActivityFoldCard: View {
     var onAskSubmit: (String, String) -> Void = { _, _ in }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.chatViewportHeight) private var viewportHeight
+    @Environment(\.dynamicTypeSize) private var typeSize
     @ObservedObject private var network = WandNetworkState.shared
     @AppStorage("wand.trafficTimelineMode") private var trafficMode = "wifi"
     @State private var expanded = false
@@ -174,7 +175,7 @@ struct ActivityFoldCard: View {
                     }.frame(width: 12, height: 12)
                     // 摘要点与时间线各行的轨道对齐，时钟紧跟圆点、排在摘要之前，
                     // 与行内「圆点 → 时钟 → 标题」同序（对齐 Android），左侧不留时间列。
-                    if let time = rows.last?.occurredAt {
+                    if !typeSize.isAccessibilitySize, let time = rows.last?.occurredAt {
                         Text(SessionTimeFormatting.chatClock(iso: time)).font(.caption2.monospaced()).foregroundStyle(Theme.textMuted).layoutPriority(1)
                     }
                     Text(summary).font(.caption).foregroundStyle(Theme.textSecondary).frame(maxWidth: .infinity, alignment: .leading)
@@ -222,7 +223,9 @@ private struct ActivityTimelineEntry: View {
     let baseURL: URL?
     let onInspection: (Bool) -> Void
     @State private var expanded = false
+    @State private var readingDetail = false
     @Environment(\.accessibilityReduceMotion) private var reduced
+    @Environment(\.dynamicTypeSize) private var typeSize
     private var thinking: String? { if case .plain(.thinking(let text, _, _, _)) = row.item { return text }; return nil }
     private var label: String {
         if thinking != nil { return "第 \(thinkingOrdinal)/\(thinkingTotal) 轮思考" }
@@ -259,6 +262,7 @@ private struct ActivityTimelineEntry: View {
     private static let railWidth: CGFloat = 12
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 0) {
             Button {
                 withAnimation(reduced ? nil : WandMotion.stateSwap) { expanded.toggle() }
                 onInspection(expanded)
@@ -268,7 +272,7 @@ private struct ActivityTimelineEntry: View {
                         .frame(width: Self.railWidth, height: 12).padding(.top, 2)
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
-                            if let clock {
+                            if !typeSize.isAccessibilitySize, let clock {
                                 Text(clock).font(.caption2.monospaced()).foregroundStyle(Theme.textMuted)
                                     .layoutPriority(1)
                             }
@@ -280,11 +284,44 @@ private struct ActivityTimelineEntry: View {
                     Image(systemName: "chevron.down").font(.caption).rotationEffect(.degrees(expanded ? 180 : 0)).padding(.top, 2)
                 }.frame(minHeight: thinking != nil ? 44 : 78, alignment: .topLeading).padding(.vertical, 8).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel(label).accessibilityValue(state.label + (expanded ? "，已展开" : "，已收起"))
+            Button { readingDetail = true; onInspection(true) } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel("展开阅读：" + label)
+            }
             if expanded {
                 if let thinking { Text(thinking.isEmpty ? "思考内容尚未到达。" : thinking).font(.subheadline).textSelection(.enabled).padding(.leading, Self.railWidth + 8) }
-                else { ActivityTimelineToolDetail(item: row.item, baseURL: baseURL).padding(.leading, Self.railWidth + 8) }
+                else { ActivityTimelineToolDetail(item: row.item, baseURL: baseURL, running: active).padding(.leading, Self.railWidth + 8) }
             }
         }.overlay(alignment: .leading) { Rectangle().fill(Theme.border).frame(width: 1).offset(x: Self.railWidth / 2).allowsHitTesting(false) }
+        .sheet(isPresented: $readingDetail, onDismiss: { onInspection(expanded) }) {
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if typeSize.isAccessibilitySize, let clock {
+                            Text(clock).font(.caption.monospaced()).foregroundStyle(Theme.textSecondary)
+                        }
+                        if let thinking {
+                            Text(state.label).font(.caption).foregroundStyle(statusColor)
+                            Text(thinking.isEmpty ? "思考内容尚未到达。" : thinking)
+                                .font(.body).textSelection(.enabled)
+                        } else {
+                            ActivityTimelineToolDetail(item: row.item, baseURL: baseURL, running: active)
+                        }
+                    }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .background(Theme.background)
+                .navigationTitle(label).navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") { readingDetail = false }
+                    }
+                }
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
         .onDisappear { onInspection(false) }
     }
 }
@@ -292,6 +329,7 @@ private struct ActivityTimelineEntry: View {
 private struct ActivityTimelineToolDetail: View {
     let item: DisplayItem
     let baseURL: URL?
+    let running: Bool
     @Environment(\.chatAPI) private var api
     @Environment(\.chatSessionID) private var sessionID
     @Environment(\.chatToolContentDidLoad) private var didLoad
@@ -312,9 +350,11 @@ private struct ActivityTimelineToolDetail: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if loading { Text("加载调用详情…").font(.caption).foregroundStyle(Theme.textSecondary) }
-            if let error { Text(error).font(.caption).foregroundStyle(Theme.danger); Button("重试") { retry += 1 } }
-            AssistantItemView(item: projectedItem, baseURL: baseURL, showSubagentTags: false, forceExpanded: true)
+            if loading { ProgressView("加载调用详情…").font(.caption).foregroundStyle(Theme.textSecondary) }
+            if let error { Text(error).font(.caption).foregroundStyle(Theme.danger); Button { retry += 1 } label: {
+                Text("重试").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+            }.buttonStyle(.plain) }
+            AssistantItemView(item: projectedItem, baseURL: baseURL, isLastTurn: running, isResponding: running, showSubagentTags: false, forceExpanded: true)
                 .environment(\.activityFoldCompact, true)
         }.task(id: retry) {
             guard let api, !sessionID.isEmpty, case .tool(let id, _, _, _, _, _) = item, !id.isEmpty else { return }

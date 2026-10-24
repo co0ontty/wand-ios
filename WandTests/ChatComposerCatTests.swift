@@ -231,6 +231,57 @@ private final class ChatLoadingURLProtocol: URLProtocol {
         XCTAssertEqual(scrolls, 1)
     }
 
+    func testFirstReplyOnlyScrollsAfterContentOutgrowsViewport() async throws {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9")!, token: nil)
+        let id = UUID().uuidString
+        let initial = try JSONDecoder().decode(SessionSnapshot.self, from: Data("{\"id\":\"\(id)\",\"sessionKind\":\"structured\",\"status\":\"running\",\"structuredState\":{\"inFlight\":true},\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"你好\"}]}]}".utf8))
+        let store = ChatStore(sessionId: id, api: api, drafts: SessionDraftStore(), initialSnapshot: initial)
+        let host = UIHostingController(rootView: ChatView(sessionId: id, api: api, sharedStore: store))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; store.shutdown() }
+        for _ in 0..<100 {
+            if composerAccessoryScrollViews(host.view).contains(where: { $0.bounds.height > 100 }) { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let scroll = try XCTUnwrap(composerAccessoryScrollViews(host.view).max { $0.bounds.height < $1.bounds.height })
+        let frames = ChatScrollFrameProbe(scroll: scroll)
+        frames.start()
+        defer { frames.stop() }
+        var shortSamples = 0
+        var overflowingSamples = 0
+        for chunk in 1...40 {
+            let payload: [String: Any] = ["type": "output", "data": ["incremental": true, "messageCount": 2,
+                "lastMessage": ["role": "assistant", "content": [["type": "text", "text": Array(repeating: "首条回复逐行增长，保持阅读位置稳定。", count: chunk).joined(separator: "\n")]]], "isResponding": true]]
+            store.handle(try JSONDecoder().decode(WsIncoming.self, from: JSONSerialization.data(withJSONObject: payload)))
+            try await Task.sleep(for: .milliseconds(60))
+            host.view.layoutIfNeeded()
+            let top = -scroll.adjustedContentInset.top
+            let bottom = max(top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            print("FIRST-REPLY chunk=\(chunk) content=\(scroll.contentSize.height) viewport=\(scroll.bounds.height) offset=\(scroll.contentOffset.y) bottom=\(bottom)")
+            if bottom == top {
+                shortSamples += 1
+                XCTAssertEqual(scroll.contentOffset.y, top, accuracy: 1, "Short first replies stay top-aligned; do not scroll into negative blank space")
+            } else {
+                overflowingSamples += 1
+                XCTAssertEqual(scroll.contentOffset.y, bottom, accuracy: 8, "Overflowing streaming replies must still follow the bottom (including 6pt tail padding)")
+            }
+        }
+        XCTAssertGreaterThan(shortSamples, 2)
+        XCTAssertGreaterThan(overflowingSamples, 2)
+        print("FIRST-REPLY frames=\(frames.samples.count) minOffset=\(frames.samples.map(\.offset).min() ?? 0)")
+        for frame in frames.samples where frame.content < frame.viewport {
+            XCTAssertEqual(frame.offset, 0, accuracy: 1, "Short content must not bounce between bottom and top on display frames")
+        }
+        let reversals = zip(frames.samples, frames.samples.dropFirst()).filter { before, after in
+            after.content >= before.content && abs(after.viewport - before.viewport) < 1 && after.offset < before.offset - 2
+        }
+        print("FIRST-REPLY reversals=\(reversals)")
+        XCTAssertTrue(reversals.isEmpty, "Growing reply must not repeatedly scroll backwards")
+    }
+
     func testLongChatSendAndStreamingUpdatesKeepMainActorResponsive() async throws {
         let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9")!, token: nil)
         let transport = FreezeReceiptTransport()
@@ -315,7 +366,6 @@ private final class ChatLoadingURLProtocol: URLProtocol {
             for width: CGFloat in [320, 402, 768] {
                 for type: DynamicTypeSize in [.large, .accessibility3] {
                     let controls = FloatingChatControls(onBack: {}) {
-                        FloatingChatIcon(symbol: "folder")
                         FloatingChatIcon(symbol: "ellipsis")
                     }.padding(.top, compact ? 0 : 18).environment(\.dynamicTypeSize, type)
                     let controlHeight = UIHostingController(rootView: controls).sizeThatFits(in: CGSize(width: width, height: 800)).height
@@ -435,7 +485,7 @@ private final class ChatLoadingURLProtocol: URLProtocol {
         XCTAssertEqual(chatTopReadback(title: "修复图片显示", subtitle: "", status: ""), "修复图片显示")
     }
 
-    /// 身份区只在顶栏控件之间的带子里排布：左边界让开返回键，右边界让开文件与更多按钮，
+    /// 身份区只在顶栏控件之间的带子里排布：左边界让开返回键，右边界让开合并后的更多按钮，
     /// 长标题的省略号不会压到可点控件上。
     func testIdentityBandStaysBetweenTopControls() {
         for width: CGFloat in [320, 402, 768] {
@@ -499,12 +549,12 @@ private final class ChatLoadingURLProtocol: URLProtocol {
     func testTopCatRemainsBetweenNativeTargetsForNarrowAndWideScreens() {
         for width: CGFloat in [320, 375, 402, 768, 1024] {
             let center = topCompanionCenter(width: width, size: 88, side: .left, drag: 0)
-            XCTAssertLessThan(center, width / 2)
+            XCTAssertEqual(center, width / 2, accuracy: 0.5)
             for side in [CatComposerSide.left, .right] {
                 for drag: CGFloat in [-999, 0, 999] {
                     let x = topCompanionCenter(width: width, size: 88, side: side, drag: drag)
                     XCTAssertGreaterThanOrEqual(x - 44, 64)
-                    XCTAssertLessThanOrEqual(x + 44, width - 116)
+                    XCTAssertLessThanOrEqual(x + 44, width - ChatTopLayout.actionsInset - ChatTopLayout.controlRowInset)
                 }
             }
         }
@@ -541,7 +591,576 @@ private struct InputOpeningTestView: View {
         }.padding(.bottom, keyboard.lift).ignoresSafeArea(.keyboard, edges: .bottom)
     }
 }
+
+@MainActor private final class ComposerAccessoriesProbe: ObservableObject {
+    @Published var todoExpanded = false
+    @Published var queueExpanded = false
+    @Published var editorHeight: CGFloat = 34
+    @Published var fieldHeight: CGFloat = 120
+    @Published var text = "保留这份尚未发送的草稿。\n检查 TODO 与待发消息展开后，仍然可以继续输入。"
+    var frames: [String: CGRect] = [:]
+}
+
+private struct ComposerAccessoryFrames: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
+}
+
+private extension View {
+    func measureComposerAccessory(_ name: String) -> some View {
+        background(GeometryReader { geometry in
+            Color.clear.preference(key: ComposerAccessoryFrames.self,
+                value: [name: geometry.frame(in: .named("composer-accessories"))])
+        })
+    }
+}
+
+/// Real shared components in a fixed viewport. State is injected through their
+/// public bindings; these fixtures do not claim physical hinge or touch coverage.
+private struct ComposerAccessoriesTestView: View {
+    @ObservedObject var probe: ComposerAccessoriesProbe
+    let todos: [TodoItem]
+    let queue: [String]
+    var recovery: AnyView? = nil
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    var body: some View {
+        GeometryReader { viewport in
+            let maximumHeight = composerAccessoryMaximumHeight(viewportHeight: viewport.size.height,
+                inputHeight: probe.fieldHeight, accessibility: typeSize.isAccessibilitySize)
+            ChatDetailLayout {
+                ScrollView {
+                    Text("离线布局样例 · 正在核对输入区\n\n消息阅读区域需要保留，展开辅助内容后仍然可以继续输入。")
+                        .font(.body).foregroundStyle(Theme.textPrimary)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
+                }
+                .background(Theme.workspaceReading)
+                .measureComposerAccessory("reading")
+            } composer: {
+                VStack(spacing: 4) {
+                    TodoProgressBar(todos: todos, maximumExpandedHeight: maximumHeight,
+                        expanded: $probe.todoExpanded)
+                        .measureComposerAccessory("todo")
+                    QueueBar(items: queue, expanded: $probe.queueExpanded,
+                        inFlight: true, steering: false, mutationPending: false,
+                        onPromote: { _ in }, onDelete: { _ in }, onEdit: { _ in }, onClearAll: {},
+                        maximumExpandedHeight: maximumHeight, recovery: recovery)
+                        .measureComposerAccessory("queue")
+                    FocusComposerSurface(expanded: true, hasDraft: true, onFocus: {}, editor: {
+                        IMEAwareComposerTextView(text: $probe.text, placeholder: "发消息…", isFocused: false,
+                            maximumHeight: composerMaximumInputHeight(compact: verticalSizeClass == .compact,
+                                keyboardVisible: false), submitOnReturn: false,
+                            onFocusChange: { _ in }, onCompositionChange: { _ in }, onSubmit: {},
+                            onHeightChange: { probe.editorHeight = $0 })
+                            .frame(height: max(34, probe.editorHeight))
+                    }, add: { ComposerAddButton(expanded: false, uploading: false, action: {}) }, send: {
+                        NativeComposerActions(phase: .idle, turnRunning: false, hasDraft: true, canSubmit: true,
+                            message: nil, onSend: {}, onStop: {})
+                    }, settings: {
+                        ComposerSettingsStrip(model: "GPT-6.1", mode: "全权限", thinking: "超高",
+                            onModel: {}, onMode: {}, onThinking: {})
+                    }, isEmbeddedInDock: true, actionCount: 1)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { probe.fieldHeight = $0 }
+                    .measureComposerAccessory("input")
+                }
+                .padding(.horizontal, 16).padding(.vertical, 6)
+                .background(Theme.workspaceReading)
+                .measureComposerAccessory("dock")
+            }
+            .coordinateSpace(name: "composer-accessories")
+            .onPreferenceChange(ComposerAccessoryFrames.self) { probe.frames = $0 }
+        }
+    }
+}
+
+@MainActor private final class ChatScrollFrameProbe: NSObject {
+    struct Sample: CustomStringConvertible {
+        let content: CGFloat
+        let viewport: CGFloat
+        let offset: CGFloat
+        var description: String { "(content=\(content), viewport=\(viewport), offset=\(offset))" }
+    }
+    private weak var scroll: UIScrollView?
+    private var displayLink: CADisplayLink?
+    private(set) var samples: [Sample] = []
+    init(scroll: UIScrollView) { self.scroll = scroll }
+    func start() {
+        let link = CADisplayLink(target: self, selector: #selector(record))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+    func stop() { displayLink?.invalidate(); displayLink = nil }
+    @objc private func record() {
+        guard let scroll else { return }
+        samples.append(Sample(content: scroll.contentSize.height, viewport: scroll.bounds.height,
+                              offset: scroll.contentOffset.y + scroll.adjustedContentInset.top))
+    }
+}
+
+@MainActor private func composerAccessoryScrollViews(_ root: UIView) -> [UIScrollView] {
+    (root is UITextView ? [] : (root as? UIScrollView).map { [$0] } ?? []) +
+        root.subviews.flatMap(composerAccessoryScrollViews)
+}
+
+private func composerSampleRGB(_ image: UIImage, at point: CGPoint) -> [Int]? {
+    guard let source = image.cgImage,
+          let pixel = source.cropping(to: CGRect(x: floor(point.x * image.scale),
+            y: floor(point.y * image.scale), width: 1, height: 1)) else { return nil }
+    var bytes = [UInt8](repeating: 0, count: 4)
+    let succeeded = bytes.withUnsafeMutableBytes { buffer -> Bool in
+        guard let context = CGContext(data: buffer.baseAddress, width: 1, height: 1, bitsPerComponent: 8,
+            bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        context.draw(pixel, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        return true
+    }
+    return succeeded ? bytes.prefix(3).map(Int.init) : nil
+}
+
+private func composerMaximumChannelDelta(_ first: [Int], _ second: [Int]) -> Int {
+    guard first.count == second.count else { return 255 }
+    var maximum = 0
+    for index in first.indices { maximum = max(maximum, abs(first[index] - second[index])) }
+    return maximum
+}
+
 @MainActor final class InputOpeningTests: XCTestCase {
+    func testQueueRecoverySlotStaysBoundedWithAndWithoutPendingMessages() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        let container = UIViewController()
+        window.rootViewController = container; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let original = String(repeating: "取回的原文必须完整保留。即使包含许多段落，也不能把输入框挤出屏幕。\n", count: 40)
+        let variants: [(String, CGFloat, CGFloat, DynamicTypeSize)] = [
+            ("narrow-landscape", 678, 466, .large), ("narrow-ax3", 320, 678, .accessibility3)
+        ]
+        for (variant, width, height, type) in variants {
+          for hasPendingMessages in [false, true] {
+            let probe = ComposerAccessoriesProbe()
+            probe.queueExpanded = true
+            let draft = probe.text
+            let recovery = AnyView(VStack(alignment: .leading, spacing: 4) {
+                Text("已取回；当前输入保留，确认后加入继续编辑。")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+                Button("加入当前输入继续编辑") {}.frame(minHeight: 44)
+                    .measureComposerAccessory("recovery-restore")
+                HStack {
+                    Button("复制原文") {}
+                    Spacer()
+                    Button("关闭") {}
+                }.font(.caption).frame(minHeight: 44)
+                    .measureComposerAccessory("recovery-actions")
+                Text(original).font(.footnote).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .measureComposerAccessory("recovery-original")
+            }.padding(.horizontal, 4).padding(.vertical, 8))
+            let root = ComposerAccessoriesTestView(probe: probe,
+                todos: [TodoItem(content: "继续核对输入区", status: "in_progress", activeForm: nil)],
+                queue: hasPendingMessages ? ["队列中仍保留第一条消息", "队列中仍保留第二条消息"] : [],
+                recovery: recovery)
+                .environment(\.colorScheme, .light).environment(\.dynamicTypeSize, type)
+                .environment(\.verticalSizeClass, width > height ? .compact : .regular)
+            let host = UIHostingController(rootView: root)
+            host.safeAreaRegions = []
+            host.overrideUserInterfaceStyle = .light
+            host.traitOverrides.preferredContentSizeCategory = type.isAccessibilitySize ? .accessibilityExtraLarge : .large
+            container.addChild(host); container.view.addSubview(host.view); host.didMove(toParent: container)
+            host.view.frame = CGRect(x: 0, y: 0, width: width, height: height)
+            defer { host.willMove(toParent: nil); host.view.removeFromSuperview(); host.removeFromParent() }
+            var previous: [String: CGRect] = [:]
+            var stable = 0
+            for _ in 0..<40 {
+                try await Task.sleep(for: .milliseconds(50))
+                host.view.layoutIfNeeded()
+                stable = probe.frames.count == 8 && probe.frames == previous ? stable + 1 : 0
+                if stable >= 3 { break }
+                previous = probe.frames
+            }
+            let name = "composer-accessories-recovery-\(variant)-\(hasPendingMessages ? "queued" : "empty-queue")"
+            XCTAssertGreaterThanOrEqual(stable, 3, name)
+            let input = try XCTUnwrap(probe.frames["input"])
+            let queue = try XCTUnwrap(probe.frames["queue"])
+            let reading = try XCTUnwrap(probe.frames["reading"])
+            let restore = try XCTUnwrap(probe.frames["recovery-restore"])
+            let actions = try XCTUnwrap(probe.frames["recovery-actions"])
+            let originalFrame = try XCTUnwrap(probe.frames["recovery-original"])
+            let list = try XCTUnwrap(composerAccessoryScrollViews(host.view).first {
+                let bounds = $0.convert($0.bounds, to: host.view)
+                return queue.contains(CGPoint(x: bounds.midX, y: bounds.midY))
+            })
+            let budget = composerAccessoryMaximumHeight(viewportHeight: height, inputHeight: input.height,
+                accessibility: type.isAccessibilitySize)
+            XCTAssertLessThanOrEqual(list.bounds.height, budget + 1, name + ": recovery uses the same list budget")
+            XCTAssertGreaterThan(list.contentSize.height, list.bounds.height * 4, "Full recovery text remains scrollable")
+            XCTAssertLessThanOrEqual(restore.maxY, originalFrame.minY)
+            XCTAssertLessThanOrEqual(actions.maxY, originalFrame.minY, "Recovery actions precede the long original")
+            XCTAssertGreaterThanOrEqual(reading.height, 44)
+            XCTAssertLessThanOrEqual(queue.maxY, input.minY + 1)
+            XCTAssertLessThanOrEqual(input.maxY, height)
+            XCTAssertEqual(probe.text, draft)
+
+            // Public UIKit scrolling verifies reachability without pretending this
+            // fixture performed a physical tap or a server queue mutation.
+            list.scrollRectToVisible(list.convert(restore, from: host.view), animated: false)
+            try await Task.sleep(for: .milliseconds(100))
+            host.view.layoutIfNeeded()
+            let visibleRestore = try XCTUnwrap(probe.frames["recovery-restore"])
+            let viewport = list.convert(list.bounds, to: host.view)
+            XCTAssertGreaterThanOrEqual(visibleRestore.intersection(viewport).height,
+                min(44, visibleRestore.height) - 1, "The restore action remains reachable in the bounded list")
+            XCTAssertEqual(try XCTUnwrap(probe.frames["input"]), input,
+                "Scrolling recovered content must not move the input field")
+            // Geometry can settle before the native disclosure cross-fade finishes.
+            try await Task.sleep(for: .milliseconds(250))
+            host.view.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+            try image.pngData()?.write(to: URL(fileURLWithPath: "/tmp/wand-\(name).png"))
+            let observation: [String: Any] = ["name": name, "queueHasMessages": hasPendingMessages,
+                "expandedListBudget": budget, "listHeight": list.bounds.height,
+                "scrollableContentHeight": list.contentSize.height, "recoveredCharacterCount": original.count,
+                "draftPreserved": probe.text == draft,
+                "frames": probe.frames.mapValues { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] }]
+            let data = try JSONSerialization.data(withJSONObject: observation, options: [.prettyPrinted, .sortedKeys])
+            let receipt = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            receipt.name = name + "-geometry"; receipt.lifetime = .keepAlways; add(receipt)
+            try data.write(to: URL(fileURLWithPath: "/tmp/wand-\(name).json"))
+          }
+        }
+    }
+
+    func testComposerAccessoriesRemainBoundedAcrossFourViewports() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        let container = UIViewController()
+        window.rootViewController = container
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let longText = String(repeating: "这是需要完整保留的超长中文内容，也包含 long-path/to/source.swift 与换行。\n", count: 3)
+        let todos = (0..<24).map { index in
+            TodoItem(content: "第 \(index + 1) 项：" + longText,
+                status: index == 0 ? "completed" : index == 1 ? "in_progress" : "pending",
+                activeForm: index == 1 ? "正在检查：" + longText : nil)
+        }
+        let queue = (0..<20).map { "第 \($0 + 1) 条待发消息：" + longText }
+        let sizes: [(String, CGFloat, CGFloat)] = [
+            ("open-portrait", 669, 951), ("open-landscape", 951, 669),
+            ("closed-portrait", 466, 678), ("closed-landscape", 678, 466),
+            ("narrow-content", 320, 678)
+        ]
+        for (sizeName, width, height) in sizes {
+          for dark in [false, true] {
+            for type: DynamicTypeSize in [.large, .accessibility3] {
+                // The system's shared bar can leave a narrower content lane than
+                // the display width. One AX variant covers that separate constraint.
+                if sizeName == "narrow-content" && (dark || !type.isAccessibilitySize) { continue }
+                let probe = ComposerAccessoriesProbe()
+                let originalDraft = probe.text
+                let root = ComposerAccessoriesTestView(probe: probe, todos: todos, queue: queue)
+                    .environment(\.colorScheme, dark ? .dark : .light)
+                    .environment(\.dynamicTypeSize, type)
+                    .environment(\.verticalSizeClass, width > height ? .compact : .regular)
+                let host = UIHostingController(rootView: root)
+                host.safeAreaRegions = []
+                host.traitOverrides.preferredContentSizeCategory = type.isAccessibilitySize ? .accessibilityExtraLarge : .large
+                host.overrideUserInterfaceStyle = dark ? .dark : .light
+                container.addChild(host); container.view.addSubview(host.view); host.didMove(toParent: container)
+                host.view.frame = CGRect(x: 0, y: 0, width: width, height: height)
+                defer {
+                    host.willMove(toParent: nil); host.view.removeFromSuperview(); host.removeFromParent()
+                }
+                var collapsedHeights: [String: CGFloat] = [:]
+                for (phase, todoExpanded, queueExpanded) in [
+                    ("collapsed", false, false), ("todo-expanded", true, false),
+                    ("todo-collapsed", false, false), ("queue-expanded", false, true),
+                    ("queue-collapsed", false, false)
+                ] {
+                    probe.todoExpanded = todoExpanded; probe.queueExpanded = queueExpanded
+                    var previousFrames: [String: CGRect] = [:]
+                    var stable = 0
+                    for _ in 0..<40 {
+                        try await Task.sleep(for: .milliseconds(50))
+                        host.view.layoutIfNeeded()
+                        let frames = probe.frames
+                        stable = frames.count == 5 && frames == previousFrames ? stable + 1 : 0
+                        if stable >= 3 { break }
+                        previousFrames = frames
+                    }
+                    let name = "composer-accessories-\(sizeName)-\(dark ? "dark" : "light")-\(type.isAccessibilitySize ? "ax3" : "standard")-\(phase)"
+                    XCTAssertGreaterThanOrEqual(stable, 3, name + ": layout must settle")
+                    XCTAssertEqual(host.view.bounds.size, CGSize(width: width, height: height))
+                    let reading = try XCTUnwrap(probe.frames["reading"])
+                    let todo = try XCTUnwrap(probe.frames["todo"])
+                    let pending = try XCTUnwrap(probe.frames["queue"])
+                    let input = try XCTUnwrap(probe.frames["input"])
+                    let dock = try XCTUnwrap(probe.frames["dock"])
+                    XCTAssertGreaterThanOrEqual(reading.height, 44, name + ": preserve a usable reading area")
+                    XCTAssertLessThanOrEqual(todo.maxY, pending.minY + 1, name + ": TODO precedes the queue")
+                    XCTAssertLessThanOrEqual(pending.maxY, input.minY + 1, name + ": queue stays outside the input field")
+                    XCTAssertGreaterThanOrEqual(input.minY, 0)
+                    XCTAssertLessThanOrEqual(input.maxY, height, name + ": the whole input remains visible")
+                    XCTAssertGreaterThanOrEqual(input.height, 48)
+                    XCTAssertEqual(probe.text, originalDraft, "Expanding auxiliary content must preserve the draft")
+                    let budget = composerAccessoryMaximumHeight(viewportHeight: height, inputHeight: input.height,
+                        accessibility: type.isAccessibilitySize)
+                    if phase == "collapsed" {
+                        collapsedHeights = ["todo": todo.height, "queue": pending.height]
+                    }
+                    for (key, frame, expanded) in [("todo", todo, todoExpanded), ("queue", pending, queueExpanded)] {
+                        let collapsedHeight = try XCTUnwrap(collapsedHeights[key])
+                        XCTAssertGreaterThanOrEqual(collapsedHeight, 44, "Summary remains a native touch target")
+                        if expanded {
+                            XCTAssertGreaterThan(frame.height, collapsedHeight, name)
+                            XCTAssertLessThanOrEqual(frame.height - collapsedHeight, budget + 12, name + ": list is bounded")
+                            let list = try XCTUnwrap(composerAccessoryScrollViews(host.view).first {
+                                let bounds = $0.convert($0.bounds, to: host.view)
+                                return frame.contains(CGPoint(x: bounds.midX, y: bounds.midY))
+                            }, name + ": expanded content must remain scrollable")
+                            XCTAssertLessThanOrEqual(list.bounds.height, budget + 1, name)
+                            XCTAssertGreaterThan(list.contentSize.height, list.bounds.height, name + ": all long content remains reachable")
+                        } else {
+                            XCTAssertEqual(frame.height, collapsedHeight, accuracy: 1, name + ": collapse restores the compact summary")
+                        }
+                    }
+                    guard !phase.hasSuffix("-collapsed") else { continue }
+                    // Stable layout samples alone can precede the 0.18s disclosure animation.
+                    try await Task.sleep(for: .milliseconds(250))
+                    host.view.layoutIfNeeded()
+                    let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+                        host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+                    }
+                    let readingRGB: [Int] = try XCTUnwrap(composerSampleRGB(image, at: CGPoint(x: 4, y: reading.midY)))
+                    let dockRGB: [Int] = try XCTUnwrap(composerSampleRGB(image, at: CGPoint(x: 4, y: dock.midY)))
+                    XCTAssertLessThanOrEqual(composerMaximumChannelDelta(readingRGB, dockRGB), 2,
+                        name + ": outside the field, the dock must match the reading background")
+                    let edgeSamples: [[Int]] = stride(from: CGFloat(0), through: 1.5, by: 0.5).compactMap {
+                        composerSampleRGB(image, at: CGPoint(x: input.minX + $0, y: input.midY))
+                    }
+                    let boundaryContrast = edgeSamples.map { composerMaximumChannelDelta($0, dockRGB) }.max() ?? 0
+                    XCTAssertGreaterThan(boundaryContrast, 8, name + ": a visible boundary must distinguish the input field")
+                    let attachment = XCTAttachment(image: image)
+                    attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+                    try image.pngData()?.write(to: URL(fileURLWithPath: "/tmp/wand-\(name).png"))
+                    let geometry = probe.frames.mapValues { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] }
+                    let observation: [String: Any] = ["name": name, "fixtureWidth": width, "fixtureHeight": height,
+                        "frames": geometry, "expandedListBudget": budget, "readingRGB": readingRGB,
+                        "dockRGB": dockRGB, "inputBoundaryContrast": boundaryContrast,
+                        "todoCount": todos.count, "queuedCount": queue.count, "draftPreserved": probe.text == originalDraft]
+                    let data = try JSONSerialization.data(withJSONObject: observation, options: [.prettyPrinted, .sortedKeys])
+                    let receipt = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                    receipt.name = name + "-geometry"; receipt.lifetime = .keepAlways; add(receipt)
+                    try data.write(to: URL(fileURLWithPath: "/tmp/wand-\(name).json"))
+                }
+            }
+          }
+        }
+    }
+
+    func testComposerPresentationSnapshots() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let appearances = [(dark: false, increasedContrast: false),
+                           (dark: true, increasedContrast: false),
+                           (dark: true, increasedContrast: true)]
+        for expanded in [false, true] {
+          for appearance in appearances {
+            // Match the real Chat/NewConversation parent: the dock owns spacing,
+            // while the shared input must retain its own visible field surface.
+            let host = UIHostingController(rootView: ChatDetailLayout {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("离线界面样例").font(.caption).foregroundStyle(Theme.textSecondary)
+                    Spacer(minLength: 16)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.workspaceReading)
+            } composer: {
+                VStack(spacing: 4) {
+                    TodoProgressBar(todos: [
+                        TodoItem(content: "检查键盘与输入栏布局", status: "completed", activeForm: nil),
+                        TodoItem(content: "优化 TODO、待发消息和输入选项", status: "in_progress", activeForm: nil),
+                        TodoItem(content: "验证窄屏和深色外观", status: "pending", activeForm: nil)])
+                    QueueBar(items: ["再检查横屏时输入框是否遮挡消息，保留已有草稿。", "完成后给我测试结果。"], expanded: .constant(true),
+                        inFlight: false, steering: false, mutationPending: false,
+                        onPromote: { _ in }, onDelete: { _ in }, onEdit: { _ in }, onClearAll: {})
+                FocusComposerSurface(expanded: expanded, hasDraft: expanded, onFocus: {}, editor: {
+                    Text(expanded ? "请继续检查输入体验" : "")
+                        .font(.body).foregroundStyle(Theme.textPrimary)
+                        .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                }, add: { ComposerAddButton(expanded: false, uploading: false, action: {}) },
+                send: { NativeComposerActions(phase: .idle, turnRunning: false, hasDraft: expanded, canSubmit: expanded,
+                    message: nil, onSend: {}, onStop: {}) }, settings: {
+                    ComposerSettingsStrip(model: "GPT-6.1", mode: "全权限", thinking: "超高", onModel: {}, onMode: {}, onThinking: {})
+                }, isEmbeddedInDock: true, isFocused: expanded, actionCount: expanded ? 1 : 0)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(Theme.workspaceReading)
+            }
+            .environment(\.colorScheme, appearance.dark ? .dark : .light))
+            host.traitOverrides.accessibilityContrast = appearance.increasedContrast ? .high : .normal
+            window.rootViewController = host
+            window.overrideUserInterfaceStyle = appearance.dark ? .dark : .light
+            window.makeKeyAndVisible()
+            try await Task.sleep(for: .milliseconds(400))
+            host.view.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            let name = "composer-dock-\(Int(window.bounds.width))-\(expanded ? "editing" : "empty")-\(appearance.dark ? "dark" : "light")-\(appearance.increasedContrast ? "high-contrast" : "standard")"
+            let attachment = XCTAttachment(image: image)
+            attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+            try image.pngData()?.write(to: URL(fileURLWithPath: "/tmp/wand-\(name).png"))
+          }
+        }
+    }
+
+    func testInstalledChatKeyboardStaysAboveKeyboard() async throws {
+        guard let path = try? String(contentsOfFile: "/tmp/wand-ios-keyboard-acceptance-path", encoding: .utf8) else {
+            throw XCTSkip("Requires an explicit private installed-service keyboard acceptance profile")
+        }
+        let file = URL(fileURLWithPath: path.trimmingCharacters(in: .whitespacesAndNewlines))
+        struct Profile: Decodable { let baseUrl: String; let token: String; let sessionId: String }
+        let profile = try JSONDecoder().decode(Profile.self, from: Data(contentsOf: file))
+        let api = WandAPI(baseURL: try XCTUnwrap(URL(string: profile.baseUrl)), token: profile.token)
+        let chat = ChatStore(sessionId: profile.sessionId, api: api)
+        let focus = ComposerFocusController()
+        let keyboard = KeyboardObserver()
+        let host = UIHostingController(rootView:
+            SystemHomeNavigation(mode: .im, enabled: true, onSelect: { _ in }) {
+                NavigationStack {
+                    ChatView(sessionId: profile.sessionId, api: api, sharedStore: chat, focusController: focus)
+                }
+            })
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.endEditing(true); chat.shutdown(); window.isHidden = true }
+        for _ in 0..<300 {
+            if chat.snapshot != nil && !chat.loading { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertNotNil(chat.snapshot, "Installed session must load before keyboard acceptance")
+        XCTAssertNil(chat.loadError)
+        func findEditor(_ view: UIView) -> ComposerUITextView? {
+            if let result = view as? ComposerUITextView { return result }
+            return view.subviews.lazy.compactMap { findEditor($0) }.first
+        }
+        let editor = try XCTUnwrap(findEditor(host.view))
+        let initialText = editor.text
+        for round in 0..<3 {
+            // Use the same state owner/action as tapping the real capsule.
+            focus.focus()
+            var settled = 0
+            for _ in 0..<100 {
+                host.view.layoutIfNeeded()
+                let frame = editor.convert(editor.bounds, to: window)
+                let top = window.bounds.maxY - window.safeAreaInsets.bottom - keyboard.lift
+                let gap = top - frame.maxY
+                settled = keyboard.lift > 0 && frame.height > 0 && gap > 0 && gap < 160 ? settled + 1 : 0
+                if settled >= 3 { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let frame = editor.convert(editor.bounds, to: window)
+            print("INSTALLED-KEYBOARD round=\(round) editor=\(frame) lift=\(keyboard.lift) settled=\(settled)")
+            XCTAssertGreaterThanOrEqual(settled, 3, "Real chat input must settle immediately above the software keyboard")
+            XCTAssertTrue(editor.isFirstResponder)
+            XCTAssertEqual(editor.text, initialText, "Focus testing must preserve the existing draft")
+            let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            })
+            attachment.name = "installed-chat-keyboard-round-\(round)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            focus.collapse()
+            window.endEditing(true)
+            for _ in 0..<80 {
+                if !keyboard.isVisible { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            XCTAssertFalse(keyboard.isVisible)
+        }
+    }
+
+    func testNavigationContainerDoesNotApplyASecondKeyboardLift() async throws {
+        let probe = InputOpeningProbe()
+        let keyboard = KeyboardObserver()
+        let host = UIHostingController(rootView:
+            SystemHomeNavigation(mode: .im, enabled: true, onSelect: { _ in }) {
+                InputOpeningTestView(probe: probe, focus: probe.focus)
+            })
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { probe.focus.collapse(); window.isHidden = true }
+        func container(_ controller: UIViewController) -> SystemHomeTabController? {
+            if let result = controller as? SystemHomeTabController { return result }
+            return controller.children.lazy.compactMap { container($0) }.first
+        }
+        func editor(_ view: UIView) -> ComposerUITextView? {
+            if let result = view as? ComposerUITextView { return result }
+            return view.subviews.lazy.compactMap { editor($0) }.first
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        host.view.layoutIfNeeded()
+        let navigation = try XCTUnwrap(container(host))
+        let initialFrame = navigation.view.convert(navigation.view.bounds, to: window)
+        for round in 0..<2 {
+            probe.focus.focus()
+            for _ in 0..<40 {
+                if keyboard.lift > 0 { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            // A hardware-only keyboard cannot exercise viewport avoidance.
+            try XCTSkipIf(keyboard.lift == 0, "Software keyboard required to verify double avoidance")
+            // First keyboard creation can outlast its nominal animation duration
+            // on a freshly booted simulator. Wait for the actual layout contract,
+            // rather than sampling the still-moving surface after a fixed delay.
+            var settledSamples = 0
+            for _ in 0..<80 {
+                host.view.layoutIfNeeded()
+                if let textView = editor(host.view) {
+                    let frame = textView.convert(textView.bounds, to: window)
+                    let top = window.bounds.maxY - window.safeAreaInsets.bottom - keyboard.lift
+                    let gap = top - frame.maxY
+                    settledSamples = gap > 0 && gap < 160 ? settledSamples + 1 : 0
+                    if settledSamples >= 3 { break }
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let focusedFrame = navigation.view.convert(navigation.view.bounds, to: window)
+            XCTAssertEqual(focusedFrame.minY, initialFrame.minY, accuracy: 1)
+            XCTAssertEqual(focusedFrame.height, initialFrame.height, accuracy: 1,
+                "The outer host must not shrink the inner navigation for the keyboard")
+            let textView = try XCTUnwrap(editor(host.view))
+            XCTAssertTrue(textView.isFirstResponder)
+            let textFrame = textView.convert(textView.bounds, to: window)
+            let keyboardTop = window.bounds.maxY - window.safeAreaInsets.bottom - keyboard.lift
+            print("KEYBOARD-LAYOUT round=\(round) container=\(focusedFrame) editor=\(textFrame) keyboardTop=\(keyboardTop) settled=\(settledSamples)")
+            let attachment = XCTAttachment(image: UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            })
+            attachment.name = "keyboard-layout-round-\(round)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertLessThan(textFrame.maxY, keyboardTop)
+            XCTAssertLessThan(keyboardTop - textFrame.maxY, 160,
+                "The editor must remain directly above its toolbar and keyboard")
+            probe.focus.collapse()
+            try await Task.sleep(for: .milliseconds(500))
+        }
+    }
+
     func testResponderChangesWaitUntilAfterRepresentableUpdateAndCancelOnNewIntent() async throws {
         var desired = IMEAwareComposerTextView(text: .constant(""), placeholder: "消息", isFocused: true,
             onFocusChange: { _ in }, onCompositionChange: { _ in }, onSubmit: {}, onHeightChange: { _ in })
@@ -719,10 +1338,19 @@ extension FocusComposerTests {
     func testExpandedEditorUsesFullWidthForEmptySingleAndMultilineDrafts() async throws {
         let probe = MorphEditorProbe()
         let host = UIHostingController(rootView: MorphEditorTestView(probe: probe, focus: probe.focus))
+        // A window owns its root controller's frame and can overwrite the proposed
+        // test width on the next keyboard/layout pass. A child gives this fixture
+        // an explicit viewport; system safe-area behavior has separate coverage.
+        host.safeAreaRegions = []
+        let container = UIViewController()
+        container.addChild(host)
+        container.view.addSubview(host.view)
+        host.didMove(toParent: container)
+        host.view.frame = CGRect(x: 0, y: 0, width: 390, height: 600)
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let window = UIWindow(windowScene: scene)
-        window.rootViewController = host; window.makeKeyAndVisible()
-        defer { window.isHidden = true }
+        window.rootViewController = container; window.makeKeyAndVisible()
+        defer { probe.focus.collapse(); window.isHidden = true; window.rootViewController = nil }
         func find(_ view: UIView) -> ComposerUITextView? {
             if let text = view as? ComposerUITextView { return text }
             return view.subviews.lazy.compactMap { find($0) }.first
@@ -736,6 +1364,7 @@ extension FocusComposerTests {
                 probe.text = text
                 try await Task.sleep(for: .milliseconds(120))
                 host.view.layoutIfNeeded()
+                XCTAssertEqual(host.view.bounds.width, width, accuracy: 1)
                 XCTAssertTrue(find(host.view) === editor)
                 let bounds = editor.convert(editor.bounds, to: host.view)
                 XCTAssertEqual(bounds.minX, 24, accuracy: 1)

@@ -49,6 +49,24 @@ private final class OrganizationAPIStub: ConversationOrganizationAPI {
 }
 
 final class WandProtocolTests: XCTestCase {
+    func testDingTalkMirrorMetadataDoesNotInventAnInternalTeam() throws {
+        let data = Data(#"{"id":"dingtalk_fixture","kind":"group","title":"外部群","external":{"provider":"dingtalk","groupId":"fixture-group","syncState":"at_only","historyComplete":false,"bindings":[{"id":"binding","employeeId":"e_fixture","state":"verifying"}]}}"#.utf8)
+        let mirror = try JSONDecoder().decode(ConversationInstance.self, from: data)
+        XCTAssertNil(mirror.team)
+        XCTAssertEqual(mirror.external?.bindings?.count, 1)
+        XCTAssertEqual(mirror.identityStatus, "钉钉群 · 仅同步 @消息")
+        XCTAssertFalse(mirror.identityStatus.contains("派发任务"))
+    }
+
+    @MainActor func testDingTalkSettingsLinkUsesOnlyAnAllowlistedSection() throws {
+        let base = URL(string: "https://example.invalid:8443/wand")!
+        let url = try XCTUnwrap(SettingsWebStore.startURL(base, section: "connectors"))
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(items?.first(where: { $0.name == "section" })?.value, "connectors")
+        let rejected = try XCTUnwrap(SettingsWebStore.startURL(base, section: "https://foreign.invalid"))
+        XCTAssertFalse(rejected.absoluteString.contains("foreign"))
+    }
+
     @MainActor
     private func organizationPhase(_ controller: ConversationOrganizationController, _ target: ConversationOrganizationController.Phase, action: () -> Void) async {
         let ready = expectation(description: "organization phase \(target)")
@@ -750,6 +768,42 @@ final class WandProtocolTests: XCTestCase {
             isBrowsingHistory: true,
             canLoadEarlier: true,
             loadingEarlier: true
+        ))
+    }
+
+    func testUnderFilledViewportSilentlyPagesEarlierWithoutManualScroll() {
+        // 首屏只有一条回复：内容不足两屏就要往前补页，不要求用户在浏览历史。
+        XCTAssertTrue(shouldLoadEarlierPageToFillViewport(
+            canLoadEarlier: true,
+            loadingEarlier: false,
+            contentHeight: 300,
+            viewportHeight: 800
+        ))
+        // 补到两屏以上即停止，不会把整段历史一次翻完。
+        XCTAssertFalse(shouldLoadEarlierPageToFillViewport(
+            canLoadEarlier: true,
+            loadingEarlier: false,
+            contentHeight: 1700,
+            viewportHeight: 800
+        ))
+        // 已翻到最早 / 正在翻页 / 布局几何还没拿到都不发请求。
+        XCTAssertFalse(shouldLoadEarlierPageToFillViewport(
+            canLoadEarlier: false,
+            loadingEarlier: false,
+            contentHeight: 300,
+            viewportHeight: 800
+        ))
+        XCTAssertFalse(shouldLoadEarlierPageToFillViewport(
+            canLoadEarlier: true,
+            loadingEarlier: true,
+            contentHeight: 300,
+            viewportHeight: 800
+        ))
+        XCTAssertFalse(shouldLoadEarlierPageToFillViewport(
+            canLoadEarlier: true,
+            loadingEarlier: false,
+            contentHeight: 300,
+            viewportHeight: 0
         ))
     }
 

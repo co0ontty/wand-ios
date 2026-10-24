@@ -331,8 +331,12 @@ func wandConversationImagePages(_ turns: [ConversationTurn]) -> [WandImagePage] 
     for turn in turns {
         for block in turn.content {
             switch block {
-            case .text(let text, _) where turn.role == "user":
-                for path in parseUserAttachmentMessage(text).attachmentPaths where isImagePath(path) { append(path, direct: false) }
+            case .text(let text, _):
+                if turn.role == "user" {
+                    for path in parseUserAttachmentMessage(text).attachmentPaths where isImagePath(path) { append(path, direct: false) }
+                } else {
+                    for page in MarkdownText.imagePages(text) { append(page.source, direct: page.directSource) }
+                }
             case .toolUse(let id, let name, _, let input, _):
                 guard let result = results[id], !result.failed else { continue }
                 if !result.images.isEmpty {
@@ -548,6 +552,16 @@ struct WandFileChip: View {
     }
 }
 
+/// Both unsent local files and uploaded chat attachments share one bounded horizontal lane.
+struct ComposerAttachmentStrip<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8, content: content)
+        }.frame(maxHeight: 76)
+    }
+}
+
 struct PendingAttachmentsPreview: View {
     let baseURL: URL
     let attachments: [UploadedFile]
@@ -556,8 +570,7 @@ struct PendingAttachmentsPreview: View {
     private var imagePaths: [String] { attachments.map(\.savedPath).filter { isImagePath($0) } }
     var body: some View {
         if !attachments.isEmpty {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+            ComposerAttachmentStrip {
                     ForEach(attachments, id: \.savedPath) { file in
                         HStack(spacing: 0) {
                             if let onPreview {
@@ -574,8 +587,7 @@ struct PendingAttachmentsPreview: View {
                             }.buttonStyle(.plain).accessibilityLabel("移除附件 \(file.originalName)")
                         }.frame(maxWidth: 260)
                     }
-                }
-            }.frame(maxHeight: 76)
+            }
         }
     }
 }
@@ -715,7 +727,7 @@ struct WandImageViewer: View {
                     .foregroundColor(.white)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(Capsule().fill(Color.black.opacity(0.6)))
+                    .wandGlassCapsule().environment(\.colorScheme, .dark)
                     .accessibilityLabel("第 \(index + 1) 张，共 \(sources.count) 张")
                     .padding(.bottom, 28)
             }

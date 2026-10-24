@@ -1,5 +1,6 @@
 import Foundation
 import ActivityKit
+import UIKit
 import os
 
 /// 会话 Live Activity 管理器：所有活跃会话聚合进**同一条**灵动岛活动（长条样式），
@@ -7,9 +8,8 @@ import os
 /// 会话退出 / 被杀时立即从条里移除；条空了整条活动一起收掉。
 /// 系统关闭实时活动、或设置页开关关闭时全部是 no-op。
 ///
-/// 局限（自签 sideload 没有 APNs push token）：活动只能由 App 进程本地更新，
-/// App 被系统挂起后状态会冻结在最后一次更新——stale date 设为 60s，过期后系统
-/// 把活动标灰；「已完成」的自动移除定时器也只在 App 存活时生效。
+/// 前台创建同一条聚合活动并请求独立 ActivityKit token；服务器可在 App 挂起后更新/结束。
+/// 未配置远程链路时保留原本地更新，过期后明确显示离线；不通过静默推送保活或后台远程新建。
 @MainActor
 final class SessionLiveActivityController {
     static let shared = SessionLiveActivityController()
@@ -89,7 +89,7 @@ final class SessionLiveActivityController {
         let next: SessionState?
         if snapshot.hasPendingPermission { next = .permission }
         else if snapshot.activityStatus == "waiting-input" { next = .waitingInput }
-        else if snapshot.isResponding { next = snapshot.structuredState?.phase == "background" ? .background : .responding }
+        else if Self.isActivityResponding(snapshot) { next = snapshot.structuredState?.phase == "background" ? .background : .responding }
         else if snapshot.status == "failed" && previous != nil { next = .failed }
         else if snapshot.status == "stopped" && previous != nil { next = .stopped }
         else { next = nil }
@@ -146,6 +146,7 @@ final class SessionLiveActivityController {
         ActivityStore.startedAtBySession.removeAll()
         ActivityStore.operationRevision &+= 1
         let activities = Activity<SessionActivityAttributes>.activities
+        for activity in activities { LiveActivityPushController.shared.retire(activityID: activity.id) }
         ActivityStore.activity = nil
         ActivityStore.endingActivityIDs.formUnion(activities.map(\.id))
         enqueueActivityOperation {
@@ -179,7 +180,10 @@ final class SessionLiveActivityController {
             ActivityStore.entries.remove(at: index)
             ActivityStore.startedAtBySession[key] = nil
         } else {
+            let finishedAt = ActivityStore.entries[index].stateRaw == SessionState.done.rawValue
+                ? ActivityStore.entries[index].finishedAt ?? Date() : Date()
             ActivityStore.entries[index].stateRaw = SessionState.done.rawValue
+            ActivityStore.entries[index].finishedAt = finishedAt
             ActivityStore.entries[index].taskTitle = nil
             ActivityStore.entries[index].queuedCount = 0
             ActivityStore.entries[index].startedAt = nil
@@ -294,6 +298,25 @@ final class SessionLiveActivityController {
     }
 #endif
 
+    /// Remote end/dismiss invalidates the retained local handle; never resurrect an ended Activity on the next poll.
+    func remoteActivityEnded(id: String) {
+        guard ActivityStore.activity?.id == id else { return }
+        for task in ActivityStore.doneRemovalTasks.values { task.cancel() }
+        ActivityStore.doneRemovalTasks.removeAll()
+        ActivityStore.activity = nil
+        ActivityStore.entries.removeAll()
+        ActivityStore.publishedEntries.removeAll()
+        ActivityStore.scheduledEntries.removeAll()
+        ActivityStore.startedAtBySession.removeAll()
+        ActivityStore.operationRevision &+= 1
+    }
+
+    private static func isActivityResponding(_ snapshot: SessionSnapshot) -> Bool {
+        if snapshot.isStructured { return snapshot.structuredState?.inFlight == true }
+        guard snapshot.status == "running", snapshot.providerCliActive != false else { return false }
+        return isProviderCliSession(snapshot.provider) ? snapshot.ptyBusy == true : snapshot.ptyCommandRunning == true
+    }
+
     // MARK: - 内部
 
     private func enqueueActivityOperation(
@@ -330,12 +353,17 @@ final class SessionLiveActivityController {
         }
         ActivityStore.publishedEntries = ActivityStore.entries
         ActivityStore.scheduledEntries = ActivityStore.entries
+        LiveActivityPushController.shared.observe(activity)
         for entry in ActivityStore.entries {
+            if entry.isFinished {
+                scheduleDoneRemoval(entry.id, serverID: entry.serverID, since: entry.finishedAt)
+            }
             if let startedAt = entry.startedAt {
                 ActivityStore.startedAtBySession[scopedKey(entry.id, serverID: entry.serverID)] = startedAt
             }
         }
         for duplicate in restorable.dropFirst() {
+            LiveActivityPushController.shared.retire(activityID: duplicate.id)
             ActivityStore.endingActivityIDs.insert(duplicate.id)
             enqueueActivityOperation {
                 await duplicate.end(nil, dismissalPolicy: .immediate)
@@ -374,7 +402,10 @@ final class SessionLiveActivityController {
         }) {
             ActivityStore.entries[index].title = shortTitle
             ActivityStore.entries[index].providerRaw = provider ?? "claude"
+            let finished = state == .done || state == .failed || state == .stopped
+            let finishedAt = finished ? (ActivityStore.entries[index].stateRaw == state.rawValue ? ActivityStore.entries[index].finishedAt ?? Date() : Date()) : nil
             ActivityStore.entries[index].stateRaw = state.rawValue
+            ActivityStore.entries[index].finishedAt = finishedAt
             ActivityStore.entries[index].taskTitle = shortTaskTitle
             ActivityStore.entries[index].queuedCount = queuedCount
             ActivityStore.entries[index].startedAt = startedAt
@@ -385,7 +416,7 @@ final class SessionLiveActivityController {
                 id: sessionId, serverID: serverID,
                 title: shortTitle, providerRaw: provider ?? "claude",
                 stateRaw: state.rawValue, taskTitle: shortTaskTitle, queuedCount: queuedCount,
-                startedAt: startedAt, engineRaw: engine, pendingPrompt: shortPrompt
+                startedAt: startedAt, finishedAt: (state == .done || state == .failed || state == .stopped) ? Date() : nil, engineRaw: engine, pendingPrompt: shortPrompt
             ))
             trimEntriesIfNeeded()
         }
@@ -403,12 +434,14 @@ final class SessionLiveActivityController {
         }
     }
 
-    private func scheduleDoneRemoval(_ sessionId: String, serverID: String?) {
+    private func scheduleDoneRemoval(_ sessionId: String, serverID: String?, since: Date? = nil) {
         let key = scopedKey(sessionId, serverID: serverID)
         cancelDoneRemoval(sessionId, serverID: serverID)
         let linger = ActivityStore.entries.first { $0.id == sessionId && $0.serverID == serverID }?.isFailed == true ? Self.failureLingerSeconds : Self.doneLingerSeconds
+        let finishedAt = ActivityStore.entries.first { $0.id == sessionId && $0.serverID == serverID }?.finishedAt ?? since
+        let delay = LiveActivityPushPolicy.remainingLinger(since: finishedAt, now: Date(), duration: TimeInterval(linger))
         ActivityStore.doneRemovalTasks[key] = Task {
-            try? await Task.sleep(nanoseconds: linger * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             ActivityStore.doneRemovalTasks[key] = nil
             ActivityStore.entries.removeAll {
@@ -442,6 +475,7 @@ final class SessionLiveActivityController {
             ActivityStore.publishedEntries.removeAll()
             ActivityStore.scheduledEntries.removeAll()
             ActivityStore.endingActivityIDs.insert(activity.id)
+            LiveActivityPushController.shared.retire(activityID: activity.id)
             enqueueActivityOperation {
                 await activity.end(nil, dismissalPolicy: .immediate)
                 ActivityStore.endingActivityIDs.remove(activity.id)
@@ -453,6 +487,20 @@ final class SessionLiveActivityController {
             guard allowCreate else { return }
             ActivityStore.operationRevision &+= 1
             let revision = ActivityStore.operationRevision
+            requestActivity(entries: entries, revision: revision)
+            return
+        }
+        // An old locally-created Activity cannot acquire a push token. Replace it once after upgrade, preserving its entries.
+        if LiveActivityPushController.supportsPush, ServerStore.shared.activeProfile != nil,
+           (activity.attributes.remoteUpdates != true || activity.attributes.connectionIdentity != ServerStore.shared.activeProfile?.connectionIdentity) {
+            ActivityStore.operationRevision &+= 1
+            let revision = ActivityStore.operationRevision
+            ActivityStore.activity = nil
+            ActivityStore.endingActivityIDs.insert(activity.id)
+            enqueueActivityOperation {
+                await activity.end(nil, dismissalPolicy: .immediate)
+                ActivityStore.endingActivityIDs.remove(activity.id)
+            }
             requestActivity(entries: entries, revision: revision)
             return
         }
@@ -490,12 +538,19 @@ final class SessionLiveActivityController {
         let state = SessionActivityAttributes.ContentState(sessions: entries, updatedAt: Date())
         ActivityStore.scheduledEntries = entries
         enqueueActivityOperation(latestRevision: revision) {
-            guard ActivityStore.activity == nil, !ActivityStore.entries.isEmpty else { return }
+            guard ActivityStore.activity == nil, !ActivityStore.entries.isEmpty,
+                  UIApplication.shared.applicationState == .active else { return }
             do {
-                ActivityStore.activity = try Activity.request(
-                    attributes: SessionActivityAttributes(),
-                    content: ActivityContent(state: state, staleDate: self.staleDate())
+                let profile = ServerStore.shared.activeProfile
+                let remote = LiveActivityPushController.supportsPush && profile != nil
+                let pushType: PushType? = remote ? .token : nil
+                let activity = try Activity.request(
+                    attributes: SessionActivityAttributes(serverID: profile?.id, remoteUpdates: remote ? true : nil, connectionIdentity: profile?.connectionIdentity),
+                    content: ActivityContent(state: state, staleDate: self.staleDate()),
+                    pushType: pushType
                 )
+                ActivityStore.activity = activity
+                LiveActivityPushController.shared.observe(activity)
                 if revision == ActivityStore.operationRevision {
                     ActivityStore.publishedEntries = entries
                 }
@@ -506,8 +561,9 @@ final class SessionLiveActivityController {
     }
 
     private func staleDate() -> Date {
-        // App 被挂起后无法继续更新；60s 没更新就让系统把活动标记为过期（变灰）。
-        Date().addingTimeInterval(60)
+        // Confirmed remote subscriptions heartbeat every minute; no connection means the system visibly marks data stale.
+        let remote = ActivityStore.activity.map { LiveActivityPushController.shared.isRegistered(activityID: $0.id) } ?? false
+        return Date().addingTimeInterval(remote ? 180 : 60)
     }
 }
 

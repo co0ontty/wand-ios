@@ -42,15 +42,18 @@ struct ConversationListView: View {
     let onEmployee: (String) -> Void
     let onSettings: () -> Void
     let onSwitchServer: () -> Void
+    @State private var revealedRowID: String?
     @State private var query = ""
     @State private var creating = false
     @State private var tier = ConversationListTier.all
     @State private var selecting = false
     @State private var selected = Set<String>()
     @State private var deleteIDs: Set<String> = []
+    @State private var dissolveID: String?
     @State private var batchBusy = false
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduced
+    @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
     private var creationOpen: Bool { creating || store.creatingPresetID != nil }
     private var rows: [ConversationInstance] {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -90,15 +93,8 @@ struct ConversationListView: View {
                 }
                 ForEach(rows) { item in
                     row(item).tag(item.id)
-                        .swipeActions(edge: .leading) {
-                            Button(item.pinnedAt == nil ? "置顶" : "取消置顶") { Task { await store.update(item.id, patch: ["pinned": item.pinnedAt == nil]) } }.tint(Theme.brand)
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button("删除", role: .destructive) { deleteIDs = [item.id] }
-                            if item.kind == "group" {
-                                Button(item.dissolvedAt == nil ? "解散" : "恢复") { Task { await store.update(item.id, patch: ["dissolved": item.dissolvedAt == nil]) } }.tint(Theme.textSecondary)
-                            }
-                        }
+                        .homeSwipeActions(id: item.id, revealedID: $revealedRowID, actions: conversationActions(item), enabled: !selecting && !creationOpen && !batchBusy, surface: Theme.background)
+                        .listRowBackground(Color.clear)
                         .onLongPressGesture { selecting = true; selected.insert(item.id) }
                 }
                 if rows.isEmpty && !store.loading && store.error == nil {
@@ -112,8 +108,11 @@ struct ConversationListView: View {
                 }
             }
             .listStyle(.plain).scrollContentBackground(.hidden)
+            .homeSwipeDismissal($revealedRowID)
+            .onChange(of: query) { _, _ in revealedRowID = nil }
+            .onChange(of: creationOpen) { _, _ in revealedRowID = nil }
             .environment(\.editMode, .constant(selecting ? .active : .inactive))
-            .refreshable { creating = false; await store.refresh() }
+            .refreshable { revealedRowID = nil; creating = false; await store.refresh() }
             .onChange(of: tier) { _, _ in selected = []; selecting = false; creating = false }
             if selecting {
                 HStack {
@@ -135,6 +134,21 @@ struct ConversationListView: View {
             }
             }
         }
+        .background(Theme.background.ignoresSafeArea())
+        .navigationTitle(usesSystemNavigation ? (tier == .all ? "聊天" : tier.title) : "")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(usesSystemNavigation ? .visible : .hidden, for: .navigationBar)
+        .toolbar {
+            if usesSystemNavigation {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(creationOpen ? "关闭建群" : "发起群聊",
+                           systemImage: creationOpen ? "xmark" : "plus", action: toggleCreation)
+                }
+                if #available(iOS 27.1, *) {
+                    ToolbarOverflowMenu { headerMenuItems.disabled(creationOpen) }
+                }
+            }
+        }
         .animation(reduced ? nil : WandMotion.expansion, value: creationOpen)
         .onKeyPress(.escape) {
             if creationOpen { creating = false; store.creatingPresetID = nil; return .handled }
@@ -142,48 +156,70 @@ struct ConversationListView: View {
             if !query.isEmpty || searchFocused { query = ""; searchFocused = false; return .handled }
             return .ignored
         }
+        .confirmationDialog("解散群聊？", isPresented: Binding(get: { dissolveID != nil }, set: { if !$0 { dissolveID = nil } }), titleVisibility: .visible) {
+            Button("解散群聊", role: .destructive) {
+                if let id = dissolveID { Task { await store.update(id, patch: ["dissolved": true]) } }
+                dissolveID = nil
+            }
+            Button("取消", role: .cancel) { dissolveID = nil }
+        } message: { Text("解散后保留历史，恢复后可继续聊天。") }
         .alert("删除对话？", isPresented: Binding(get: { !deleteIDs.isEmpty }, set: { if !$0 { deleteIDs = [] } })) {
             Button("取消", role: .cancel) { deleteIDs = [] }
             Button("删除", role: .destructive) { batchDelete() }
-        } message: { Text("删除其所属执行会话和群任务资源；不会删除其他对话或工作区。") }
+        } message: { Text("删除本地消息、所属执行会话和群任务资源；不会删除其他对话或工作区。钉钉群仅删除本地镜像，不退出或解散真实群、不删除共享机器人。") }
     }
     private var header: some View {
         VStack(spacing: 4) {
-            HStack(spacing: 4) {
-                Color.clear.frame(width: 88, height: 44).accessibilityHidden(true)
-                Text(tier == .all ? "消息" : tier.title).font(.headline)
-                    .lineLimit(1).frame(maxWidth: .infinity)
-                HStack(spacing: 0) {
-                    Menu {
-                        ForEach(ConversationListTier.allCases, id: \.self) { option in
-                            Button { tier = option } label: {
-                                HStack { Text(option == .all ? "全部消息" : option.title); if option == tier { Image(systemName: "checkmark") } }
-                            }
-                        }
-                        Divider()
-                        Button("设置", systemImage: "gearshape", action: onSettings)
-                        Button("切换服务器", systemImage: "server.rack", action: onSwitchServer)
-                    } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
-                        .accessibilityLabel("消息菜单").disabled(creationOpen)
-                    ContactMorphButton(expanded: creationOpen, symbol: "plus", label: creationOpen ? "关闭建群" : "发起群聊") {
-                        if creationOpen { creating = false; store.creatingPresetID = nil } else { creating = true }
-                        searchFocused = false
-                    }
-                }.background(Theme.surface, in: Capsule()).overlay(Capsule().stroke(Theme.border.opacity(0.6)))
-            }.frame(minHeight: 56)
+            if !usesSystemNavigation {
+                HStack(spacing: 4) {
+                    Text(tier == .all ? "聊天" : tier.title).font(.title2.weight(.bold))
+                        .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 8) {
+                        ContactMorphButton(expanded: creationOpen, symbol: "plus", label: creationOpen ? "关闭建群" : "发起群聊", title: creationOpen ? "收起" : "建群", action: toggleCreation)
+                        Menu {
+                            headerMenuItems
+                        } label: { Text("更多").font(.subheadline.weight(.medium)).frame(minWidth: 44, minHeight: 44) }
+                            .buttonStyle(WandQuietButtonStyle())
+                            .accessibilityLabel("消息菜单").disabled(creationOpen)
+                    }.fixedSize(horizontal: true, vertical: false)
+                }.frame(minHeight: 56)
+                    .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+            }
             if !creationOpen {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(Theme.textSecondary)
-                    TextField("搜索聊天或任务", text: $query).focused($searchFocused)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled().submitLabel(.search)
-                    if !query.isEmpty {
-                        Button { query = "" } label: { Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44) }
-                            .buttonStyle(.plain).accessibilityLabel("清空搜索")
-                    }
-                }.padding(.horizontal, 12).frame(minHeight: 44).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+                HomeSearchField(placeholder: "搜索聊天或任务", text: $query, focused: $searchFocused)
             }
         }.padding(.horizontal, WandLayout.pageInset).padding(.vertical, 4)
     }
+    @ViewBuilder private var headerMenuItems: some View {
+        Menu {
+            Picker("消息范围", selection: $tier) {
+                ForEach(ConversationListTier.allCases, id: \.self) { option in
+                    Text(option == .all ? "全部消息" : option.title).tag(option)
+                }
+            }
+        } label: { Label("消息范围", systemImage: "line.3.horizontal.decrease") }
+        Button("设置", systemImage: "gearshape", action: onSettings)
+        Button("切换服务器", systemImage: "server.rack", action: onSwitchServer)
+    }
+    private func toggleCreation() {
+        if creationOpen { creating = false; store.creatingPresetID = nil } else { creating = true }
+        searchFocused = false
+    }
+    private func conversationActions(_ item: ConversationInstance) -> [HomeRowAction] {
+        var actions = [HomeRowAction(id: "pin", title: item.pinnedAt == nil ? "置顶" : "取消置顶", symbol: "pin") {
+            Task { await store.update(item.id, patch: ["pinned": item.pinnedAt == nil]) }
+        }]
+        if item.kind == "group" && item.external == nil {
+            actions.append(HomeRowAction(id: "dissolve", title: item.dissolvedAt == nil ? "解散" : "恢复",
+                symbol: item.dissolvedAt == nil ? "person.3" : "arrow.uturn.backward", tint: Theme.warning) {
+                if item.dissolvedAt == nil { dissolveID = item.id }
+                else { Task { await store.update(item.id, patch: ["dissolved": false]) } }
+            })
+        }
+        actions.append(HomeRowAction(id: "delete", title: "删除", symbol: "trash", tint: Theme.danger) { deleteIDs = [item.id] })
+        return actions
+    }
+
     private func row(_ item: ConversationInstance) -> some View {
         HStack(spacing: 12) {
             Button {
@@ -201,13 +237,14 @@ struct ConversationListView: View {
                     HStack {
                         Text(item.title).font(.headline).lineLimit(2)
                         Spacer()
-                        if item.pinnedAt != nil { Image(systemName: "pin.fill").font(.caption).foregroundStyle(Theme.textSecondary) }
+                        if item.pinnedAt != nil { Image(systemName: "pin.fill").font(.system(size: 12)).foregroundStyle(Theme.textSecondary).accessibilityLabel("已置顶") }
                     }
                     Text(item.unavailableReason ?? item.preview).font(.subheadline).foregroundStyle(Theme.textSecondary).lineLimit(2)
-                    if item.kind == "group" { Text("\(item.team?.members.count ?? 0) 人 · \(item.tasks.count) 项任务").font(.caption).foregroundStyle(Theme.textSecondary) }
+                    if let external = item.external { Text(external.statusText).font(.caption).foregroundStyle(Theme.textSecondary) }
+                    else if item.kind == "group" { Text("\(item.team?.members.count ?? 0) 人 · \(item.tasks.count) 项任务").font(.caption).foregroundStyle(Theme.textSecondary) }
                 }.frame(maxWidth: .infinity, minHeight: 56, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(WandQuietButtonStyle(tint: Theme.textPrimary))
-        }.padding(.vertical, 4).listRowBackground(Theme.surface)
+        }.padding(.vertical, 4)
     }
     private func batchPin(_ pin: Bool) {
         guard !batchBusy, !selected.isEmpty else { return }
@@ -419,11 +456,16 @@ struct ConversationDetailView: View {
     @State private var dragOffset: CGFloat = 0
     @State private var files = false
     @StateObject private var messageLinks = ServerFileLinkController()
+    @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
     @Environment(\.dismiss) private var dismiss
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var members = false
     @State private var tasks = false
     @State private var inviting = false
+    @State private var managementAction: ConversationManagementAction?
+    @State private var managementBusy = false
+    @State private var managementError: String?
+    @State private var visible = false
     @State private var scrollPinned = true
     @State private var userScrolling = false
     @StateObject private var scrollScheduler = ChatScrollScheduler()
@@ -437,6 +479,11 @@ struct ConversationDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let detail {
+                if managementBusy { ProgressView("正在更新群聊…").padding(8).accessibilityIdentifier("conversation-management-busy") }
+                if let managementError {
+                    Text(managementError).font(.caption).foregroundStyle(Theme.danger).padding(8)
+                        .accessibilityIdentifier("conversation-management-error")
+                }
                 if let reason = detail.unavailableReason { Text(reason).font(.caption).foregroundStyle(Theme.danger).padding(8) }
                 if members { memberPanel(detail) }
                 if inviting {
@@ -473,13 +520,22 @@ struct ConversationDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.top, identityMetrics.clearance)
+        .padding(.top, usesSystemNavigation ? 0 : identityMetrics.clearance)
         .background(Theme.background)
-        .background { SessionBackSwipeEnabler().allowsHitTesting(false) }
-        .navigationTitle("").navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .navigationBar)
+        .background { if !usesSystemNavigation { SessionBackSwipeEnabler().allowsHitTesting(false) } }
+        .navigationTitle(usesSystemNavigation ? (detail?.title ?? "对话") : "")
+        .modifier(SystemSessionSubtitle(enabled: usesSystemNavigation,
+            subtitle: detail?.identityStatus ?? "正在加载对话"))
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(usesSystemNavigation ? .visible : .hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(!usesSystemNavigation)
+        .toolbar {
+            if #available(iOS 27.1, *), usesSystemNavigation {
+                ToolbarOverflowMenu { conversationMenuItems }
+            }
+        }
         .ignoresSafeArea(.keyboard, edges: .bottom)
-        .overlay(alignment: .top) { navigation }
+        .overlay(alignment: .top) { if !usesSystemNavigation { navigation } }
         .environment(\.chatAPI, store.api)
         .environment(\.serverFileLinkController, messageLinks)
         .sheet(item: $messageLinks.previewItem, onDismiss: { messageLinks.dismissPreview(); composerFocus.resume("message-file") }) {
@@ -504,8 +560,18 @@ struct ConversationDetailView: View {
                 }.navigationTitle("对话文件").toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { files = false } } }
             }
         }
+        .confirmationDialog(managementAction.flatMap { action in detail.map { action.title(for: $0) } } ?? "管理群聊",
+            isPresented: Binding(get: { managementAction != nil }, set: { if !$0 { managementAction = nil } }),
+            titleVisibility: .visible, presenting: managementAction) { action in
+                Button(detail.map { action.title(for: $0) } ?? action.title, role: .destructive) { manage(action) }
+                Button("取消", role: .cancel) { managementAction = nil }
+        } message: { action in
+            if let detail { Text(action.explanation(for: detail)) }
+        }
         .task(id: id) { store.select(id); await store.load(id) }
+        .onAppear { visible = true }
         .onDisappear {
+            visible = false; managementAction = nil
             inviting = false; composerFocus.collapse(); messageLinks.cancel(); scrollScheduler.cancel()
             store.clearExecutionPreference(for: id)
         }
@@ -527,20 +593,80 @@ struct ConversationDetailView: View {
                         .accessibilityAction(named: "切换角色位置") { sideRaw = sideRaw == "left" ? "right" : "left" }
                 }
             }
+            if !usesSystemNavigation {
             FloatingChatControls(onBack: { dismiss() }) {
-                Button { composerFocus.borrow("files"); files = true } label: { FloatingChatIcon(symbol: "folder") }.accessibilityLabel("对话文件")
-                Menu {
-                    Text(detail?.title ?? "聊天")
-                    if let employee = detail?.peerEmployeeId { Button("员工资料与执行配置") { onEmployee(employee) } }
-                    if detail?.kind == "group" {
-                        Button(members ? "收起成员" : "成员") { composerFocus.collapse(); members.toggle(); inviting = false }
-                        Button("邀请成员") { composerFocus.collapse(); inviting.toggle(); members = false }
-                        Button(tasks ? "收起任务" : "任务与执行") { composerFocus.collapse(); tasks.toggle() }
-                    }
-                } label: { FloatingChatIcon(symbol: "ellipsis") }.accessibilityLabel("对话菜单")
+                Menu { conversationMenuItems } label: { FloatingChatIcon(symbol: "ellipsis") }.accessibilityLabel("对话菜单")
+            }
             }
         }
     }
+    @ViewBuilder private var conversationMenuItems: some View {
+        SessionActionPalette(actions: conversationMenuActions)
+        if let detail {
+            let actions = ConversationManagementAction.available(for: detail)
+            if !actions.isEmpty {
+                Section {
+                    SessionActionPalette(actions: actions.map { action in
+                        SessionMenuAction(id: action.rawValue, title: action.title(for: detail), symbol: action.symbol,
+                            isEnabled: !managementBusy && !store.mutationBusy,
+                            role: action == .restore ? nil : .destructive) {
+                                composerFocus.collapse()
+                                if action == .restore { manage(action) } else { managementAction = action }
+                            }
+                    })
+                }
+            }
+        }
+    }
+
+    private func manage(_ action: ConversationManagementAction) {
+        guard !managementBusy, !store.mutationBusy, let detail,
+              ConversationManagementAction.available(for: detail).contains(action) else { return }
+        managementAction = nil; managementError = nil; managementBusy = true
+        Task {
+            defer { managementBusy = false }
+            if action == .delete {
+                do {
+                    try await store.remove(id)
+                    if visible { dismiss() }
+                } catch { managementError = error.localizedDescription }
+            } else if await store.update(id, patch: ["dissolved": action == .dissolve]) {
+                inviting = false; members = false; tasks = false
+            } else {
+                managementError = store.error ?? "更新失败，请从更多菜单重试。"
+            }
+        }
+    }
+
+    private var conversationMenuActions: [SessionMenuAction] {
+        var actions = [SessionMenuAction(id: "files", title: "对话文件", symbol: "folder") {
+            composerFocus.borrow("files"); files = true
+        }]
+        if let employee = detail?.peerEmployeeId {
+            actions.append(SessionMenuAction(id: "employee", title: "员工资料与配置", symbol: "person.crop.circle") {
+                onEmployee(employee)
+            })
+        }
+        if detail?.kind == "group" {
+            actions.append(SessionMenuAction(id: "members", title: members ? "收起成员" : "成员",
+                symbol: members ? "person.2.fill" : "person.2") {
+                composerFocus.collapse(); members.toggle(); inviting = false
+            })
+            if detail?.external == nil {
+                actions.append(SessionMenuAction(id: "invite", title: inviting ? "收起邀请" : "邀请成员",
+                    symbol: inviting ? "person.fill.badge.plus" : "person.badge.plus",
+                    isEnabled: detail?.dissolvedAt == nil && detail?.deleting != true && !managementBusy) {
+                    composerFocus.collapse(); inviting.toggle(); members = false
+                })
+                actions.append(SessionMenuAction(id: "tasks", title: tasks ? "收起任务" : "任务与执行",
+                    symbol: tasks ? "checklist.checked" : "checklist") {
+                    composerFocus.collapse(); tasks.toggle()
+                })
+            }
+        }
+        return actions
+    }
+
     private func messageList(_ detail: ConversationInstance) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -563,6 +689,11 @@ struct ConversationDetailView: View {
             }
             .environment(\.wandImageGallery, { wandConversationImagePages(messages.map(\.turn)) })
             .defaultScrollAnchor(.bottom)
+            // Short first replies stay at the top, like Android's LazyColumn.
+            // The unscoped bottom anchor also aligns undersized content: every
+            // streamed line then moves the entire conversation upward. Keep
+            // bottom anchoring for initial history/follow, not short alignment.
+            .defaultScrollAnchor(.top, for: .alignment)
             .defaultScrollAnchor(scrollPinned ? .bottom : nil, for: .sizeChanges)
             .onScrollPhaseChange { _, phase in userScrolling = phase == .interacting || phase == .decelerating }
             .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -600,9 +731,16 @@ struct ConversationDetailView: View {
     private func messageView(_ message: ConversationMessage, detail: ConversationInstance) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             if detail.kind == "group", message.turn.role != "user", let author = message.author {
-                Button(author.name ?? "成员") {
-                    if let employee = detail.team?.members.first(where: { $0.id == author.id })?.employeeId { onEmployee(employee) }
-                }.font(.caption.weight(.semibold)).frame(minHeight: 32)
+                if detail.external != nil {
+                    if let employeeID = author.id,
+                       detail.external?.bindings?.contains(where: { $0.employeeId == employeeID }) == true {
+                        Button(author.name ?? "员工") { onEmployee(employeeID) }.font(.caption.weight(.semibold)).frame(minHeight: 32)
+                    } else { Text(author.name ?? "钉钉成员").font(.caption.weight(.semibold)) }
+                } else {
+                    Button(author.name ?? "成员") {
+                        if let employee = detail.team?.members.first(where: { $0.id == author.id })?.employeeId { onEmployee(employee) }
+                    }.font(.caption.weight(.semibold)).frame(minHeight: 32)
+                }
             }
             messageContent(message, detail: detail)
         }.frame(maxWidth: .infinity, alignment: .leading)
@@ -633,6 +771,17 @@ struct ConversationDetailView: View {
     private func memberPanel(_ detail: ConversationInstance) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
+                if let external = detail.external {
+                    Text("已接入员工（不是钉钉完整成员名单）").font(.caption).foregroundStyle(Theme.textSecondary)
+                    ForEach(external.bindings ?? []) { binding in
+                        Button { onEmployee(binding.employeeId) } label: {
+                            Text((store.employees.first { $0.id == binding.employeeId }?.name ?? "员工已不可用") + " · " + (binding.state == "ready" ? "已接通" : binding.state == "paused" ? "已暂停" : "接入待核实"))
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        }.buttonStyle(.plain)
+                    }
+                    Text(external.syncError ?? "普通消息同步展示；请在钉钉原生 @员工。员工最终正文回群，工具过程只在 Wand 查看。")
+                        .font(.caption).foregroundStyle(Theme.textSecondary)
+                }
                 ForEach(detail.team?.members ?? []) { member in
                     Button { if let employee = member.employeeId { onEmployee(employee) } } label: {
                         VStack(alignment: .leading, spacing: 4) {
@@ -798,7 +947,7 @@ private struct ConversationComposerView: View {
                         PendingAttachmentsPreview(baseURL: store.api.baseURL, attachments: attachments.attachments, onRemove: attachments.remove,
                             onPreview: { file in focus.borrow("preview", open: true); links.open(serverPath: file.savedPath, api: store.api) })
                         if draft.submissionFailed, let feedback = draft.sendFeedback { Text(feedback).font(.caption).foregroundStyle(Theme.danger) }
-                        IMEAwareComposerTextView(text: editorText, placeholder: dispatch ? "任务说明" : "输入消息，回车换行", isFocused: focus.focused,
+                        IMEAwareComposerTextView(text: editorText, placeholder: detail.external != nil ? "发送到钉钉群（普通消息不启动员工）" : dispatch ? "任务说明" : "输入消息，回车换行", isFocused: focus.focused,
                             maximumHeight: maximumHeight, submitOnReturn: false, onPasteImages: attachments.handlePastedImageData,
                             onFocusChange: { focus.focused = $0 }, onCompositionChange: { composing = $0 }, onSubmit: send, onHeightChange: { height = $0 })
                             // Discard also retires UIKit marked text; it must not commit back on blur.
@@ -836,7 +985,7 @@ private struct ConversationComposerView: View {
                             .accessibilityHint("此处不能选择模型，可前往员工执行配置修改")
                             .accessibilityIdentifier("conversation-execution-defaults")
                     }
-                }, actionCount: ComposerActionPresentation(phase: composerPhase,
+                }, isFocused: focus.focused, actionCount: ComposerActionPresentation(phase: composerPhase,
                     turnRunning: running && !dispatch, hasDraft: hasComposerDraft).slotCount)
         }
         .onAppear { if !visible { draft.acquire(draftConsumer) }; visible = true; attachments.setToastHandler { notice = $0 } }
@@ -923,7 +1072,14 @@ private struct ConversationComposerView: View {
         closeComposerActions()
         focus.collapse()
     }
-    private var composerActionsPanel: some View {
+    @ViewBuilder private var composerActionsPanel: some View {
+        if detail.external != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("此处文字发送到钉钉群，不派发内部团队任务。当前仅支持文字；请在钉钉中原生 @已接入员工。")
+                    .font(.callout).foregroundStyle(Theme.textSecondary)
+                Button("关闭") { closeComposerActions() }.frame(minHeight: 44)
+            }.padding(16)
+        } else {
         ComposerAttachmentPanel(onPhoto: {
             focus.borrow("attachment", open: true); closeComposerActions(); attachments.showPhotoPicker = true
         }, onFile: {
@@ -956,6 +1112,7 @@ private struct ConversationComposerView: View {
                     }.frame(maxWidth: .infinity, minHeight: 44).disabled(!action.canSubmit || draft.sendPhase == .sending)
                 }
             }
+        }
         }
     }
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -1054,7 +1211,7 @@ private struct ConversationExecutionSettings: View {
         HStack(spacing: 4) {
             ComposerSettingsStrip(model: modelLabel, mode: toolLabel, thinking: thinkingLabel,
                 onModel: { open(.model) }, onMode: { open(.tool) }, onThinking: { open(.thinking) },
-                modeName: "执行工具", modeSymbol: "wrench.and.screwdriver")
+                modeName: "执行工具")
             if preference != nil {
                 Button {
                     store.setExecutionPreference(nil, for: conversationID, employeeID: employee.id)

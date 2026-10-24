@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 @testable import Wand
 
@@ -16,10 +17,15 @@ final class NewConversationTests: XCTestCase {
         let sourceDirectory = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Wand")
         let root = try String(contentsOf: sourceDirectory.appendingPathComponent("NativeRootView.swift"), encoding: .utf8)
-        XCTAssertTrue(root.contains(".sheet(isPresented: $presentNewConversation"))
+        XCTAssertFalse(root.contains(".sheet(isPresented: $presentNewConversation"))
+        XCTAssertTrue(root.contains("marker == \"wand:pending-conversation\""))
+        XCTAssertTrue(root.contains("onCancel: { presentNewConversation = false }"))
+        XCTAssertTrue(root.contains("initialCreateTask: pendingCreatesTask"))
+        XCTAssertTrue(root.contains("guard presentNewConversation, pendingCreationID == creationID"))
+        XCTAssertTrue(root.contains(".id(creationID)"))
         XCTAssertFalse(root.contains("requestNewTask: Binding(get: { presentNewConversation }"))
         let pending = try String(contentsOf: sourceDirectory.appendingPathComponent("NewConversationView.swift"), encoding: .utf8)
-        XCTAssertTrue(pending.contains("Picker(\"工作目录方式\", selection: $worktreeEnabled)"))
+        XCTAssertTrue(pending.contains("Toggle(\"隔离 worktree\", isOn: $worktreeEnabled)"))
         XCTAssertTrue(pending.contains("let frozenWorktree = worktreeEnabled"))
         XCTAssertTrue(pending.contains("worktree: frozenWorktree, creationRequestId:"))
         XCTAssertFalse(pending.contains("worktree: false,"))
@@ -27,6 +33,164 @@ final class NewConversationTests: XCTestCase {
         XCTAssertTrue(pending.contains("resolvedCwd = detail.cwd"))
         XCTAssertTrue(pending.contains("cwd: resolvedCwd,"))
         XCTAssertTrue(pending.contains("workspaceId: resolvedWorkspaceID,"))
+    }
+
+    func testPendingAndRunningConversationUseTheSameDetailAndComposer() throws {
+        let directory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Wand")
+        let pending = try String(contentsOf: directory.appendingPathComponent("NewConversationView.swift"), encoding: .utf8)
+        let running = try String(contentsOf: directory.appendingPathComponent("ChatView.swift"), encoding: .utf8)
+        for source in [pending, running] {
+            XCTAssertTrue(source.contains("ChatDetailLayout("))
+            XCTAssertTrue(source.contains("FocusComposerSurface("))
+            XCTAssertTrue(source.contains("ChatTopIdentityBar("))
+            XCTAssertTrue(source.contains("isEmbeddedInDock: true"))
+        }
+        XCTAssertFalse(pending.contains("NavigationStack {"))
+        XCTAssertFalse(pending.contains(".sheet(isPresented: $showSettings)"))
+        XCTAssertFalse(pending.contains("任务名称不能为空"))
+        XCTAssertTrue(pending.contains("selection = nil\n        showAttachments = false"))
+        XCTAssertTrue(pending.contains("ComposerSettingsStrip("))
+        XCTAssertTrue(pending.contains("SearchableChoiceSheet("))
+        XCTAssertFalse(pending.contains("textFieldStyle(.roundedBorder)"))
+        XCTAssertFalse(pending.contains("DisclosureGroup("))
+        XCTAssertTrue(pending.contains("maximumHeight: composerMaximumHeight"))
+        XCTAssertTrue(pending.contains("confirmationDialog(\"设置本次对话权限\""))
+    }
+
+    func testExplicitTaskOwnerSurvivesMissingListSnapshot() {
+        let bound = NewConversationBoundTask(id: "task-1", workspaceId: "workspace-1", name: "已有任务", cwd: "/project")
+        XCTAssertEqual(pendingConversationTaskContext(boundTask: bound, selectedTaskID: "task-1", tasks: []), bound)
+        XCTAssertNil(pendingConversationTaskContext(boundTask: bound, selectedTaskID: "task-2", tasks: []))
+        XCTAssertNil(pendingConversationTaskContext(boundTask: nil, selectedTaskID: "task-1", tasks: []))
+    }
+
+    @MainActor
+    func testInstalledServerPendingDetailLoadsWithoutCreatingWork() async throws {
+        let pointer = URL(fileURLWithPath: "/tmp/wand-ios-pending-acceptance-connection-path")
+        guard let path = try? String(contentsOf: pointer, encoding: .utf8) else {
+            throw XCTSkip("Requires an explicit private installed-service connection path")
+        }
+        struct Connection: Decodable { let connectionCode: String }
+        let connection = try JSONDecoder().decode(Connection.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        let target = try XCTUnwrap(WandAuth.decodeConnectCode(connection.connectionCode))
+        let api = WandAPI(baseURL: target.url, token: target.token)
+        let config = try await api.serverConfig()
+        _ = try await api.listTaskGroups()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let identity = "pending-acceptance-" + UUID().uuidString
+        let cwd = config.defaultCwd ?? ""
+        let draft = SessionDraftStore.shared.draft(sessionId: "pending-new-conversation:\(identity):\(cwd)", api: api)
+        draft.text = "等待发送的验收草稿（不执行）"
+        draft.attachments.stageFileSelection(.success((1...5).map {
+            URL(fileURLWithPath: "/tmp/只读布局验收附件-\($0).txt")
+        }), cleanupAfterUpload: false)
+        defer { draft.text = ""; draft.attachments.discardUnsentAttachments() }
+        let host = UIHostingController(rootView: NewConversationView(
+            api: api, serverID: identity, initialCwd: cwd, initialCreateTask: true,
+            onCreated: { _ in XCTFail("Opening or editing the pending detail must not create work") }
+        ))
+        // A fixed child hosting controller keeps test geometry independent of the simulator window.
+        // This verifies content reflow at the Duo viewport sizes, not physical folding events.
+        let window = UIWindow(windowScene: scene)
+        let container = UIViewController()
+        window.rootViewController = container
+        window.makeKeyAndVisible()
+        container.addChild(host)
+        host.safeAreaRegions = []
+        container.view.addSubview(host.view)
+        host.view.frame = CGRect(x: 0, y: 0, width: 466, height: 678)
+        host.didMove(toParent: container)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await Task.sleep(for: .seconds(2))
+        func editors(_ view: UIView) -> [UITextView] {
+            (view as? UITextView).map { [$0] } ?? view.subviews.flatMap(editors)
+        }
+        let originalEditor = try XCTUnwrap(editors(host.view).first)
+        let sizes: [(String, CGFloat, CGFloat)] = [
+            ("outer-portrait", 466, 678), ("outer-landscape", 678, 466),
+            ("inner-portrait", 669, 951), ("inner-landscape", 951, 669), ("narrow-phone", 390, 800)
+        ]
+        for (index, entry) in sizes.enumerated() {
+            let (name, width, height) = entry
+            host.view.frame = CGRect(x: 0, y: 0, width: width, height: height)
+            host.overrideUserInterfaceStyle = index.isMultiple(of: 2) ? .light : .dark
+            host.traitOverrides.verticalSizeClass = width > height ? .compact : .regular
+            host.view.setNeedsLayout()
+            try await Task.sleep(for: .milliseconds(180))
+            host.view.layoutIfNeeded()
+            XCTAssertEqual(host.view.bounds.width, width, accuracy: 0.5)
+            XCTAssertEqual(host.view.bounds.height, height, accuracy: 0.5)
+            let fields = editors(host.view)
+            XCTAssertEqual(fields.count, 1)
+            XCTAssertTrue(fields.first === originalEditor, "Size changes must preserve the native editing node")
+            XCTAssertEqual(fields.first?.text, draft.text)
+            XCTAssertEqual(draft.attachments.stagedAttachmentCount, 5)
+            XCTAssertNil(host.presentedViewController, "Opening a pending detail must not present a settings form")
+            let frame = originalEditor.convert(originalEditor.bounds, to: host.view)
+            XCTAssertGreaterThan(frame.width, 180)
+            XCTAssertGreaterThanOrEqual(frame.minX, 0)
+            XCTAssertLessThanOrEqual(frame.maxX, host.view.bounds.width + 1)
+            XCTAssertLessThanOrEqual(frame.maxY, host.view.bounds.height + 1)
+            let image = UIGraphicsImageRenderer(size: host.view.bounds.size).image { _ in
+                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "pending-task-fixture-" + name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
+    @MainActor
+    func testMultipleStagedAttachmentsUseBoundedChatLaneAtAllDuoSizes() {
+        let attachments = (1...5).map { StagedComposerAttachment(name: "需要保留完整名称的验收附件-\($0).txt") }
+        for size in [CGSize(width: 466, height: 678), CGSize(width: 678, height: 466),
+                     CGSize(width: 669, height: 951), CGSize(width: 951, height: 669)] {
+            for typeSize in [DynamicTypeSize.large, .accessibility3] {
+                let host = UIHostingController(rootView: StagedAttachmentsPreview(attachments: attachments) { _ in }
+                    .environment(\.dynamicTypeSize, typeSize))
+                let measured = host.sizeThatFits(in: size)
+                XCTAssertGreaterThanOrEqual(measured.height, 44)
+                XCTAssertLessThanOrEqual(measured.height, 76)
+                XCTAssertLessThanOrEqual(measured.width, size.width)
+            }
+        }
+    }
+
+    @MainActor
+    func testSharedDetailKeepsDockAnchoredWhenOptionsExpandAndKeyboardLifts() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        for width in [CGFloat(320), 390, 768] {
+            for reduced in [false, true] {
+                let state = PendingDetailLayoutProbe()
+                let host = UIHostingController(rootView: PendingDetailLayoutFixture(state: state)
+                    .transaction { $0.disablesAnimations = reduced })
+                let window = UIWindow(windowScene: scene)
+                window.frame = CGRect(x: 0, y: 0, width: width, height: 700)
+                window.rootViewController = host; window.makeKeyAndVisible()
+                defer { window.isHidden = true; window.rootViewController = nil }
+                try await Task.sleep(for: .milliseconds(100))
+                func dock(_ view: UIView) -> UIView? {
+                    if view.accessibilityIdentifier == "pending-detail-dock" { return view }
+                    return view.subviews.lazy.compactMap(dock).first
+                }
+                let marker = try XCTUnwrap(dock(host.view))
+                let before = marker.convert(marker.bounds, to: host.view)
+                state.expanded = true
+                try await Task.sleep(for: .milliseconds(100))
+                host.view.layoutIfNeeded()
+                let expanded = marker.convert(marker.bounds, to: host.view)
+                XCTAssertEqual(before.minY, expanded.minY, accuracy: 1)
+                XCTAssertEqual(before.width, expanded.width, accuracy: 1)
+                state.lift = 180
+                try await Task.sleep(for: .milliseconds(100))
+                host.view.layoutIfNeeded()
+                let lifted = marker.convert(marker.bounds, to: host.view)
+                XCTAssertEqual(before.minY - lifted.minY, 180, accuracy: 1)
+                XCTAssertGreaterThan(lifted.minY, host.view.safeAreaInsets.top)
+            }
+        }
     }
 
     func testAcceptedTaskContinuationWaitsForConfigurationButSessionHandoffDoesNot() {
@@ -342,5 +506,34 @@ final class NewConversationTests: XCTestCase {
     private func decodeSnapshot(id: String) throws -> SessionSnapshot {
         let data = Data(#"{"id":"\#(id)","sessionKind":"structured","provider":"claude","selectedModel":null,"thinkingEffort":null,"claudeSessionId":null}"#.utf8)
         return try JSONDecoder().decode(SessionSnapshot.self, from: data)
+    }
+}
+
+@MainActor private final class PendingDetailLayoutProbe: ObservableObject {
+    @Published var expanded = false
+    @Published var lift: CGFloat = 0
+}
+
+private struct PendingDetailDockMarker: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.accessibilityIdentifier = "pending-detail-dock"
+        return view
+    }
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+private struct PendingDetailLayoutFixture: View {
+    @ObservedObject var state: PendingDetailLayoutProbe
+    var body: some View {
+        ChatDetailLayout(keyboardLift: state.lift) {
+            ScrollView {
+                if state.expanded {
+                    ForEach(0..<30) { index in Text("创建选项 \(index)").frame(minHeight: 44) }
+                }
+            }
+        } composer: {
+            PendingDetailDockMarker().frame(height: 64)
+        }
     }
 }

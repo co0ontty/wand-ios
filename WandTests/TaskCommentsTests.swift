@@ -370,6 +370,7 @@ extension TaskCommentsTests {
             "pending": "等待确认", "accepted": "已创建执行", "running": "执行中", "blocked": "等待审批",
             "idle": "本轮已结束", "exited": "会话已退出", "stopped": "已停止", "failed": "执行失败",
             "done": "已完成", "unknown": "送达未知 · 不会重放", "history": "历史会话", "unavailable": "会话不可用",
+            "paused": "已暂停",
         ]
         XCTAssertEqual(TaskCommentStatusLabels.labels, expected, "iOS 状态词表与服务端 src/task-comment-status.ts 漂移")
         XCTAssertEqual(TaskCommentStatusLabels.unknown, "状态未确认")

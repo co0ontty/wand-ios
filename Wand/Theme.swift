@@ -32,8 +32,6 @@ enum WandMotion {
     static let stateSwap = Animation.easeInOut(duration: 0.18)
     static let expansion = Animation.interactiveSpring(response: 0.32, dampingFraction: 1, blendDuration: 0)
     static let topicPulse = Animation.easeInOut(duration: 1.15).repeatForever(autoreverses: true)
-    static let tabFront = Animation.easeInOut(duration: 0.22)
-    static let tabRear = Animation.easeInOut(duration: 0.22).delay(0.08)
     static let submittedDwell: UInt64 = 720_000_000
     static let failedDwell: UInt64 = 1_500_000_000
     static let searchDebounce: UInt64 = 240_000_000
@@ -44,13 +42,6 @@ enum WandMotion {
     static let scan = Animation.linear(duration: 2.2).repeatForever(autoreverses: false)
     static let activityPulse = Animation.smooth(duration: 1.2, extraBounce: 0).repeatForever(autoreverses: true)
     static let activityTick: TimeInterval = 0.05
-    /// 交互式侧滑返回：跟手阶段不用动画，松手后才用这条曲线补齐剩余位移。
-    /// 提交与回弹共用同一组时长/曲线，保证「收起是展开的倒放」的观感一致。
-    static let backSwipeCommit = Animation.easeOut(duration: 0.26)
-    static let backSwipeCancel = Animation.interactiveSpring(response: 0.28, dampingFraction: 1, blendDuration: 0)
-    /// 上一页视差：跟随时只露出一小段并轻微变暗，不整体平移一屏。
-    static let backSwipeParallaxRatio: CGFloat = 0.28
-    static let backSwipeDimOpacity: CGFloat = 0.14
     static func keyboard(duration: Double) -> Animation? { UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: max(0, duration)) }
 }
 
@@ -60,6 +51,33 @@ enum WandLayout {
     static let fieldGap: CGFloat = 12
     static let sectionGap: CGFloat = 24
     static let controlTouch: CGFloat = 44
+}
+
+/// Persistent labels for inline editors outside a native Form. The actual inputs
+/// remain system TextField/TextEditor/Picker controls, with no separate draft state.
+struct WandFormField<Content: View>: View {
+    let title: String
+    var hint: String?
+    @ViewBuilder let content: Content
+
+    init(_ title: String, hint: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title; self.hint = hint; self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.subheadline.weight(.medium)).foregroundStyle(Theme.textPrimary)
+            content
+                .font(.body)
+                .textFieldStyle(.roundedBorder)
+                .frame(minHeight: WandLayout.controlTouch, alignment: .leading)
+            if let hint {
+                Text(hint).font(.caption).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 /// Immediate color feedback without moving or resizing the target.
@@ -162,6 +180,13 @@ enum WandAppearanceMode: String, CaseIterable, Identifiable {
 /// 品牌配色与复用样式。颜色随系统明暗自适应。
 /// 与当前 Android WandColors 共用灰白蓝色板；终端独立保留暖深色。
 enum Theme {
+    // Approved workspace v5: semantic regions, native dark-mode equivalents.
+    static let workspaceCanvas = dynamic(light: hex(0xEAEFF4), dark: hex(0x10151C))
+    static let workspaceContext = dynamic(light: hex(0xDBE6F0), dark: hex(0x202E3C))
+    static let workspaceReading = dynamic(light: hex(0xFFFFFF), dark: hex(0x181D24))
+    static let workspaceInputDock = dynamic(light: hex(0xF0F3F7), dark: hex(0x242B34))
+    static let workspaceSelection = dynamic(light: hex(0xEAF2FA), dark: hex(0x263C51))
+
     private static func rgb(_ r: Double, _ g: Double, _ b: Double) -> UIColor {
         UIColor(red: r, green: g, blue: b, alpha: 1)
     }
@@ -260,11 +285,25 @@ func wandNoticeDuration(_ message: String) -> TimeInterval {
 extension View {
     @ViewBuilder
     func wandGlassSurface() -> some View {
-        modifier(WandGlassSurfaceModifier())
+        modifier(WandGlassSurfaceModifier(shape: RoundedRectangle(cornerRadius: 0, style: .continuous)))
+    }
+
+    func wandGlassCapsule(tint: Color? = nil) -> some View {
+        modifier(WandGlassSurfaceModifier(shape: Capsule(), tint: tint))
+    }
+
+    func wandGlassSurface<S: InsettableShape>(in shape: S, tint: Color? = nil) -> some View {
+        modifier(WandGlassSurfaceModifier(shape: shape, tint: tint))
     }
 
     func wandGlassCard(cornerRadius: CGFloat = 16) -> some View {
         modifier(WandGlassCardModifier(cornerRadius: cornerRadius))
+    }
+
+    /// Native controls own their thumb/track, gestures, focus and accessibility.
+    /// Child selection toggles can explicitly retain .button rather than becoming switches.
+    func wandNativeFormControls() -> some View {
+        toggleStyle(.switch).controlSize(.regular).tint(Theme.brand)
     }
 
     func wandPreferredAppearance() -> some View {
@@ -309,13 +348,15 @@ extension View {
     func wandInputSurface(
         focused: Bool,
         invalid: Bool = false,
-        cornerRadius: CGFloat = 14
+        cornerRadius: CGFloat = 14,
+        fill: Color? = nil
     ) -> some View {
         modifier(
             WandInputSurfaceModifier(
                 focused: focused,
                 invalid: invalid,
-                cornerRadius: cornerRadius
+                cornerRadius: cornerRadius,
+                fill: fill
             )
         )
     }
@@ -357,13 +398,14 @@ struct WandPathRevealText: View {
     }
 }
 
-private struct WandGlassSurfaceModifier: ViewModifier {
+private struct WandGlassSurfaceModifier<SurfaceShape: InsettableShape>: ViewModifier {
+    let shape: SurfaceShape
+    var tint: Color? = nil
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 0, style: .continuous)
         let highContrast = contrast == .increased
 
         if reduceTransparency || highContrast {
@@ -371,7 +413,7 @@ private struct WandGlassSurfaceModifier: ViewModifier {
                 .background(shape.fill(Theme.surface))
                 .overlay(shape.stroke(Theme.border, lineWidth: highContrast ? 1.5 : 1))
         } else if #available(iOS 26.0, *) {
-            content.glassEffect(.regular.tint(Theme.brand.opacity(0.035)), in: shape)
+            content.glassEffect(.regular.tint(tint?.opacity(0.12) ?? Theme.brand.opacity(0.035)), in: shape)
         } else {
             content
                 .background(.ultraThinMaterial, in: shape)
@@ -407,6 +449,7 @@ private struct WandInputSurfaceModifier: ViewModifier {
     let focused: Bool
     let invalid: Bool
     let cornerRadius: CGFloat
+    let fill: Color?
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -415,11 +458,11 @@ private struct WandInputSurfaceModifier: ViewModifier {
 
         content
             .background {
-                shape.fill(
+                shape.fill(fill ?? (
                     reduceTransparency || highContrast
                         ? Theme.surface
                         : Theme.surface.opacity(focused ? 0.98 : 0.86)
-                )
+                ))
             }
             .overlay {
                 shape.stroke(
@@ -440,6 +483,7 @@ private struct WandPreferredAppearanceModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            .wandNativeFormControls()
             .onAppear { applyAppearanceOverride() }
             .onChange(of: appearanceModeRaw) { _, _ in applyAppearanceOverride() }
     }
@@ -458,51 +502,22 @@ private struct WandPreferredAppearanceModifier: ViewModifier {
 }
 
 /// 品牌色主按钮，原生按压与禁用反馈；文字随 Dynamic Type 增长。
-struct WandPrimaryButtonStyle: ButtonStyle {
-    @MainActor
-    func makeBody(configuration: Configuration) -> Body {
-        Body(configuration: configuration)
-    }
-
-    struct Body: View {
-        let configuration: ButtonStyleConfiguration
-        @Environment(\.isEnabled) private var isEnabled
-
-        var body: some View {
-            configuration.label
-                .font(.body.weight(.semibold))
-                .foregroundColor(Theme.onBrand)
-                .padding(.vertical, 13)
-                .padding(.horizontal, 18)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(isEnabled ? Theme.brand : Theme.brand.opacity(0.45))
-                )
-                .brightness(configuration.isPressed ? -0.06 : 0)
-                .contentShape(Rectangle())
-        }
+struct WandPrimaryButtonStyle: PrimitiveButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button(role: configuration.role, action: configuration.trigger) { configuration.label }
+            .buttonStyle(.glassProminent).buttonBorderShape(.capsule)
+            .tint(configuration.role == .destructive ? Theme.danger : Theme.brand)
+            .controlSize(.large)
     }
 }
 
 /// 描边次按钮，用于「重新连接 / 取消」等次要动作。
-struct WandSecondaryButtonStyle: ButtonStyle {
-    @MainActor
+struct WandSecondaryButtonStyle: PrimitiveButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.body.weight(.medium))
-            .foregroundColor(Theme.textPrimary)
-            .padding(.vertical, 13)
-            .padding(.horizontal, 18)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Theme.surface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Theme.border, lineWidth: 1)
-            )
-            .opacity(configuration.isPressed ? 0.7 : 1)
-            .contentShape(Rectangle())
+        Button(role: configuration.role, action: configuration.trigger) { configuration.label }
+            .buttonStyle(.glass).buttonBorderShape(.capsule)
+            .tint(configuration.role == .destructive ? Theme.danger : Theme.brand)
+            .controlSize(.large)
     }
 }
 

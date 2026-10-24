@@ -75,7 +75,6 @@ private enum TaskListConfirm: Identifiable {
 struct WorkspaceListView: View {
     @ObservedObject var store: WorkspaceStore
     let api: WandAPI
-    var creationServerID: String? = nil
     var serverDisplayName: String? = nil
     let selectedTaskId: String?
     var selectedSessionId: String? = nil
@@ -97,6 +96,7 @@ struct WorkspaceListView: View {
     var onOpenTeamRun: ((String) -> Void)? = nil
     var onModalVisibilityChanged: ((Bool) -> Void)? = nil
     var onMutationBusyChanged: ((Bool) -> Void)? = nil
+    var onRequestNewConversation: (String, String?) -> Void = { _, _ in }
 
     @State private var renameTarget: WorkspaceTask?
     @State private var renameDraft = ""
@@ -105,10 +105,6 @@ struct WorkspaceListView: View {
     @State private var pendingConfirm: TaskListConfirm?
     @State private var confirmBusy = false
     @State private var confirmError: String?
-    @State private var newTaskSheetPresented = false
-    @State private var newTaskSheetCwd = ""
-    @State private var newTaskSheetWorkspaceId: String?
-    @State private var newTaskSheetWorkspaceName = ""
     @State private var collapsedTaskGroups = TaskListExpansionStorage.collapsedIds(kind: "groups")
     @State private var collapsedTaskIds = TaskListExpansionStorage.collapsedIds(kind: "tasks")
     @State private var collapsedLooseGroups = TaskListExpansionStorage.collapsedIds(kind: "loose")
@@ -121,6 +117,7 @@ struct WorkspaceListView: View {
     @State private var archiveError: String?
     /// 收起/展开是位移类动效：系统减少动效时退化为瞬时（与 Theme 其它组件同一口径）。
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var collapsedArchivedTaskIds = Set<String>()
     @State private var renameDirectoryBusy = false
@@ -130,6 +127,7 @@ struct WorkspaceListView: View {
     @State private var reviewTarget: Workspace?
     @State private var moveSessionTarget: WorkspaceSessionSummary?
     @State private var toastMessage: String?
+    @State private var revealedRowID: String?
     @State private var searchQuery = ""
     private var searchingWorkspaces: Bool { !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     @FocusState private var searchFocused: Bool
@@ -215,8 +213,8 @@ struct WorkspaceListView: View {
                 conversationOrganizationTarget = nil
                 if !selecting { clearManagedSelection() }
             }
-            .onChange(of: searchQuery) { _, _ in conversationOrganizationTarget = nil }
-            .onChange(of: attentionOnly) { _, _ in conversationOrganizationTarget = nil }
+            .onChange(of: searchQuery) { _, _ in conversationOrganizationTarget = nil; revealedRowID = nil }
+            .onChange(of: attentionOnly) { _, _ in conversationOrganizationTarget = nil; revealedRowID = nil }
             .onChange(of: recentFoldRaw) { _, _ in temporaryExpandedRecent.removeAll() }
             .onChange(of: workspaceFoldRaw) { _, _ in
                 conversationOrganizationTarget = nil
@@ -231,10 +229,10 @@ struct WorkspaceListView: View {
     /// 导航栏外观 + 工具栏 + 提示浮层。
     private var navigationChrome: some View {
         sheetContent
-            .background(WandAmbientBackground())
-            .navigationTitle("")
+            .background(Theme.workspaceCanvas)
+            .navigationTitle(usesSystemNavigation ? "工作区" : "")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar(hidesHomeChrome ? .hidden : .automatic, for: .navigationBar)
+            .toolbar(hidesHomeChrome && !usesSystemNavigation ? .hidden : .automatic, for: .navigationBar)
             .toolbar { navigationToolbar }
             .overlay(alignment: .top) { toastView }
             .animation(reduceMotion ? nil : WandMotion.stateSwap, value: toastMessage)
@@ -343,47 +341,7 @@ struct WorkspaceListView: View {
                     }
                 )
             }
-            .sheet(isPresented: $newTaskSheetPresented) {
-                NewConversationView(
-                    api: api,
-                    serverID: creationServerID ?? store.serverID,
-                    initialCwd: newTaskSheetCwd,
-                    workspaceID: newTaskSheetWorkspaceId,
-                    onCreated: { snapshot in
-                        newTaskSheetPresented = false
-                        Task {
-                            await store.loadTaskGroups(force: true)
-                            let session = WorkspaceSessionSummary(snapshot: snapshot)
-                            if let taskId = snapshot.workspaceTaskId,
-                               let summary = store.taskGroups.flatMap(\.tasks).first(where: { $0.id == taskId }) {
-                                let group = store.taskGroups.first { $0.tasks.contains(where: { $0.id == taskId }) }
-                                let workspace = store.workspaces.first(where: { $0.id == summary.workspaceId })
-                                    ?? group.map { workspace(for: summary, group: $0) }
-                                    ?? Workspace(id: summary.workspaceId, name: newTaskSheetWorkspaceName, cwd: summary.cwd, defaultProvider: nil, layout: nil, createdAt: "", lastOpenedAt: nil)
-                                showToast("已创建任务「\(summary.name)」并启动会话")
-                                if let onOpenTaskSession {
-                                    onOpenTaskSession(workspace, summary.asTask(), session)
-                                } else {
-                                    onOpenTask(workspace, summary.asTask())
-                                }
-                            } else {
-                                showToast("已创建新对话")
-                                let workspace = store.workspaces.first(where: { $0.id == snapshot.workspaceId })
-                                    ?? Workspace(id: snapshot.workspaceId ?? "wand-global", name: newTaskSheetWorkspaceName, cwd: snapshot.cwd ?? newTaskSheetCwd, defaultProvider: nil, layout: nil, createdAt: "", lastOpenedAt: nil)
-                                if let onOpenSession {
-                                    onOpenSession(workspace, session)
-                                } else {
-                                    onOpenTask(workspace, WorkspaceTask(
-                                        id: "", workspaceId: workspace.id, name: "", worktree: nil,
-                                        layout: nil, status: "active", createdAt: "", lastOpenedAt: nil
-                                    ))
-                                }
-                            }
-                        }
-                    }
-                )
-                .presentationDetents([.large])
-            }
+
     }
 
     private var alertContent: some View {
@@ -642,6 +600,13 @@ struct WorkspaceListView: View {
     private var taskGroupsList: some View {
         List {
             if !isSelecting { homeSearchAndActivity }
+            let visible = HomePresentation.visibleGroups(
+                TaskListPresentation.orderedDirectoryGroups(store.taskGroups),
+                query: searchQuery, attentionOnly: attentionOnly, employees: employees)
+            if !isSelecting {
+                HomeSectionHeader(title: "最近对话", foldRaw: $recentFoldRaw)
+                recentConversationRows(visible)
+            }
             if let error = store.orderSaveError {
                 HStack { Text(error).font(.caption).foregroundStyle(Theme.danger); Spacer(); Button("重试保存顺序") { store.savePendingGroupOrder() } }.padding(8)
             }
@@ -659,16 +624,11 @@ struct WorkspaceListView: View {
             if let error = store.taskGroupsError, store.taskGroups.isEmpty {
                 inlineError(error)
             }
-            let visible = HomePresentation.visibleGroups(
-                TaskListPresentation.orderedDirectoryGroups(store.taskGroups),
-                query: searchQuery, attentionOnly: attentionOnly, employees: employees)
             if hidesHomeChrome && isSelecting {
                 homeManageBar(visible: visible)
             }
             if !isSelecting {
-                HomeSectionHeader(title: "最近对话", foldRaw: $recentFoldRaw)
-                recentConversationRows(visible)
-                HomeSectionHeader(title: "任务与工作区", foldRaw: $workspaceFoldRaw, onCreate: {
+                HomeSectionHeader(title: "目录", foldRaw: $workspaceFoldRaw, onCreate: {
                     guard !workspaceCreateBusy else { return }
                     withAnimation(reduceMotion ? nil : WandMotion.stateSwap) {
                         workspaceCreateExpanded.toggle()
@@ -691,14 +651,12 @@ struct WorkspaceListView: View {
                     Text(searchQuery.isEmpty && !attentionOnly ? "还没有任务" : "没有匹配的会话")
                         .font(.wand(size: 15, weight: .semibold))
                         .foregroundColor(Theme.textPrimary)
-                    Text(searchQuery.isEmpty && !attentionOnly ? "新建任务时选目录，之后在任务里建会话无需再选目录。" : "清空搜索或取消「等你」筛选可显示其他内容。")
-                        .font(.footnote)
-                        .foregroundColor(Theme.textSecondary)
-                        .multilineTextAlignment(.center)
                     Button {
-                        presentNewTaskSheet()
+                        if searchQuery.isEmpty && !attentionOnly { presentNewTaskSheet() }
+                        else { searchQuery = ""; attentionOnly = false; searchFocused = false }
                     } label: {
-                        Label("新建任务", systemImage: "plus")
+                        Label(searchQuery.isEmpty && !attentionOnly ? "新建任务" : "显示全部工作区",
+                            systemImage: searchQuery.isEmpty && !attentionOnly ? "plus" : "line.3.horizontal.decrease.circle")
                             .frame(maxWidth: 220)
                     }
                     .buttonStyle(WandPrimaryButtonStyle())
@@ -709,13 +667,21 @@ struct WorkspaceListView: View {
                 .listRowSeparator(.hidden)
             }
             ForEach(visible) { group in
-                taskGroupSection(group)
-                    .disabled(creationBusy)
+                Section {
+                    taskGroupSection(group)
+                        .disabled(creationBusy)
+                }
             }
         }
-        .listStyle(.plain)
+        .listStyle(.insetGrouped)
+        .listSectionSpacing(18)
+        .background(Theme.workspaceCanvas)
+        .contentMargins(.top, 0, for: .scrollContent)
+        .scrollContentBackground(.hidden)
+        .homeSwipeDismissal($revealedRowID)
         .animation(reduceMotion ? nil : WandMotion.stateSwap, value: conversationOrganizationTarget?.id)
         .refreshable {
+            revealedRowID = nil
             conversationOrganizationTarget = nil
             await store.loadTaskGroups(force: true)
             await store.loadWorkspaceIndex()
@@ -727,7 +693,7 @@ struct WorkspaceListView: View {
     }
 
     private var modalVisible: Bool {
-        newTaskSheetPresented || reviewTarget != nil || moveSessionTarget != nil
+        reviewTarget != nil || moveSessionTarget != nil
             || renameTarget != nil || renameDirectoryTarget != nil || conversationOrganizationTarget != nil || pendingConfirm != nil
     }
 
@@ -736,38 +702,28 @@ struct WorkspaceListView: View {
     private var homeSearchAndActivity: some View {
         let counts = HomePresentation.counts(store.taskGroups)
         return VStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundColor(Theme.textMuted)
-                TextField("搜索对话、员工、任务或目录", text: $searchQuery)
-                    .font(.wand(size: 14))
-                    .focused($searchFocused)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityLabel("搜索对话、员工、任务或目录")
-                Button { searchQuery = ""; searchFocused = true } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundColor(Theme.textMuted)
-                        .opacity(searchQuery.isEmpty ? 0 : 1).frame(width: 32, height: 32)
-                }.buttonStyle(.plain).disabled(searchQuery.isEmpty).accessibilityLabel("清空搜索")
-            }
-            .padding(.horizontal, 10)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
+            HomeSearchField(placeholder: "搜索对话、员工、任务或目录", text: $searchQuery, focused: $searchFocused)
             if counts.running > 0 || counts.needsYou > 0 || attentionOnly {
-                HStack(spacing: 12) {
-                    Label("在跑 \(counts.running)", systemImage: "bolt.fill")
+                let layout = dynamicTypeSize.isAccessibilitySize
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+                    : AnyLayout(HStackLayout(spacing: 12))
+                layout {
+                    Text("运行中 \(counts.running)")
                         .foregroundColor(Theme.success)
-                    Spacer(minLength: 4)
+                    if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 4) }
                     Button {
                         attentionOnly.toggle()
                         if attentionOnly { recentFoldRaw = "expand"; workspaceFoldRaw = "expand" }
                     } label: {
-                        Label("等你 \(counts.needsYou)", systemImage: attentionOnly ? "checkmark.circle.fill" : "hand.raised")
+                        Text(attentionOnly ? "待处理 \(counts.needsYou) · 筛选中" : "待处理 \(counts.needsYou)")
                             .foregroundColor(attentionOnly ? Theme.brand : Theme.textSecondary)
                     }.buttonStyle(.plain).accessibilityLabel(attentionOnly ? "取消只看等你" : "只看等你处理的会话")
                 }.font(.wand(size: 12, weight: .medium))
             }
         }
         .padding(.vertical, 4)
-        .listRowBackground(Theme.background)
+        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+        .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
     }
 
@@ -796,44 +752,46 @@ struct WorkspaceListView: View {
                 visibleConversationCount: shown.count
             )
             if !matching.isEmpty || (group.kind == .blankTerminal && searchQuery.isEmpty && !attentionOnly) {
-                if !showsHeader, let item = shown.first {
-                    recentConversationRow(item, index: 0, secondary: false)
-                        .listRowBackground(Theme.background)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 1, leading: 12, bottom: 1, trailing: 12))
-                } else {
-                    HomeRecentGroupHeader(
-                        group: group,
-                        expanded: expanded,
-                        onToggle: fold == .expand || group.conversations.isEmpty ? nil : {
-                            withAnimation(reduceMotion ? nil : WandMotion.stateSwap) {
-                                if temporaryExpandedRecent.contains(group.id) {
-                                    temporaryExpandedRecent.remove(group.id)
-                                } else {
-                                    temporaryExpandedRecent.insert(group.id)
+                Section {
+                    if !showsHeader, let item = shown.first {
+                        recentConversationRow(item, index: 0, secondary: false)
+                            .listRowBackground(Theme.surface)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                    } else {
+                        HomeRecentGroupHeader(
+                            group: group,
+                            expanded: expanded,
+                            onToggle: fold == .expand || group.conversations.isEmpty ? nil : {
+                                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) {
+                                    if temporaryExpandedRecent.contains(group.id) {
+                                        temporaryExpandedRecent.remove(group.id)
+                                    } else {
+                                        temporaryExpandedRecent.insert(group.id)
+                                    }
                                 }
+                            },
+                            onCreate: group.kind == .blankTerminal ? {
+                                guard !terminalCreateBusy else { return }
+                                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { terminalCreateExpanded.toggle() }
+                            } : nil
+                        )
+                        .listRowBackground(Theme.surface)
+                        .listRowSeparator(.hidden)
+                        .disabled(creationBusy)
+                        if group.kind == .blankTerminal && terminalCreateExpanded { terminalCreatePanel }
+                        if expanded {
+                            ForEach(Array(shown.enumerated()), id: \.element.id) { index, item in
+                                recentConversationRow(item, index: index, secondary: true)
+                                    .disabled(creationBusy)
+                                    .listRowBackground(Theme.surface)
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets(top: 4, leading: 28, bottom: 4, trailing: 16))
                             }
-                        },
-                        onCreate: group.kind == .blankTerminal ? {
-                            guard !terminalCreateBusy else { return }
-                            withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { terminalCreateExpanded.toggle() }
-                        } : nil
-                    )
-                    .listRowBackground(Theme.background)
-                    .listRowSeparator(.hidden)
-                    .disabled(creationBusy)
-                    if group.kind == .blankTerminal && terminalCreateExpanded { terminalCreatePanel }
-                    if expanded {
-                        ForEach(Array(shown.enumerated()), id: \.element.id) { index, item in
-                            recentConversationRow(item, index: index, secondary: true)
-                                .disabled(creationBusy)
-                                .listRowBackground(Theme.background)
-                                .listRowSeparator(.hidden)
-                                .listRowInsets(EdgeInsets(top: 1, leading: 28, bottom: 1, trailing: 12))
-                        }
-                        if shown.isEmpty && !matching.isEmpty && groupFold == .running {
-                            Text("暂无在跑或待查看的会话").font(.caption).foregroundColor(Theme.textMuted)
-                                .listRowSeparator(.hidden).listRowBackground(Theme.background)
+                            if shown.isEmpty && !matching.isEmpty && groupFold == .running {
+                                Text("暂无在跑或待查看的会话").font(.caption).foregroundColor(Theme.textMuted)
+                                    .listRowSeparator(.hidden).listRowBackground(Theme.surface)
+                            }
                         }
                     }
                 }
@@ -857,22 +815,21 @@ struct WorkspaceListView: View {
                 onOpenTaskSession?(workspace(for: task, group: item.group), task.asTask(), item.session)
             } else { onOpenSession?(workspace(from: item.group), item.session) }
         } label: {
-            HStack(spacing: 9) {
+            HStack(alignment: .top, spacing: 12) {
                 recentConversationLeading(item, secondary: secondary)
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text(directEmployee ? employee?.name ?? item.session.employeeName ?? "员工" : conversationTitle)
-                        .font(.wand(size: 14, weight: .medium)).foregroundColor(Theme.textPrimary)
-                        .lineLimit(secondary ? 1 : 2)
+                        .font(.subheadline.weight(.medium)).foregroundStyle(Theme.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if !secondary {
                         Text([directEmployee ? conversationTitle : nil, item.task?.name, item.session.teamStep?.teamName, item.group.isGlobal ? nil : item.group.workspaceName]
                             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
-                            .font(.wand(size: 11)).foregroundColor(Theme.textMuted).lineLimit(1)
+                            .font(.caption).foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                }
-                Spacer(minLength: 4)
-                Text(item.session.isJustCompleted ? "刚完成" : HomePresentation.statusLabel(item.session.activityStatus))
-                    .font(.wand(size: 11)).foregroundColor(item.session.isJustCompleted ? Theme.brand : Theme.textSecondary)
-            }.padding(.vertical, 7)
+                    HomeExecutionBadge(state: HomePresentation.executionState(item.session), compact: true)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.padding(.vertical, 8)
         }.buttonStyle(.plain)
         .contextMenu {
             Button("选择多项", systemImage: "checkmark.circle") {
@@ -882,6 +839,8 @@ struct WorkspaceListView: View {
             Button { moveSessionTarget = item.session } label: { Label("移动到任务", systemImage: "folder") }
             Button(role: .destructive) { presentConfirm(.deleteSession(item.session)) } label: { Label("删除会话", systemImage: "trash") }
         }
+        .homeSwipeActions(id: "recent-" + item.id, revealedID: $revealedRowID,
+            actions: sessionRowActions(item.session), enabled: !isSelecting && !creationBusy, surface: Theme.surface)
     }
 
     @ViewBuilder
@@ -1049,12 +1008,7 @@ struct WorkspaceListView: View {
     }
 
     private func presentNewTaskSheet(cwd: String = "", workspaceId: String? = nil) {
-        newTaskSheetCwd = cwd
-        newTaskSheetWorkspaceId = workspaceId
-        newTaskSheetWorkspaceName = store.workspaces.first(where: { $0.id == workspaceId })?.name
-            ?? store.taskGroups.first(where: { $0.workspaceId == workspaceId })?.workspaceName
-            ?? ""
-        newTaskSheetPresented = true
+        onRequestNewConversation(cwd, workspaceId)
     }
 
     private func beginManagedSelection() {
@@ -1079,8 +1033,12 @@ struct WorkspaceListView: View {
         let expanded = searchingWorkspaces || isSelecting || (fold != .collapse &&
             (temporaryExpandedWorkspaces.contains(group.id) || !collapsedTaskGroups.contains(group.id)))
         taskGroupHeader(group, expanded: expanded)
-            .padding(.top, 12)
+            .padding(12)
+            .background(Theme.workspaceContext, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .padding(.vertical, 8)
+            .overlay(alignment: .bottom) { if expanded { Rectangle().fill(Theme.border).frame(height: 0.5) } }
             .workspaceTreeRow(.directory)
+            .listRowBackground(Theme.workspaceContext)
             .id("workspace-directory-" + group.id)
         if conversationOrganizationTarget?.id == group.id, let controller = conversationOrganizationControllers[group.id] {
             ConversationOrganizationPanel(
@@ -1211,6 +1169,8 @@ struct WorkspaceListView: View {
                 }
             }
         }
+        .homeSwipeActions(id: "directory-" + group.id, revealedID: $revealedRowID,
+            actions: directoryRowActions(group), enabled: !isSelecting && !creationBusy, surface: Theme.workspaceContext)
         .onDrag { NSItemProvider(object: group.id as NSString) }
         .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
             guard let provider = providers.first else { return false }
@@ -1220,6 +1180,28 @@ struct WorkspaceListView: View {
             }
             return true
         }
+    }
+
+    private func directoryRowActions(_ group: TaskDirectoryGroup) -> [HomeRowAction] {
+        var actions = [
+            HomeRowAction(id: "new", title: "新建任务", symbol: "plus") {
+                presentNewTaskSheet(cwd: group.workspaceCwd, workspaceId: group.isBindableProject ? group.workspaceId : nil)
+            },
+            HomeRowAction(id: "organize", title: "整理", symbol: "wand.and.stars", tint: Theme.info) {
+                presentConversationOrganization(group)
+            }
+        ]
+        if !group.isGlobal {
+            actions.append(HomeRowAction(id: "rename", title: "重命名", symbol: "pencil", tint: Theme.warning) {
+                renameDirectoryDraft = group.workspaceName; renameDirectoryError = nil; renameDirectoryTarget = group
+            })
+        }
+        if group.isBindableProject {
+            actions.append(HomeRowAction(id: "delete", title: "删除", symbol: "trash", tint: Theme.danger) {
+                presentConfirm(.deleteWorkspace(workspace(from: group)))
+            })
+        }
+        return actions
     }
 
     private func treeDisclosureCaret(expanded: Bool) -> some View {
@@ -1338,17 +1320,6 @@ struct WorkspaceListView: View {
         return layout {
             taskSummaryTitle(summary, workspace: workspace, task: task)
 
-            if summary.hasQueuedExecution {
-                Label("排队中", systemImage: "clock")
-                    .font(.caption).foregroundStyle(Theme.textSecondary)
-                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
-            }
-            if summary.status == "done" {
-                Text("已完成")
-                    .font(.wand(size: 11, weight: .medium))
-                    .foregroundColor(Theme.textMuted)
-                    .padding(.trailing, 4)
-            }
 
             HStack(spacing: 8) {
                 if dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
@@ -1367,9 +1338,13 @@ struct WorkspaceListView: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("任务 \(summary.name)")
         .contextMenu { taskSummaryContextMenu(summary, workspace: workspace, task: task) }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            taskSummarySwipeActions(summary, task: task)
-        }
+        .homeSwipeActions(id: "task-" + summary.id, revealedID: $revealedRowID, actions: [
+            HomeRowAction(id: "new", title: "新建会话", symbol: "plus") { onRequestNewSession?(workspace, task) },
+            HomeRowAction(id: "rename", title: "重命名", symbol: "pencil", tint: Theme.info) {
+                renameDraft = summary.name; renameError = nil; renameTarget = task
+            },
+            HomeRowAction(id: "archive", title: "归档", symbol: "archivebox", tint: Theme.warning) { presentConfirm(.archiveTask(task)) }
+        ], enabled: !isSelecting && !creationBusy, surface: Theme.surface)
     }
 
     /// 任务名与多选勾选、点击行为单独成体：整行内联时这一个表达式就会占满 type
@@ -1380,7 +1355,6 @@ struct WorkspaceListView: View {
         workspace: Workspace,
         task: WorkspaceTask
     ) -> some View {
-        let selected = selectedTaskId == summary.id
         let isSelected = selectedTaskIds.contains(summary.id)
         HStack(spacing: 8) {
             if isSelecting {
@@ -1391,16 +1365,10 @@ struct WorkspaceListView: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(summary.name)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(selected || (isSelecting && isSelected) ? Theme.textPrimary : Theme.textSecondary)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                    .font(.body.weight(.regular))
+                    .foregroundStyle(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("task-name-" + summary.id)
-                if summary.listedSessionCount > 0 {
-                    Text(HomePresentation.sessionSummary(summary.sessions, total: summary.listedSessionCount))
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
             .multilineTextAlignment(.leading)
             Spacer(minLength: 0)
@@ -1522,22 +1490,26 @@ struct WorkspaceListView: View {
         }
     }
 
-    @ViewBuilder
-    private func taskSummarySwipeActions(_ summary: WorkspaceTaskSummary, task: WorkspaceTask) -> some View {
-        Button {
-            presentConfirm(.archiveTask(task))
-        } label: {
-            Label("归档", systemImage: "archivebox")
-        }
-        .tint(Theme.brand)
-        if summary.listedSessionCount > 0 {
-            Button {
-                presentConfirm(.clearSessions(summary))
-            } label: {
-                Label("清空", systemImage: "trash")
+    private func openSessionFromSwipe(_ session: WorkspaceSessionSummary) {
+        if let chat = session.teamChat { onOpenTeamRun?(chat.runId); return }
+        for group in store.taskGroups {
+            if let task = group.tasks.first(where: { $0.sessions.contains(where: { $0.id == session.id }) }) {
+                onOpenTaskSession?(workspace(for: task, group: group), task.asTask(), session)
+                return
             }
-            .tint(Theme.warning)
+            if group.standaloneSessions.contains(where: { $0.id == session.id }) {
+                onOpenSession?(workspace(from: group), session)
+                return
+            }
         }
+    }
+
+    private func sessionRowActions(_ session: WorkspaceSessionSummary) -> [HomeRowAction] {
+        [
+            HomeRowAction(id: "open", title: "打开", symbol: "bubble.left") { openSessionFromSwipe(session) },
+            HomeRowAction(id: "move", title: "移动", symbol: "folder", tint: Theme.info) { moveSessionTarget = session },
+            HomeRowAction(id: "delete", title: "删除", symbol: "trash", tint: Theme.danger) { requestDeleteSession(session) }
+        ]
     }
 
     private func taskOwnedSessionRow(
@@ -1565,7 +1537,7 @@ struct WorkspaceListView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .frame(minHeight: 44)
-        .background(selected ? Theme.brandSoft : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        .background(selected ? Theme.workspaceSelection : Color.clear, in: RoundedRectangle(cornerRadius: 16))
         .contentShape(Rectangle())
         .onTapGesture {
             if isSelecting {
@@ -1605,13 +1577,8 @@ struct WorkspaceListView: View {
                 Label("删除终端", systemImage: "trash")
             }
         }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(role: .destructive) {
-                requestDeleteSession(session)
-            } label: {
-                Label("删除", systemImage: "trash")
-            }
-        }
+        .homeSwipeActions(id: "session-" + session.id, revealedID: $revealedRowID,
+            actions: sessionRowActions(session), enabled: !isSelecting && !creationBusy, surface: Theme.surface)
     }
 
     /// 每层自己的「已归档会话」折叠区：归档不杀进程也不删历史，
@@ -1779,14 +1746,8 @@ struct WorkspaceListView: View {
             .foregroundColor(count > 0 ? Theme.brand : Theme.textMuted)
             .padding(.horizontal, 7)
             .padding(.vertical, 4)
-            .background(
-                Capsule().fill(count > 0 ? Theme.brand.opacity(0.10) : Theme.surface)
-            )
-            .overlay(
-                Capsule().stroke(Theme.border, lineWidth: 0.8)
-            )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.glass).buttonBorderShape(.capsule)
         .disabled(count == 0)
         .accessibilityLabel("\(workspace.name) 的 Worktree：\(count) 个")
     }
@@ -1809,7 +1770,7 @@ struct WorkspaceListView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .frame(minHeight: 44)
-        .background(selectedSessionId == session.id ? Theme.brandSoft : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        .background(selectedSessionId == session.id ? Theme.workspaceSelection : Color.clear, in: RoundedRectangle(cornerRadius: 16))
         .contentShape(Rectangle())
         .onTapGesture {
             if isSelecting {
@@ -1849,13 +1810,8 @@ struct WorkspaceListView: View {
                 Label("删除终端", systemImage: "trash")
             }
         }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(role: .destructive) {
-                requestDeleteSession(session)
-            } label: {
-                Label("删除", systemImage: "trash")
-            }
-        }
+        .homeSwipeActions(id: "session-" + session.id, revealedID: $revealedRowID,
+            actions: sessionRowActions(session), enabled: !isSelecting && !creationBusy, surface: Theme.surface)
     }
 
     private func titleOrganizeMessage(_ result: TitleOrganizeResponse) -> String {
@@ -1887,7 +1843,7 @@ struct WorkspaceListView: View {
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Capsule().fill(Color.black.opacity(0.78)))
+                .wandGlassCapsule().environment(\.colorScheme, .dark)
                 .padding(.top, 8)
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .onAppear {

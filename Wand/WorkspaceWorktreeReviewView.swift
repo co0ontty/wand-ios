@@ -194,9 +194,7 @@ struct WorkspaceWorktreeReviewView: View {
                     .foregroundColor(stateColor(worktree.state))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
-                    .background(
-                        Capsule().fill(stateColor(worktree.state).opacity(0.12))
-                    )
+                    .wandGlassCapsule(tint: stateColor(worktree.state))
             }
             .padding(12)
             .background(

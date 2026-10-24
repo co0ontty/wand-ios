@@ -76,6 +76,16 @@ class SigningTests(unittest.TestCase):
     p = profile(); p["Entitlements"]["com.apple.developer.team-identifier"] = "OTHER12345"
     with self.assertRaises(ValueError): self.fact(p)
 
+  def test_main_apns_environment_is_required_but_widget_need_not_enable_push(self):
+    app = self.fact()
+    with self.assertRaises(ValueError): signing.require_apns_environment(app)
+    for value in ["development", "", None]:
+      with self.subTest(value=value):
+        with self.assertRaises(ValueError): signing.require_apns_environment({**app, "apnsEnvironment": value})
+    p = profile(); p["Entitlements"]["aps-environment"] = "production"
+    self.assertEqual(signing.require_apns_environment(self.fact(p)), "production")
+    signing.validate_pair(self.fact(p), self.fact(profile("com.example.wand.widgets")))
+
   def test_matching_app_widget(self):
     signing.validate_pair(self.fact(), self.fact(profile("com.example.wand.widgets")))
 

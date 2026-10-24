@@ -615,14 +615,9 @@ struct WorkspaceNewTaskSheet: View {
                                     .truncationMode(.middle)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 6)
-                                    .background(
-                                        Capsule().fill(
-                                            cwd == recent.path ? Theme.brand.opacity(0.16) : Theme.surface
-                                        )
-                                    )
                                     .foregroundColor(cwd == recent.path ? Theme.brand : Theme.textSecondary)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.glass).buttonBorderShape(.capsule)
                         }
                     }
                 }

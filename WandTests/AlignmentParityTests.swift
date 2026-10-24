@@ -1649,9 +1649,9 @@ private final class MockSessionListService: SessionListServing {
 final class SettingsParityTests: XCTestCase {
     func testSettingsChaptersMatchCurrentAndroidDirectory() {
         XCTAssertEqual(MobileSettingsSection.allCases.map(\.title), [
-            "当前服务器", "外观与反馈", "流量与实时内容", "应用与更新", "模型分组", "诊断", "关于 Wand",
+            "当前服务器", "外观与反馈", "流量与实时内容", "通知与后台", "应用与更新", "模型分组", "诊断", "关于 Wand",
         ])
-        XCTAssertEqual(Set(MobileSettingsSection.allCases.map(\.id)).count, 7)
+        XCTAssertEqual(Set(MobileSettingsSection.allCases.map(\.id)).count, 8)
         XCTAssertTrue(MobileSettingsSection.allCases.allSatisfy { !$0.symbol.isEmpty })
     }
 
@@ -1747,7 +1747,8 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertFalse(project.contains("UnifiedSessionListView.swift"))
         let settings = try String(contentsOf: root.appendingPathComponent("Wand/SettingsView.swift"), encoding: .utf8)
         XCTAssertFalse(settings.contains("confirmDisconnect"))
-        XCTAssertTrue(settings.contains("SettingsWebView(api: api)"))
+        XCTAssertTrue(settings.contains("SettingsWebView(api: api, section: webSettingsSection)"),
+                      "Web settings must preserve the selected section as well as endpoint identity")
     }
 
     func testHapticPreferenceDefaultsToEnabledAndSurvivesReload() throws {

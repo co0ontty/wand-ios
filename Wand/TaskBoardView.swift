@@ -4,11 +4,11 @@ struct TaskBoardView: View {
     let api: WandAPI
     /// 任务看板与会话树共用同一套任务/终端：看板里移动会话要直接改归属。
     @ObservedObject var workspaceStore: WorkspaceStore
-    var creationServerID: String? = nil
     var linkedWorkspaceId: String? = nil
     let onOpenSession: (String) -> Void
     /// 会话已绑定任务时优先打开任务上下文（对齐 web / Android 的 openSessionWithOwningTask）。
     var onOpenBoundSession: ((String, String) -> Void)? = nil
+    var onRequestNewConversation: (String, String?) -> Void = { _, _ in }
     var onOpenTeamRun: ((String) -> Void)? = nil
     var onDismiss: (() -> Void)? = nil
     var embedded: Bool = false
@@ -17,6 +17,7 @@ struct TaskBoardView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
     @State private var tasks: [WandBoardTask] = []
     @State private var workspaces: [Workspace] = []
     @State private var catalog: ModelsResponse?
@@ -37,22 +38,19 @@ struct TaskBoardView: View {
     @State private var selected: WandBoardTask?
     /// 打开子任务时保留父任务栈：返回时回到上一层，而不是直接退出详情。
     @State private var taskPath: [WandBoardTask] = []
-    @State private var showCreate = false
-    @State private var createCwd = ""
-    @State private var createWorkspaceID: String?
     @State private var busy = false
     @State private var lastAgent = WandBoardTaskAgent.default
     @State private var archiveExpanded = false
     @State private var statusFilter = ""
     @State private var pendingSwipe: (task: WandBoardTask, action: WandBoardSwipeAction)?
     @State private var expandedUnassignedGroups = Set<String>()
-    /// 当前划开的卡片：同一时刻只允许一张，划开期间悬浮「新建任务」让位，动作条始终点得到。
+    /// 当前划开的卡片：同一时刻只允许一张，筛选或滚动时收起。
     @State private var swipedTaskId: String?
 
     var body: some View {
         Group {
             if embedded {
-                boardSurface
+                embeddedBoardSurface
             } else {
                 NavigationStack {
                     boardSurface
@@ -79,34 +77,9 @@ struct TaskBoardView: View {
                 }
             }
         }
+        .homeNavigationHidden(selected != nil)
         .onAppear { activeView = true }
         .onDisappear { activeView = false; operationGeneration += 1 }
-        .sheet(isPresented: $showCreate) {
-            NewConversationView(
-                api: api,
-                serverID: creationServerID ?? workspaceStore.serverID,
-                initialCwd: createCwd,
-                workspaceID: createWorkspaceID,
-                initialCreateTask: true
-            ) { snapshot in
-                showCreate = false
-                Task {
-                    await refresh(showProgress: false)
-                    if let taskId = snapshot.workspaceTaskId,
-                       let created = tasks.first(where: { $0.workspaceTaskId == taskId }) {
-                        selected = created
-                        if let bound = onOpenBoundSession, let workspaceTaskId = created.workspaceTaskId {
-                            bound(snapshot.id, workspaceTaskId)
-                        } else {
-                            onOpenSession(snapshot.id)
-                        }
-                    } else {
-                        onOpenSession(snapshot.id)
-                    }
-                }
-            }
-            .presentationDetents([.large])
-        }
         .sheet(item: $moveSessionTarget) { session in
             SessionMoveSheet(
                 store: workspaceStore,
@@ -138,7 +111,7 @@ struct TaskBoardView: View {
         }
         .alert("任务操作失败", isPresented: Binding(
             // 新建弹窗上时用弹窗内联错误，弹窗外再弹 alert 会与 sheet 争同一个呈现通道。
-            get: { (errorMessage != nil || refreshError != nil) && !showCreate },
+            get: { errorMessage != nil || refreshError != nil },
             set: { if !$0 { errorMessage = nil; refreshError = nil } }
         )) {
             Button("好", role: .cancel) { errorMessage = nil; refreshError = nil }
@@ -178,12 +151,49 @@ struct TaskBoardView: View {
     }
 
     @ViewBuilder
+    private var embeddedBoardSurface: some View {
+        if usesSystemNavigation && selected == nil {
+            boardSurface
+                .navigationTitle(overviewBar?.title ?? "任务")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar(.visible, for: .navigationBar)
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("新建任务", systemImage: "plus") { openCreate("backlog") }
+                            .disabled(busy || (loading && tasks.isEmpty))
+                    }
+                    if #available(iOS 27.1, *), let overviewBar {
+                        ToolbarOverflowMenu {
+                            Section(overviewBar.serverDisplayName) {
+                                Button("设置", systemImage: "gearshape", action: overviewBar.onOpenSettings)
+                                Button("切换服务器", systemImage: "server.rack", action: overviewBar.onSwitchServer)
+                            }
+                        }
+                    }
+                }
+        } else if usesSystemNavigation, let selected {
+            boardSurface
+                .navigationTitle(selected.title.isEmpty ? "任务详情" : selected.title)
+                .navigationBarTitleDisplayMode(.inline)
+                .navigationBarBackButtonHidden()
+                .toolbar(.visible, for: .navigationBar)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("返回", systemImage: "chevron.left", action: closeTaskDetail)
+                    }
+                }
+        } else {
+            boardSurface
+        }
+    }
+
+    @ViewBuilder
     private var boardSurface: some View {
         VStack(spacing: 0) {
-            if selected == nil { overviewBar }
+            if selected == nil && (!embedded || !usesSystemNavigation) { overviewBar }
             boardContent
         }
-        .background { WandAmbientBackground() }
+        .background(Theme.background)
     }
 
     @ViewBuilder
@@ -191,7 +201,7 @@ struct TaskBoardView: View {
         Group {
             if let selected {
                 VStack(spacing: 0) {
-                    if embedded {
+                    if embedded && !usesSystemNavigation {
                         boardDetailChrome(title: selected.title.isEmpty ? "任务详情" : selected.title)
                     }
                     TaskBoardDetailView(
@@ -339,41 +349,18 @@ struct TaskBoardView: View {
                 await refresh(showProgress: false)
             }
             .scrollContentBackground(.hidden)
-            .contentMargins(.bottom, 88, for: .scrollContent)
+            .contentMargins(.bottom, 16, for: .scrollContent)
             // 筛选条件变了就把划开状态收掉，否则卡片被筛走后悬浮按钮会一直被藏着。
             .onChange(of: [statusFilter, filterWorkspaceId, query]) { _, _ in
                 swipedTaskId = nil
                 expandedUnassignedGroups.removeAll()
             }
             // 竖向滚动时也收掉：和系统 swipeActions 一样，否则划开的卡片滚出屏幕后悬浮按钮就回不来了。
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 8)
-                    .onChanged { value in
-                        guard swipedTaskId != nil else { return }
-                        let dx = abs(value.translation.width)
-                        let dy = abs(value.translation.height)
-                        if dy > dx, dy > 8 {
-                            swipedTaskId = nil
-                        }
-                    }
-            )
-
-            if swipedTaskId == nil {
-                Button {
-                    openCreate("backlog")
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(width: 56, height: 56)
-                        .background(Circle().fill(Theme.success))
-                        .shadow(color: Theme.success.opacity(0.28), radius: 8, y: 3)
-                }
-                .buttonStyle(.plain)
-                .padding(.trailing, 18)
-                .padding(.bottom, 18)
-                .accessibilityLabel("新建任务")
+            .onScrollPhaseChange { _, phase in
+                if phase == .interacting { swipedTaskId = nil }
             }
+
+
         }
         .confirmationDialog(
             pendingSwipe.map { wandBoardSwipeActionTitle($0.action) } ?? "确认",
@@ -406,52 +393,44 @@ struct TaskBoardView: View {
 
     private var boardFilters: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Menu {
-                Button("所有项目") { filterWorkspaceId = "" }
-                ForEach(workspaces) { workspace in
-                    Button(workspace.name) { filterWorkspaceId = workspace.id }
+            HStack(spacing: 8) {
+                Menu {
+                    Button("所有项目") { filterWorkspaceId = "" }
+                    ForEach(workspaces) { workspace in Button(workspace.name) { filterWorkspaceId = workspace.id } }
+                } label: {
+                    Label(workspaces.first(where: { $0.id == filterWorkspaceId })?.name ?? "所有项目", systemImage: "folder")
+                        .font(.subheadline).lineLimit(1)
                 }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text(workspaces.first(where: { $0.id == filterWorkspaceId })?.name ?? "所有项目")
-                        .font(.wand(size: 13, weight: .medium))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                }
-                .foregroundColor(Theme.textSecondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(Capsule().fill(Theme.surface.opacity(0.92)))
-                .overlay(Capsule().stroke(Theme.border.opacity(0.7), lineWidth: 0.5))
-            }
-            .buttonStyle(.plain)
-
-            HStack(spacing: 6) {
-                ForEach(
-                    [("", "全部"), ("backlog", "待立项"), ("todo", "待办"), ("doing", "进行中"), ("done", "等你确认"), ("archived", "归档")],
-                    id: \.0
-                ) { value, label in
-                    let active = statusFilter == value
-                    Button {
-                        statusFilter = value
-                    } label: {
-                        Text(label)
-                            .font(.wand(size: 12, weight: .semibold))
-                            .foregroundColor(active ? Theme.success : Theme.textSecondary)
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 8)
-                            .background(
-                                Capsule().fill(active ? Theme.successSoft : Theme.surface.opacity(0.88))
-                            )
-                            .overlay(
-                                Capsule().stroke(active ? Theme.success.opacity(0.35) : Theme.border.opacity(0.55), lineWidth: 0.5)
-                            )
+                .buttonStyle(.glass).buttonBorderShape(.capsule)
+                .frame(minHeight: WandLayout.controlTouch)
+                Spacer(minLength: 0)
+                if !embedded || !usesSystemNavigation {
+                    Button { openCreate("backlog") } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 17, weight: .semibold))
+                            .frame(width: 24, height: 28)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.glassProminent).tint(Theme.success).buttonBorderShape(.circle)
+                    .frame(minWidth: WandLayout.controlTouch, minHeight: WandLayout.controlTouch)
+                    .accessibilityLabel("新建任务")
                 }
+            }
+            ViewThatFits(in: .horizontal) {
+                statusPicker
+                    .pickerStyle(.segmented).tint(Theme.success)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minHeight: WandLayout.controlTouch)
+                statusPicker
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, minHeight: WandLayout.controlTouch, alignment: .leading)
+            }
+        }
+    }
+
+    private var statusPicker: some View {
+        Picker("任务状态", selection: $statusFilter) {
+            ForEach([("", "全部"), ("backlog", "待立项"), ("todo", "待办"), ("doing", "进行中"), ("done", "等你确认"), ("archived", "归档")], id: \.0) { value, label in
+                Text(label).tag(value)
             }
         }
     }
@@ -559,10 +538,9 @@ struct TaskBoardView: View {
 
     private func openCreate(_ status: String) {
         let selectedWorkspace = workspaces.first { $0.id == filterWorkspaceId }
-        createCwd = selectedWorkspace?.cwd ?? workspaceStore.taskGroups.first(where: { $0.workspaceId == filterWorkspaceId })?.workspaceCwd ?? ""
-        createWorkspaceID = selectedWorkspace?.id
+        let cwd = selectedWorkspace?.cwd ?? workspaceStore.taskGroups.first(where: { $0.workspaceId == filterWorkspaceId })?.workspaceCwd ?? ""
         errorMessage = nil
-        showCreate = true
+        onRequestNewConversation(cwd, selectedWorkspace?.id)
     }
 
     private func boardSectionHeader(status: String, count: Int) -> some View {
@@ -621,7 +599,11 @@ struct TaskBoardView: View {
             },
             onAction: { action in
                 pendingSwipe = (task, action)
-            }
+            },
+            extraActions: [HomeRowAction(id: "detail", title: "详情", symbol: "doc.text", tint: Theme.info) { selected = task }]
+                + (task.status == "archived" || task.status == "done" ? [] : [
+                    HomeRowAction(id: "archive", title: "归档", symbol: "archivebox", tint: Theme.warning) { pendingSwipe = (task, .archive) }
+                ])
         ) {
             TaskBoardRow(
                 task: task,
@@ -842,104 +824,20 @@ private struct TaskBoardSwipeCard<Content: View>: View {
     let revealed: Bool
     let onRevealedChange: (Bool) -> Void
     let onAction: (WandBoardSwipeAction) -> Void
+    var extraActions: [HomeRowAction] = []
     @ViewBuilder let content: () -> Content
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// 跟手期间的额外位移；松手和 `revealed` 一起写回，交给同一帧动画。
-    @State private var dragTranslation: CGFloat = 0
-    /// 只有横向占优的拖动才跟手，竖直方向的滑动留给列表滚动。
-    @State private var draggingHorizontally = false
-
-    private var action: WandBoardSwipeAction? { wandBoardSwipeAction(for: status) }
-
-    var body: some View {
-        if let action {
-            ZStack(alignment: .trailing) {
-                content()
-                    // 卡片自身半透明，底下垫一层页面底色，否则动作条颜色会透上来。
-                    .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Theme.background)
-                    )
-                    .offset(x: offset)
-                // 动作按钮盖在卡片上面、但只露出被推开的宽度：`.offset` 不会带走命中区域，
-                // 用遮罩盖卡片的话动作条永远点不到（点下去只会被遮罩收起）。
-                actionButton(action)
-                    .frame(width: max(0, -offset), alignment: .trailing)
-                    .clipped()
-                    .allowsHitTesting(revealed || draggingHorizontally)
-                    .accessibilityHidden(!revealed)
-            }
-            .animation(reduceMotion ? nil : WandMotion.scroll, value: revealed)
-            // 和列表的滚动手势并存：动作条要能拖，列表也要能滚。
-            .simultaneousGesture(dragGesture)
-        } else {
-            content()
-        }
-    }
-
-    private var offset: CGFloat {
-        let base = revealed ? -wandBoardSwipeActionWidth : 0
-        guard draggingHorizontally, dragTranslation != 0 else { return base }
-        return min(0, max(-wandBoardSwipeActionWidth, base + dragTranslation))
-    }
-
-    private var dragGesture: some Gesture {
-        // 12pt 起手：点按照常穿透到卡片里的按钮，不会误判成滑动。
-        DragGesture(minimumDistance: 12)
-            .onChanged { value in
-                let dx = value.translation.width
-                draggingHorizontally = abs(dx) > abs(value.translation.height)
-                dragTranslation = dx
-            }
-            .onEnded { value in
-                let dx = value.translation.width
-                let horizontal = abs(dx) > abs(value.translation.height)
-                let settled = min(
-                    0,
-                    max(-wandBoardSwipeActionWidth, (revealed ? -wandBoardSwipeActionWidth : 0) + (horizontal ? dx : 0))
-                )
-                // SwiftUI 只给惯性预测终点，按固定视界折回速度，喂给与 Android 同一个判定函数。
-                let velocity = horizontal
-                    ? (value.predictedEndTranslation.width - dx) / wandBoardSwipeVelocityHorizon
-                    : 0
-                let open = horizontal
-                    && wandBoardSwipeShouldReveal(
-                        offset: settled,
-                        revealWidth: wandBoardSwipeActionWidth,
-                        velocity: velocity
-                    )
-                dragTranslation = 0
-                draggingHorizontally = false
-                if open != revealed { onRevealedChange(open) }
-            }
-    }
-
-    private func actionButton(_ action: WandBoardSwipeAction) -> some View {
-        Button {
-            // 先收起再弹确认：Android 的 `onAction` 之后同样把 `revealed` 置回 false。
-            onRevealedChange(false)
+    private var actions: [HomeRowAction] {
+        guard let action = wandBoardSwipeAction(for: status) else { return extraActions }
+        return [HomeRowAction(id: "status", title: wandBoardSwipeActionLabel(action),
+            symbol: wandBoardSwipeSystemImage(action), tint: wandBoardSwipeActionColor(action)) {
             onAction(action)
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: wandBoardSwipeSystemImage(action))
-                    .font(.system(size: 18, weight: .semibold))
-                Text(wandBoardSwipeActionLabel(action))
-                    .font(.wand(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            .foregroundColor(.white)
-            .frame(width: wandBoardSwipeActionWidth)
-            .frame(maxHeight: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(wandBoardSwipeActionColor(action))
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(wandBoardSwipeActionLabel(action))
+        }] + extraActions
+    }
+    var body: some View {
+        HomeSwipeRow(id: "board", revealedID: Binding(
+            get: { revealed ? "board" : nil },
+            set: { onRevealedChange($0 != nil) }), actions: actions, enabled: !actions.isEmpty) { content() }
     }
 }
 
@@ -956,95 +854,47 @@ private struct TaskBoardHero: View {
     let projectName: String
     let stats: WandBoardTaskStats
     @Binding var query: String
+    @FocusState private var searchFocused: Bool
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Text(projectName)
-                    .font(.wand(size: 13, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                boardSearchCapsule
+        VStack(alignment: .leading, spacing: WandLayout.fieldGap) {
+            HomeSearchField(placeholder: "搜索任务", text: $query, focused: $searchFocused)
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Text(projectName).lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text("\(stats.remaining) 项未完成").fixedSize()
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(projectName)
+                    Text("\(stats.remaining) 项未完成")
+                }
             }
-            HStack(alignment: .bottom, spacing: 10) {
-                Text("\(stats.remaining)")
-                    .font(.wand(size: 40, weight: .bold, design: .rounded))
-                    .foregroundColor(Theme.success)
-                    .monospacedDigit()
-                Text("未完成")
-                    .font(.wand(size: 15, weight: .medium))
-                    .foregroundColor(Theme.textMuted)
-                    .padding(.bottom, 6)
-            }
-            .padding(.top, 4)
-            HStack(spacing: 8) {
+            .font(.subheadline).foregroundStyle(Theme.textSecondary)
+            let metricsLayout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+                : AnyLayout(HStackLayout(alignment: .top, spacing: WandLayout.fieldGap))
+            metricsLayout {
                 metricTile("待办", value: stats.todo, color: wandBoardStatusColor("todo"))
                 metricTile("进行中", value: stats.doing, color: wandBoardStatusColor("doing"))
                 metricTile("已验收", value: stats.accepted, color: Theme.success)
             }
-            .padding(.top, 12)
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Theme.successSoft)
-        )
-    }
-
-    private var boardSearchCapsule: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Theme.textMuted)
-            TextField("搜索", text: $query)
-                .font(.wand(size: 12))
-                .foregroundColor(Theme.textPrimary)
-                .textInputAutocapitalization(.never)
-            if !query.isEmpty {
-                Button {
-                    query = ""
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Theme.textMuted)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 10)
-        .frame(width: 148, height: 30)
-        .background(Capsule().fill(Theme.surface.opacity(0.88)))
-        .overlay(Capsule().stroke(Theme.border.opacity(0.72), lineWidth: 0.5))
+        .padding(.vertical, 4)
     }
 
     private func metricTile(_ label: String, value: Int, color: Color) -> some View {
-        let ratio = stats.total > 0 ? CGFloat(value) / CGFloat(stats.total) : 0
-        return VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.wand(size: 11))
-                .foregroundColor(Theme.textMuted)
-            Text("\(value)")
-                .font(.wand(size: 20, weight: .bold, design: .rounded))
-                .foregroundColor(color)
-                .padding(.bottom, 8)
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(color.opacity(0.16))
-                    Capsule()
-                        .fill(color)
-                        .frame(width: max(4, proxy.size.width * ratio))
-                }
-            }
-            .frame(height: 4)
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(HStackLayout(spacing: WandLayout.fieldGap))
+            : AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+        return layout {
+            Text(label).font(.caption).foregroundStyle(Theme.textSecondary)
+            if dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 8) }
+            Text("\(value)").font(.title3.weight(.semibold)).monospacedDigit().foregroundStyle(color)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Theme.surface.opacity(0.82))
-        )
+        .padding(.vertical, 4)
     }
 }
 
@@ -1070,6 +920,7 @@ private struct TaskBoardRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            HomeExecutionBadge(state: HomePresentation.executionState(task)).padding(.top, 6)
             Text(task.acceptance?.acceptedAt != nil ? "验收通过 · 已完成" : task.acceptance?.blocker.isEmpty == false ? "待处理：\(task.acceptance?.blocker ?? "")" : "未验收")
                 .font(.caption).foregroundStyle(task.acceptance?.acceptedAt != nil ? Theme.success : Theme.textSecondary)
                 .lineLimit(2).padding(.top, 6)

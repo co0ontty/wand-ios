@@ -625,8 +625,13 @@ func toolInputPreview(_ input: [String: JSONValue]) -> String {
     return ""
 }
 
+/// The decoder reserves __wand for projection metadata; it is never a tool argument.
+func toolInputArguments(_ input: [String: JSONValue]) -> [String: JSONValue] {
+    input.filter { !$0.key.hasPrefix("__wand") }
+}
+
 func toolInputDetail(_ input: [String: JSONValue]) -> String {
-    let original = input.filter { !$0.key.hasPrefix("__wand") }
+    let original = toolInputArguments(input)
     return original.isEmpty ? "" : JSONValue.object(original).fullPayloadText()
 }
 
@@ -1055,6 +1060,7 @@ struct SessionSnapshot: Decodable, Identifiable {
     var providerCliActive: Bool? = nil
     var providerCliExitCode: Int? = nil
     var ptyBusy: Bool? = nil
+    var ptyCommandRunning: Bool? = nil
     var employeeId: String? = nil
     var employeeName: String? = nil
     var employeeAvatar: String? = nil

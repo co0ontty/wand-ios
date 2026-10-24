@@ -68,6 +68,7 @@ struct WorkspaceTaskSessionList: View {
 }
 
 struct WorkspaceTaskView: View {
+    @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
     let workspace: Workspace
     let task: WorkspaceTask
     let api: WandAPI
@@ -97,10 +98,10 @@ struct WorkspaceTaskView: View {
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .navigationTitle("")
+        .modifier(TaskNavigationTitle(inheritsSessionTitle: usesSystemNavigation && presentsSession))
         .navigationBarTitleDisplayMode(.inline)
         // 会话可见时整屏只留会话自己那条栏（对齐 Android 的会话路由）；任务动作并进它的「更多」。
-        .toolbar(presentsSession ? .hidden : .visible, for: .navigationBar)
+        .toolbar(presentsSession && !usesSystemNavigation ? .hidden : .visible, for: .navigationBar)
         .toolbar {
             if !presentsSession {
                 ToolbarItem(placement: .principal) {
@@ -500,5 +501,13 @@ struct WorkspaceTaskView: View {
             deleteSessionError = error.localizedDescription
         }
         deleteSessionBusy = false
+    }
+}
+
+private struct TaskNavigationTitle: ViewModifier {
+    let inheritsSessionTitle: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if inheritsSessionTitle { content }
+        else { content.navigationTitle("") }
     }
 }

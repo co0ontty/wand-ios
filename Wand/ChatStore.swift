@@ -119,6 +119,7 @@ final class ChatStore: ObservableObject {
     /// 每个 WS 状态事件都会前进；初始 REST 只能在此版本未变化时整体落地，
     /// 避免晚到的旧快照覆盖 init/output/status 已经发布的新状态。
     private var realtimeRevision = 0
+    private var queueRealtimeRevision = 0
     @Published private(set) var queueMutationPending = false
     private var autoResumeAttempted = false
     /// 所有 PTY 输入共用一条尾队列。普通提交的文本和回车作为同一个 operation，
@@ -404,6 +405,7 @@ final class ChatStore: ObservableObject {
         )
         status = snap.status ?? status
         isResponding = snap.isResponding
+        queueRealtimeRevision &+= 1
         queuedMessages = snap.queuedMessages ?? []
         pendingEscalation = snap.pendingEscalation
         permissionBlocked = snap.permissionBlocked ?? (snap.pendingEscalation != nil)
@@ -628,7 +630,10 @@ final class ChatStore: ObservableObject {
             isResponding = snapshot?.isResponding ?? isResponding
         }
         if let exitCode = data.providerCliExitCode { snapshot?.providerCliExitCode = exitCode }
-        if let q = data.queuedMessages { queuedMessages = q }
+        if let q = data.queuedMessages {
+            queueRealtimeRevision &+= 1
+            queuedMessages = q
+        }
         if let esc = data.pendingEscalation {
             pendingEscalation = esc
             legacyPermissionPrompt = nil
@@ -1335,7 +1340,7 @@ final class ChatStore: ObservableObject {
               queuedMessages.indices.contains(index) else { return false }
         let source = queuedMessages[index]
         guard composerDraft.beginQueueRetrieval(source) else { return false }
-        let revision = realtimeRevision
+        let revision = queueRealtimeRevision
         queueMutationPending = true
         defer { queueMutationPending = false }
         do {
@@ -1356,7 +1361,9 @@ final class ChatStore: ObservableObject {
         guard snap.id == sessionId, let queue = snap.queuedMessages else {
             throw WandAPI.APIError.network("队列确认无效，请核对最新状态")
         }
-        if realtimeRevision == revision { queuedMessages = queue }
+        // Body/title/status-only events cannot make a queue receipt stale.
+        // Any authoritative queue push, including an empty or equal queue, wins.
+        if queueRealtimeRevision == revision { queuedMessages = queue }
         socket.requestResync()
     }
 
@@ -1365,7 +1372,7 @@ final class ChatStore: ObservableObject {
         guard isStructured, !queueMutationPending, !composerDraft.queueRetrievalPending,
               queuedMessages.indices.contains(index) else { return }
         let picked = queuedMessages[index]
-        let revision = realtimeRevision
+        let revision = queueRealtimeRevision
         queueMutationPending = true
         Task {
             defer { queueMutationPending = false }
@@ -1383,7 +1390,7 @@ final class ChatStore: ObservableObject {
         guard isStructured, !queueMutationPending, !composerDraft.queueRetrievalPending,
               queuedMessages.indices.contains(index) else { return }
         let picked = queuedMessages[index]
-        let revision = realtimeRevision
+        let revision = queueRealtimeRevision
         queueMutationPending = true
         Task {
             defer { queueMutationPending = false }
@@ -1401,7 +1408,7 @@ final class ChatStore: ObservableObject {
         guard isStructured, !queueMutationPending, !composerDraft.queueRetrievalPending,
               !queuedMessages.isEmpty else { return }
         let expected = queuedMessages
-        let revision = realtimeRevision
+        let revision = queueRealtimeRevision
         queueMutationPending = true
         Task {
             defer { queueMutationPending = false }

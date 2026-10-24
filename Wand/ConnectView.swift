@@ -353,7 +353,7 @@ struct ConnectView: View {
                                     .foregroundColor(Theme.brand)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(Capsule().fill(Theme.brand.opacity(0.12)))
+                                    .wandGlassCapsule(tint: Theme.brand)
                             }
                         }
                         HStack(spacing: 6) {

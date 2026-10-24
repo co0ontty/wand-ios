@@ -3,6 +3,11 @@ import ActivityKit
 
 /// Small, credential-free activity projection shared by app and WidgetKit.
 struct SessionActivityAttributes: ActivityAttributes {
+    /// Immutable owner/creation-mode marker; optional fields keep legacy local activities decodable.
+    var serverID: String? = nil
+    var remoteUpdates: Bool? = nil
+    /// One-way credential fingerprint, not a login token. Pins ownership even before the first ActivityKit token arrives.
+    var connectionIdentity: String? = nil
     struct SessionEntry: Codable, Hashable {
         var id: String
         var serverID: String? = nil
@@ -12,6 +17,7 @@ struct SessionActivityAttributes: ActivityAttributes {
         var taskTitle: String?
         var queuedCount: Int
         var startedAt: Date? = nil
+        var finishedAt: Date? = nil
         var engineRaw: String? = nil
         /// 「待授权/等你回复」时真正被问的那件事（例如「写入 src/index.ts」）。
         /// 只有状态而说不出在等什么时，灵动岛就只剩一句无用的「需要你的确认」。

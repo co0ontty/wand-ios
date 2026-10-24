@@ -55,6 +55,9 @@ struct SharedPlushScene: UIViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "wandScene")
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.isOpaque = false; view.backgroundColor = .clear
+        view.underPageBackgroundColor = .clear
+        view.clipsToBounds = false
+        view.scrollView.clipsToBounds = false
         view.scrollView.backgroundColor = .clear; view.scrollView.isScrollEnabled = false
         view.isUserInteractionEnabled = false; view.accessibilityElementsHidden = true
         view.navigationDelegate = context.coordinator

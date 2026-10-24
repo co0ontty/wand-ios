@@ -2,8 +2,8 @@ import Foundation
 import UIKit
 import UserNotifications
 
-/// 会话本地通知。无需 APNs / 推送证书，适合自签安装；只要 App 进程仍有机会轮询，
-/// 就能在回复完成或等待授权时发系统通知。App 被系统彻底挂起后无法继续获取新状态。
+/// 统一通知权限与点击入口。服务器启用 APNs 后不再重复生成同类本地通知；
+/// 旧服务器/无推送签名保留本地回退，该回退在 App 被挂起后无法获取新状态。
 @MainActor
 final class SessionNotificationController: NSObject, UNUserNotificationCenterDelegate {
     static let shared = SessionNotificationController()
@@ -36,11 +36,13 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
     }
 
     func requestAuthorizationAndWait() async -> Bool {
-        await withCheckedContinuation { continuation in
+        let granted: Bool = await withCheckedContinuation { continuation in
             center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
                 continuation.resume(returning: granted)
             }
         }
+        RemoteNotificationController.shared.refresh()
+        return granted
     }
 
     func clearPending() {
@@ -69,6 +71,7 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         guard ServerStore.shared.notificationsEnabled else { return }
         let sessionId = sessionId(from: tag)
         let serverID = serverID ?? ServerStore.shared.activeServerID
+        if sessionId != nil, let serverID, RemoteNotificationController.shared.suppressesLocal(for: serverID) { return }
         send(
             id: normalizedIdentifier(tag: tag, sessionId: sessionId, serverID: serverID),
             title: title.isEmpty ? "Wand" : title,
@@ -92,6 +95,7 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         }
 
         if ServerStore.shared.notificationsEnabled,
+           !RemoteNotificationController.shared.suppressesLocal(for: serverID),
            UIApplication.shared.applicationState != .active {
             for snapshot in visible {
                 let scopedID = key(snapshot.id)
@@ -133,6 +137,13 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
+        let info = response.notification.request.content.userInfo
+        if info["aps"] != nil {
+            guard ServerStore.shared.notificationsEnabled,
+                  let target = RemoteNotificationPolicy.target(info, knownServerIDs: Set(ServerStore.shared.profiles.map(\.id))) else { return }
+            QuickActionCoordinator.shared.enqueue(.openSession(id: target.sessionID, serverID: target.serverID))
+            return
+        }
         guard let sessionId = response.notification.request.content.userInfo["sessionId"] as? String,
               !sessionId.isEmpty else { return }
         let serverID = response.notification.request.content.userInfo["serverId"] as? String

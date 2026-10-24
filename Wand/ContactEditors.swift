@@ -56,13 +56,20 @@ struct ContactAvatar: View {
         }
         .accessibilityHidden(true)
     }
-    private var legacyFace: some View {
+    @ViewBuilder private var legacyFace: some View {
+        if floating { legacyFaceContent }
+        else {
+            legacyFaceContent
+                .background(Theme.surfaceSoft, in: RoundedRectangle(cornerRadius: size * 0.3))
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.3))
+        }
+    }
+    private var legacyFaceContent: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: size * 0.3).fill(Theme.surfaceSoft)
             if avatar.hasPrefix("data:image/"), let comma = avatar.firstIndex(of: ","),
                let bytes = Data(base64Encoded: String(avatar[avatar.index(after: comma)...])),
                let image = UIImage(data: bytes) {
-                Image(uiImage: image).resizable().scaledToFill()
+                Image(uiImage: image).resizable().aspectRatio(contentMode: floating ? .fit : .fill)
             } else {
                 if team {
                     Image(systemName: "person.3.fill")
@@ -83,7 +90,7 @@ struct ContactAvatar: View {
                     }.frame(width: size * 0.74, height: size * 0.74)
                 }
             }
-        }.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.3))
+        }.frame(width: size, height: size)
     }
 }
 
@@ -173,20 +180,21 @@ struct ContactCandidateEditor: View {
     @Binding var agents: [ContactCandidate]
     let catalog: ModelsResponse?
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: WandLayout.sectionGap) {
             ForEach(agents.indices, id: \.self) { index in
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("候选 \(index + 1)").font(.caption.weight(.semibold))
-                        Spacer()
-                        if agents.count > 1 {
+                    Text(index == 0 ? "首选" : "备用 \(index)").font(.subheadline.weight(.semibold))
+                    if agents.count > 1 {
+                        HStack {
                             Button { agents.swapAt(index, index - 1) } label: { Image(systemName: "arrow.up") }
                                 .disabled(index == 0).accessibilityLabel("候选\(index + 1)上移")
                             Button { agents.swapAt(index, index + 1) } label: { Image(systemName: "arrow.down") }
                                 .disabled(index == agents.count - 1).accessibilityLabel("候选\(index + 1)下移")
+                            Spacer(minLength: 0)
                             Button("移除") { agents.remove(at: index) }.foregroundStyle(Theme.danger)
                         }
                     }
+                    WandFormField("执行工具") {
                     Picker("执行工具", selection: Binding(
                         get: { WandAgentTool(provider: agents[index].provider, engine: agents[index].engine).rawValue }, set: { id in
                             guard let tool = WandAgentTool(rawValue: id) else { return }
@@ -196,19 +204,23 @@ struct ContactCandidateEditor: View {
                         }
                     )) {
                         ForEach(WandAgentTool.allCases) { Text($0.title).tag($0.rawValue) }
+                    }.labelsHidden()
                     }
-                    HStack {
-                        TextField("模型（default 跟随默认）", text: $agents[index].model)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        Menu {
-                            Button("跟随默认") { agents[index].model = "default" }
-                            ForEach(catalog?.models(for: agents[index].provider) ?? []) { model in
-                                Button(model.label) { agents[index].model = model.id }
-                            }
-                        } label: { Image(systemName: "list.bullet") }
-                        .accessibilityLabel("选择候选\(index + 1)模型")
+                    WandFormField("模型", hint: "default 跟随默认，也可直接填写模型 ID。") {
+                        HStack(alignment: .top) {
+                            TextField("模型 ID", text: $agents[index].model)
+                                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                .accessibilityLabel("候选\(index + 1)模型 ID")
+                            Menu {
+                                Button("跟随默认") { agents[index].model = "default" }
+                                ForEach(catalog?.models(for: agents[index].provider) ?? []) { model in
+                                    Button(model.label) { agents[index].model = model.id }
+                                }
+                            } label: { Image(systemName: "list.bullet") }
+                            .accessibilityLabel("选择候选\(index + 1)模型")
+                        }
                     }
-                    HStack {
+                    WandFormField("思考深度") {
                         Picker("思考深度", selection: $agents[index].thinkingEffort) {
                             let options = thinkingEffortOptions(provider: agents[index].provider,
                                 selectedModel: agents[index].model, defaultModel: catalog?.defaultModelId(for: agents[index].provider),
@@ -218,14 +230,19 @@ struct ContactCandidateEditor: View {
                             if !options.contains(where: { $0.id == agents[index].thinkingEffort }) {
                                 Text(agents[index].thinkingEffort).tag(agents[index].thinkingEffort)
                             }
-                        }
+                        }.labelsHidden()
+                    }
+                    WandFormField("执行模式") {
                         Picker("执行模式", selection: $agents[index].mode) {
                             ForEach(wandBoardSupportedModes(agents[index].provider), id: \.self) { mode in
                                 Text(wandBoardModeLabel(mode)).tag(mode)
                             }
-                        }
+                        }.labelsHidden()
                     }
-                }.padding(12).background(Theme.elevated, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if index < agents.count - 1 { Divider() }
             }
             if agents.count < 4 {
                 Button("添加执行候选") { agents.append(ContactCandidate()) }
@@ -288,12 +305,18 @@ struct EmployeeProfilePanel: View {
                         Text(model.employee?.displayTags.joined(separator: " · ") ?? "")
                             .font(.caption).foregroundStyle(Theme.brand)
                     } else {
-                        TextField("员工名字", text: $model.draft.name)
-                            .accessibilityIdentifier("contact-employee-name")
-                        TextField("职责", text: $model.draft.duty, axis: .vertical).lineLimit(2...5)
-                            .accessibilityIdentifier("contact-employee-duty")
-                        TextField("标签，用逗号分隔", text: $model.draft.tagInput)
-                            .accessibilityIdentifier("contact-employee-tags")
+                        WandFormField("员工名字") {
+                            TextField("员工名字", text: $model.draft.name)
+                                .accessibilityIdentifier("contact-employee-name")
+                        }
+                        WandFormField("职责") {
+                            TextField("描述这位员工负责什么", text: $model.draft.duty, axis: .vertical).lineLimit(2...5)
+                                .accessibilityLabel("职责").accessibilityIdentifier("contact-employee-duty")
+                        }
+                        WandFormField("标签", hint: "用逗号分隔，最多 8 个，每个 20 字。") {
+                            TextField("例如：开发，测试，设计", text: $model.draft.tagInput)
+                                .accessibilityLabel("标签").accessibilityIdentifier("contact-employee-tags")
+                        }
                         PhotosPicker(selection: $avatarPhoto, matching: .images) {
                             Label("上传头像", systemImage: "photo")
                         }.frame(minHeight: 44)
@@ -303,33 +326,31 @@ struct EmployeeProfilePanel: View {
                             ForEach(0..<ContactCatAvatar.coats.count) { shade in Button("猫咪 \(shade + 1)") { model.draft.avatar = "cat:\(shade)" } }
                         }
                     }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("系统调用历史保留上限").font(.subheadline)
-                        TextField("留空表示不限", text: $model.draft.systemSessionLimitInput)
-                            .keyboardType(.numberPad)
-                            .accessibilityIdentifier("employee-system-session-limit")
-                        Text("0–10000，留空不限，0 不保留。仅保留标题生成等系统辅助功能的最新 N 条已结束记录，保存后永久清理超出部分。任务派发、agent 间调用（含决策）、手动聊天与运行中会话不计入，也不会清理。")
-                            .font(.caption).foregroundStyle(Theme.textSecondary)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("并发任务上限").font(.subheadline)
+                    Divider().padding(.vertical, WandLayout.fieldGap)
+                    WandFormField("并发任务上限", hint: "默认 2，可设 1–100；留空保存时恢复默认 2。超出上限的新派发显示为「排队中」，任务仍留在活动任务里；前序任务结束后按先后顺序自动开始。同一任务的多条派发不额外占用名额。") {
                         TextField("默认 2", text: $model.draft.maxConcurrentTasksInput)
-                            .keyboardType(.numberPad)
+                            .keyboardType(.numberPad).accessibilityLabel("并发任务上限")
                             .accessibilityIdentifier("employee-max-concurrent-tasks")
-                        Text("默认 2，可设 1–100；留空保存时恢复默认 2。超出上限的新派发显示为「排队中」，任务仍留在活动任务里；前序任务结束后按先后顺序自动开始。同一任务的多条派发不额外占用名额。")
-                            .font(.caption).foregroundStyle(Theme.textSecondary)
+                    }
+                    WandFormField("系统调用历史保留上限", hint: "0–10000，留空不限，0 不保留。仅保留标题生成等系统辅助功能的最新 N 条已结束记录，保存后永久清理超出部分。任务派发、agent 间调用（含决策）、手动聊天与运行中会话不计入，也不会清理。") {
+                        TextField("留空表示不限", text: $model.draft.systemSessionLimitInput)
+                            .keyboardType(.numberPad).accessibilityLabel("系统调用历史保留上限")
+                            .accessibilityIdentifier("employee-system-session-limit")
                     }
                     DisclosureGroup("角色设定", isExpanded: $roleExpanded) {
                         if model.builtin {
                             Text(model.draft.prompt).font(.caption).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
-                            TextEditor(text: $model.draft.prompt).frame(height: 140)
+                            TextField("说明工作方式、边界和交付要求", text: $model.draft.prompt, axis: .vertical)
+                                .lineLimit(4...10).textFieldStyle(.roundedBorder)
                                 .accessibilityLabel("员工角色设定")
+                                .padding(.top, WandLayout.fieldGap)
                         }
                     }
                     DisclosureGroup("执行候选 · 按顺序降级", isExpanded: $candidatesExpanded) {
                         ContactCandidateEditor(agents: $model.draft.agents, catalog: model.catalog)
+                            .padding(.top, WandLayout.fieldGap)
                     }
                 }.disabled(model.busy || directory.editorBusy)
                 HStack {
@@ -362,9 +383,9 @@ struct EmployeeProfilePanel: View {
         }
         .padding(16).background(Theme.surface, in: RoundedRectangle(cornerRadius: 16))
         .buttonStyle(WandQuietButtonStyle())
-        .animation(reduced ? nil : WandMotion.stateSwap, value: roleExpanded)
-        .animation(reduced ? nil : WandMotion.stateSwap, value: candidatesExpanded)
-        .animation(reduced ? nil : WandMotion.stateSwap, value: knowledgeExpanded)
+        .animation(reduced ? nil : WandMotion.expansion, value: roleExpanded)
+        .animation(reduced ? nil : WandMotion.expansion, value: candidatesExpanded)
+        .animation(reduced ? nil : WandMotion.expansion, value: knowledgeExpanded)
         .task { await model.load(); directory.editorDirty = model.hasUnsavedChanges }
         .task(id: avatarPhoto) {
             guard let avatarPhoto else { return }
@@ -419,8 +440,12 @@ struct ContactKnowledgePanel: View {
     private var busy: Bool { loading || phase == .sending }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            WandFormField("搜索知识") {
                 TextField("搜索该员工知识", text: $query)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .submitLabel(.search).onSubmit { Task { await load() } }
+            }.disabled(phase == .sending)
+            HStack {
                 Button("搜索") { Task { await load() } }.disabled(busy)
                 Button("刷新") { Task { await load() } }.disabled(busy)
             }.disabled(phase == .sending)
@@ -437,9 +462,11 @@ struct ContactKnowledgePanel: View {
             }.frame(height: 240)
             Text("\(total)/200条 · 仅属于该员工，不读取其他员工或私聊。")
                 .font(.caption).foregroundStyle(Theme.textSecondary)
-            TextField("添加明确知识（最多4000字符）", text: Binding(
-                get: { text }, set: { text = $0; textRevision += 1 }
-            ), axis: .vertical).lineLimit(2...4)
+            WandFormField("添加明确知识", hint: "最多 4000 字符。") {
+                TextField("希望这位员工记住什么？", text: Binding(
+                    get: { text }, set: { text = $0; textRevision += 1 }
+                ), axis: .vertical).lineLimit(2...6).accessibilityLabel("添加明确知识")
+            }
             HStack {
                 ContactActionButton(title: "记住", phase: phase, disabled: loading || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || unconfirmed) { remember() }
                 Spacer()
