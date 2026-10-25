@@ -103,6 +103,31 @@ enum WandServerFileLink {
         return path
     }
 
+    /// Recognize authenticated file URLs only within the active endpoint. A LAN address
+    /// is not automatically an alias of a public host; never forward cookies or rebase
+    /// a foreign server's path onto the connected server.
+    static func downloadPath(_ target: String, baseURL: URL) -> String? {
+        if let path = serverPath(target) { return path }
+        guard let components = URLComponents(string: target),
+              components.user == nil, components.password == nil,
+              let expected = WandEndpoint.url(baseURL: baseURL, route: "/api/file-raw") else { return nil }
+        if components.scheme == nil {
+            guard components.host == nil, target.hasPrefix("/api/file-raw?"),
+                  components.percentEncodedPath == "/api/file-raw" else { return nil }
+        } else {
+            guard let url = components.url,
+                  WandEndpointScope(baseURL)?.contains(url) == true,
+                  components.percentEncodedPath == URLComponents(url: expected, resolvingAgainstBaseURL: false)?.percentEncodedPath else { return nil }
+        }
+        let paths = components.queryItems?.filter { $0.name == "path" } ?? []
+        guard paths.count == 1, let path = paths.first?.value,
+              path.hasPrefix("/"), !path.hasPrefix("//"),
+              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        // queryItems decoded the path exactly once. Do not pass it through serverPath:
+        // a literal %20 in a filename must not become a space on the second decode.
+        return path
+    }
+
     static func download(serverPath: String, api: WandAPI) async throws -> URL {
         guard serverPath.hasPrefix("/") else { throw DownloadError.invalidURL }
         let stripped = removingColonLineSuffix(from: serverPath)

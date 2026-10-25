@@ -4,6 +4,47 @@ import UIKit
 import WebKit
 @testable import Wand
 
+final class ServerFileLinkRoutingTests: XCTestCase {
+    func testAuthenticatedDownloadURLsResolveWithoutLosingFilenameBytes() throws {
+        let base = try XCTUnwrap(URL(string: "http://192.168.0.10:8181"))
+        let path = "/Users/co0ontty/Self/vibe_coding/tiger_tools/output/releases/20261025-093540/PlaylistBridge.ipa"
+        let target = try XCTUnwrap(WandEndpoint.url(baseURL: base, route: "/api/file-raw", queryItems: [
+            URLQueryItem(name: "path", value: path), URLQueryItem(name: "download", value: "1")
+        ]))
+        XCTAssertEqual(WandServerFileLink.downloadPath(target.absoluteString, baseURL: base), path)
+        XCTAssertEqual(WandServerFileLink.downloadPath("/api/file-raw?path=%2Ftmp%2Fa%2520%2Bb.ipa&download=1", baseURL: base), "/tmp/a%20+b.ipa")
+        XCTAssertEqual(WandServerFileLink.downloadPath("/tmp/a.ipa", baseURL: base), "/tmp/a.ipa")
+        // Parsing without an endpoint still must not infer authority from an HTTP URL.
+        XCTAssertNil(WandServerFileLink.serverPath(target.absoluteString))
+    }
+
+    func testDownloadURLsRespectOriginAndReverseProxyNamespace() throws {
+        let base = try XCTUnwrap(URL(string: "https://home.example:443/wand/"))
+        XCTAssertEqual(WandServerFileLink.downloadPath("https://home.example/wand/api/file-raw?path=%2Ftmp%2Fa.ipa", baseURL: base), "/tmp/a.ipa")
+        for target in [
+            "http://home.example/wand/api/file-raw?path=%2Ftmp%2Fa.ipa",
+            "https://home.example:8443/wand/api/file-raw?path=%2Ftmp%2Fa.ipa",
+            "https://other.example/wand/api/file-raw?path=%2Ftmp%2Fa.ipa",
+            "https://home.example/api/file-raw?path=%2Ftmp%2Fa.ipa",
+            "https://home.example/wand-other/api/file-raw?path=%2Ftmp%2Fa.ipa",
+            "https://user@home.example/wand/api/file-raw?path=%2Ftmp%2Fa.ipa",
+            "//home.example/wand/api/file-raw?path=%2Ftmp%2Fa.ipa",
+            "https://home.example/wand/../wand/api/file-raw?path=%2Ftmp%2Fa.ipa",
+            "https://home.example/wand/api/file-raw?path=relative.ipa",
+            "https://home.example/wand/api/file-raw?path=%2Ftmp%2Fa.ipa&path=%2Ftmp%2Fb.ipa",
+            "https://home.example/wand/api/file-raw?path=%2Ftmp%2Fa%00.ipa"
+        ] { XCTAssertNil(WandServerFileLink.downloadPath(target, baseURL: base), target) }
+    }
+
+    func testDownloadLinkRemainsMarkdownLinkNotImage() throws {
+        let target = "http://192.168.0.10:8181/api/file-raw?path=%2Ftmp%2FPlaylistBridge.ipa&download=1"
+        let raw = "[下载 IPA](\(target))"
+        XCTAssertEqual(splitMarkdownImages(raw), [.text(raw)])
+        let attributed = try AttributedString(markdown: raw, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        XCTAssertEqual(attributed.runs.compactMap(\.link).first?.absoluteString, target)
+    }
+}
+
 final class ThinkingEffortParityTests: XCTestCase {
     private func model(_ id: String, _ efforts: String...) -> ModelInfo {
         ModelInfo(id: id, label: id, alias: nil,

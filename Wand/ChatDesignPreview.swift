@@ -48,6 +48,41 @@ struct TodoDisplayPreview: View {
     }
 }
 
+/// Real production MarkdownText tap harness. No credentials or live requests:
+/// the scoped download endpoint is retired so the existing downloader fails closed.
+struct MarkdownLinkAcceptance: View {
+    private let api = WandAPI(baseURL: URL(string: "http://192.168.0.10:8181")!, token: nil)
+    @StateObject private var links = ServerFileLinkController()
+    @State private var externalCount = 0
+    private let target = "http://192.168.0.10:8181/api/file-raw?path=%2Ftmp%2FPlaylistBridge.ipa&download=1"
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    MarkdownText(text: "[下载 IPA](\(target))")
+                    MarkdownText(text: "[外部页面](https://example.com/)")
+                    MarkdownText(text: "[不可打开](unsupported-test://file)")
+                    Text("external=\(externalCount)").accessibilityIdentifier("markdown-external-count")
+                    if let failure = links.failure {
+                        Text(failure.message).accessibilityIdentifier("markdown-download-failure")
+                    }
+                }.padding(20)
+            }
+            .navigationTitle("链接点击验收")
+        }
+        .environment(\.chatAPI, api)
+        .environment(\.serverFileLinkController, links)
+        .environment(\.openURL, OpenURLAction { url in
+            guard url.scheme == "https" else { return .discarded }
+            externalCount += 1
+            return .handled
+        })
+        .onAppear { SelfSignedSession.resetEndpoint(api.baseURL) }
+        .onDisappear { links.cancel() }
+    }
+}
+
 struct ChatDesignPreview: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     private var identityMetrics = ChatIdentityLayoutMetrics()

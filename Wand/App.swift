@@ -10,7 +10,7 @@ struct WandApp: App {
 
     init() {
 #if DEBUG
-        if ProcessInfo.processInfo.environment["WAND_DEBUG_LIVE_BACK"] != nil || ProcessInfo.processInfo.environment["WAND_DEBUG_ACCEPTANCE_PROFILE"] == "1" {
+        if ProcessInfo.processInfo.environment["WAND_DEBUG_LIVE_BACK"] != nil || ProcessInfo.processInfo.environment["WAND_DEBUG_ACCEPTANCE_PROFILE"] == "1" || ProcessInfo.processInfo.environment["WAND_DEBUG_MARKDOWN_LINKS"] == "1" {
             // This isolated gesture harness must not request notification permission.
             ServerStore.shared.notificationsEnabled = false
             ServerStore.shared.liveActivityEnabled = false
@@ -35,6 +35,8 @@ struct WandApp: App {
 #if DEBUG
             if let mode = ProcessInfo.processInfo.environment["WAND_DEBUG_LIVE_BACK"], !mode.isEmpty {
                 LiveBackAcceptance(mode: mode)
+            } else if ProcessInfo.processInfo.environment["WAND_DEBUG_MARKDOWN_LINKS"] == "1" {
+                MarkdownLinkAcceptance()
             } else if ProcessInfo.processInfo.environment["WAND_DEBUG_TODO_PREVIEW"] == "1" {
                 TodoDisplayPreview()
             } else if let scenario = mobileOperationParityScenario() {

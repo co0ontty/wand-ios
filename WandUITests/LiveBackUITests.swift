@@ -114,6 +114,32 @@ final class LiveBackUITests: XCTestCase {
         XCTAssertTrue(home.isHittable, "A completed real-session back must restore home navigation")
     }
 
+    func testMarkdownDownloadTapAndExternalFailureAreVisible() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["WAND_DEBUG_MARKDOWN_LINKS"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let download = app.links["下载 IPA"]
+        XCTAssertTrue(download.waitForExistence(timeout: 20))
+        download.tap()
+        let failure = app.staticTexts["markdown-download-failure"]
+        XCTAssertTrue(failure.waitForExistence(timeout: 5), "Tap must reach the authenticated downloader, not silently disappear")
+        XCTAssertEqual(failure.label, "服务器连接已关闭")
+        XCTAssertEqual(app.staticTexts["markdown-external-count"].label, "external=0")
+        app.links["外部页面"].tap()
+        XCTAssertEqual(app.staticTexts["markdown-external-count"].label, "external=1")
+        app.links["不可打开"].tap()
+        XCTAssertTrue(app.staticTexts["markdown-link-error"].waitForExistence(timeout: 5))
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "markdown-link-tap-feedback"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let evidence = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("markdown-link-tap-feedback.png")
+        try? app.screenshot().pngRepresentation.write(to: evidence)
+    }
+
     func testDuoRegularLivePagesCancelAndCommit() { exercise("system-regular") }
     func testDuoCompactLivePagesCancelAndCommit() { exercise("system-compact") }
     func testHiddenBarChatUsesNativeLivePages() { exercise("hidden") }

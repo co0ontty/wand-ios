@@ -3738,12 +3738,19 @@ struct MarkdownText: View {
     @Environment(\.chatAPI) private var api
     @Environment(\.serverFileLinkController) private var serverFileLinks
     @Environment(\.activityFoldCompact) private var compact
+    @Environment(\.openURL) private var inheritedOpenURL
+    @State private var linkError: String?
 
     var body: some View {
         let pages = Self.imagePages(text)
         VStack(alignment: .leading, spacing: 7) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 blockView(block)
+            }
+            if let linkError {
+                Label(linkError, systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(Theme.danger)
+                    .accessibilityIdentifier("markdown-link-error")
             }
         }
         .environment(\.openURL, serverFileOpenURLAction)
@@ -3755,12 +3762,28 @@ struct MarkdownText: View {
 
     private var serverFileOpenURLAction: OpenURLAction {
         OpenURLAction { url in
-            guard let serverPath = WandServerFileLink.serverPath(url.absoluteString) else {
-                return .systemAction
+            // Text may invoke this while SwiftUI is updating its selectable-text view.
+            // Defer observable state changes to the main actor instead of publishing
+            // from inside that update; each tap still has exactly one owner.
+            Task { @MainActor in
+                linkError = nil
+                let serverPath = api.flatMap { WandServerFileLink.downloadPath(url.absoluteString, baseURL: $0.baseURL) }
+                    ?? WandServerFileLink.serverPath(url.absoluteString)
+                if let serverPath {
+                    // A server path must never fall through to the phone's local file opener.
+                    guard let api, let serverFileLinks else {
+                        linkError = "当前页面没有可用的服务器连接，无法下载文件。请返回会话后重试。"
+                        return
+                    }
+                    serverFileLinks.open(serverPath: serverPath, api: api)
+                } else {
+                    // Preserve the parent's URL handler and observe refusal instead of silently
+                    // handing the link to the system. External links never inherit Wand cookies.
+                    inheritedOpenURL(url) { accepted in
+                        if !accepted { linkError = "系统未能打开此链接。请长按复制到浏览器；服务器下载链接需要在浏览器中单独登录。" }
+                    }
+                }
             }
-            // A matched absolute path must never fall through to iOS' local file opener.
-            guard let api, let serverFileLinks else { return .discarded }
-            serverFileLinks.open(serverPath: serverPath, api: api)
             return .handled
         }
     }
