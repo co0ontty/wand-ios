@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F271A0000000000000000201 /* KnowledgeLibraryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F271A0000000000000000202 /* KnowledgeLibraryTests.swift */; };
+		F271A0000000000000000101 /* KnowledgeLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F271A0000000000000000102 /* KnowledgeLibraryView.swift */; };
+		F271A0000000000000000001 /* KnowledgeLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = F271A0000000000000000002 /* KnowledgeLibrary.swift */; };
+		D12700000000000000000101 /* ArtifactPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = D12700000000000000000102 /* ArtifactPreview.swift */; };
+		D12700000000000000000001 /* MessageLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = D12700000000000000000002 /* MessageLink.swift */; };
 		FB4100000000000000000020 /* ChatComposerCatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000021 /* ChatComposerCatTests.swift */; };
 		FB4100000000000000000010 /* PlushScene in Resources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000011 /* PlushScene */; };
 		FB4100000000000000000005 /* ChatDesignPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB4100000000000000000006 /* ChatDesignPreview.swift */; };
@@ -164,6 +169,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F271A0000000000000000202 /* KnowledgeLibraryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeLibraryTests.swift; sourceTree = "<group>"; };
+		F271A0000000000000000102 /* KnowledgeLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeLibraryView.swift; sourceTree = "<group>"; };
+		F271A0000000000000000002 /* KnowledgeLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeLibrary.swift; sourceTree = "<group>"; };
+		D12700000000000000000102 /* ArtifactPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactPreview.swift; sourceTree = "<group>"; };
+		D12700000000000000000002 /* MessageLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageLink.swift; sourceTree = "<group>"; };
 		FB4100000000000000000021 /* ChatComposerCatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatComposerCatTests.swift; sourceTree = "<group>"; };
 		FB4100000000000000000011 /* PlushScene */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PlushScene; sourceTree = "<group>"; };
 		FB4100000000000000000006 /* ChatDesignPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDesignPreview.swift; sourceTree = "<group>"; };
@@ -343,6 +353,8 @@
 				A100000000000000000000BB /* Theme.swift */,
 				AB1600000000000000000003 /* AppUpdate.swift */,
 				A1000000000000000000BC01 /* WandModels.swift */,
+				F271A0000000000000000002 /* KnowledgeLibrary.swift */,
+				F271A0000000000000000102 /* KnowledgeLibraryView.swift */,
 				A1000000000000000000BC02 /* WandAPI.swift */,
 				F8030000000000000000BC01 /* TaskComments.swift */,
 				F8030000000000000000BC02 /* TaskCommentComposer.swift */,
@@ -410,6 +422,8 @@
 				A1000000000000000000BC06 /* SessionDestinationView.swift */,
 				C12500000000000000000002 /* SettingsWebView.swift */,
 				F6000000000000000000BC04 /* WandEndpoint.swift */,
+				D12700000000000000000002 /* MessageLink.swift */,
+				D12700000000000000000102 /* ArtifactPreview.swift */,
 				F6000000000000000000BC05 /* ServerFileLink.swift */,
 				E7000000000000000000BC01 /* WorkspaceModels.swift */,
 				E7000000000000000000BC02 /* WorkspaceAPI.swift */,
@@ -465,6 +479,7 @@
 				FA3000000000000000000005 /* LiveActivityExperienceTests.swift */,
 				AB1600000000000000000004 /* AppUpdateTests.swift */,
 				C3000000000000000000BC01 /* WandProtocolTests.swift */,
+				F271A0000000000000000202 /* KnowledgeLibraryTests.swift */,
 				C3000000000000000000BC02 /* ContactsTests.swift */,
 				F6000000000000000000BC06 /* AlignmentParityTests.swift */,
 				E7000000000000000000BC08 /* WorkspaceTests.swift */,
@@ -649,6 +664,8 @@
 				A100000000000000000000AB /* Theme.swift in Sources */,
 				AB1600000000000000000001 /* AppUpdate.swift in Sources */,
 				A1000000000000000000AC01 /* WandModels.swift in Sources */,
+				F271A0000000000000000001 /* KnowledgeLibrary.swift in Sources */,
+				F271A0000000000000000101 /* KnowledgeLibraryView.swift in Sources */,
 				A1000000000000000000AC02 /* WandAPI.swift in Sources */,
 				F8030000000000000000AC01 /* TaskComments.swift in Sources */,
 				F8030000000000000000AC02 /* TaskCommentComposer.swift in Sources */,
@@ -713,6 +730,8 @@
 				A1000000000000000000AC06 /* SessionDestinationView.swift in Sources */,
 				C12500000000000000000001 /* SettingsWebView.swift in Sources */,
 				F6000000000000000000AC04 /* WandEndpoint.swift in Sources */,
+				D12700000000000000000001 /* MessageLink.swift in Sources */,
+				D12700000000000000000101 /* ArtifactPreview.swift in Sources */,
 				F6000000000000000000AC05 /* ServerFileLink.swift in Sources */,
 				E7000000000000000000AC01 /* WorkspaceModels.swift in Sources */,
 				E7000000000000000000AC02 /* WorkspaceAPI.swift in Sources */,
@@ -756,6 +775,7 @@
 				FA3000000000000000000004 /* LiveActivityExperienceTests.swift in Sources */,
 				AB1600000000000000000002 /* AppUpdateTests.swift in Sources */,
 				C3000000000000000000AC01 /* WandProtocolTests.swift in Sources */,
+				F271A0000000000000000201 /* KnowledgeLibraryTests.swift in Sources */,
 				C3000000000000000000AC02 /* ContactsTests.swift in Sources */,
 				F6000000000000000000AC06 /* AlignmentParityTests.swift in Sources */,
 				E7000000000000000000AC08 /* WorkspaceTests.swift in Sources */,

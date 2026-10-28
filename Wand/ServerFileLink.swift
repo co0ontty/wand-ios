@@ -185,6 +185,29 @@ enum WandServerFileLink {
         throw DownloadError.server(404)
     }
 
+    static func download(url: URL, suggestedName: String, api: WandAPI) async throws -> URL {
+        guard let route = WandMessageLink.endpointRoute(url, baseURL: api.baseURL),
+              WandMessageLink.isArtifactRoute(route.percentEncodedPath) else { throw DownloadError.invalidURL }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 60
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        var response = try await perform(request, api: api)
+        if response.http.statusCode == 401, let token = api.token, !token.isEmpty {
+            try? FileManager.default.removeItem(at: response.temporaryURL)
+            try await relogin(baseURL: api.baseURL, token: token, endpointSession: api.endpointSession)
+            response = try await perform(request, api: api)
+        }
+        defer { try? FileManager.default.removeItem(at: response.temporaryURL) }
+        guard (200...299).contains(response.http.statusCode) else {
+            throw response.http.statusCode == 401 ? DownloadError.unauthorized : DownloadError.server(response.http.statusCode)
+        }
+        guard let finalURL = response.http.url, WandEndpointScope(api.baseURL)?.contains(finalURL) == true else {
+            throw DownloadError.crossEndpointRedirect
+        }
+        return try persistTemporaryFile(response.temporaryURL,
+            fileName: safeFileName(fileName(from: response.http, fallbackPath: suggestedName)))
+    }
+
     private static func perform(
         _ request: URLRequest,
         api: WandAPI
@@ -390,6 +413,8 @@ enum WandServerFileLink {
 struct ServerFilePreviewItem: Identifiable {
     let id = UUID()
     let url: URL
+    var api: WandAPI? = nil
+    var title: String? = nil
 }
 
 struct ServerFileLinkFailure: Identifiable {
@@ -407,7 +432,25 @@ final class ServerFileLinkController: ObservableObject {
     private var temporaryPreviewURL: URL?
     private var downloadGeneration = 0
 
+    func open(destination: WandMessageLinkDestination, api: WandAPI) {
+        switch destination {
+        case .preview(let url, let title):
+            cancel()
+            failure = nil
+            previewItem = ServerFilePreviewItem(url: url, api: api, title: title)
+        case .download(let url, let name):
+            beginDownload { try await WandServerFileLink.download(url: url, suggestedName: name, api: api) }
+        case .unavailable(let message): failure = ServerFileLinkFailure(message: message)
+        case .external: break
+        }
+    }
+
     func open(serverPath: String, api: WandAPI) {
+        beginDownload { try await WandServerFileLink.download(serverPath: serverPath, api: api) }
+    }
+
+    private func beginDownload(_ operation: @escaping () async throws -> URL) {
+        dismissPreview()
         downloadTask?.cancel()
         downloadGeneration &+= 1
         let generation = downloadGeneration
@@ -416,7 +459,7 @@ final class ServerFileLinkController: ObservableObject {
         downloadTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let url = try await WandServerFileLink.download(serverPath: serverPath, api: api)
+                let url = try await operation()
                 guard !Task.isCancelled, downloadGeneration == generation else {
                     try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
                     return
@@ -466,26 +509,30 @@ struct ServerFilePreviewView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            ServerFileQuickLook(fileURL: item.url)
-                .navigationTitle(item.url.lastPathComponent)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("完成") { dismiss() }
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        ShareLink(item: item.url) {
-                            Image(systemName: "square.and.arrow.up")
+        if let api = item.api {
+            ArtifactPreviewView(url: item.url, title: item.title ?? "HTML 预览", api: api)
+        } else {
+            NavigationStack {
+                ServerFileQuickLook(fileURL: item.url)
+                    .navigationTitle(item.url.lastPathComponent)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button("完成") { dismiss() }
                         }
-                        .accessibilityLabel("分享文件")
+                        ToolbarItem(placement: .topBarTrailing) {
+                            ShareLink(item: item.url) {
+                                Image(systemName: "square.and.arrow.up")
+                            }
+                            .accessibilityLabel("分享文件")
+                        }
                     }
-                }
+            }
         }
     }
 }
 
-private struct ServerFileQuickLook: UIViewControllerRepresentable {
+struct ServerFileQuickLook: UIViewControllerRepresentable {
     let fileURL: URL
 
     func makeCoordinator() -> Coordinator {
@@ -530,5 +577,16 @@ extension EnvironmentValues {
     var serverFileLinkController: ServerFileLinkController? {
         get { self[ServerFileLinkControllerEnvironmentKey.self] }
         set { self[ServerFileLinkControllerEnvironmentKey.self] = newValue }
+    }
+}
+
+private struct MessageFileContextEnvironmentKey: EnvironmentKey {
+    static let defaultValue = WandMessageFileContext()
+}
+
+extension EnvironmentValues {
+    var messageFileContext: WandMessageFileContext {
+        get { self[MessageFileContextEnvironmentKey.self] }
+        set { self[MessageFileContextEnvironmentKey.self] = newValue }
     }
 }

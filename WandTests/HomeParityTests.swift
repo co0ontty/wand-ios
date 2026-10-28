@@ -5,6 +5,25 @@ import WebKit
 @testable import Wand
 
 final class HomeParityTests: XCTestCase {
+    func testPersonSessionWorkspaceLabelIsCompactAndOmitsGlobalOwnership() throws {
+        func label(_ name: String, cwd: String = "/work/wand", global: Bool = false, id: String = "w") throws -> String? {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "workspaceId": id, "workspaceName": name, "workspaceCwd": cwd, "global": global,
+                "tasks": [], "standaloneSessions": []
+            ] as [String: Any])
+            let group = try JSONDecoder().decode(TaskDirectoryGroup.self, from: data)
+            return HomePresentation.workspaceLabel(group)
+        }
+        XCTAssertEqual(try label("wand"), "wand")
+        XCTAssertEqual(try label(" 产品工作区 "), "产品工作区")
+        XCTAssertEqual(try label("/work/wand/"), "wand")
+        XCTAssertEqual(try label("C:\\work\\wand\\"), "wand")
+        XCTAssertEqual(try label(" "), "wand")
+        XCTAssertNil(try label("", cwd: "/"))
+        XCTAssertNil(try label("wand", global: true))
+        XCTAssertNil(try label("wand", id: "wand-global"))
+    }
+
     @MainActor
     func testSystemNavigationKeepsTheSameRealListAndParentControllers() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -337,7 +356,7 @@ final class HomeParityTests: XCTestCase {
         for dark in [false, true] {
             window.overrideUserInterfaceStyle = dark ? .dark : .light
             for (mode, title, capture) in [(HomeListMode.im, "聊天", "live-root-chats"),
-                                           (.contacts, "通讯录", "live-root-contacts"),
+
                                            (.board, "任务", "live-root-board"),
                                            (.sessions, "工作区", "live-root-workspaces")] {
                 let index = try XCTUnwrap(SystemHomeTabController.modes.firstIndex(of: mode))
@@ -913,7 +932,7 @@ final class HomeParityTests: XCTestCase {
         defer { window.isHidden = true; window.rootViewController = nil }
         try await Task.sleep(for: .milliseconds(500))
         let slots = try XCTUnwrap(controller.viewControllers)
-        XCTAssertEqual(slots.count, 4)
+        XCTAssertEqual(slots.map { $0.tabBarItem.title }, ["聊天", "工作区", "知识库", "任务"])
         let host = try XCTUnwrap(slots[0].children.first)
         XCTAssertFalse(controller.tabBarController(controller, shouldSelect: slots[3]))
         XCTAssertEqual(requests, [.board])
@@ -1046,17 +1065,20 @@ final class HomeParityTests: XCTestCase {
     @MainActor
     func testNavigationUsesTheNativeTabBarAndSystemSelection() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let host = UIHostingController(rootView: HomeMenuPill(mode: .board, onMode: { _ in }, onContacts: {}))
+        let host = UIHostingController(rootView: HomeMenuPill(mode: .board, onMode: { _ in }))
         let window = UIWindow(windowScene: scene); window.rootViewController = host; window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil }
         try await Task.sleep(for: .milliseconds(80))
         func bars(_ view: UIView) -> [UITabBar] { (view as? UITabBar).map { [$0] } ?? view.subviews.flatMap(bars) }
         let bar = try XCTUnwrap(bars(host.view).first)
-        XCTAssertEqual(bar.items?.map(\.title), ["聊天", "通讯录", "工作区", "任务"])
+        XCTAssertEqual(bar.items?.map(\.title), ["聊天", "工作区", "知识库", "任务"])
         XCTAssertEqual(bar.selectedItem?.tag, 3)
-        host.rootView = HomeMenuPill(mode: .sessions, onMode: { _ in }, onContacts: {})
+        host.rootView = HomeMenuPill(mode: .sessions, onMode: { _ in })
         try await Task.sleep(for: .milliseconds(80))
-        XCTAssertEqual(bar.selectedItem?.tag, 2)
+        XCTAssertEqual(bar.selectedItem?.tag, 1)
+        host.rootView = HomeMenuPill(mode: .contacts, onMode: { _ in })
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertNil(bar.selectedItem, "Secondary contacts must not select an unrelated root tab")
         for width: CGFloat in [280, 320, 440] {
             let size = host.sizeThatFits(in: CGSize(width: width, height: 100))
             XCTAssertLessThanOrEqual(size.width, width); XCTAssertGreaterThanOrEqual(size.height, 44)
@@ -1073,7 +1095,7 @@ final class HomeParityTests: XCTestCase {
                     .scrollContentBackground(.hidden)
                     .background(Theme.background)
             } navigation: {
-                HomeMenuPill(mode: .im, onMode: { _ in }, onContacts: {})
+                HomeMenuPill(mode: .im, onMode: { _ in })
                     .padding(.vertical, 8)
             }.frame(width: width, height: 600)
                 .environment(\.colorScheme, dark ? .dark : .light))
@@ -1155,7 +1177,7 @@ final class HomeParityTests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(delay))
                 capture("travel-" + String(index))
             }
-            probe.select(.contacts); try await Task.sleep(for: .milliseconds(40))
+            probe.select(.knowledge); try await Task.sleep(for: .milliseconds(40))
             probe.select(.sessions); try await Task.sleep(for: .milliseconds(40))
             probe.select(.im); try await Task.sleep(for: .milliseconds(380))
             capture("rapid-settled")
@@ -1200,7 +1222,7 @@ final class HomeParityTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: payload).write(to: URL(fileURLWithPath: "/tmp/wand-native-tab-targets.json"), options: .atomic)
         try "ready".write(toFile: "/tmp/wand-dock-ready", atomically: true, encoding: .utf8)
         await fulfillment(of: [finished], timeout: 120)
-        XCTAssertEqual(probe.selections, [.board, .contacts, .sessions, .im, .im])
+        XCTAssertEqual(probe.selections, [.board, .knowledge, .sessions, .im, .im])
         XCTAssertEqual(probe.mode, .im)
     }
 
@@ -1210,9 +1232,8 @@ final class HomeParityTests: XCTestCase {
             try String(contentsOf: root.appendingPathComponent("Wand/" + name + ".swift"), encoding: .utf8)
         }
         let workspace = try source("WorkspaceListView")
-        let directories = try XCTUnwrap(workspace.range(of: "ForEach(visible) { group in"))
-        let history = try XCTUnwrap(workspace.range(of: "HomeSectionHeader(title: \"最近对话\""))
-        XCTAssertLessThan(history.lowerBound, directories.lowerBound, "工作区页最近对话应排在任务与工作区之前")
+        XCTAssertFalse(workspace.contains("HomeSectionHeader(title: \"最近对话\""), "人物视图已收进聊天，工作区不再重复最近对话")
+        XCTAssertTrue(try source("ConversationViews").contains("其他会话"))
         for name in ["WorkspaceListView", "ConversationViews", "ContactsView", "TaskBoardView"] {
             XCTAssertTrue(try source(name).contains("HomeSearchField("), name)
         }
@@ -1431,7 +1452,7 @@ final class HomeParityTests: XCTestCase {
             ("phone-dark", 402, true, ContentSizeCategory.large),
             ("narrow-large", 320, false, ContentSizeCategory.accessibilityExtraExtraLarge)
         ] {
-            for mode in [HomeListMode.im, .contacts, .sessions, .board] {
+            for mode in [HomeListMode.im, .contacts, .sessions, .knowledge, .board] {
                 let overview = HomeOverviewBar(serverDisplayName: "当前服务器", title: mode.label,
                     showNewTask: mode == .sessions, onNewTask: {}, onOpenSettings: {}, onSwitchServer: {})
                 let surface: AnyView
@@ -1450,6 +1471,8 @@ final class HomeParityTests: XCTestCase {
                             hidesHomeChrome: true, isSelecting: .constant(false), onOpenTask: { _, _ in },
                             employees: contacts.employees, teams: contacts.teams)
                     })
+                case .knowledge:
+                    surface = AnyView(KnowledgeLibraryView(store: KnowledgeLibraryStore(service: api)))
                 case .board:
                     surface = AnyView(TaskBoardView(api: api, workspaceStore: workspace,
                         onOpenSession: { _ in }, embedded: true, overviewBar: overview))
@@ -1457,7 +1480,7 @@ final class HomeParityTests: XCTestCase {
                 let content = HomeSidebarLayout {
                     surface.background(Theme.background)
                 } navigation: {
-                    HomeMenuPill(mode: mode, onMode: { _ in }, onContacts: {})
+                    HomeMenuPill(mode: mode, onMode: { _ in })
                         .padding(.vertical, 8)
                 }
                     .environment(\.colorScheme, dark ? .dark : .light)
@@ -1862,7 +1885,7 @@ private struct HomeDockFixture: View {
                         .frame(minHeight: 44).accessibilityIdentifier("dock-lock")
                 }
                 Spacer()
-                HomeMenuPill(mode: probe.mode, onMode: probe.select, onContacts: { probe.select(.contacts) }, canSelect: { _ in !probe.blocked })
+                HomeMenuPill(mode: probe.mode, onMode: probe.select, canSelect: { _ in !probe.blocked })
                     .padding(.horizontal, 12)
             }.padding(.top, 24)
         }.background(Theme.background)
@@ -1952,6 +1975,8 @@ private struct HomeInstalledScrollFixture: View {
         case .contacts:
             ContactsView(api: api, store: contacts, onBack: {}, onOpenSession: { _ in }, onOpenRun: { _ in },
                 embedded: true, serverDisplayName: "当前服务器", onOpenSettings: {}, onSwitchServer: {})
+        case .knowledge:
+            KnowledgeLibraryView(store: KnowledgeLibraryStore(service: api))
         case .board:
             TaskBoardView(api: api, workspaceStore: workspace, onOpenSession: { _ in }, embedded: true)
         }
@@ -2149,7 +2174,7 @@ private struct HomeNavigationDetailFixture: View {
                     }
                 }.homeNavigationHidden(state.detail)
             } navigation: {
-                HomeMenuPill(mode: .sessions, onMode: { _ in }, onContacts: {})
+                HomeMenuPill(mode: .sessions, onMode: { _ in })
                     .background(HomeNavigationGeometryMarker(identifier: "home-preference-inline-dock"))
             }
         }

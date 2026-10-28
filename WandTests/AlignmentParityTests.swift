@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import UIKit
 import WebKit
+import Network
 @testable import Wand
 
 final class ServerFileLinkRoutingTests: XCTestCase {
@@ -43,6 +44,285 @@ final class ServerFileLinkRoutingTests: XCTestCase {
         let attributed = try AttributedString(markdown: raw, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
         XCTAssertEqual(attributed.runs.compactMap(\.link).first?.absoluteString, target)
     }
+}
+
+final class MessageLinkFormatTests: XCTestCase {
+    let base = URL(string: "https://wand.example/team/")!
+    private func download(_ raw: String, context: WandMessageFileContext = .init()) throws -> URL {
+        guard case .download(let url, _) = WandMessageLink.resolve(raw, baseURL: base, context: context) else {
+            XCTFail("Expected download: " + raw); throw URLError(.badURL)
+        }
+        return url
+    }
+    private func preview(_ raw: String, context: WandMessageFileContext = .init()) throws -> URL {
+        guard case .preview(let url, _) = WandMessageLink.resolve(raw, baseURL: base, context: context) else {
+            XCTFail("Expected preview: " + raw); throw URLError(.badURL)
+        }
+        return url
+    }
+    private func query(_ url: URL, _ key: String) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == key }?.value
+    }
+    func testAbsoluteAndFileURLsDecodeExactlyOnceAndPreserveColon() throws {
+        for raw in ["/tmp/a%2520%23%3F.pdf:42", "file://localhost/tmp/a%2520%23%3F.pdf:42"] {
+            XCTAssertEqual(query(try download(raw), "path"), "/tmp/a%20#?.pdf:42")
+        }
+        XCTAssertEqual(query(try download("/tmp/readme.md#L4C2"), "path"), "/tmp/readme.md")
+        XCTAssertEqual(query(try download("~/Downloads/a.zip"), "path"), "~/Downloads/a.zip")
+    }
+    func testRelativeLinksUseSourceSessionAndPreserveNavigation() throws {
+        let url = try preview("./demo%23%3F.html?tab=a%2Bb#panel", context: .init(sessionID: "source", cwd: "/wrong"))
+        XCTAssertEqual(url.path, "/team/api/session-file/source")
+        XCTAssertEqual(query(url, "path"), "./demo#?.html")
+        XCTAssertEqual(query(url, "search"), "?tab=a%2Bb")
+        XCTAssertEqual(url.fragment, "panel")
+        XCTAssertEqual(query(try download("source.swift:42", context: .init(sessionID: "source")), "path"), "source.swift:42")
+    }
+    func testRelativeLinksNeverGuessCurrentSession() throws {
+        for raw in ["./demo.html", "result.zip", "../readme.md"] {
+            guard case .unavailable = WandMessageLink.resolve(raw, baseURL: base) else { return XCTFail(raw) }
+        }
+        XCTAssertEqual(query(try download("a/../result.zip", context: .init(cwd: "/safe/./dir")), "path"), "/safe/dir/result.zip")
+        XCTAssertEqual(query(try download("result.zip", context: .init(cwd: "/")), "path"), "/result.zip")
+        guard case .unavailable = WandMessageLink.resolve("../escape.zip", baseURL: base, context: .init(cwd: "/safe")) else { return XCTFail("cwd escape") }
+    }
+    func testHTMLQueryAndFragmentDoNotBecomeFilenameBytes() throws {
+        let url = try preview("/tmp/demo%23%3F.html?mode=edit#form")
+        XCTAssertEqual(url.query, "mode=edit"); XCTAssertEqual(url.fragment, "form")
+        let encoded = url.path.split(separator: "/")[3]
+        var root = String(encoded).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        root += String(repeating: "=", count: (4 - root.count % 4) % 4)
+        XCTAssertEqual(Data(base64Encoded: root).flatMap { String(data: $0, encoding: .utf8) }, "/tmp/demo#?.html")
+    }
+    func testAPIQueryFormEncodingAndApplicationQueryBytesRemainDistinct() throws {
+        XCTAssertEqual(query(try download("/api/file-raw?path=%2Ftmp%2Fa+b%2Bc.pdf"), "path"), "/tmp/a b+c.pdf")
+        let url = try download("/api/local-file/L3RtcC9yb290/report.pdf?mode=edit&q=a+b%2Bc&__wand_file_action=metadata#part")
+        XCTAssertEqual(url.query, "mode=edit&q=a+b%2Bc&__wand_file_action=download")
+        XCTAssertEqual(url.fragment, "part")
+    }
+    func testForwardedRoutesAndSameEndpointAbsoluteURLs() throws {
+        for prefix in ["/api/file-raw", "/api/file-preview", "https://wand.example/team/api/file-raw"] {
+            XCTAssertEqual(query(try download(prefix + "?path=%2Ftmp%2Fa%2520.pdf"), "path"), "/tmp/a%20.pdf")
+        }
+        let forwarded = try preview("/api/session-file/old?path=demo.html&mode=preview&search=%3Fx%3D1#part")
+        XCTAssertEqual(forwarded.path, "/team/api/session-file/old")
+        XCTAssertEqual(query(forwarded, "search"), "?x=1"); XCTAssertEqual(forwarded.fragment, "part")
+        let nested = try download("/api/local-file/L3RtcC9yb290/report%23.pdf?theme=dark&mode=edit#view")
+        XCTAssertEqual(query(nested, "__wand_file_action"), "download"); XCTAssertEqual(query(nested, "mode"), "edit"); XCTAssertEqual(query(nested, "theme"), "dark")
+        XCTAssertEqual(nested.fragment, "view")
+    }
+    func testForeignAPILinksStayExternalAndUnsafeSchemesFailClosed() {
+        for raw in ["https://other.example/api/file-raw?path=/private", "https://wand.example/api/file-raw?path=/private", "https://wand.example:444/team/api/file-raw?path=/private"] {
+            XCTAssertEqual(WandMessageLink.resolve(raw, baseURL: base), .external(URL(string: raw)!))
+        }
+        for raw in ["javascript:alert(1)", "//other.example/a", "file://foreign/tmp/a", "/api/file-raw?path=/a&path=/b", "https://user:pass@wand.example/team/api/file-raw?path=/a"] {
+            guard case .unavailable = WandMessageLink.resolve(raw, baseURL: base) else { return XCTFail(raw) }
+        }
+    }
+    func testLoopbackBareIPv4IPv6PreserveQueryAndHash() throws {
+        for raw in ["localhost:8080/demo?q=a%2Bb#panel", "http://127.0.0.1:8080/demo?q=a%2Bb#panel", "[::1]:8080/demo?q=a%2Bb#panel"] {
+            let url = try preview(raw)
+            XCTAssertTrue(url.path.contains("/api/local-preview/"))
+            XCTAssertEqual(url.query, "q=a%2Bb"); XCTAssertEqual(url.fragment, "panel")
+        }
+    }
+    func testNativeMarkdownRetainsRelativeDestinations() throws {
+        for raw in ["./demo.html?tab=1#panel", "~/Downloads/test.pdf", "source.swift:42", "/tmp/a%23b.pdf", "localhost:8080/demo"] {
+            let text = try AttributedString(markdown: "[open](\(raw))", options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+            XCTAssertEqual(try XCTUnwrap(text.runs.compactMap(\.link).first).absoluteString, raw)
+        }
+    }
+    @MainActor func testForwardedPreviewRootUsesActualMIMEForFilesAndDottedDirectories() throws {
+        let url = try preview("/api/local-file/L3RtcC9yZXBvcnQucGRm/?mode=edit")
+        let pdf = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/pdf"])!
+        let target = try XCTUnwrap(ArtifactPreviewStore.nonHTMLDownload(pdf, baseURL: base))
+        XCTAssertEqual(query(target, "__wand_file_action"), "download")
+        XCTAssertEqual(query(target, "mode"), "edit")
+        let html = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/html"])!
+        XCTAssertNil(ArtifactPreviewStore.nonHTMLDownload(html, baseURL: base))
+        let failed = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        XCTAssertNil(ArtifactPreviewStore.nonHTMLDownload(failed, baseURL: base))
+    }
+    @MainActor func testLoopbackNonHTMLDownloadsWhileHTMLStillRequiresIsolation() throws {
+        let url = try preview("http://localhost:3000/report.pdf?mode=view#page=2")
+        let pdf = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/pdf"])!
+        XCTAssertEqual(ArtifactPreviewStore.nonHTMLDownload(pdf, baseURL: base), url)
+        XCTAssertEqual(pdf.suggestedFilename, "report.pdf")
+        let html = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/html"])!
+        XCTAssertNil(ArtifactPreviewStore.nonHTMLDownload(html, baseURL: base))
+        XCTAssertFalse(ArtifactPreviewStore.isolatedHTML(html))
+    }
+    @MainActor func testHTMLPolicyRequiresOpaqueOriginAndBlockedNativeForms() throws {
+        func response(_ csp: String) -> HTTPURLResponse {
+            HTTPURLResponse(url: base, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/html", "Content-Security-Policy": csp])!
+        }
+        let safe = "sandbox allow-scripts allow-forms; form-action 'none'; connect-src 'none'"
+        XCTAssertTrue(ArtifactPreviewStore.isolatedHTML(response(safe)))
+        for unsafe in ["", "sandbox allow-same-origin allow-scripts; form-action 'none'; connect-src 'none'", "sandbox allow-scripts allow-forms", "sandbox allow-top-navigation; form-action 'none'; connect-src 'none'", "sandboxed; form-action 'none'; connect-src 'none'"] {
+            XCTAssertFalse(ArtifactPreviewStore.isolatedHTML(response(unsafe)))
+        }
+        XCTAssertNil(ArtifactPreviewStore.previewRoot(URL(string: "https://foreign.example/api/local-file/root/")!, baseURL: base))
+    }
+    @MainActor func testReadinessFallsBackToGETWithoutWaitingForBody() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ArtifactProbeProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let result = try await ArtifactPreviewStore.probe(base, session: session)
+        XCTAssertEqual(result.statusCode, 200)
+        XCTAssertEqual(result.expectedContentLength, 999999999)
+    }
+    func testRelativeImagesShareSourceResolverAndGallery() throws {
+        let context = WandMessageFileContext(sessionID: "original")
+        let page = try XCTUnwrap(markdownImagePage("./plot%23.png", baseURL: base, context: context))
+        XCTAssertTrue(page.directSource)
+        let url = try XCTUnwrap(URL(string: page.source))
+        XCTAssertEqual(url.path, "/team/api/session-file/original")
+        XCTAssertEqual(query(url, "path"), "./plot#.png")
+        XCTAssertNil(markdownImagePage("./plot.png", baseURL: base, context: .init()))
+        XCTAssertEqual(splitMarkdownImages("[plot](./plot.png)"), [.image(alt: "plot", source: "./plot.png")])
+    }
+    @MainActor func testRealWebKitFormEventsRunWhileNativeSubmissionAndStorageStayBlocked() async throws {
+        let server = try ArtifactHTMLTestServer()
+        let url = try await server.start()
+        defer { server.close() }
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let rules = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "wand-artifact-live-test", encodedContentRuleList: ArtifactPreviewStore.contentRules(root: url))
+        config.userContentController.add(try XCTUnwrap(rules))
+        let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 600), configuration: config)
+        let loaded = expectation(description: "actual HTTP sandbox document loaded")
+        let delegate = ArtifactNavigationTestDelegate(loaded: loaded)
+        view.navigationDelegate = delegate
+        view.load(URLRequest(url: url))
+        await fulfillment(of: [loaded], timeout: 15)
+        let saved = try await view.evaluateJavaScript("document.querySelector('#save').click(); window.saved === 1")
+        XCTAssertEqual(saved as? Bool, true)
+        let isolated = try await view.evaluateJavaScript("(() => { let blocked = 0; try { document.cookie } catch (_) { blocked++ } try { localStorage.getItem('x') } catch (_) { blocked++ } return blocked === 2 && !window.webkit?.messageHandlers; })()")
+        XCTAssertEqual(isolated as? Bool, true)
+        let prevented = try await view.callAsyncJavaScript("return await new Promise(resolve => { document.addEventListener('securitypolicyviolation', e => { if(e.violatedDirective === 'form-action') resolve(true) }, {once:true}); document.querySelector('#native').click(); setTimeout(() => resolve(false), 1500); });", arguments: [:], in: nil, contentWorld: .page)
+        XCTAssertEqual(prevented as? Bool, true)
+        XCTAssertEqual(server.submissionCount, 0)
+        view.stopLoading(); view.navigationDelegate = nil
+        try await WKContentRuleListStore.default().removeContentRuleList(forIdentifier: "wand-artifact-live-test")
+    }
+    @MainActor func testWebKitAcceptsArtifactResourceBoundary() async throws {
+        let root = try XCTUnwrap(ArtifactPreviewStore.previewRoot(try preview("/tmp/demo.html"), baseURL: base))
+        let json = try ArtifactPreviewStore.contentRules(root: root)
+        let rule = try await WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "wand-artifact-test", encodedContentRuleList: json)
+        XCTAssertNotNil(rule)
+        XCTAssertFalse(json.contains("allow-same-origin"))
+        try await WKContentRuleListStore.default().removeContentRuleList(forIdentifier: "wand-artifact-test")
+    }
+}
+
+@MainActor final class InstalledMessageLinkTests: XCTestCase {
+    func testInstalledServiceSourceBoundPreviewAndDownload() async throws {
+        let pointer = URL(fileURLWithPath: "/tmp/wand-ios-link-acceptance-path.json")
+        guard let data = try? Data(contentsOf: pointer),
+              let input = try JSONSerialization.jsonObject(with: data) as? [String: String],
+              let connectionPath = input["connectionFile"], let sessionID = input["sessionID"],
+              let relative = input["relativeHTML"], let downloadPath = input["relativeFile"] else {
+            throw XCTSkip("Requires an explicit installed-service acceptance pointer")
+        }
+        let connection = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: connectionPath))) as? [String: String])
+        let decoded = try XCTUnwrap(WandAuth.decodeConnectCode(try XCTUnwrap(connection["connectionCode"])))
+        let base = try XCTUnwrap(URL(string: try XCTUnwrap(connection["serverURL"])))
+        let api = WandAPI(baseURL: base, token: decoded.token)
+        defer { SelfSignedSession.resetEndpoint(base) }
+        let source = WandMessageFileContext(sessionID: sessionID)
+        guard case .preview(let url, _) = WandMessageLink.resolve(relative + "?mode=edit#form", baseURL: base, context: source) else { return XCTFail("relative HTML preview") }
+        let model = ArtifactPreviewStore(url: url, api: api)
+        defer { model.close() }
+        model.load()
+        for _ in 0..<300 where model.webView == nil && model.error == nil { try await Task.sleep(for: .milliseconds(100)) }
+        XCTAssertNil(model.error, model.error ?? "")
+        let view = try XCTUnwrap(model.webView)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController(); controller.view = view; window.rootViewController = controller
+        window.makeKeyAndVisible(); defer { window.isHidden = true }
+        view.frame = window.bounds; controller.view.layoutIfNeeded()
+        for _ in 0..<300 where model.loading { try await Task.sleep(for: .milliseconds(100)) }
+        // WK's offscreen compositor can finish a load before the native host appears.
+        // Re-read after attaching so the screenshot verifies a real on-screen document.
+        view.reload()
+        for _ in 0..<300 where view.isLoading { try await Task.sleep(for: .milliseconds(100)) }
+        XCTAssertNil(model.error, model.error ?? "")
+        XCTAssertFalse(view.isLoading)
+        let count = try await view.evaluateJavaScript("document.querySelector('#counter button').click(); document.querySelector('#result').value")
+        XCTAssertEqual(count as? String, "1")
+        let navigation = try await view.evaluateJavaScript("document.querySelector('#nav').textContent")
+        XCTAssertEqual(navigation as? String, "?mode=edit#form")
+        let opaque = try await view.evaluateJavaScript("(() => { try { document.cookie; return false } catch (_) { return true } })()")
+        XCTAssertEqual(opaque as? Bool, true)
+        guard case .download(let fileURL, let name) = WandMessageLink.resolve(downloadPath, baseURL: base, context: source) else { return XCTFail("relative download") }
+        let saved = try await WandServerFileLink.download(url: fileURL, suggestedName: name, api: api)
+        defer { try? FileManager.default.removeItem(at: saved.deletingLastPathComponent()) }
+        XCTAssertEqual(saved.lastPathComponent, "source.txt")
+        XCTAssertGreaterThan(try Data(contentsOf: saved).count, 0)
+        try await Task.sleep(for: .milliseconds(500))
+        let snapshot = try await view.takeSnapshot(configuration: nil)
+        let pixels = try XCTUnwrap(snapshot.cgImage?.dataProvider?.data) as Data
+        XCTAssertGreaterThan(Set(pixels).count, 12, "The native preview must paint content, not just a flat background")
+        let attachment = XCTAttachment(image: snapshot); attachment.name = "installed-source-html-preview"; attachment.lifetime = .keepAlways; add(attachment)
+        try snapshot.pngData()?.write(to: URL(fileURLWithPath: "/tmp/wand-ios-link-installed.png"))
+    }
+}
+
+private final class ArtifactProbeProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let head = request.httpMethod == "HEAD"
+        let response = HTTPURLResponse(url: request.url!, statusCode: head ? 405 : 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/html", "Content-Length": head ? "0" : "999999999"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if head { client?.urlProtocolDidFinishLoading(self) }
+        // GET deliberately never ends: a header-only probe must cancel it.
+    }
+    override func stopLoading() {}
+}
+
+@MainActor private final class ArtifactNavigationTestDelegate: NSObject, WKNavigationDelegate {
+    let loaded: XCTestExpectation
+    init(loaded: XCTestExpectation) { self.loaded = loaded }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded.fulfill() }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { XCTFail(error.localizedDescription); loaded.fulfill() }
+}
+
+private final class ArtifactHTMLTestServer: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "wand-artifact-html-test")
+    private let lock = NSLock()
+    private var submitted = 0
+    var submissionCount: Int { lock.lock(); defer { lock.unlock() }; return submitted }
+    init() throws { listener = try NWListener(using: .tcp, on: .any) }
+    func start() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                if case .ready = state, let port = listener.port {
+                    listener.stateUpdateHandler = nil
+                    continuation.resume(returning: URL(string: "http://127.0.0.1:\(port)/api/local-file/test/")!)
+                } else if case .failed(let error) = state { listener.stateUpdateHandler = nil; continuation.resume(throwing: error) }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else { return }
+                connection.start(queue: queue)
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] data, _, _, _ in
+                    guard let self else { return }
+                    let request = String(data: data ?? Data(), encoding: .utf8) ?? ""
+                    if request.hasPrefix("POST ") { lock.lock(); submitted += 1; lock.unlock() }
+                    let html = "<html><form onsubmit='event.preventDefault(); window.saved=(window.saved||0)+1'><button id='save' type='submit'>save</button></form><form action='/api/local-file/test/submit' method='post'><button id='native' type='submit'>submit</button></form></html>"
+                    let body = Data(html.utf8)
+                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Security-Policy: sandbox allow-scripts allow-forms; form-action 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+                    connection.send(content: Data(headers.utf8) + body, completion: .contentProcessed { _ in connection.cancel() })
+                }
+            }
+            listener.start(queue: queue)
+        }
+    }
+    func close() { listener.cancel() }
 }
 
 final class ThinkingEffortParityTests: XCTestCase {

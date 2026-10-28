@@ -66,6 +66,7 @@ struct FocusComposerSurface<Editor: View, Add: View, Send: View, Settings: View>
     var isFocused = false
     var actionCount = 0
     var accessory: AnyView? = nil
+    var placeholder = "发消息…"
     @Environment(\.accessibilityReduceMotion) private var reduced
     var body: some View {
         VStack(spacing: 4) {
@@ -90,7 +91,7 @@ struct FocusComposerSurface<Editor: View, Add: View, Send: View, Settings: View>
                     Button(action: onFocus) {
                         HStack(spacing: 4) {
                             if hasDraft { Circle().fill(Theme.brand).frame(width: 6, height: 6) }
-                            Text(hasDraft ? "草稿 · 未发送" : "发消息…").font(.body).lineLimit(1)
+                            Text(hasDraft ? "草稿 · 未发送" : placeholder).font(.body).lineLimit(1)
                         }.padding(.leading, 8).padding(.trailing, 12)
                             .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading).contentShape(Rectangle())
                     }.buttonStyle(.plain).accessibilityLabel(hasDraft ? "编辑未发送草稿及附件" : "展开文字输入")

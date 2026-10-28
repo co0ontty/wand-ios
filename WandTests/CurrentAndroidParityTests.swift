@@ -80,13 +80,181 @@ private final class FilesFake: SessionFilesService {
 
 @MainActor
 private final class PiFake: PiResourcesService {
-    var response = try! parityDecode(PiResourcesResponse.self, #"{"settings":{"resources":{"skills":[],"mcpServers":[]}},"resourceCatalog":{"supported":true,"skills":[],"mcpServers":[]},"controls":{"codemodeOverride":true,"codemodeOnly":false},"skillLocksAvailable":true,"autoResourcesAvailable":true}"#)
+    var response = try! parityDecode(PiResourcesResponse.self, #"{"settings":{"resources":{"skills":[],"mcpServers":[]}},"resourceCatalog":{"supported":true,"skills":[{"id":"skill","name":"Installed Skill"}],"mcpServers":[{"id":"mcp","name":"Installed MCP"}]},"controls":{"codemodeOverride":true,"codemodeOnly":false},"skillLocksAvailable":true,"autoResourcesAvailable":true}"#)
     var failure: Error?
     var bodies: [[String: Any]] = []
     var ack: PiResourcesResponse.Settings?
     func piResources(_ id: String) async throws -> PiResourcesResponse { response }
     func savePiResources(_ id: String, body: [String: Any]) async throws -> PiResourcesResponse.Settings {
         bodies.append(body); if let failure { throw failure }; return ack ?? response.settings
+    }
+}
+
+@MainActor
+private final class PiResourceContractService: PiResourcesService {
+    var response: PiResourcesResponse
+    var ack: PiResourcesResponse.Settings?
+    var bodies: [[String: Any]] = []
+    var suspendSave = false
+    var continuation: CheckedContinuation<PiResourcesResponse.Settings, Error>?
+    init(_ response: PiResourcesResponse) { self.response = response }
+    func piResources(_ id: String) async throws -> PiResourcesResponse { response }
+    func savePiResources(_ id: String, body: [String: Any]) async throws -> PiResourcesResponse.Settings {
+        bodies.append(body)
+        if suspendSave { return try await withCheckedThrowingContinuation { continuation = $0 } }
+        if let ack { return ack }
+        let saved = try JSONDecoder().decode(PiResourcesResponse.Settings.self, from: JSONSerialization.data(withJSONObject: body))
+        response.settings = saved
+        return saved
+    }
+}
+
+@MainActor
+final class PiResourcesTests: XCTestCase {
+    private func fixture(skills: [String] = ["live", "removed"], locks: [String] = ["live", "removed"],
+                         installed: [String] = ["live"], mcp: [String] = ["mcp"]) throws -> PiResourcesResponse {
+        try JSONDecoder().decode(PiResourcesResponse.self, from: JSONSerialization.data(withJSONObject: [
+            "settings": ["resources": ["skills": skills, "mcpServers": mcp], "lockedSkills": locks,
+                         "autoResources": false],
+            "resourceCatalog": ["supported": true,
+                                "skills": installed.map { ["id": $0, "name": "可用技能 " + $0] },
+                                "mcpServers": [["id": "mcp", "name": "可用 MCP"]]],
+            "controls": ["codemodeOverride": true, "codemodeOnly": false],
+            "skillLocksAvailable": true, "autoResourcesAvailable": true
+        ]))
+    }
+    private func settle(_ predicate: () -> Bool) async throws {
+        for _ in 0..<200 {
+            if predicate() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Pi resource operation did not settle")
+        throw URLError(.timedOut)
+    }
+    func testUnlockRemovedSkillDropsSelectionAndLockButKeepsInstalledSkills() async throws {
+        let service = PiResourceContractService(try fixture())
+        let store = PiResourcesStore(sessionID: "fixture", service: service); await store.load()
+        store.setSkill("removed", mode: "on")
+        XCTAssertEqual(store.draft.resources?.skills, ["live"])
+        XCTAssertEqual(store.draft.lockedSkills, ["live"])
+        XCTAssertEqual(store.draft.resources?.mcpServers, ["mcp"])
+        store.save(); try await settle { store.phase == .sent }
+        XCTAssertFalse(store.dirty); XCTAssertTrue(store.unavailableSkillIDs.isEmpty)
+    }
+    func testUnlockInstalledSkillPreservesSelectionAndOtherMissingReferences() async throws {
+        let service = PiResourceContractService(try fixture())
+        let store = PiResourcesStore(sessionID: "fixture", service: service); await store.load()
+        store.setSkill("live", mode: "on")
+        XCTAssertEqual(Set(store.draft.resources?.skills ?? []), ["live", "removed"])
+        XCTAssertEqual(store.draft.lockedSkills, ["removed"])
+        XCTAssertEqual(store.unavailableSkillIDs, ["removed"])
+        store.save(); try await settle { store.phase == .sent }
+        XCTAssertFalse(store.dirty)
+    }
+    func testMissingRowsIncludeLockOnlyReferencesAndCanClearEachIndependently() async throws {
+        let service = PiResourceContractService(try fixture(skills: ["live", "selected-only", "removed"],
+            locks: ["live", "locked-only", "removed"], mcp: ["mcp", "missing-mcp"]))
+        let store = PiResourcesStore(sessionID: "fixture", service: service); await store.load()
+        XCTAssertEqual(store.unavailableSkillIDs, ["locked-only", "removed", "selected-only"])
+        XCTAssertEqual(store.unavailableMcpIDs, ["missing-mcp"])
+        store.setSkill("locked-only", mode: "off")
+        XCTAssertEqual(store.unavailableSkillIDs, ["removed", "selected-only"])
+        XCTAssertEqual(store.draft.resources?.skills, service.response.settings.resources?.skills)
+        store.setMcp("missing-mcp", enabled: false)
+        XCTAssertEqual(store.draft.resources?.mcpServers, ["mcp"])
+        XCTAssertEqual(store.draft.lockedSkills, ["live", "removed"])
+    }
+    func testServerCanRemoveSkillUninstalledAfterPanelLoadOnlyWhenExplicitlyUnlocked() async throws {
+        let service = PiResourceContractService(try fixture(installed: ["live", "removed"]))
+        let store = PiResourcesStore(sessionID: "fixture", service: service); await store.load()
+        store.setSkill("removed", mode: "on")
+        XCTAssertTrue(store.draft.resources?.skills.contains("removed") == true)
+        var canonical = store.draft; canonical.resources?.skills.removeAll { $0 == "removed" }
+        service.ack = canonical; store.save(); try await settle { store.phase != .sending }
+        XCTAssertEqual(store.phase, .sent); XCTAssertEqual(store.draft, canonical); XCTAssertFalse(store.dirty)
+    }
+    func testUnrelatedOrMalformedAcknowledgementsNeverConfirmSave() async throws {
+        for variant in 0..<6 {
+            let service = PiResourceContractService(try fixture(installed: ["live", "removed"]))
+            let store = PiResourcesStore(sessionID: "fixture", service: service); await store.load()
+            store.setSkill("removed", mode: "on")
+            let submitted = store.draft
+            var wrong = submitted
+            switch variant {
+            case 0: wrong.lockedSkills = ["live", "removed"]
+            case 1: wrong.resources?.skills.removeAll { $0 == "live" }
+            case 2: wrong.resources?.skills.append("unexpected")
+            case 3: wrong.resources?.skills.append("live")
+            case 4: wrong.resources?.mcpServers = []
+            default: wrong.resources?.skills.reverse()
+            }
+            service.ack = wrong; store.save(); try await settle { store.phase != .sending }
+            XCTAssertEqual(store.phase, .failed, "variant \(variant)"); XCTAssertTrue(store.uncertain)
+            XCTAssertEqual(store.draft, submitted); XCTAssertEqual(store.response?.settings, service.response.settings)
+            store.save(); XCTAssertEqual(service.bodies.count, 1, "Unknown save must not repeat")
+        }
+    }
+    func testLateSaveCannotUpdateClosedStore() async throws {
+        let service = PiResourceContractService(try fixture()); service.suspendSave = true
+        let store = PiResourcesStore(sessionID: "fixture", service: service); await store.load()
+        store.setSkill("removed", mode: "off"); let submitted = store.draft; store.save()
+        try await settle { service.continuation != nil }; store.close()
+        service.continuation?.resume(returning: submitted)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(store.response?.settings, service.response.settings)
+        XCTAssertEqual(store.draft, submitted); XCTAssertNotEqual(store.phase, .sent)
+    }
+    func testNewDraftSurvivesAnEarlierSaveAcknowledgement() async throws {
+        let service = PiResourceContractService(try fixture()); service.suspendSave = true
+        let store = PiResourcesStore(sessionID: "fixture", service: service); await store.load()
+        store.setSkill("removed", mode: "off"); let submitted = store.draft; store.save()
+        try await settle { service.continuation != nil }
+        store.setMcp("mcp", enabled: false); let newer = store.draft
+        service.continuation?.resume(returning: submitted)
+        try await settle { store.phase != .sending }
+        XCTAssertEqual(store.draft, newer); XCTAssertEqual(store.response?.settings, submitted); XCTAssertTrue(store.dirty)
+    }
+    func testInstalledServicePiSettingsReadOnly() async throws {
+        let pointer = "/tmp/wand-ios-pi-acceptance-input.json"
+        guard FileManager.default.fileExists(atPath: pointer) else { throw XCTSkip("Requires explicit installed-service acceptance input") }
+        struct Input: Decodable { let connectionPath: String; let sessionID: String }
+        struct Connection: Decodable { let connectionCode: String }
+        let input = try JSONDecoder().decode(Input.self, from: Data(contentsOf: URL(fileURLWithPath: pointer)))
+        let connection = try JSONDecoder().decode(Connection.self, from: Data(contentsOf: URL(fileURLWithPath: input.connectionPath)))
+        let target = try XCTUnwrap(WandAuth.decodeConnectCode(connection.connectionCode))
+        let api = WandAPI(baseURL: target.url, token: target.token)
+        let response = try await api.piResources(input.sessionID)
+        XCTAssertTrue(response.editable); XCTAssertEqual(response.skillLocksAvailable, true)
+        let catalog = try XCTUnwrap(response.resourceCatalog)
+        XCTAssertFalse(catalog.skills.isEmpty)
+        let store = PiResourcesStore(sessionID: input.sessionID, service: api); await store.load()
+        XCTAssertNotNil(store.response); XCTAssertFalse(store.dirty)
+    }
+    func testNativeMissingResourceButtonsRemoveHiddenReferencesAndSave() async throws {
+        guard FileManager.default.fileExists(atPath: "/tmp/wand-ios-pi-ui-replay-enabled") else {
+            throw XCTSkip("Run scripts/test-pi-resources.py for native accessibility taps")
+        }
+        let service = PiResourceContractService(try fixture(skills: ["removed"], locks: ["removed"], installed: [], mcp: []))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: PiResourcesView(sessionID: "fixture", service: service))
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await Task.sleep(for: .milliseconds(300))
+        let before = XCTAttachment(image: UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }); before.name = "pi-missing-before"; before.lifetime = .keepAlways; add(before)
+        print("PI_RESOURCES_UI_READY")
+        let deadline = Date().addingTimeInterval(75)
+        while service.bodies.isEmpty, Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertEqual(service.bodies.count, 1, "Tap the real missing-resource button, then Save")
+        guard let body = service.bodies.first else { return }
+        let resources = try XCTUnwrap(body["resources"] as? [String: [String]])
+        XCTAssertEqual(resources["skills"], []); XCTAssertEqual(body["lockedSkills"] as? [String], [])
+        XCTAssertEqual(resources["mcpServers"], [])
+        let after = XCTAttachment(image: UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }); after.name = "pi-missing-after"; after.lifetime = .keepAlways; add(after)
     }
 }
 
@@ -249,7 +417,7 @@ final class CurrentAndroidParityTests: XCTestCase {
     func testDefaultAndExplicitRootModesMatchAndroid() {
         XCTAssertEqual(HomeListMode.fromStorage(nil), .im)
         XCTAssertEqual(HomeListMode.fromStorage("bogus"), .im)
-        for mode in [HomeListMode.im, .contacts, .sessions, .board] { XCTAssertEqual(HomeListMode.fromStorage(mode.rawValue), mode) }
+        for mode in [HomeListMode.im, .contacts, .sessions, .knowledge, .board] { XCTAssertEqual(HomeListMode.fromStorage(mode.rawValue), mode) }
     }
     func testIMPreviewHasBoundedProjectionAndExactLinks() throws {
         let data: [String: Any] = ["messageId": "m", "role": "assistant", "content": [], "sessionLink": ["sessionId": "s1", "title": "会话"], "sessionPreview": ["status": "running", "text": String(repeating: "字", count: 9000)]]
@@ -1618,9 +1786,11 @@ final class CurrentAndroidParityTests: XCTestCase {
                 [.text("前文 "), .image(alt: label, source: source), .text(" 后文")])
         }
         for raw in ["[图片](/work/notes.md)", "[图片](https://host.test/page)", "[图片](javascript:bad.png)",
-                    "[图片](//host.test/a.png)", "[图片](../a.png)", "`[预览](/work/a.png)`", "\\![例](/a.png)", "\\[例](/a.png)"] {
+                    "[图片](//host.test/a.png)", "`[预览](/work/a.png)`", "\\![例](/a.png)", "\\[例](/a.png)"] {
             XCTAssertEqual(splitMarkdownImages(raw), [.text(raw)])
         }
+        // Classification accepts relative images; the source-aware resolver decides access.
+        XCTAssertEqual(splitMarkdownImages("[图片](../a.png)"), [.image(alt: "图片", source: "../a.png")])
         let delivery = "[查看优化效果](</work/a (2).png>)\n\n[记录](/work/log.md)\n\n```md\n[示例](/work/code.png)\n```"
         XCTAssertEqual(MarkdownText.imagePages(delivery), [WandImagePage(source: "/work/a (2).png", directSource: false)])
         let image = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 280)).image { context in
@@ -1736,6 +1906,19 @@ final class CurrentAndroidParityTests: XCTestCase {
                       "同一气泡的附件图片要作为一组传给查看器")
         XCTAssertTrue(chat.contains("group: images, groupIndex: index"))
         XCTAssertTrue(chat.contains("group: fullImages, groupIndex: index"))
+    }
+
+    func testImageViewerOpensWithFreshIdentityPerTap() throws {
+        // @State(initialValue:) 只在视图身份新建时种一次；fullScreenCover 必须用 item 承载
+        // 每次点击的打开快照，否则第二次起 startIndex 冻结、点第 N 张仍打开第一张。
+        XCTAssertNotEqual(WandImageViewerOpen(selection: WandImageGallerySelection()).id,
+                          WandImageViewerOpen(selection: WandImageGallerySelection()).id)
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let image = try String(contentsOf: root.appendingPathComponent("Wand/WandRemoteImage.swift"), encoding: .utf8)
+        XCTAssertFalse(image.contains("fullScreenCover(isPresented: $showFullScreen)"),
+                       "图片查看器不能复用 isPresented 承载，打开索引会被冻结")
+        XCTAssertEqual(image.components(separatedBy: ".fullScreenCover(item: $viewerOpen)").count - 1, 3,
+                       "三个缩略图入口都要用 item 承载打开快照")
     }
 
     func testConversationImageGalleryCrossesToolResultsAndKeepsSourceModes() {
@@ -1883,7 +2066,7 @@ final class CurrentAndroidParityTests: XCTestCase {
         ]
         for (name, size, scheme, type) in frames {
             let list = ConversationListView(store: store, onSelect: { _ in }, onEmployee: { _ in }, onSettings: {}, onSwitchServer: {})
-                .safeAreaInset(edge: .bottom) { HomeMenuPill(mode: .im, onMode: { _ in }, onContacts: {}) }
+                .safeAreaInset(edge: .bottom) { HomeMenuPill(mode: .im, onMode: { _ in }) }
             let chat = ConversationDetailView(id: "dm_e", store: store, onOpenSession: { _ in }, onOpenConversation: { _ in }, onEmployee: { _ in })
             let content = Group {
                 if size.width > 600 { NavigationSplitView { list } detail: { chat } }

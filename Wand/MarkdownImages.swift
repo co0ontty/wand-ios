@@ -122,9 +122,25 @@ func markdownImagePage(_ raw: String) -> WandImagePage? {
     return WandImagePage(source: source, directSource: true)
 }
 
+/// Source-aware variant for rendered messages. The gallery uses this same resolution.
+func markdownImagePage(_ raw: String, baseURL: URL?, context: WandMessageFileContext) -> WandImagePage? {
+    guard let baseURL else { return markdownImagePage(raw) }
+    if raw.lowercased().hasPrefix("data:image/") { return markdownImagePage(raw) }
+    switch WandMessageLink.resolve(raw, baseURL: baseURL, context: context) {
+    case .download(let url, _): return WandImagePage(source: url.absoluteString, directSource: true)
+    case .external(let url) where ["http", "https"].contains(url.scheme?.lowercased() ?? ""):
+        return WandImagePage(source: url.absoluteString, directSource: true)
+    default: return nil
+    }
+}
+
 /// Classify the link destination, never its label. Keep documents and unknown web pages as links.
 private func markdownLinkIsImage(_ source: String) -> Bool {
-    guard let page = markdownImagePage(source) else { return false }
+    guard let page = markdownImagePage(source) else {
+        guard let parts = URLComponents(string: source), parts.scheme == nil,
+              !source.hasPrefix("//"), !source.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return false }
+        return isImagePath(parts.path)
+    }
     if page.source.lowercased().hasPrefix("data:image/") { return true }
     if !page.directSource { return isImagePath(page.source) }
     guard let url = URLComponents(string: page.source) else { return false }

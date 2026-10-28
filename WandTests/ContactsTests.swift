@@ -507,7 +507,7 @@ final class ContactsTests: XCTestCase {
 
     func testHomeDockFitsNarrowSidebarAndFeedbackKeepsFixedSize() {
         for width: CGFloat in [280, 320, 768] {
-            let dock = UIHostingController(rootView: HomeMenuPill(mode: .sessions, onMode: { _ in }, onContacts: {}))
+            let dock = UIHostingController(rootView: HomeMenuPill(mode: .sessions, onMode: { _ in }))
             XCTAssertLessThanOrEqual(dock.sizeThatFits(in: CGSize(width: width, height: 100)).width, width)
         }
         for phase: ComposerSendPhase in [.idle, .sending, .sent, .failed] {

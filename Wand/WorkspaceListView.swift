@@ -603,10 +603,6 @@ struct WorkspaceListView: View {
             let visible = HomePresentation.visibleGroups(
                 TaskListPresentation.orderedDirectoryGroups(store.taskGroups),
                 query: searchQuery, attentionOnly: attentionOnly, employees: employees)
-            if !isSelecting {
-                HomeSectionHeader(title: "最近对话", foldRaw: $recentFoldRaw)
-                recentConversationRows(visible)
-            }
             if let error = store.orderSaveError {
                 HStack { Text(error).font(.caption).foregroundStyle(Theme.danger); Spacer(); Button("重试保存顺序") { store.savePendingGroupOrder() } }.padding(8)
             }
@@ -827,7 +823,15 @@ struct WorkspaceListView: View {
                             .font(.caption).foregroundStyle(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    HomeExecutionBadge(state: HomePresentation.executionState(item.session), compact: true)
+                    HStack(spacing: 6) {
+                        HomeExecutionBadge(state: HomePresentation.executionState(item.session), compact: true)
+                        if secondary, let workspace = HomePresentation.workspaceLabel(item.group) {
+                            Text("·").foregroundStyle(Theme.textSecondary).accessibilityHidden(true)
+                            Text(workspace).font(.caption2).foregroundStyle(Theme.textSecondary)
+                                .lineLimit(1).truncationMode(.tail)
+                                .accessibilityLabel("工作区：" + workspace)
+                        }
+                    }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }.padding(.vertical, 8)
         }.buttonStyle(.plain)

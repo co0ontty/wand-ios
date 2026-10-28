@@ -282,6 +282,91 @@ private final class ChatLoadingURLProtocol: URLProtocol {
         XCTAssertTrue(reversals.isEmpty, "Growing reply must not repeatedly scroll backwards")
     }
 
+    func testShortRunningConversationKeepsTopStableDuringActivityUpdates() async throws {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9")!, token: nil)
+        let id = UUID().uuidString
+        let initial = try JSONDecoder().decode(SessionSnapshot.self, from: Data("{\"id\":\"\(id)\",\"sessionKind\":\"structured\",\"status\":\"running\",\"structuredState\":{\"inFlight\":true},\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"请继续\"}]}]}".utf8))
+        let store = ChatStore(sessionId: id, api: api, drafts: SessionDraftStore(), initialSnapshot: initial)
+        let host = UIHostingController(rootView: ChatView(sessionId: id, api: api, sharedStore: store))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; store.shutdown() }
+        try await Task.sleep(for: .milliseconds(500))
+        let scroll = try XCTUnwrap(composerAccessoryScrollViews(host.view).filter { $0.bounds.height > 100 }.max { $0.bounds.height < $1.bounds.height })
+        let frames = ChatScrollFrameProbe(scroll: scroll)
+        frames.start()
+        defer { frames.stop() }
+        for chunk in 1...40 {
+            let content: [[String: Any]] = [
+                ["type": "text", "text": "我先检查现有实现。"],
+                ["type": "tool_use", "id": "read-1", "name": "read", "input": ["path": "/tmp/example"]],
+                ["type": "tool_result", "tool_use_id": "read-1", "content": "结果 \(chunk)"],
+                ["type": "text", "text": "正在继续处理。"]
+            ]
+            let payload: [String: Any] = ["type": "output", "data": ["incremental": true, "messageCount": 2,
+                "lastMessage": ["role": "assistant", "content": content], "isResponding": true]]
+            store.handle(try JSONDecoder().decode(WsIncoming.self, from: JSONSerialization.data(withJSONObject: payload)))
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(store.isResponding)
+        XCTAssertEqual(store.messages.count, 2)
+        XCTAssertGreaterThan(frames.samples.count, 20)
+        XCTAssertLessThan(scroll.contentSize.height, scroll.bounds.height)
+        for frame in frames.samples where frame.content < frame.viewport {
+            XCTAssertEqual(frame.offset, 0, accuracy: 1, "Short running conversation must not jump on any display frame")
+        }
+    }
+
+    func testRunningConversationStreamingKeepsTailStable() async throws {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9")!, token: nil)
+        let id = UUID().uuidString
+        let initial = try JSONDecoder().decode(SessionSnapshot.self, from: Data("{\"id\":\"\(id)\",\"sessionKind\":\"structured\",\"status\":\"running\",\"structuredState\":{\"inFlight\":true}}".utf8))
+        let store = ChatStore(sessionId: id, api: api, drafts: SessionDraftStore(), initialSnapshot: initial)
+        store.messages = (0..<15).flatMap { index in
+            [ConversationTurn(role: "user", content: [.text(text: "问题 \(index)", subagent: nil)]),
+             ConversationTurn(role: "assistant", content: [.text(text: String(repeating: "历史回复内容。", count: 30), subagent: nil)])]
+        }
+        store.messages.append(ConversationTurn(role: "user", content: [.text(text: "继续处理", subagent: nil)]))
+        let host = UIHostingController(rootView: ChatView(sessionId: id, api: api, sharedStore: store))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; store.shutdown() }
+        try await Task.sleep(for: .milliseconds(500))
+        let scroll = try XCTUnwrap(composerAccessoryScrollViews(host.view).filter { $0.bounds.height > 100 }.max { $0.bounds.height < $1.bounds.height }, "Expected the conversation list, not a small nested scroll view")
+        let initialContentHeight = scroll.contentSize.height
+        let frames = ChatScrollFrameProbe(scroll: scroll)
+        frames.start()
+        defer { frames.stop() }
+        let count = store.messages.count + 1
+        for chunk in 1...40 {
+            var content: [[String: Any]] = [["type": "thinking", "thinking": "分析任务"]]
+            for tool in 0..<(chunk / 5) {
+                content.append(["type": "tool_use", "id": "tool-\(tool)", "name": "read", "input": ["path": "/tmp/file-\(tool)"]])
+                content.append(["type": "tool_result", "tool_use_id": "tool-\(tool)", "content": "读取完成"])
+            }
+            content.append(["type": "text", "text": Array(repeating: "正在运行的回复逐行增长。", count: chunk).joined(separator: "\n")])
+            let payload: [String: Any] = ["type": "output", "data": ["incremental": true, "messageCount": count,
+                "lastMessage": ["role": "assistant", "content": content], "isResponding": true]]
+            store.handle(try JSONDecoder().decode(WsIncoming.self, from: JSONSerialization.data(withJSONObject: payload)))
+            try await Task.sleep(for: .milliseconds(60))
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(store.isResponding)
+        XCTAssertEqual(store.messages.count, count)
+        XCTAssertGreaterThan(scroll.contentSize.height, scroll.bounds.height)
+        XCTAssertGreaterThan(scroll.contentSize.height, initialContentHeight + 100, "The selected list must grow with the streamed reply")
+        let bottom = max(-scroll.adjustedContentInset.top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+        XCTAssertEqual(scroll.contentOffset.y, bottom, accuracy: 14, "Running conversation should keep following the tail")
+        let reversals = zip(frames.samples, frames.samples.dropFirst()).filter { before, after in
+            after.content >= before.content && abs(after.viewport - before.viewport) < 1 && after.offset < before.offset - 2
+        }
+        print("RUNNING-REPLY frames=\(frames.samples.count) reversals=\(reversals)")
+        XCTAssertTrue(reversals.isEmpty, "Growing reply must not jump backwards while following the tail")
+    }
+
     func testLongChatSendAndStreamingUpdatesKeepMainActorResponsive() async throws {
         let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9")!, token: nil)
         let transport = FreezeReceiptTransport()

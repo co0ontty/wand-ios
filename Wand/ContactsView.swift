@@ -378,12 +378,11 @@ struct ContactsView: View {
 struct HomeMenuPill: UIViewRepresentable {
     let mode: HomeListMode
     let onMode: (HomeListMode) -> Void
-    let onContacts: () -> Void
     var canSelect: (HomeListMode) -> Bool = { _ in true }
     @Environment(\.isEnabled) private var enabled
     @Environment(\.colorScheme) private var scheme
-    private static let modes: [HomeListMode] = [.im, .contacts, .sessions, .board]
-    private static let symbols = ["bubble.left.and.bubble.right", "person.crop.rectangle", "folder", "square.grid.2x2"]
+    private static let modes = SystemHomeTabController.modes
+    private static let symbols = ["bubble.left.and.bubble.right", "folder", "doc.text", "square.grid.2x2"]
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -405,14 +404,13 @@ struct HomeMenuPill: UIViewRepresentable {
     func updateUIView(_ bar: UITabBar, context: Context) {
         context.coordinator.mode = mode
         context.coordinator.onMode = onMode
-        context.coordinator.onContacts = onContacts
         context.coordinator.canSelect = canSelect
         context.coordinator.enabled = enabled
         bar.overrideUserInterfaceStyle = scheme == .dark ? .dark : .light
         bar.tintColor = UIColor(Theme.brandText)
         bar.items?.forEach { $0.isEnabled = enabled }
-        let index = Self.modes.firstIndex(of: mode) ?? 0
-        if bar.selectedItem?.tag != index { bar.selectedItem = bar.items?[index] }
+        let selectedItem = Self.modes.firstIndex(of: mode).flatMap { bar.items?[$0] }
+        if bar.selectedItem !== selectedItem { bar.selectedItem = selectedItem }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITabBar, context: Context) -> CGSize? {
@@ -426,7 +424,6 @@ struct HomeMenuPill: UIViewRepresentable {
     final class Coordinator: NSObject, UITabBarDelegate {
         var mode = HomeListMode.im
         var onMode: (HomeListMode) -> Void = { _ in }
-        var onContacts: () -> Void = {}
         var canSelect: (HomeListMode) -> Bool = { _ in true }
         var enabled = true
         func position(for bar: UIBarPositioning) -> UIBarPosition { .bottom }
@@ -435,10 +432,10 @@ struct HomeMenuPill: UIViewRepresentable {
             guard modes.indices.contains(item.tag) else { return }
             let requested = modes[item.tag]
             guard enabled && canSelect(requested) else {
-                tabBar.selectedItem = tabBar.items?[modes.firstIndex(of: mode) ?? 0]
+                tabBar.selectedItem = modes.firstIndex(of: mode).flatMap { tabBar.items?[$0] }
                 return
             }
-            if requested == .contacts { onContacts() } else { onMode(requested) }
+            onMode(requested)
         }
     }
 }

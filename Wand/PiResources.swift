@@ -80,10 +80,23 @@ final class PiResourcesStore: ObservableObject {
         guard draft.resources?.skills.contains(id) == true else { return "off" }
         return draft.lockedSkills?.contains(id) == true ? "locked" : "on"
     }
+    var unavailableSkillIDs: [String] {
+        guard let catalog = response?.resourceCatalog, catalog.supported else { return [] }
+        let installed = Set(catalog.skills.map(\.id))
+        return Set((draft.resources?.skills ?? []) + (draft.lockedSkills ?? []))
+            .filter { !installed.contains($0) }.sorted()
+    }
+    var unavailableMcpIDs: [String] {
+        guard let catalog = response?.resourceCatalog, catalog.supported else { return [] }
+        let installed = Set(catalog.mcpServers.map(\.id))
+        return Set(draft.resources?.mcpServers ?? []).filter { !installed.contains($0) }.sorted()
+    }
     func setSkill(_ id: String, mode: String) {
+        // Unlocking a removed Skill must not leave an enabled reference behind.
+        let removed = response?.resourceCatalog.map { $0.supported && !$0.skills.contains { $0.id == id } } == true
         var resources = draft.resources ?? PiResourceSelection()
         resources.skills.removeAll { $0 == id }
-        if mode != "off" { resources.skills.append(id) }
+        if mode != "off", !(mode == "on" && removed) { resources.skills.append(id) }
         draft.resources = resources
         var locks = draft.lockedSkills ?? []; locks.removeAll { $0 == id }
         if mode == "locked" { locks.append(id) }
@@ -110,10 +123,22 @@ final class PiResourcesStore: ObservableObject {
             do {
                 let ack = try await service.savePiResources(sessionID, body: body)
                 guard active, request == revision else { return }
-                if body["resources"] != nil, ack.resources == nil { throw WandAPI.APIError.network("资源选择回执无效") }
-                if body["lockedSkills"] != nil, ack.lockedSkills == nil || (ack.lockedSkills?.count ?? 0) > 64
-                    || Set(ack.lockedSkills ?? []).count != ack.lockedSkills?.count { throw WandAPI.APIError.network("Skill 锁定回执无效") }
-                if body["autoResources"] != nil, ack.autoResources != submitted.autoResources { throw WandAPI.APIError.network("自动配置回执无效") }
+                if body["resources"] != nil {
+                    let unlocked = body["lockedSkills"] == nil ? Set<String>()
+                        : Set(response.settings.lockedSkills ?? []).subtracting(submitted.lockedSkills ?? [])
+                    guard let expected = submitted.resources, let saved = ack.resources,
+                          saved.skills.count <= 64, Set(saved.skills).count == saved.skills.count,
+                          saved.mcpServers.count <= 64, Set(saved.mcpServers).count == saved.mcpServers.count,
+                          saved.mcpServers == expected.mcpServers else { throw WandAPI.APIError.network("资源选择回执无效") }
+                    let removed = Set(expected.skills).subtracting(saved.skills)
+                    guard removed.isSubset(of: unlocked), expected.skills.filter({ !removed.contains($0) }) == saved.skills
+                    else { throw WandAPI.APIError.network("服务端未确认本次资源选择") }
+                }
+                if body["lockedSkills"] != nil {
+                    guard let locks = ack.lockedSkills, locks.count <= 64, Set(locks).count == locks.count,
+                          locks == (submitted.lockedSkills ?? []) else { throw WandAPI.APIError.network("Skill 锁定回执无效") }
+                }
+                if body["autoResources"] != nil, ack.autoResources != (submitted.autoResources ?? false) { throw WandAPI.APIError.network("自动配置回执无效") }
                 if body["codemodeOverride"] != nil, ack.codemodeOverride != submitted.codemodeOverride { throw WandAPI.APIError.network("CodeMode 回执无效") }
                 self.response?.settings = ack
                 if draft == submitted { draft = ack }
@@ -133,7 +158,8 @@ struct PiResourcesView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmReload = false
     @State private var confirmClose = false
-    init(sessionID: String, api: WandAPI) { _store = StateObject(wrappedValue: PiResourcesStore(sessionID: sessionID, service: api)) }
+    init(sessionID: String, api: WandAPI) { self.init(sessionID: sessionID, service: api) }
+    init(sessionID: String, service: any PiResourcesService) { _store = StateObject(wrappedValue: PiResourcesStore(sessionID: sessionID, service: service)) }
     var body: some View {
         NavigationStack {
             Form {
@@ -157,10 +183,16 @@ struct PiResourcesView: View {
                                 }
                             }
                         }
+                        ForEach(store.unavailableSkillIDs, id: \.self) { id in
+                            unavailableResourceRow("Skill", id: id) { store.setSkill(id, mode: "off") }
+                        }
                     }.disabled(!response.editable || store.phase == .sending)
                     Section("MCP") {
                         ForEach(response.resourceCatalog?.mcpServers ?? []) { item in
                             Toggle(item.name, isOn: Binding(get: { store.draft.resources?.mcpServers.contains(item.id) == true }, set: { store.setMcp(item.id, enabled: $0) }))
+                        }
+                        ForEach(store.unavailableMcpIDs, id: \.self) { id in
+                            unavailableResourceRow("MCP", id: id) { store.setMcp(id, enabled: false) }
                         }
                     }.disabled(!response.editable || store.phase == .sending)
                     Section("自动配置") {
@@ -186,6 +218,7 @@ struct PiResourcesView: View {
                 ToolbarItem(placement: .topBarLeading) { Button("关闭") { if store.dirty { confirmClose = true } else { dismiss() } }.disabled(store.phase == .sending) }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { store.save() } label: { Text(store.phase == .sending ? "保存中" : store.phase == .sent ? "已保存" : store.phase == .failed ? "失败" : "保存").frame(width: 64, height: 44) }
+                        .accessibilityIdentifier("pi-resources-save")
                         .disabled(!store.dirty || store.phase == .sending || store.uncertain)
                 }
             }
@@ -197,6 +230,19 @@ struct PiResourcesView: View {
         .alert("重新读取会放弃尚未保存的选择", isPresented: $confirmReload) {
             Button("取消", role: .cancel) {}
             Button("重新读取") { Task { await store.load() } }
+        }
+    }
+    private func unavailableResourceRow(_ kind: String, id: String, remove: @escaping () -> Void) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(kind) 已移除").foregroundStyle(Theme.danger)
+                Text(kind == "Skill" ? "取消选择会同时解除锁定。" : "取消选择后可重新选择可用资源。")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+            }.fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("取消选择", action: remove)
+                .accessibilityLabel("取消已移除的 \(kind)")
+                .accessibilityIdentifier("pi-remove-unavailable-\(id)")
         }
     }
 }

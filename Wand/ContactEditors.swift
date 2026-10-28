@@ -424,127 +424,31 @@ struct ContactKnowledgePanel: View {
     let employeeId: String
     let api: WandAPI
     @ObservedObject var directory: ContactsStore
-    @State private var entries: [EmployeeKnowledgeEntry] = []
-    @State private var total = 0
-    @State private var query = ""
-    @State private var text = ""
-    @State private var error: String?
-    @State private var phase = ComposerSendPhase.idle
-    @State private var confirmClear = false
-    private var unconfirmed: Bool { directory.unconfirmedActions.contains("knowledge:" + employeeId) }
-    @State private var generation = 0
-    @State private var loading = false
-    @State private var active = true
-    @State private var mutationAdding = false
-    @State private var textRevision = 0
-    private var busy: Bool { loading || phase == .sending }
+    @State private var presented = false
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            WandFormField("搜索知识") {
-                TextField("搜索该员工知识", text: $query)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .submitLabel(.search).onSubmit { Task { await load() } }
-            }.disabled(phase == .sending)
-            HStack {
-                Button("搜索") { Task { await load() } }.disabled(busy)
-                Button("刷新") { Task { await load() } }.disabled(busy)
-            }.disabled(phase == .sending)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(entries) { entry in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(entry.content).font(.caption).textSelection(.enabled)
-                            Button("删除此条", role: .destructive) { remove(entry.id) }.disabled(busy)
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    if entries.isEmpty { Text(loading ? "正在读取…" : "没有匹配的知识").font(.caption).foregroundStyle(Theme.textSecondary) }
-                }
-            }.frame(height: 240)
-            Text("\(total)/200条 · 仅属于该员工，不读取其他员工或私聊。")
-                .font(.caption).foregroundStyle(Theme.textSecondary)
-            WandFormField("添加明确知识", hint: "最多 4000 字符。") {
-                TextField("希望这位员工记住什么？", text: Binding(
-                    get: { text }, set: { text = $0; textRevision += 1 }
-                ), axis: .vertical).lineLimit(2...6).accessibilityLabel("添加明确知识")
+        Button("打开员工知识库", systemImage: "doc.text") { presented = true }
+            .sheet(isPresented: $presented) {
+                EmployeeKnowledgeSheet(api: api, employeeId: employeeId)
             }
-            HStack {
-                ContactActionButton(title: "记住", phase: phase, disabled: loading || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || unconfirmed) { remember() }
-                Spacer()
-                Button("清空", role: .destructive) { confirmClear = true }.disabled(busy || total == 0)
-            }
-            if unconfirmed {
-                Text("添加结果未确认，请刷新并核对该员工的知识。").font(.caption).foregroundStyle(Theme.danger)
-                Button("我已核对，开始新的知识添加") { directory.acknowledgedUnconfirmed("knowledge:" + employeeId) }.font(.caption)
-            }
-            Text(error ?? " ").font(.caption).foregroundStyle(phase == .failed ? Theme.danger : Theme.textSecondary)
-                .frame(minHeight: 24)
-        }
-        .task(id: query) {
-            active = true
-            if !query.isEmpty { try? await Task.sleep(nanoseconds: WandMotion.searchDebounce) }
-            guard !Task.isCancelled else { return }
-            await load()
-        }
-        .onChange(of: query) { _, _ in generation += 1 }
-        .onDisappear {
-            active = false; generation += 1
-            if phase == .sending && mutationAdding { directory.markUnconfirmed("knowledge:" + employeeId) }
-        }
-        .confirmationDialog("清空该员工的全部知识？其他员工和聊天历史不受影响。", isPresented: $confirmClear, titleVisibility: .visible) {
-            Button("清空该员工知识", role: .destructive) { remove(nil) }
-            Button("取消", role: .cancel) {}
-        }
-    }
-    private func load() async {
-        guard active, phase != .sending else { return }
-        generation += 1; let request = generation; let search = query; loading = true
-        do {
-            let page = try await api.contactKnowledge(employeeId: employeeId, query: search)
-            guard active, request == generation, query == search, !Task.isCancelled else { return }
-            entries = page.entries; total = page.total; error = nil
-        } catch { if request == generation { self.error = error.localizedDescription } }
-        if request == generation { loading = false }
-    }
-    private func remember() {
-        guard !busy, !unconfirmed else { return }
-        let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty, content.utf16.count <= 4000 else { phase = .failed; error = "知识不能为空且最多4000个字符。"; return }
-        generation += 1; let request = generation; let revision = textRevision
-        phase = .sending; mutationAdding = true; error = nil; directory.editorBusy = true
-        Task {
-            defer { directory.editorBusy = false }
-            do {
-                let entry = try await api.addContactKnowledge(employeeId: employeeId, text: content)
-                guard entry.employeeId == employeeId else { throw WandAPI.APIError.network("知识回执归属错误") }
-                guard request == generation else { return }
-                if textRevision == revision { text = "" }
-                phase = .sent
-                await load()
-            } catch {
-                guard request == generation else { return }
-                phase = .failed
-                if !isDefiniteInputRejection(error) { directory.markUnconfirmed("knowledge:" + employeeId) }
-                self.error = unconfirmed ? "添加结果未确认，请刷新核对，勿重复添加。" : error.localizedDescription
-            }
-        }
-    }
-    private func remove(_ entryId: String?) {
-        guard !busy else { return }
-        generation += 1; let request = generation; phase = .sending; mutationAdding = false; directory.editorBusy = true
-        Task {
-            defer { directory.editorBusy = false }
-            do {
-                try await api.deleteContactKnowledge(employeeId: employeeId, entryId: entryId)
-                guard request == generation else { return }
-                phase = .sent; await load()
-            } catch {
-                guard request == generation else { return }
-                phase = .failed; self.error = error.localizedDescription
-            }
-        }
     }
 }
 
+private struct EmployeeKnowledgeSheet: View {
+    @StateObject private var knowledge: KnowledgeLibraryStore
+    @Environment(\.dismiss) private var dismiss
+    init(api: WandAPI, employeeId: String) {
+        _knowledge = StateObject(wrappedValue: KnowledgeLibraryStore(service: api, scope: .personal, ownerId: employeeId))
+    }
+    var body: some View {
+        NavigationStack {
+            KnowledgeLibraryView(store: knowledge, allowsOwnerSelection: false)
+                .navigationTitle("员工知识库").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { knowledge.guarded { dismiss() } }.disabled(knowledge.busy)
+                } }
+        }.interactiveDismissDisabled(knowledge.hasUnsavedChanges || knowledge.busy)
+    }
+}
 
 struct ContactExecutionSubjectPicker: View {
     @Binding var subject: ContactExecutionSubject?

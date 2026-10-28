@@ -33,7 +33,7 @@ struct ComposerAttachmentPanel<Extra: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Button("照片", systemImage: "photo", action: onPhoto).frame(maxWidth: .infinity, minHeight: 44)
+                Button("照片与视频", systemImage: "photo", action: onPhoto).frame(maxWidth: .infinity, minHeight: 44)
                 Button("文件", systemImage: "doc", action: onFile).frame(maxWidth: .infinity, minHeight: 44)
             }
             extra()

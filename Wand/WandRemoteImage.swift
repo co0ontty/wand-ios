@@ -358,6 +358,14 @@ struct WandImageGallerySelection {
     var startIndex = 0
 }
 
+/// 一次「打开全屏查看器」的不可变快照。fullScreenCover(item:) 每次打开都是新身份，
+/// WandImageViewer 的 @State 初值才会重新生效；isPresented 复用同一承载视图会把
+/// index 冻结在首次种下的 0，导致点第 N 张也总打开第一张。
+struct WandImageViewerOpen: Identifiable {
+    let id = UUID()
+    let selection: WandImageGallerySelection
+}
+
 func wandImageGallerySelection(gallery: [WandImagePage], local: [String], current: String, direct: Bool, localIndex: Int = 0) -> WandImageGallerySelection {
     let selected = WandImagePage(source: current, directSource: direct)
     if let index = gallery.firstIndex(of: selected) { return WandImageGallerySelection(pages: gallery, startIndex: index) }
@@ -378,13 +386,11 @@ struct WandToolImageThumbnail: View {
     var group: [String] = []
     var groupIndex: Int = 0
     @State private var ready = false
-    @State private var showFullScreen = false
-    @State private var selection = WandImageGallerySelection()
+    @State private var viewerOpen: WandImageViewerOpen?
     @Environment(\.wandImageGallery) private var gallery
 
     private func openViewer() {
-        selection = wandImageGallerySelection(gallery: gallery(), local: viewerSources, current: source, direct: true, localIndex: groupIndex)
-        showFullScreen = true
+        viewerOpen = WandImageViewerOpen(selection: wandImageGallerySelection(gallery: gallery(), local: viewerSources, current: source, direct: true, localIndex: groupIndex))
     }
 
     var body: some View {
@@ -400,9 +406,9 @@ struct WandToolImageThumbnail: View {
             .accessibilityValue(ready ? "已加载，可查看大图" : "正在加载或等待重试")
             .accessibilityAddTraits(ready ? .isButton : [])
             .accessibilityAction { if ready { openViewer() } }
-            .fullScreenCover(isPresented: $showFullScreen) {
-                WandImageViewer(baseURL: baseURL, pages: selection.pages, startIndex: selection.startIndex,
-                                isPresented: $showFullScreen)
+            .fullScreenCover(item: $viewerOpen) { open in
+                WandImageViewer(baseURL: baseURL, pages: open.selection.pages, startIndex: open.selection.startIndex,
+                                isPresented: Binding(get: { viewerOpen != nil }, set: { if !$0 { viewerOpen = nil } }))
             }
     }
 }
@@ -419,13 +425,11 @@ struct WandToolImageFigure: View {
     var group: [String] = []
     var groupIndex: Int = 0
     @State private var ready = false
-    @State private var showFullScreen = false
-    @State private var selection = WandImageGallerySelection()
+    @State private var viewerOpen: WandImageViewerOpen?
     @Environment(\.wandImageGallery) private var gallery
 
     private func openViewer() {
-        selection = wandImageGallerySelection(gallery: gallery(), local: viewerSources, current: source, direct: directSource, localIndex: groupIndex)
-        showFullScreen = true
+        viewerOpen = WandImageViewerOpen(selection: wandImageGallerySelection(gallery: gallery(), local: viewerSources, current: source, direct: directSource, localIndex: groupIndex))
     }
 
     var body: some View {
@@ -449,9 +453,9 @@ struct WandToolImageFigure: View {
                 .accessibilityValue(ready ? "已加载，可查看大图" : "正在加载或等待重试")
                 .accessibilityAddTraits(ready ? .isButton : [])
                 .accessibilityAction { if ready { openViewer() } }
-                .fullScreenCover(isPresented: $showFullScreen) {
-                    WandImageViewer(baseURL: baseURL, pages: selection.pages, startIndex: selection.startIndex,
-                                    isPresented: $showFullScreen)
+                .fullScreenCover(item: $viewerOpen) { open in
+                    WandImageViewer(baseURL: baseURL, pages: open.selection.pages, startIndex: open.selection.startIndex,
+                                    isPresented: Binding(get: { viewerOpen != nil }, set: { if !$0 { viewerOpen = nil } }))
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -486,8 +490,7 @@ struct WandImageThumbnail: View {
     var group: [String] = []
     var groupIndex: Int = 0
 
-    @State private var showFullScreen = false
-    @State private var selection = WandImageGallerySelection()
+    @State private var viewerOpen: WandImageViewerOpen?
     @Environment(\.wandImageGallery) private var gallery
 
     var body: some View {
@@ -500,12 +503,11 @@ struct WandImageThumbnail: View {
             )
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .onTapGesture {
-                selection = wandImageGallerySelection(gallery: gallery(), local: viewerSources, current: path, direct: false, localIndex: groupIndex)
-                showFullScreen = true
+                viewerOpen = WandImageViewerOpen(selection: wandImageGallerySelection(gallery: gallery(), local: viewerSources, current: path, direct: false, localIndex: groupIndex))
             }
-            .fullScreenCover(isPresented: $showFullScreen) {
-                WandImageViewer(baseURL: baseURL, pages: selection.pages, startIndex: selection.startIndex,
-                                isPresented: $showFullScreen)
+            .fullScreenCover(item: $viewerOpen) { open in
+                WandImageViewer(baseURL: baseURL, pages: open.selection.pages, startIndex: open.selection.startIndex,
+                                isPresented: Binding(get: { viewerOpen != nil }, set: { if !$0 { viewerOpen = nil } }))
             }
     }
 }

@@ -63,6 +63,13 @@ struct HomeRecentGroup: Identifiable {
 }
 
 enum HomePresentation {
+    static func workspaceLabel(_ group: TaskDirectoryGroup) -> String? {
+        guard !group.isGlobal else { return nil }
+        let name = group.workspaceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = name.isEmpty ? group.workspaceCwd.trimmingCharacters(in: .whitespacesAndNewlines) : name
+        return value.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map(String.init)
+    }
+
     static func executionState(_ task: WandBoardTask) -> HomeExecutionState {
         let sessions = task.sessions.filter { $0.archived != true }
         if sessions.contains(where: { $0.permissionBlocked == true || ["waiting-input", "waiting_input"].contains($0.status) }) { return .needsYou }

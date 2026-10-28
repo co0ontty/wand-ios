@@ -21,14 +21,14 @@ func sessionListQuickActionsEnabled(
     rootIsSessions && !hasPresentedSurface
 }
 
-/// Same four root modes as Android; preserve explicit old sessions/board preferences.
+/// Same five root modes as Android; preserve explicit old sessions/board preferences.
 enum HomeListMode: String, Equatable {
-    case im, contacts, sessions, board
+    case im, contacts, sessions, knowledge, board
 
     static let storageKey = "wand.homeListMode"
 
     var label: String {
-        switch self { case .im: return "聊天"; case .contacts: return "通讯录"; case .sessions: return "工作区"; case .board: return "任务" }
+        switch self { case .im: return "聊天"; case .contacts: return "通讯录"; case .sessions: return "工作区"; case .knowledge: return "知识库"; case .board: return "任务" }
     }
 
     /// One page canvas, including native bars and safe-area gutters. Workspace
@@ -95,6 +95,7 @@ struct NativeRootView: View {
     @State private var initialNewConversationEmployeeID: String?
     @StateObject private var workspaceStore: WorkspaceStore
     @StateObject private var contactsStore: ContactsStore
+    @StateObject private var knowledgeStore: KnowledgeLibraryStore
     @StateObject private var conversations: ConversationStore
     @StateObject private var homeKeyboard = KeyboardObserver()
     @State private var selectedConversationID: String?
@@ -123,6 +124,7 @@ struct NativeRootView: View {
             report: { endpointAPI.reportClientFeedback(event: "update_failed", feature: "app_update", error: $0) }
         ))
         _contactsStore = StateObject(wrappedValue: ContactsStore(service: endpointAPI))
+        _knowledgeStore = StateObject(wrappedValue: KnowledgeLibraryStore(service: endpointAPI))
         _conversations = StateObject(wrappedValue: ConversationStore(api: endpointAPI))
         _workspaceStore = StateObject(wrappedValue: WorkspaceStore(
             api: endpointAPI,
@@ -153,13 +155,14 @@ struct NativeRootView: View {
     var body: some View {
         SystemHomeNavigation(
             mode: homeListMode,
-            enabled: phase == .ready && !contactsStore.busy && !homeMutationBusy,
+            enabled: phase == .ready && !contactsStore.busy && !homeMutationBusy && !knowledgeStore.busy,
             navigationVisible: isHomeNavigationVisible,
             onSelect: requestSystemHomeMode
         ) {
             AdaptiveNavigationContainer(
                 selection: navigationSelection,
                 parents: contactNavigationParents,
+                fullWidthRoot: homeListMode == .knowledge,
                 sidebar: { sidebarContent.disabled(homeMutationBusy) },
                 detail: { marker in contactDestination(marker) }
             )
@@ -425,12 +428,20 @@ struct NativeRootView: View {
         guard !contactsStore.busy, !homeMutationBusy else { return }
         if contactsStore.editorDirty {
             pendingHomeMode = mode
+        } else if homeListMode == .knowledge && mode != .knowledge {
+            knowledgeStore.guarded { setHomeListMode(mode) }
         } else {
             setHomeListMode(mode)
         }
     }
 
     private func setHomeListMode(_ mode: HomeListMode) {
+        if homeListMode == .knowledge && mode != .knowledge {
+            knowledgeStore.guarded { applyHomeListMode(mode) }
+        } else { applyHomeListMode(mode) }
+    }
+
+    private func applyHomeListMode(_ mode: HomeListMode) {
         guard !contactsStore.busy, !homeMutationBusy else { return }
         presentNewConversation = false
         showingContacts = false; selectedContactRunID = nil
@@ -526,7 +537,8 @@ struct NativeRootView: View {
                     if homeListMode == .im {
                         ConversationListView(store: conversations, onSelect: openConversation,
                             onEmployee: { selectedContactEmployeeID = $0 }, onSettings: { showSettings = true },
-                            onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) })
+                            onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) },
+                            taskGroups: workspaceStore.taskGroups, onOpenSession: openWorkspaceStandaloneSession)
                             .transition(.opacity)
                     } else if homeListMode == .contacts {
                         ContactsView(api: api, store: contactsStore, onBack: { setHomeListMode(.im) },
@@ -538,6 +550,8 @@ struct NativeRootView: View {
                             serverDisplayName: profile.displayName, onOpenSettings: { showSettings = true },
                             onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) })
                             .transition(.opacity)
+                    } else if homeListMode == .knowledge {
+                        KnowledgeLibraryView(store: knowledgeStore)
                     } else if showingBoard {
                         TaskBoardView(
                             api: api,
@@ -655,11 +669,8 @@ struct NativeRootView: View {
                     if isHomeNavigationVisible {
                         HStack {
                             Spacer(minLength: 8)
-                            HomeMenuPill(mode: homeListMode, onMode: setHomeListMode, onContacts: {
-                                guard !contactsStore.busy, !homeMutationBusy else { return }
-                                selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
-                                selectedContactRunID = nil; setHomeListMode(.contacts)
-                            }, canSelect: { _ in !contactsStore.busy && !homeMutationBusy })
+                            HomeMenuPill(mode: homeListMode, onMode: requestSystemHomeMode,
+                                canSelect: { _ in !contactsStore.busy && !homeMutationBusy && !knowledgeStore.busy })
                             .disabled(homeMutationBusy)
                             Spacer(minLength: 8)
                         }
@@ -1487,7 +1498,7 @@ private struct SystemHomeNavigationHost<Content: View>: UIViewControllerRepresen
 }
 
 final class SystemHomeTabController: UITabBarController, UITabBarControllerDelegate {
-    static let modes: [HomeListMode] = [.im, .contacts, .sessions, .board]
+    static let modes: [HomeListMode] = [.im, .sessions, .knowledge, .board]
     private let host = UIHostingController(rootView: AnyView(Color.clear))
     private var content = AnyView(Color.clear)
     private var slots: [UIViewController] = []
@@ -1502,7 +1513,7 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
         super.viewDidLoad()
         delegate = self
         mode = .tabBar
-        let symbols = ["bubble.left.and.bubble.right", "person.crop.rectangle", "folder", "square.grid.2x2"]
+        let symbols = ["bubble.left.and.bubble.right", "folder", "doc.text", "square.grid.2x2"]
         slots = Self.modes.enumerated().map { index, destination in
             let slot = UIViewController()
             slot.tabBarItem = UITabBarItem(title: destination.label,
@@ -1661,6 +1672,7 @@ struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @Binding var selection: String?
     @Binding var parents: [String]
+    var fullWidthRoot = false
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let detail: (String?) -> Detail
     @State private var navigationPath: [String] = []
@@ -1673,7 +1685,7 @@ struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
             Group {
                 if usesSystemNavigation {
                     systemLayout
-                } else if usesWideListDetail(width: proxy.size.width, height: proxy.size.height) {
+                } else if !fullWidthRoot && usesWideListDetail(width: proxy.size.width, height: proxy.size.height) {
                     wideLayout
                 } else {
                     narrowLayout

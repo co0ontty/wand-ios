@@ -42,6 +42,8 @@ struct ConversationListView: View {
     let onEmployee: (String) -> Void
     let onSettings: () -> Void
     let onSwitchServer: () -> Void
+    var taskGroups: [TaskDirectoryGroup] = []
+    var onOpenSession: (String) -> Void = { _ in }
     @State private var revealedRowID: String?
     @State private var query = ""
     @State private var creating = false
@@ -51,6 +53,7 @@ struct ConversationListView: View {
     @State private var deleteIDs: Set<String> = []
     @State private var dissolveID: String?
     @State private var batchBusy = false
+    @State private var expandedPeople: Set<String> = []
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduced
     @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
@@ -92,12 +95,58 @@ struct ConversationListView: View {
                     }
                 }
                 ForEach(rows) { item in
-                    row(item).tag(item.id)
+                    VStack(alignment: .leading, spacing: 0) {
+                        row(item)
+                        if expandedPeople.contains(item.id) || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            ForEach(personSessions(item.peerEmployeeId)) { session in
+                                Button { onOpenSession(session.session.id) } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(session.session.title ?? "会话").font(.subheadline).lineLimit(1)
+                                        Text(session.session.status ?? "").font(.caption).foregroundStyle(Theme.textSecondary)
+                                    }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).padding(.leading, 56)
+                                }.buttonStyle(.plain).accessibilityLabel("继续会话：\(session.session.title ?? "会话")")
+                            }
+                        }
+                    }.tag(item.id)
                         .homeSwipeActions(id: item.id, revealedID: $revealedRowID, actions: conversationActions(item), enabled: !selecting && !creationOpen && !batchBusy, surface: Theme.background)
                         .listRowBackground(Color.clear)
                         .onLongPressGesture { selecting = true; selected.insert(item.id) }
                 }
-                if rows.isEmpty && !store.loading && store.error == nil {
+                ForEach(sessionOnlyPeople, id: \.id) { person in
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack {
+                            Button { onSelect(ConversationStore.employeeID(person.id)) } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(person.name).font(.headline).lineLimit(1)
+                                    Text(person.preview).font(.subheadline).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                                }.frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                            }.buttonStyle(.plain).accessibilityLabel("打开\(person.name)的私聊")
+                            Button {
+                                let key = ConversationStore.employeeID(person.id)
+                                if expandedPeople.contains(key) { expandedPeople.remove(key) } else { expandedPeople.insert(key) }
+                            } label: {
+                                Image(systemName: "chevron.right").rotationEffect(.degrees(expandedPeople.contains(ConversationStore.employeeID(person.id)) ? 90 : 0)).frame(width: 44, height: 44)
+                            }.buttonStyle(.plain).accessibilityLabel("展开\(person.name)的会话")
+                        }
+                        if expandedPeople.contains(ConversationStore.employeeID(person.id)) || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            ForEach(personSessions(person.id)) { session in
+                                Button { onOpenSession(session.session.id) } label: {
+                                    Text(session.session.title ?? "会话").frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).padding(.leading, 28)
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                if !unboundSessions.isEmpty {
+                    Section("其他会话") {
+                        ForEach(unboundSessions) { session in
+                            Button { onOpenSession(session.session.id) } label: {
+                                Text(session.session.title ?? "会话").frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            }.buttonStyle(.plain)
+                        }
+                    }
+                }
+                if rows.isEmpty && unboundSessions.isEmpty && !store.loading && store.error == nil {
                     ContentUnavailableView {
                         Label(emptyState.title, systemImage: emptyState.symbol)
                     } description: {
@@ -220,6 +269,26 @@ struct ConversationListView: View {
         return actions
     }
 
+    private var workSessions: [HomeRecentConversation] {
+        HomePresentation.conversations(taskGroups).filter { $0.session.teamChat == nil }
+    }
+    private func personSessions(_ employeeId: String?) -> [HomeRecentConversation] {
+        guard let employeeId else { return [] }
+        return workSessions.filter { $0.session.employeeId == employeeId }
+    }
+    private var unboundSessions: [HomeRecentConversation] {
+        workSessions.filter { $0.session.employeeId == nil }
+    }
+    private var sessionOnlyPeople: [(id: String, name: String, preview: String)] {
+        let owned = Set(store.items.compactMap { $0.kind == "dm" ? $0.peerEmployeeId : nil })
+        var seen = Set<String>()
+        var rows: [(String, String, String)] = []
+        for item in workSessions {
+            guard let employeeId = item.session.employeeId, !owned.contains(employeeId), seen.insert(employeeId).inserted else { continue }
+            rows.append((employeeId, item.session.employeeName ?? "员工", item.session.title ?? "有工作会话，尚未开始私聊"))
+        }
+        return rows
+    }
     private func row(_ item: ConversationInstance) -> some View {
         HStack(spacing: 12) {
             Button {
@@ -244,6 +313,15 @@ struct ConversationListView: View {
                     else if item.kind == "group" { Text("\(item.team?.members.count ?? 0) 人 · \(item.tasks.count) 项任务").font(.caption).foregroundStyle(Theme.textSecondary) }
                 }.frame(maxWidth: .infinity, minHeight: 56, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(WandQuietButtonStyle(tint: Theme.textPrimary))
+            if item.kind == "dm" && !personSessions(item.peerEmployeeId).isEmpty {
+                Button {
+                    if expandedPeople.contains(item.id) { expandedPeople.remove(item.id) } else { expandedPeople.insert(item.id) }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .rotationEffect(.degrees(expandedPeople.contains(item.id) ? 90 : 0))
+                        .frame(width: 44, height: 44)
+                }.buttonStyle(.plain).accessibilityLabel(expandedPeople.contains(item.id) ? "收起\(item.title)的会话" : "展开\(item.title)的会话")
+            }
         }.padding(.vertical, 4)
     }
     private func batchPin(_ pin: Bool) {
@@ -764,7 +842,7 @@ struct ConversationDetailView: View {
             ConversationReportCard(file: file, api: store.api)
         } else {
             VStack(alignment: .leading, spacing: 4) {
-                SessionMessageBody(turn: message.turn, api: store.api, sessionID: message.author?.sessionId ?? detail.communicationSessionId ?? detail.sessionId ?? "", store: message.author?.sessionId.map { store.executionStore($0) })
+                SessionMessageBody(turn: message.turn, api: store.api, sessionID: message.author?.sessionId ?? detail.communicationSessionId ?? detail.sessionId ?? "", store: message.author?.sessionId.map { store.executionStore($0) }, fileContext: .init(sessionID: message.author?.sessionId))
             }
         }
     }
@@ -822,6 +900,7 @@ private struct ConversationReplyCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             MarkdownText(text: text.isEmpty ? "等待会话输出" : text)
+                .environment(\.messageFileContext, .init(sessionID: message.sessionLink?.sessionId, cwd: execution.snapshot?.cwd))
                 .frame(maxWidth: .infinity, alignment: .leading)
             HStack {
                 Text(message.sessionPreview?.label ?? "准备中").font(.caption).foregroundStyle(Theme.textSecondary)

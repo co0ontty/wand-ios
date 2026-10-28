@@ -24,6 +24,40 @@ func pendingConversationTaskContext(boundTask: NewConversationBoundTask?, select
     return boundTask?.id == selectedTaskID ? boundTask : nil
 }
 
+/// The Web invitation, using native controls and reflow rather than a second creation form.
+struct NewWorkInvitation<Subject: View, Directory: View, TaskLabel: View>: View {
+    @ViewBuilder let subject: () -> Subject
+    @ViewBuilder let directory: () -> Directory
+    @ViewBuilder let task: () -> TaskLabel
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { Text("今天你想与"); subject() }
+                VStack(spacing: 8) { Text("今天你想与"); subject() }
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { directoryPhrase; taskPhrase }
+                VStack(spacing: 8) { directoryPhrase; taskPhrase }
+            }
+            Text("中创造些什么？")
+        }
+        .font(.title2)
+        .foregroundStyle(Theme.textPrimary)
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 520)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("new-work-invitation")
+    }
+
+    private var directoryPhrase: some View {
+        HStack(spacing: 8) { Text("在").fixedSize(); directory() }
+    }
+    private var taskPhrase: some View {
+        HStack(spacing: 8) { Text("的").fixedSize(); task() }
+    }
+}
+
 /// Chat-first pending conversation. It performs no mutation until the first submit.
 struct NewConversationView: View {
     let api: WandAPI
@@ -59,6 +93,7 @@ struct NewConversationView: View {
     @State private var contactSubject: ContactExecutionSubject?
     @State private var contactEmployees: [SiliconEmployee] = []
     @State private var contactsError: String?
+    @State private var didLoadEmployeeDefaults = false
     @State private var employeeOverride = false
     @State private var mode = "managed"
     @State private var model = ""
@@ -131,6 +166,9 @@ struct NewConversationView: View {
         self.onBusyChanged = onBusyChanged
         self.onCancel = onCancel
         self.onCreated = onCreated
+        _contactSubject = State(initialValue: ContactExecutionSubject(
+            type: "employee", id: initialEmployeeID.flatMap { $0.isEmpty ? nil : $0 } ?? "e_wand_default"
+        ))
         let lockedTaskID = boundTask?.id ?? initialWorkspaceTaskID
         _cwd = State(initialValue: boundTask?.cwd ?? Self.preferredCwd(initialCwd: initialCwd))
         _selectedTaskID = State(initialValue: lockedTaskID ?? "")
@@ -298,12 +336,16 @@ struct NewConversationView: View {
             keyboardLift: keyboard.lift,
             onReadingTap: { composerFocus.collapse(); showAttachments = false }
         ) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if loading { ProgressView("正在加载对话配置…") }
-                    creationFeedback
+            GeometryReader { viewport in
+                ScrollView {
+                    VStack(spacing: 24) {
+                        if loading { ProgressView("正在加载对话配置…") }
+                        else { invitation }
+                        creationFeedback
+                    }
+                    .padding(24)
+                    .frame(maxWidth: .infinity, minHeight: viewport.size.height)
                 }
-                .padding(16)
             }
         } composer: {
             VStack(spacing: 6) {
@@ -316,7 +358,7 @@ struct NewConversationView: View {
                     editor: {
                         IMEAwareComposerTextView(
                             text: $pendingDraft.text,
-                            placeholder: "输入要处理的内容…",
+                            placeholder: "随心输入，描述你想完成的事…",
                             isFocused: focused,
                             maximumHeight: composerMaximumHeight,
                             submitOnReturn: false,
@@ -347,7 +389,8 @@ struct NewConversationView: View {
                     settings: { pendingOptions },
                     isEmbeddedInDock: true,
                     isFocused: composerFocus.focused,
-                    actionCount: (!text.isEmpty || stagedAttachments.stagedAttachmentCount > 0 || sessionKind == "shell" || creating || hasOutstandingCreation) ? 1 : 0
+                    actionCount: (!text.isEmpty || stagedAttachments.stagedAttachmentCount > 0 || sessionKind == "shell" || creating || hasOutstandingCreation) ? 1 : 0,
+                    placeholder: "随心输入，描述你想完成的事…"
                 )
             }
             .padding(.horizontal, 12)
@@ -445,6 +488,73 @@ struct NewConversationView: View {
 
     }
 
+    @ViewBuilder private var invitation: some View {
+        if sessionKind == "structured" {
+            NewWorkInvitation {
+                Menu { executionOptions } label: {
+                    HStack(spacing: 4) {
+                        if let employee = selectedEmployee {
+                            ContactAvatar(id: employee.id, avatar: employee.avatar,
+                                size: 32, name: employee.name)
+                        } else {
+                            Image(systemName: "sparkles").font(.system(size: 20))
+                        }
+                        Image(systemName: "chevron.down").font(.system(size: 11))
+                    }.frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
+                .accessibilityLabel("选择员工：当前为 \(subjectLabel)")
+                .accessibilityIdentifier("new-work-subject")
+            } directory: {
+                Menu { directoryOptions } label: {
+                    invitationLabel(directoryLabel)
+                }
+                .disabled(workspaceSelectionIsLocked)
+                .accessibilityLabel("选择运行目录：当前为 \(cwd.isEmpty ? "尚未选择" : cwd)")
+                .accessibilityHint(workspaceSelectionIsLocked ? "工作目录由所属任务确定" : "")
+                .accessibilityIdentifier("new-work-directory")
+            } task: {
+                Menu { taskOptions } label: {
+                    invitationLabel(taskOwnership == "none" ? "默认任务" : taskOwnership == "new" && newTaskName.isEmpty ? "新任务" : taskLabel)
+                }
+                .disabled(embedded)
+                .accessibilityLabel("所属任务：\(taskLabel)")
+                .accessibilityIdentifier("new-work-task")
+            }
+            .buttonStyle(.plain)
+            .disabled(creating || loading || hasOutstandingCreation)
+        } else {
+            Text(sessionKind == "pty" ? "从这里开始 CLI 工作" : "从这里打开空白终端")
+                .font(.title2).foregroundStyle(Theme.textPrimary)
+                .multilineTextAlignment(.center)
+        }
+    }
+
+    private var directoryLabel: String {
+        if cwd.isEmpty { return "选择目录" }
+        func comparablePath(_ path: String) -> String {
+            var value = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            while value.hasSuffix("/") { value.removeLast() }
+            return value
+        }
+        if let workspace = availableWorkspaces.first(where: { comparablePath($0.cwd) == comparablePath(cwd) }),
+           !workspace.name.isEmpty { return workspace.name }
+        let name = URL(fileURLWithPath: cwd).lastPathComponent
+        return name.isEmpty ? cwd : name
+    }
+
+    private var subjectLabel: String {
+        selectedEmployee?.name ?? (contactSubject?.type == "employee" ? "员工暂不可用" : WandAgentTool(provider: provider, engine: engine).title)
+    }
+
+    private func invitationLabel(_ title: String) -> some View {
+        HStack(spacing: 4) {
+            Text(title).underline(color: Theme.border).lineLimit(2)
+            Image(systemName: "chevron.down").font(.system(size: 11))
+        }
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
+    }
+
     private var contextMenu: some View {
         Menu { contextOptions } label: {
             Image(systemName: "ellipsis")
@@ -458,74 +568,82 @@ struct NewConversationView: View {
 
     @ViewBuilder private var contextOptions: some View {
         Menu {
-            if sessionKind == "structured" {
-                Button("选择员工…", systemImage: "person") { open(.employee) }
-                if selectedEmployee != nil {
-                    Button("恢复员工默认设置", systemImage: "arrow.counterclockwise", action: restoreEmployeeDefaults)
-                        .disabled(!employeeOverride)
-                }
-            }
-            if sessionKind != "shell" {
-                Menu(selectedEmployee == nil ? "执行工具" : "本次执行工具") {
-                    ForEach(WandAgentTool.allCases.filter { sessionKind == "structured" || !$0.structuredOnly }) { tool in
-                        Button {
-                            employeeOverride = selectedEmployee != nil
-                            provider = tool.provider.rawValue
-                            engine = tool.engine
-                            if tool.structuredOnly { sessionKind = "structured" }
-                        } label: {
-                            if provider == tool.provider.rawValue && engine == tool.engine {
-                                Label(tool.title, systemImage: "checkmark")
-                            } else { Text(tool.title) }
-                        }
-                    }
-                }
-                if selectedEmployee != nil {
-                    Button("直接使用执行工具") { contactSubject = nil }
-                }
-            }
-            Picker("会话类型", selection: $sessionKind) {
-                Text("对话").tag("structured")
-                Text("PTY").tag("pty")
-                Text("空白终端").tag("shell")
-            }
+            executionOptions
         } label: {
-            Label(selectedEmployee?.name ?? WandAgentTool(provider: provider, engine: engine).title, systemImage: "person.crop.circle")
+            Label(subjectLabel, systemImage: "person.crop.circle")
         }
         if !embedded {
-            Menu {
-                Button { taskOwnership = "none" } label: {
-                    if taskOwnership == "none" { Label("不归属任务", systemImage: "checkmark") }
-                    else { Text("不归属任务") }
-                }
-                Button { taskOwnership = "new" } label: {
-                    if taskOwnership == "new" { Label("新建任务", systemImage: "checkmark") }
-                    else { Text("新建任务") }
-                }
-                Button("选择已有任务…", systemImage: "checklist") { open(.task) }
-                if taskOwnership == "new" {
-                    Button(newTaskName.isEmpty ? "任务名称 · 自动" : "任务名称 · \(newTaskName)", systemImage: "pencil") {
-                        editText(directory: false)
-                    }
-                    Button("所属项目 · \(taskWorkspaceOptions.first { $0.id == targetWorkspaceID }?.name ?? "按目录创建")") { open(.workspace) }
-                    Toggle("隔离 worktree", isOn: $worktreeEnabled)
-                }
-            } label: { Label(taskLabel, systemImage: "checklist") }
+            Menu { taskOptions } label: { Label(taskLabel, systemImage: "checklist") }
         }
-        Menu {
-            Text(cwd.isEmpty ? "尚未选择目录" : cwd)
-            if workspaceSelectionIsLocked {
-                Text("工作目录由所属任务确定")
-            } else {
-                ForEach(recentPaths.prefix(8)) { path in
-                    Button { cwd = path.path } label: {
-                        if path.path == cwd { Label(path.path, systemImage: "checkmark") }
-                        else { Text(path.path) }
+        Menu { directoryOptions } label: { Label(directoryLabel, systemImage: "folder") }
+    }
+
+    @ViewBuilder private var executionOptions: some View {
+        if sessionKind == "structured" {
+            Button("选择员工…", systemImage: "person") { open(.employee) }
+            if selectedEmployee != nil {
+                Button("恢复员工默认设置", systemImage: "arrow.counterclockwise", action: restoreEmployeeDefaults)
+                    .disabled(!employeeOverride)
+            }
+        }
+        if sessionKind != "shell" {
+            Menu(selectedEmployee == nil ? "执行工具" : "本次执行工具") {
+                ForEach(WandAgentTool.allCases.filter { sessionKind == "structured" || !$0.structuredOnly }) { tool in
+                    Button {
+                        employeeOverride = selectedEmployee != nil
+                        provider = tool.provider.rawValue
+                        engine = tool.engine
+                        if tool.structuredOnly { sessionKind = "structured" }
+                    } label: {
+                        if provider == tool.provider.rawValue && engine == tool.engine {
+                            Label(tool.title, systemImage: "checkmark")
+                        } else { Text(tool.title) }
                     }
                 }
-                Button("输入其他目录…", systemImage: "folder") { editText(directory: true) }
             }
-        } label: { Label(cwd.isEmpty ? "选择目录" : URL(fileURLWithPath: cwd).lastPathComponent, systemImage: "folder") }
+            if selectedEmployee != nil {
+                Button("直接使用执行工具") { contactSubject = nil }
+            }
+        }
+        Picker("会话类型", selection: $sessionKind) {
+            Text("对话").tag("structured")
+            Text("PTY").tag("pty")
+            Text("空白终端").tag("shell")
+        }
+    }
+
+    @ViewBuilder private var taskOptions: some View {
+        Button { taskOwnership = "none" } label: {
+            if taskOwnership == "none" { Label("不归属任务", systemImage: "checkmark") }
+            else { Text("不归属任务") }
+        }
+        Button { taskOwnership = "new" } label: {
+            if taskOwnership == "new" { Label("新建任务", systemImage: "checkmark") }
+            else { Text("新建任务") }
+        }
+        Button("选择已有任务…", systemImage: "checklist") { open(.task) }
+        if taskOwnership == "new" {
+            Button(newTaskName.isEmpty ? "任务名称 · 自动" : "任务名称 · \(newTaskName)", systemImage: "pencil") {
+                editText(directory: false)
+            }
+            Button("所属项目 · \(taskWorkspaceOptions.first { $0.id == targetWorkspaceID }?.name ?? "按目录创建")") { open(.workspace) }
+            Toggle("隔离 worktree", isOn: $worktreeEnabled)
+        }
+    }
+
+    @ViewBuilder private var directoryOptions: some View {
+        Text(cwd.isEmpty ? "尚未选择目录" : cwd)
+        if workspaceSelectionIsLocked {
+            Text("工作目录由所属任务确定")
+        } else {
+            ForEach(recentPaths.prefix(8)) { path in
+                Button { cwd = path.path } label: {
+                    if path.path == cwd { Label(path.path, systemImage: "checkmark") }
+                    else { Text(path.path) }
+                }
+            }
+            Button("输入其他目录…", systemImage: "folder") { editText(directory: true) }
+        }
     }
 
     private var taskLabel: String {
@@ -649,6 +767,13 @@ struct NewConversationView: View {
             }
         } else if let errorMessage {
             Text(errorMessage).font(.footnote).foregroundStyle(Theme.danger)
+        }
+        if contactSubject?.type == "employee", let contactsError {
+            VStack(spacing: 8) {
+                Text(contactsError).font(.footnote).foregroundStyle(Theme.danger)
+                Button("重试员工") { Task { await loadContacts() } }
+                    .buttonStyle(WandQuietButtonStyle()).disabled(creating)
+            }
         }
     }
 
@@ -874,14 +999,13 @@ struct NewConversationView: View {
             guard !Task.isCancelled else { return }
             contactEmployees = employees
             contactsError = nil
-            if contactSubject == nil, let employeeID = initialEmployeeID,
-               let employee = employees.first(where: { $0.id == employeeID && !$0.archived && !$0.agents.isEmpty }) {
-                contactSubject = ContactExecutionSubject(type: "employee", id: employee.id)
+            if !didLoadEmployeeDefaults, selectedEmployee != nil, !employeeOverride {
+                restoreEmployeeDefaults()
+                didLoadEmployeeDefaults = true
             }
             if let current = contactSubject, current.type == "employee",
                !employees.contains(where: { $0.id == current.id && !$0.archived && !$0.agents.isEmpty }) {
-                contactSubject = nil
-                employeeOverride = false
+                contactsError = "所选员工暂不可用，请重试或选择其他执行对象。"
             }
         } catch {
             guard !Task.isCancelled else { return }

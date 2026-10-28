@@ -81,10 +81,6 @@ final class NewConversationTests: XCTestCase {
         let identity = "pending-acceptance-" + UUID().uuidString
         let cwd = config.defaultCwd ?? ""
         let draft = SessionDraftStore.shared.draft(sessionId: "pending-new-conversation:\(identity):\(cwd)", api: api)
-        draft.text = "等待发送的验收草稿（不执行）"
-        draft.attachments.stageFileSelection(.success((1...5).map {
-            URL(fileURLWithPath: "/tmp/只读布局验收附件-\($0).txt")
-        }), cleanupAfterUpload: false)
         defer { draft.text = ""; draft.attachments.discardUnsentAttachments() }
         let host = UIHostingController(rootView: NewConversationView(
             api: api, serverID: identity, initialCwd: cwd, initialCreateTask: true,
@@ -106,7 +102,111 @@ final class NewConversationTests: XCTestCase {
         func editors(_ view: UIView) -> [UITextView] {
             (view as? UITextView).map { [$0] } ?? view.subviews.flatMap(editors)
         }
+        func menuControls(_ view: UIView) -> [UIControl] {
+            (view as? UIControl).map { [$0] } ?? view.subviews.flatMap(menuControls)
+        }
+        func menuTree(_ element: UIMenuElement) -> [UIMenuElement] {
+            [element] + ((element as? UIMenu)?.children.flatMap(menuTree) ?? [])
+        }
+        let evidence = URL(fileURLWithPath: "/tmp/wand-ios-new-work-acceptance")
+        try FileManager.default.createDirectory(at: evidence, withIntermediateDirectories: true)
+        func capture(_ name: String) throws {
+            let image = UIGraphicsImageRenderer(size: host.view.bounds.size).image { _ in
+                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "pending-task-" + name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            try image.pngData()?.write(to: evidence.appendingPathComponent(name + ".png"))
+        }
         let originalEditor = try XCTUnwrap(editors(host.view).first)
+        let configurationDeadline = Date().addingTimeInterval(20)
+        while Date() < configurationDeadline {
+            let invitationControls = menuControls(host.view).filter {
+                $0.showsMenuAsPrimaryAction && $0.convert($0.bounds, to: host.view).minY > 100
+            }
+            if invitationControls.count == 3 { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        // Empty and edited states use the same production view and editor. The
+        // invitation must not depend on an already populated draft.
+        for (name, width, height, category, dark) in [
+            ("empty-390", 390.0, 800.0, UIContentSizeCategory.large, false),
+            ("empty-320", 320.0, 700.0, .large, false),
+            ("empty-large-type-dark", 390.0, 800.0, .accessibilityExtraExtraExtraLarge, true)
+        ] {
+            host.view.frame = CGRect(x: 0, y: 0, width: width, height: height)
+            host.traitOverrides.preferredContentSizeCategory = category
+            host.overrideUserInterfaceStyle = dark ? .dark : .light
+            try await Task.sleep(for: .milliseconds(250))
+            host.view.layoutIfNeeded()
+            let controls = menuControls(host.view).filter {
+                $0.showsMenuAsPrimaryAction && $0.convert($0.bounds, to: host.view).minY > 100
+            }
+            XCTAssertEqual(controls.count, 3, "One invitation with employee, directory and task controls")
+            for control in controls {
+                let frame = control.convert(control.bounds, to: host.view)
+                XCTAssertGreaterThanOrEqual(frame.width + 0.5, 44)
+                XCTAssertGreaterThanOrEqual(frame.height + 0.5, 44)
+                XCTAssertGreaterThanOrEqual(frame.minX, 0)
+                XCTAssertLessThanOrEqual(frame.maxX, width + 1)
+            }
+            XCTAssertTrue(editors(host.view).first === originalEditor)
+            try capture(name)
+        }
+        host.traitOverrides.preferredContentSizeCategory = .large
+        host.overrideUserInterfaceStyle = .light
+        host.view.frame = CGRect(x: 0, y: 0, width: 390, height: 800)
+        draft.text = "等待发送的验收草稿（不执行）"
+        draft.attachments.stageFileSelection(.success((1...5).map {
+            URL(fileURLWithPath: "/tmp/只读布局验收附件-\($0).txt")
+        }), cleanupAfterUpload: false)
+        try await Task.sleep(for: .milliseconds(300))
+        let controls = menuControls(host.view).filter {
+            $0.showsMenuAsPrimaryAction && $0.convert($0.bounds, to: host.view).minY > 100
+        }.sorted {
+            let first = $0.convert($0.bounds, to: host.view)
+            let second = $1.convert($1.bounds, to: host.view)
+            return abs(first.minY - second.minY) > 10 ? first.minY < second.minY : first.minX < second.minX
+        }
+        XCTAssertEqual(controls.count, 3)
+        for (index, expectedAction) in ["选择员工…", "输入其他目录…", "新建任务"].enumerated() {
+            let control = try XCTUnwrap(controls.indices.contains(index) ? controls[index] : nil)
+            control.performPrimaryAction()
+            var presentedMenu: UIMenu?
+            for _ in 0..<30 {
+                control.contextMenuInteraction?.updateVisibleMenu { presentedMenu = $0; return $0 }
+                if presentedMenu != nil { break }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            let menu = try XCTUnwrap(presentedMenu, "Invitation control must present its native menu")
+            XCTAssertTrue(menuTree(menu).contains { $0.title == expectedAction })
+            if index == 0 {
+                XCTAssertTrue(menuTree(menu).contains { $0.title == "恢复员工默认设置" }, "The default companion must resolve to an employee")
+                XCTAssertTrue(menuTree(menu).contains { $0.title == "直接使用执行工具" }, "Choosing a bare tool remains an explicit action")
+            }
+            try await Task.sleep(for: .milliseconds(1000))
+            let image = UIGraphicsImageRenderer(size: window.bounds.size).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            try image.pngData()?.write(to: evidence.appendingPathComponent("menu-\(index).png"))
+            if FileManager.default.fileExists(atPath: "/tmp/wand-new-work-menu-capture-enabled") {
+                let checkpoint = "/tmp/wand-new-work-menu-capture-ready"
+                try String(index).write(toFile: checkpoint, atomically: true, encoding: .utf8)
+                let deadline = Date().addingTimeInterval(10)
+                while FileManager.default.fileExists(atPath: checkpoint) && Date() < deadline {
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                XCTAssertFalse(FileManager.default.fileExists(atPath: checkpoint), "Capture the native menu before dismissal")
+                try? FileManager.default.removeItem(atPath: checkpoint)
+            }
+            control.contextMenuInteraction?.dismissMenu()
+            try await Task.sleep(for: .milliseconds(350))
+            XCTAssertEqual(draft.text, "等待发送的验收草稿（不执行）")
+            XCTAssertEqual(draft.attachments.stagedAttachmentCount, 5)
+            XCTAssertTrue(editors(host.view).first === originalEditor)
+        }
         let sizes: [(String, CGFloat, CGFloat)] = [
             ("outer-portrait", 466, 678), ("outer-landscape", 678, 466),
             ("inner-portrait", 669, 951), ("inner-landscape", 951, 669), ("narrow-phone", 390, 800)
@@ -132,13 +232,7 @@ final class NewConversationTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(frame.minX, 0)
             XCTAssertLessThanOrEqual(frame.maxX, host.view.bounds.width + 1)
             XCTAssertLessThanOrEqual(frame.maxY, host.view.bounds.height + 1)
-            let image = UIGraphicsImageRenderer(size: host.view.bounds.size).image { _ in
-                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
-            }
-            let attachment = XCTAttachment(image: image)
-            attachment.name = "pending-task-fixture-" + name
-            attachment.lifetime = .keepAlways
-            add(attachment)
+            try capture("edited-" + name)
         }
     }
 

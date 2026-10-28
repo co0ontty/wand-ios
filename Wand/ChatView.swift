@@ -445,6 +445,7 @@ struct ChatView: View {
         .environment(\.chatDecisionCards, store.decisionCards)
         .environment(\.chatToolContentDidLoad, { [weak store] loaded in store?.applyLoadedToolContent(loaded) })
         .environment(\.serverFileLinkController, serverFileLinks)
+        .environment(\.messageFileContext, .init(sessionID: sessionId, cwd: store.snapshot?.cwd))
         .wandKeyboardShortcuts(chatKeyboardShortcuts)
     }
 
@@ -2758,6 +2759,7 @@ struct SessionMessageBody: View {
     let api: WandAPI
     let sessionID: String
     var store: ChatStore? = nil
+    var fileContext = WandMessageFileContext()
     var body: some View {
         TurnView(turn: turn, baseURL: api.baseURL,
             askSelections: store?.displayedAskSelections ?? [:],
@@ -2765,6 +2767,7 @@ struct SessionMessageBody: View {
             onAskSubmit: { store?.submitAskUser(toolUseId: $0, answerText: $1) })
             .environment(\.chatAPI, api)
             .environment(\.chatSessionID, sessionID)
+            .environment(\.messageFileContext, fileContext)
             .environment(\.chatToolContentDidLoad, { store?.applyLoadedToolContent($0) })
     }
 }
@@ -3737,12 +3740,13 @@ struct MarkdownText: View {
     @Environment(\.wandImageGallery) private var gallery
     @Environment(\.chatAPI) private var api
     @Environment(\.serverFileLinkController) private var serverFileLinks
+    @Environment(\.messageFileContext) private var fileContext
     @Environment(\.activityFoldCompact) private var compact
     @Environment(\.openURL) private var inheritedOpenURL
     @State private var linkError: String?
 
     var body: some View {
-        let pages = Self.imagePages(text)
+        let pages = Self.imagePages(text, baseURL: api?.baseURL, context: fileContext)
         VStack(alignment: .leading, spacing: 7) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 blockView(block)
@@ -3767,21 +3771,20 @@ struct MarkdownText: View {
             // from inside that update; each tap still has exactly one owner.
             Task { @MainActor in
                 linkError = nil
-                let serverPath = api.flatMap { WandServerFileLink.downloadPath(url.absoluteString, baseURL: $0.baseURL) }
-                    ?? WandServerFileLink.serverPath(url.absoluteString)
-                if let serverPath {
-                    // A server path must never fall through to the phone's local file opener.
+                let destination = WandMessageLink.resolve(url.absoluteString,
+                    baseURL: api?.baseURL ?? URL(string: "https://unavailable.invalid")!, context: fileContext)
+                switch destination {
+                case .external(let external):
+                    inheritedOpenURL(external) { accepted in
+                        if !accepted { linkError = "系统未能打开此链接，请长按复制后重试。" }
+                    }
+                case .unavailable(let message): linkError = message
+                case .download, .preview:
                     guard let api, let serverFileLinks else {
-                        linkError = "当前页面没有可用的服务器连接，无法下载文件。请返回会话后重试。"
+                        linkError = "当前页面没有可用的服务器连接，请返回会话后重试。"
                         return
                     }
-                    serverFileLinks.open(serverPath: serverPath, api: api)
-                } else {
-                    // Preserve the parent's URL handler and observe refusal instead of silently
-                    // handing the link to the system. External links never inherit Wand cookies.
-                    inheritedOpenURL(url) { accepted in
-                        if !accepted { linkError = "系统未能打开此链接。请长按复制到浏览器；服务器下载链接需要在浏览器中单独登录。" }
-                    }
+                    serverFileLinks.open(destination: destination, api: api)
                 }
             }
             return .handled
@@ -3916,7 +3919,7 @@ struct MarkdownText: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 case .image(let alt, let source):
-                    if let page = markdownImagePage(source), let baseURL = api?.baseURL {
+                    if let page = markdownImagePage(source, baseURL: api?.baseURL, context: fileContext), let baseURL = api?.baseURL {
                         WandToolImageFigure(baseURL: baseURL, source: page.source,
                                             name: alt.isEmpty ? "回复图片" : alt,
                                             directSource: page.directSource)
@@ -3931,7 +3934,7 @@ struct MarkdownText: View {
     }
 
     /// Use the same block/inline parsers as rendering, so code examples never enter the gallery.
-    static func imagePages(_ text: String) -> [WandImagePage] {
+    static func imagePages(_ text: String, baseURL: URL? = nil, context: WandMessageFileContext = .init()) -> [WandImagePage] {
         parseBlocks(text).flatMap { block -> [WandImagePage] in
             let raw: String
             switch block {
@@ -3939,7 +3942,7 @@ struct MarkdownText: View {
             default: return []
             }
             return splitMarkdownImages(raw).compactMap { piece in
-                if case .image(_, let source) = piece { return markdownImagePage(source) }
+                if case .image(_, let source) = piece { return markdownImagePage(source, baseURL: baseURL, context: context) }
                 return nil
             }
         }
@@ -5610,7 +5613,7 @@ private struct PermissionButtonStyle: ButtonStyle {
     }
 }
 
-/// 系统相册选择器。PHPicker 只把用户明确选择的图片交给应用，无需申请整库访问权限。
+/// 系统相册选择器，仅访问用户明确选择的照片和视频。
 struct PhotoLibraryPicker: UIViewControllerRepresentable {
     let onComplete: (Result<[URL], Error>) -> Void
 
@@ -5620,7 +5623,7 @@ struct PhotoLibraryPicker: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> PHPickerViewController {
         var configuration = PHPickerConfiguration(photoLibrary: .shared())
-        configuration.filter = .images
+        configuration.filter = .any(of: [.images, .videos])
         configuration.selectionLimit = 5
         let picker = PHPickerViewController(configuration: configuration)
         picker.delegate = context.coordinator
@@ -5651,10 +5654,10 @@ struct PhotoLibraryPicker: UIViewControllerRepresentable {
             for result in results {
                 let provider = result.itemProvider
                 guard let typeIdentifier = provider.registeredTypeIdentifiers.first(where: {
-                    UTType($0)?.conforms(to: .image) == true
+                    UTType($0).map { $0.conforms(to: .image) || $0.conforms(to: .movie) || $0.conforms(to: .video) } == true
                 }) else {
                     lock.lock()
-                    firstError = PhotoLibraryPickerError.unsupportedImage
+                    firstError = PhotoLibraryPickerError.unsupportedMedia
                     lock.unlock()
                     continue
                 }
@@ -5703,7 +5706,7 @@ struct PhotoLibraryPicker: UIViewControllerRepresentable {
             }
             let baseName = suggested.flatMap { $0.isEmpty ? nil : $0 } ?? "photo"
             let fileExtension = source.pathExtension.isEmpty
-                ? (UTType(typeIdentifier)?.preferredFilenameExtension ?? "jpg")
+                ? (UTType(typeIdentifier)?.preferredFilenameExtension ?? (UTType(typeIdentifier)?.conforms(to: .image) == true ? "jpg" : "mov"))
                 : source.pathExtension
             let destination = FileManager.default.temporaryDirectory
                 .appendingPathComponent("\(baseName)-\(UUID().uuidString)")
@@ -5715,13 +5718,13 @@ struct PhotoLibraryPicker: UIViewControllerRepresentable {
 }
 
 private enum PhotoLibraryPickerError: LocalizedError {
-    case unsupportedImage
+    case unsupportedMedia
     case missingFile
 
     var errorDescription: String? {
         switch self {
-        case .unsupportedImage: return "无法读取所选图片格式"
-        case .missingFile: return "无法读取所选图片"
+        case .unsupportedMedia: return "无法读取所选照片或视频格式"
+        case .missingFile: return "无法读取所选照片或视频"
         }
     }
 }
