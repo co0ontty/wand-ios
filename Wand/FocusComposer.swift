@@ -296,6 +296,16 @@ struct ChatTopIdentityBar: View {
     var reservesFloatingControls = true
     private var identityMetrics = ChatIdentityLayoutMetrics()
 
+    init(title: String, subtitle: String, attention: ChatTopAttention, statusText: String = "",
+         avatarID: String = "e_wand_default", avatarName: String = "", avatarValue: String = "",
+         activity: AvatarFileActivity = .idle, thinking: Bool = false, speaking: Bool = false,
+         reservesFloatingControls: Bool = true) {
+        self.title = title; self.subtitle = subtitle; self.attention = attention
+        self.statusText = statusText; self.avatarID = avatarID; self.avatarName = avatarName
+        self.avatarValue = avatarValue; self.activity = activity; self.thinking = thinking
+        self.speaking = speaking; self.reservesFloatingControls = reservesFloatingControls
+    }
+
     var body: some View {
         if reservesFloatingControls {
             floatingIdentity
@@ -351,6 +361,12 @@ struct TopChatCompanion<Face: View>: View {
     @ViewBuilder let face: (CGFloat) -> Face
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     private var identityMetrics = ChatIdentityLayoutMetrics()
+    init(side: CatComposerSide = .left, dragOffset: CGFloat = 0, title: String? = nil,
+         status: String = "", @ViewBuilder face: @escaping (CGFloat) -> Face) {
+        self.side = side; self.dragOffset = dragOffset; self.title = title
+        self.status = status; self.face = face
+    }
+
     var body: some View {
         GeometryReader { area in
             let size: CGFloat = title == nil ? (verticalSizeClass == .compact ? 48 : 88) : identityMetrics.faceSize
