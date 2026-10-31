@@ -121,13 +121,14 @@ struct TaskBoardView: View {
     }
 
     private var visibleTasks: [WandBoardTask] {
-        tasks.filter { task in
+        let matched = tasks.filter { task in
             let haystack = "\(task.title) \(task.description) \(task.identifier) \(task.workspace?.name ?? "")"
             let matchesQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || haystack.localizedCaseInsensitiveContains(query)
             let matchesWorkspace = filterWorkspaceId.isEmpty || task.workspaceId == filterWorkspaceId
             return matchesQuery && matchesWorkspace
         }
+        return wandBoardGoalProjection(all: tasks, matched: matched)
     }
 
     private var boardStats: WandBoardTaskStats { wandBoardTaskStats(visibleTasks) }
@@ -217,6 +218,7 @@ struct TaskBoardView: View {
                         onVerify: { unconfirmedDispatches.remove(selected.id); errorMessage = nil },
                         onContactsRetry: { Task { await loadContacts() } },
                         onPatch: { body in await mutate { _ = try await api.updateBoardTask(id: selected.id, body: body) } },
+                        onWorkflow: { body in await applyWorkflow(selected, body) },
                         onRemember: rememberAgent,
                         onDispatch: { agent, prompt, subject in
                             await dispatchTask(task: selected, agent: agent, prompt: prompt, subject: subject)
@@ -309,9 +311,7 @@ struct TaskBoardView: View {
                 } else if statusFilter.isEmpty {
                     ForEach(WandBoardStatus.allCases) { status in
                         let items = sortedTasks(visibleTasks.filter { $0.status == status.rawValue })
-                        let archived = status == .done
-                            ? sortedTasks(visibleTasks.filter { $0.status == "archived" })
-                            : []
+                        let archived: [WandBoardTask] = []
                         if !items.isEmpty || !archived.isEmpty {
                             Section {
                                 boardSectionHeader(status: status.rawValue, count: items.count)
@@ -429,7 +429,7 @@ struct TaskBoardView: View {
 
     private var statusPicker: some View {
         Picker("任务状态", selection: $statusFilter) {
-            ForEach([("", "全部"), ("backlog", "待立项"), ("todo", "待办"), ("doing", "进行中"), ("done", "等你确认"), ("archived", "归档")], id: \.0) { value, label in
+            ForEach([("", "全部"), ("backlog", "待立项"), ("todo", "等待认领"), ("doing", "执行中"), ("review", "待验收"), ("ready", "待归档"), ("archived", "归档")], id: \.0) { value, label in
                 Text(label).tag(value)
             }
         }
@@ -565,7 +565,7 @@ struct TaskBoardView: View {
                     .background(Circle().fill(Theme.surface.opacity(0.9)))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("在\(WandBoardStatus(rawValue: status)?.label ?? status)中新建任务")
+            .accessibilityLabel("在「\(WandBoardStatus(rawValue: status)?.label ?? status)」中新建任务")
         }
     }
 
@@ -600,10 +600,7 @@ struct TaskBoardView: View {
             onAction: { action in
                 pendingSwipe = (task, action)
             },
-            extraActions: [HomeRowAction(id: "detail", title: "详情", symbol: "doc.text", tint: Theme.info) { selected = task }]
-                + (task.status == "archived" || task.status == "done" ? [] : [
-                    HomeRowAction(id: "archive", title: "归档", symbol: "archivebox", tint: Theme.warning) { pendingSwipe = (task, .archive) }
-                ])
+            extraActions: [HomeRowAction(id: "detail", title: "详情与验收", symbol: "doc.text", tint: Theme.info) { selected = task }]
         ) {
             TaskBoardRow(
                 task: task,
@@ -617,7 +614,7 @@ struct TaskBoardView: View {
                     if revealed {
                         swipedTaskId = nil
                     } else {
-                        Task { await mutate { _ = try await api.updateBoardTask(id: task.id, body: ["status": wandBoardToggledStatus(task.status)]) } }
+                        selected = task
                     }
                 },
                 onOpenSession: { sessionId in
@@ -773,7 +770,18 @@ struct TaskBoardView: View {
         }
     }
 
-    private func mutate(_ work: () async throws -> Void) async {
+    private func applyWorkflow(_ task: WandBoardTask, _ body: [String: Any]) async -> Bool {
+        var accepted = false
+        await mutate(reportError: false) {
+            let updated = try await api.updateBoardTask(id: task.id, body: body)
+            if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = updated }
+            selected = updated
+            accepted = true
+        }
+        return accepted
+    }
+
+    private func mutate(reportError: Bool = true, _ work: () async throws -> Void) async {
         guard !busy else { return }
         busy = true
         errorMessage = nil
@@ -784,7 +792,7 @@ struct TaskBoardView: View {
                 selected = tasks.first(where: { $0.id == id }) ?? selected
             }
         } catch {
-            errorMessage = error.localizedDescription
+            if reportError { errorMessage = error.localizedDescription }
         }
         busy = false
     }
@@ -793,8 +801,9 @@ struct TaskBoardView: View {
 private func wandBoardStatusColor(_ status: String) -> Color {
     switch status {
     case "todo": return Theme.thinking
-    case "doing": return Theme.success
-    case "done": return Theme.info
+    case "doing": return Theme.brandText
+    case "done", "review": return Theme.info
+    case "ready": return Theme.success
     default: return Theme.textMuted
     }
 }
@@ -872,14 +881,15 @@ private struct TaskBoardHero: View {
                 }
             }
             .font(.subheadline).foregroundStyle(Theme.textSecondary)
-            let metricsLayout = dynamicTypeSize.isAccessibilitySize
-                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
-                : AnyLayout(HStackLayout(alignment: .top, spacing: WandLayout.fieldGap))
-            metricsLayout {
-                metricTile("待办", value: stats.todo, color: wandBoardStatusColor("todo"))
-                metricTile("进行中", value: stats.doing, color: wandBoardStatusColor("doing"))
-                metricTile("已验收", value: stats.accepted, color: Theme.success)
+            LazyVGrid(columns: dynamicTypeSize.isAccessibilitySize ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: 90))], alignment: .leading, spacing: WandLayout.fieldGap) {
+                metricTile("待立项", value: stats.backlog, color: Theme.textSecondary)
+                metricTile("等待认领", value: stats.todo, color: wandBoardStatusColor("todo"))
+                metricTile("执行中", value: stats.doing, color: wandBoardStatusColor("doing"))
+                metricTile("待验收", value: stats.review, color: wandBoardStatusColor("review"))
+                metricTile("待归档", value: stats.ready, color: Theme.success)
             }
+            Text("\(stats.accepted) / \(stats.total) 个主目标由人工确认；AI 通过不提前计入完成。")
+                .font(.caption).foregroundStyle(Theme.textSecondary)
         }
         .padding(.vertical, 4)
     }
@@ -914,15 +924,15 @@ private struct TaskBoardRow: View {
     var onToggleComplete: () -> Void = {}
     var onOpenSession: (String) -> Void = { _ in }
 
-    private var done: Bool { task.status == "done" || task.status == "archived" }
+    private var done: Bool { task.humanAcceptanceCurrent }
     private var model: WandBoardTaskCardModel { wandBoardCardModel(task, showWorkspace: showWorkspace) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             HomeExecutionBadge(state: HomePresentation.executionState(task)).padding(.top, 6)
-            Text(task.acceptance?.acceptedAt != nil ? "验收通过 · 已完成" : task.acceptance?.blocker.isEmpty == false ? "待处理：\(task.acceptance?.blocker ?? "")" : "未验收")
-                .font(.caption).foregroundStyle(task.acceptance?.acceptedAt != nil ? Theme.success : Theme.textSecondary)
+            Text(task.humanAcceptanceCurrent ? "人工已确认 · 已归档" : task.aiVerificationCurrent ? "AI 已通过 · 待归档" : task.acceptance?.blocker.isEmpty == false ? "待处理：\(task.acceptance?.blocker ?? "")" : "待 AI 验收")
+                .font(.caption).foregroundStyle(task.humanAcceptanceCurrent ? Theme.success : Theme.textSecondary)
                 .lineLimit(2).padding(.top, 6)
             if let summary = model.body {
                 Text(summary)
@@ -966,14 +976,14 @@ private struct TaskBoardRow: View {
     private var header: some View {
         HStack(alignment: .top, spacing: 8) {
             Button(action: onToggleComplete) {
-                BoardStatusCheck(status: task.status)
+                BoardStatusCheck(status: task.status, confirmed: task.humanAcceptanceCurrent)
             }
             .buttonStyle(.plain)
             .padding(.top, 2)
             Text(model.title)
                 .font(.wand(size: 16, weight: .semibold))
                 .foregroundColor(done ? Theme.textMuted : Theme.textPrimary)
-                .strikethrough(task.acceptance?.acceptedAt != nil)
+                .strikethrough(task.humanAcceptanceCurrent)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1153,7 +1163,8 @@ private struct FlowLayout: Layout {
 
 private struct BoardStatusCheck: View {
     let status: String
-    private var done: Bool { status == "done" || status == "archived" }
+    var confirmed: Bool = false
+    private var done: Bool { confirmed }
     private var doing: Bool { status == "doing" }
 
     var body: some View {
@@ -1172,7 +1183,7 @@ private struct BoardStatusCheck: View {
             }
         }
         .frame(width: 18, height: 18)
-        .accessibilityLabel(done ? "重新打开任务" : "转为等你确认")
+        .accessibilityLabel("查看任务状态与交付验收")
     }
 }
 
@@ -1207,6 +1218,7 @@ private func boardAgentDotLift(index: Int, now: TimeInterval) -> CGFloat {
 
 @MainActor private enum IosTaskAcceptanceDrafts {
     static var values: [String: (evidence: String, blocker: String)] = [:]
+    static var requests: [String: String] = [:]
 }
 
 private struct TaskBoardDetailView: View {
@@ -1225,6 +1237,7 @@ private struct TaskBoardDetailView: View {
     let onVerify: () -> Void
     let onContactsRetry: () -> Void
     let onPatch: ([String: Any]) async -> Void
+    let onWorkflow: ([String: Any]) async -> Bool
     let onRemember: (WandBoardTaskAgent) -> Void
     let onDispatch: (WandBoardTaskAgent, String, ContactExecutionSubject?) async -> Bool
     let onDelete: () async -> Void
@@ -1247,6 +1260,9 @@ private struct TaskBoardDetailView: View {
     @State private var legacyDispatchOpen = false
     @State private var acceptanceEvidence: String
     @State private var acceptanceBlocker: String
+    @State private var pendingWorkflow: String?
+    @State private var receiptWorkflow: String?
+    @State private var workflowSucceeded = false
 
     init(
         api: WandAPI,
@@ -1259,6 +1275,7 @@ private struct TaskBoardDetailView: View {
         employees: [SiliconEmployee], teams: [ContactTeam], contactsError: String?, unconfirmed: Bool,
         onVerify: @escaping () -> Void, onContactsRetry: @escaping () -> Void,
         onPatch: @escaping ([String: Any]) async -> Void,
+        onWorkflow: @escaping ([String: Any]) async -> Bool = { _ in false },
         onRemember: @escaping (WandBoardTaskAgent) -> Void,
         onDispatch: @escaping (WandBoardTaskAgent, String, ContactExecutionSubject?) async -> Bool,
         onDelete: @escaping () async -> Void,
@@ -1277,6 +1294,7 @@ private struct TaskBoardDetailView: View {
         self.contactsError = contactsError; self.unconfirmed = unconfirmed
         self.onVerify = onVerify; self.onContactsRetry = onContactsRetry
         self.onPatch = onPatch
+        self.onWorkflow = onWorkflow
         self.onRemember = onRemember
         self.onDispatch = onDispatch
         self.onDelete = onDelete
@@ -1296,8 +1314,8 @@ private struct TaskBoardDetailView: View {
         ScrollViewReader { scroll in
             detailForm(scroll: scroll)
         }
-        .onChange(of: acceptanceEvidence) { _, _ in cacheAcceptanceDraft() }
-        .onChange(of: acceptanceBlocker) { _, _ in cacheAcceptanceDraft() }
+        .onChange(of: acceptanceEvidence) { _, _ in cacheAcceptanceDraft(); if pendingWorkflow == nil { receiptWorkflow = nil } }
+        .onChange(of: acceptanceBlocker) { _, _ in cacheAcceptanceDraft(); if pendingWorkflow == nil { receiptWorkflow = nil } }
     }
 
     private func detailForm(scroll: ScrollViewProxy) -> some View {
@@ -1324,7 +1342,7 @@ private struct TaskBoardDetailView: View {
                 }
             }
             Section("评论与员工派发") {
-                TaskCommentComposer(api: api, taskId: task.id,
+                TaskCommentComposer(api: api, taskId: task.id, dispatchPurpose: task.status == "review" ? "review" : "execution",
                                     employees: employees.filter { !$0.archived }.map { (id: $0.id, name: $0.name) },
                                     referenceTasks: referenceTargets,
                                     sourceCommentId: $replyCommentId,
@@ -1371,35 +1389,43 @@ private struct TaskBoardDetailView: View {
                 }
             }
             Section("交付与验收") {
-                Text("会话运行中、空闲、结束、失败或归档，都不代表任务验收通过。")
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
-                Text(task.acceptance?.acceptedAt != nil ? "验收通过 · 已完成" : task.acceptance?.blocker.isEmpty == false ? "待处理 · 有验收缺口" : "未验收 · 待汇总交付")
-                    .font(.subheadline.weight(.semibold))
-                Text("由任务负责人统一核对各会话产物；等待信息／授权／部署／验收时写明原因与下一步。")
+                Text("AI 核验交付后进入待归档；只有你确认并归档才算完成。运行结束、旧状态与历史验收日期都不代表当前验收通过。")
                     .font(.caption).foregroundStyle(Theme.textSecondary)
-                TextField("交付证据、产物路径或源会话", text: $acceptanceEvidence, axis: .vertical)
-                    .lineLimit(2...6)
-                TextField("待处理原因、授权或部署阻塞（无则留空）", text: $acceptanceBlocker, axis: .vertical)
-                    .lineLimit(2...4)
-                if task.acceptance?.acceptedAt != nil {
-                    Label("已确认验收通过", systemImage: "checkmark.seal.fill")
-                        .foregroundStyle(Theme.success)
-                    Button("保存并重新验收") { saveAcceptance(accepted: false) }
-                } else {
-                    if !childTasks.filter({ $0.acceptance?.acceptedAt == nil }).isEmpty {
-                        Text("仍有子任务未验收通过，主目标不能通过。")
-                            .font(.caption)
-                            .foregroundStyle(Theme.warning)
+                TextField("交付证据、产物版本和真实核验结果", text: $acceptanceEvidence, axis: .vertical).lineLimit(2...6)
+                    .disabled(busy || task.status == "archived")
+                TextField("不通过、无法验证或人工退回原因", text: $acceptanceBlocker, axis: .vertical).lineLimit(2...4)
+                    .disabled(busy || task.status == "archived")
+                let proof = !acceptanceEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let gap = !acceptanceBlocker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let actions: [(String, String, Bool)] = [
+                    ("submit", "提交 AI 验收", task.status == "doing" && proof && !gap),
+                    ("pass", "记录 AI 通过", task.status == "review" && proof && !gap && childTasks.allSatisfy { $0.aiVerificationCurrent }),
+                    ("fail", "验收失败并退回", task.status == "review" && gap),
+                    ("accept", "确认并归档", task.status == "ready" && task.aiVerificationCurrent && proof && !gap && childTasks.allSatisfy { $0.humanAcceptanceCurrent }),
+                    ("return", "退回执行", task.status == "ready" && gap)
+                ]
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130))], alignment: .leading, spacing: 8) {
+                    ForEach(actions, id: \.0) { entry in
+                        Button { applyWorkflow(entry.0) } label: {
+                            HStack(spacing: 6) {
+                                ZStack { if pendingWorkflow == entry.0 { ProgressView().controlSize(.small) } }.frame(width: 16, height: 16)
+                                ZStack {
+                                    ForEach([entry.1, "提交中…", "未确认，请核对", workflowSuccessTitle(entry.0)], id: \.self) { copy in Text(copy).hidden().accessibilityHidden(true) }
+                                    Text(workflowButtonTitle(entry.0, entry.1))
+                                }.frame(maxWidth: .infinity, minHeight: 44)
+                            }
+                        }.buttonStyle(.bordered).disabled(busy || pendingWorkflow != nil || !entry.2)
                     }
-                    HStack {
-                        Button("保存交付与缺口") { saveAcceptance(accepted: false) }
-                        Button("确认验收通过") { saveAcceptance(accepted: true) }
-                            .disabled(busy || acceptanceEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                      || !acceptanceBlocker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                      || childTasks.contains { $0.acceptance?.acceptedAt == nil })
-                    }
+                    Button { saveAcceptance() } label: { ZStack {
+                        ForEach(["保存交付与缺口", "提交中…", "未确认，请核对", "交付已保存"], id: \.self) { copy in Text(copy).hidden().accessibilityHidden(true) }
+                        Text(workflowButtonTitle("save", "保存交付与缺口"))
+                    }.frame(maxWidth: .infinity, minHeight: 44) }
+                        .buttonStyle(.bordered).disabled(busy || pendingWorkflow != nil || task.status == "archived")
                 }
+                if receiptWorkflow != nil { Text(workflowSucceeded ? "动作已由服务端确认；下一步以当前阶段为准。" : "动作未确认，草稿与请求标识已保留，请核对任务及服务版本。").font(.caption).foregroundStyle(workflowSucceeded ? Theme.textSecondary : Theme.warning) }
+                Text(task.humanAcceptanceCurrent ? "人工已确认 · 已归档" : task.aiVerificationCurrent ? "AI 已通过 · 人工未确认" : task.legacyReview ? "历史验收待核对" : "尚未通过 AI 验收").font(.subheadline.weight(.semibold))
+                if childTasks.contains(where: { !$0.humanAcceptanceCurrent }) { Text("仍有子任务未由人工确认，主目标需要独立整体验收。").font(.caption).foregroundStyle(Theme.warning) }
+                if task.status == "review" { Text("验收派发仍需明确 @员工，回填不能代替人工确认。").font(.caption).foregroundStyle(Theme.textSecondary) }
             }
             Section("属性") {
                 Picker("状态", selection: Binding(
@@ -1407,8 +1433,9 @@ private struct TaskBoardDetailView: View {
                     set: { status in Task { await onPatch(["status": status]) } }
                 )) {
                     ForEach(WandBoardStatus.allCases) { status in
-                        Text(status.label).tag(status.rawValue)
+                        Text(status.label).tag(status.rawValue).disabled(!["backlog", "todo", "doing", task.status].contains(status.rawValue))
                     }
+                    if task.status == "archived" { Text("已归档").tag("archived") }
                 }
                 Picker("优先级", selection: Binding(
                     get: { task.priority },
@@ -1611,6 +1638,7 @@ private struct TaskBoardDetailView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(comment.authorName).font(.subheadline.weight(.semibold))
+                if comment.reviewWritebackPending == true { Text("验收结论待回填").font(.caption).foregroundStyle(Theme.warning) }
                 Spacer()
                 Text(comment.createdAt).font(.caption).foregroundStyle(.secondary)
             }
@@ -1670,16 +1698,39 @@ private struct TaskBoardDetailView: View {
         IosTaskAcceptanceDrafts.values[task.id] = (acceptanceEvidence, acceptanceBlocker)
     }
 
-    private func saveAcceptance(accepted: Bool) {
-        let evidence = acceptanceEvidence.trimmingCharacters(in: .whitespacesAndNewlines)
-        let blocker = acceptanceBlocker.trimmingCharacters(in: .whitespacesAndNewlines)
-        let value: [String: Any] = [
-            "evidence": acceptanceEvidence,
-            "blocker": acceptanceBlocker,
-            "acceptedAt": accepted ? ISO8601DateFormatter().string(from: Date()) : NSNull()
-        ]
-        guard !accepted || (!evidence.isEmpty && blocker.isEmpty && !childTasks.contains { $0.acceptance?.acceptedAt == nil }) else { return }
-        Task { await onPatch(["acceptance": value]) }
+    private func saveAcceptance() {
+        guard pendingWorkflow == nil else { return }
+        let payload: [String: Any] = ["acceptance": ["evidence": acceptanceEvidence, "blocker": acceptanceBlocker, "acceptedAt": NSNull()]]
+        pendingWorkflow = "save"; receiptWorkflow = nil
+        Task {
+            let accepted = await onWorkflow(payload)
+            pendingWorkflow = nil; receiptWorkflow = "save"; workflowSucceeded = accepted
+        }
+    }
+
+    private func applyWorkflow(_ action: String) {
+        guard pendingWorkflow == nil else { return }
+        cacheAcceptanceDraft()
+        let key = (try? JSONSerialization.data(withJSONObject: [task.id, action, task.updatedAt, acceptanceEvidence, acceptanceBlocker]).base64EncodedString()) ?? UUID().uuidString
+        let requestId = IosTaskAcceptanceDrafts.requests[key] ?? UUID().uuidString
+        if IosTaskAcceptanceDrafts.requests.count >= 100, let oldest = IosTaskAcceptanceDrafts.requests.keys.first { IosTaskAcceptanceDrafts.requests.removeValue(forKey: oldest) }
+        IosTaskAcceptanceDrafts.requests[key] = requestId
+        let body = wandBoardWorkflowBody(action: action, requestId: requestId, expectedUpdatedAt: task.updatedAt, evidence: acceptanceEvidence, blocker: acceptanceBlocker)
+        pendingWorkflow = action; receiptWorkflow = nil
+        Task {
+            let accepted = await onWorkflow(body)
+            pendingWorkflow = nil; receiptWorkflow = action; workflowSucceeded = accepted
+        }
+    }
+
+    private func workflowButtonTitle(_ action: String, _ fallback: String) -> String {
+        if pendingWorkflow == action { return "提交中…" }
+        guard receiptWorkflow == action else { return fallback }
+        if !workflowSucceeded { return "未确认，请核对" }
+        return workflowSuccessTitle(action)
+    }
+    private func workflowSuccessTitle(_ action: String) -> String {
+        ["submit": "已提交 AI 验收", "pass": "已进入待归档", "fail": "已退回执行", "accept": "已确认并归档", "return": "已退回执行", "save": "交付已保存"][action] ?? "动作已确认"
     }
 
     private func refreshComments(taskId: String? = nil) async {
@@ -1827,7 +1878,7 @@ private struct TaskBoardCreateView: View {
                     Button("我已核对，开始新的创建操作", action: onVerify).font(.caption)
                 }
                 Picker("状态", selection: $status) {
-                    ForEach(WandBoardStatus.allCases) { item in
+                    ForEach(WandBoardStatus.allCases.filter { ["backlog", "todo", "doing"].contains($0.rawValue) }) { item in
                         Text(item.label).tag(item.rawValue)
                     }
                 }

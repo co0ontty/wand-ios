@@ -1004,6 +1004,7 @@ struct StructuredSessionState: Decodable {
     let lastError: String?
     var inFlight: Bool?
     var engine: String? = nil
+    var inputMode: String? = nil
     var phase: String? = nil
     var turnStartedAt: String? = nil
     var lastActivityAt: String? = nil
@@ -1772,6 +1773,16 @@ struct GitStatusResult: Decodable {
     let lastCommit: LastCommit?
     let latestTag: String?
     let hasSubmodule: Bool?
+    let head: String?
+    let worktreeCount: Int?
+    let error: String?
+}
+
+struct WorktreeBatchResult: Decodable {
+    let ok: Bool
+    let targetBranch: String
+    let mergedBranches: [String]
+    let pushed: Bool
     let error: String?
 }
 

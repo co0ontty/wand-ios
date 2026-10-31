@@ -48,16 +48,23 @@ struct KnowledgeLibraryView: View {
             Picker("知识范围", selection: Binding(get: { store.scope }, set: { store.changeScope($0) })) {
                 ForEach(KnowledgeScope.allCases) { Text($0.label).tag($0) }
             }.pickerStyle(.segmented).labelsHidden().disabled(store.busy)
+            if store.scope == .global {
+                Text("所有员工、项目与 CLI").font(.callout).foregroundStyle(.secondary)
+            } else {
             Picker(store.scope == .personal ? "员工" : "项目", selection: Binding(get: { store.ownerId }, set: { store.changeOwner($0) })) {
                 if store.availableOwners.isEmpty { Text(store.loading ? "正在加载…" : "暂无可选对象").tag("") }
                 ForEach(store.availableOwners) { Text($0.name + ($0.isReadOnly ? "（只读）" : "")).tag($0.id) }
             }.disabled(store.busy || store.availableOwners.isEmpty)
+            }
             }
             HomeSearchField(placeholder: "搜索文档", text: $store.query, focused: $searchFocused, identifier: "knowledge-search")
             HStack {
                 Text("\(store.page?.total ?? 0) 篇文档").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button { store.create() } label: { Label("新建", systemImage: "plus").frame(minHeight: 44) }.disabled(store.ownerId.isEmpty || store.readOnly || store.busy || store.loading)
+            }
+            if let errors = store.page?.syncErrors, !errors.isEmpty {
+                Text("知识已保存，部分 CLI 尚未同步：" + errors.joined(separator: "；")).font(.caption).foregroundStyle(.orange)
             }
             if store.readOnly { Text("项目已移除，仍可阅读与删除保留的文档。").font(.caption).foregroundStyle(.secondary) }
             if store.loading { ProgressView().frame(maxWidth: .infinity) }
@@ -78,12 +85,12 @@ struct KnowledgeLibraryView: View {
                         }
                     }
                     if !store.loading && store.documents.isEmpty {
-                        Text(store.query.isEmpty ? (store.availableOwners.isEmpty ? (store.scope == .project ? "先创建工作区，即可整理项目知识。" : "暂无员工。") : "还没有文档。可以新建，也可以在对话中请员工记住内容。") : "没有找到匹配的文档。")
+                        Text(store.query.isEmpty ? (store.availableOwners.isEmpty ? (store.scope == .global ? "服务器尚不支持全局知识库，请更新服务端。" : store.scope == .project ? "先创建工作区，即可整理项目知识。" : "暂无员工。") : "还没有文档。可以新建，也可以在对话中请员工记住内容。") : "没有找到匹配的文档。")
                             .font(.callout).foregroundStyle(.secondary).padding(.vertical, 20)
                     }
                 }
             }
-            Text(store.scope == .personal ? "每位员工保留自己的知识。" : "项目知识由当前项目中的对话使用。")
+            Text(store.scope == .global ? "全局约定自动加载，合计最多 24 KB。默认安装同步各 CLI；现有终端会话可能需要重开。" : store.scope == .personal ? "每位员工保留自己的知识。" : "项目知识由当前项目中的对话使用。")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(16).frame(maxHeight: .infinity, alignment: .top)
     }

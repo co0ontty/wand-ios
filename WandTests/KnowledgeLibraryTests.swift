@@ -9,6 +9,15 @@ import UIKit
 @testable import Wand
 
 @MainActor final class KnowledgeLibraryTests: XCTestCase {
+    func testGlobalScopeDecodesWithoutEmployeeOrProjectAndReportsSyncErrors() throws {
+        let owners = try JSONDecoder().decode(KnowledgeOwners.self, from: Data(#"{"global":{"id":"global","name":"全局知识库"},"employees":[],"projects":[]}"#.utf8))
+        XCTAssertEqual(owners.global?.id, "global")
+        XCTAssertTrue(owners.employees.isEmpty)
+        let page = try JSONDecoder().decode(KnowledgeLibraryPage.self, from: Data(#"{"scope":"global","ownerId":"global","ownerName":"全局知识库","readOnly":false,"entries":[],"total":0,"limit":200,"cliSync":[{"provider":"Pi","path":"/fixture/AGENTS.md","error":"区块被修改"}]}"#.utf8))
+        XCTAssertEqual(page.scope, .global)
+        XCTAssertEqual(page.syncErrors, ["Pi：区块被修改"])
+        XCTAssertEqual(WandAPI.knowledgeLibraryPath(scope: .global, ownerId: "global"), "/api/knowledge?scope=global&ownerId=global")
+    }
     func testOwnerQueryPreservesPlusPercentUnicodeAndEndpointPrefix() throws {
         let owner = "project+a% 空间&x=1"
         let path = try XCTUnwrap(WandAPI.knowledgeLibraryPath(scope: .project, ownerId: owner))

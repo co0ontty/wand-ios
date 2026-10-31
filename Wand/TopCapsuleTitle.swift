@@ -23,6 +23,11 @@ struct TopCapsuleTitle: View {
     /// Shared scene viewport; the header never clips this viewport to the smaller layout slot.
     private static let sceneMinimumSize: CGFloat = 48
 
+    /// 系统导航栏按「压缩提议」量标题视图：只报内容宽度时 UIKit 会把胶囊缩到文字宽度再居中，
+    /// 窄屏（Duo 最小屏）左侧就空出一大段。报一个超过任何标题槽的理想宽度，UIKit 会把标题
+    /// 视图钳到槽宽，胶囊因此占满整条槽；文字仍从左侧开始排，长标题在槽内缩放、截断。
+    private static let titleSlotIdealWidth: CGFloat = 2400
+
     private var renderedAvatarSize: CGFloat { max(Self.sceneMinimumSize, avatarSize) }
     private var avatarOverhang: CGFloat { max(0, renderedAvatarSize - avatarSize) / 2 }
 
@@ -36,6 +41,7 @@ struct TopCapsuleTitle: View {
                     .font(.wand(size: titleSize, weight: .semibold))
                     .foregroundColor(titleColor)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.82)
                     .truncationMode(.tail)
                     .frame(maxWidth: titleWidth, alignment: .leading)
                 if let subtitle, !subtitle.isEmpty {
@@ -43,6 +49,7 @@ struct TopCapsuleTitle: View {
                         .font(.wand(size: subtitleSize, weight: .medium))
                         .foregroundColor(subtitleColor)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                         .truncationMode(subtitleTruncation)
                         .frame(maxWidth: titleWidth, alignment: .leading)
                 }
@@ -51,6 +58,8 @@ struct TopCapsuleTitle: View {
             .padding(.trailing, 14)
         }
         .padding(.leading, capsuleInset).padding(.vertical, capsuleInset)
+        // 先占满父布局提供的净宽，再绘制玻璃；短标题也保持同一颗完整胶囊。
+        .frame(minWidth: 0, idealWidth: Self.titleSlotIdealWidth, maxWidth: .infinity, alignment: .leading)
         .background {
             Color.clear.wandGlassCapsule().allowsHitTesting(false)
         }

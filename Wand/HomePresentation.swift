@@ -147,13 +147,13 @@ enum HomePresentation {
         return result
     }
 
-    static func conversations(_ groups: [TaskDirectoryGroup]) -> [HomeRecentConversation] {
+    static func conversations(_ groups: [TaskDirectoryGroup], includeArchived: Bool = false) -> [HomeRecentConversation] {
         var seen = Set<String>()
         return groups.flatMap { group in
             group.tasks.flatMap { task in
                 task.sessions.map { HomeRecentConversation(group: group, task: task, session: $0) }
             } + group.standaloneSessions.map { HomeRecentConversation(group: group, task: nil, session: $0) }
-        }.filter { $0.session.archived != true && seen.insert($0.id).inserted }
+        }.filter { (includeArchived || !$0.filterArchived) && seen.insert($0.id).inserted }
             .sorted {
                 let a = $0.session.startedAt ?? "", b = $1.session.startedAt ?? ""
                 return a == b ? $0.id < $1.id : a > b
@@ -273,13 +273,31 @@ enum HomePresentation {
     }
 
     static func replacing(_ task: WorkspaceTaskSummary, sessions: [WorkspaceSessionSummary]) -> WorkspaceTaskSummary {
-        WorkspaceTaskSummary(id: task.id, workspaceId: task.workspaceId, name: task.name, worktree: task.worktree,
-            layout: task.layout, status: task.status, createdAt: task.createdAt, lastOpenedAt: task.lastOpenedAt,
-            cwd: task.cwd, isolated: task.isolated, worktreeError: task.worktreeError, sessions: sessions,
-            totalSessions: task.totalSessions, executionStatus: task.executionStatus, queuedExecutionCount: task.queuedExecutionCount)
+        task.replacingSessions(sessions)
     }
 
     private static func nonblank(_ value: String?) -> String? {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? value : nil
+    }
+}
+
+
+extension HomeRecentConversation {
+    var filterWorkspace: ConversationWorkspaceFilter {
+        .resolve(id: group.workspaceId, synthetic: group.isSynthetic, global: group.isGlobal)
+    }
+    var filterWorkspaceTitle: String {
+        filterWorkspace == .unassigned ? "未分配工作区" : group.workspaceName
+    }
+    var filterStage: ConversationTaskStage {
+        .resolve(boardStatus: task?.boardTaskStatus, hasTaskContainer: task != nil, workspaceTaskId: session.workspaceTaskId)
+    }
+    var filterArchived: Bool { session.archived == true || task?.archived == true }
+    var filterCaption: String { "\(filterStage.title) · \(filterWorkspaceTitle)" }
+    func filterFacts(employees: [SiliconEmployee]) -> ConversationFilterFacts {
+        ConversationFilterFacts(stage: filterStage, workspace: filterWorkspace,
+            archived: filterArchived, active: !filterArchived && HomePresentation.isActive(session),
+            searchText: (HomePresentation.sessionFields(session, employees: employees)
+                + [task?.name, filterWorkspaceTitle]).compactMap { $0 }.joined(separator: " "))
     }
 }

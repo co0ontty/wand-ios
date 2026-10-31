@@ -136,6 +136,17 @@ struct ConversationTask: Decodable, Identifiable {
     let task: WandBoardTask
     let runs: [ContactTeamRun]
     let startup: Startup?
+    let filterStage: ConversationTaskStage
+    private enum CodingKeys: String, CodingKey { case task, runs, startup }
+    private enum TaskKeys: String, CodingKey { case status }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        task = try c.decode(WandBoardTask.self, forKey: .task)
+        runs = try c.decode([ContactTeamRun].self, forKey: .runs)
+        startup = try c.decodeIfPresent(Startup.self, forKey: .startup)
+        let raw = try c.nestedContainer(keyedBy: TaskKeys.self, forKey: .task)
+        filterStage = .businessStatus(try raw.decodeIfPresent(String.self, forKey: .status))
+    }
     struct Startup: Decodable { let state: String; let error: String? }
     var id: String { task.id }
 }
@@ -343,5 +354,57 @@ struct ConversationGroupDraft: Equatable {
             members.append(member)
         }
         return members
+    }
+}
+
+
+extension ConversationTask {
+    func filterWorkspace(in groups: [TaskDirectoryGroup]) -> ConversationWorkspaceFilter {
+        let group = groups.first { group in
+            group.tasks.contains { $0.boardTaskId == task.id || (task.workspaceTaskId != nil && $0.id == task.workspaceTaskId) }
+        } ?? groups.first { $0.workspaceId == task.workspaceId }
+        return .resolve(id: group?.workspaceId ?? task.workspaceId, synthetic: group?.isSynthetic ?? false, global: group?.isGlobal ?? false)
+    }
+    func filterWorkspaceTitle(in groups: [TaskDirectoryGroup]) -> String {
+        switch filterWorkspace(in: groups) {
+        case .unassigned: return "未分配工作区"
+        case .workspace(let id): return groups.first { $0.workspaceId == id }?.workspaceName ?? "工作区不可用（\(id)）"
+        default: return "工作区未知"
+        }
+    }
+    func filterCaption(in groups: [TaskDirectoryGroup]) -> String {
+        "\(filterStage.title) · \(filterWorkspaceTitle(in: groups))"
+    }
+    func matchesFilters(_ filters: ConversationListFilters, query: String, conversationTitle: String, groups: [TaskDirectoryGroup]) -> Bool {
+        let searchText = [conversationTitle, task.title, filterWorkspaceTitle(in: groups)].joined(separator: " ")
+        func matches(archived: Bool, active: Bool, sessionTitle: String = "") -> Bool {
+            filters.matches(ConversationFilterFacts(stage: filterStage, workspace: filterWorkspace(in: groups),
+                archived: archived, active: active, searchText: searchText + " " + sessionTitle), query: query)
+        }
+        // Conversation summaries can carry raw board tasks without embedded sessions.
+        // Join only by explicit board/container IDs, never cwd or a time-window guess.
+        let linked = HomePresentation.conversations(groups, includeArchived: true).filter {
+            $0.task?.boardTaskId == task.id || (task.workspaceTaskId != nil && $0.task?.id == task.workspaceTaskId)
+                || task.sessionIds.contains($0.id)
+        }
+        if !linked.isEmpty {
+            return linked.contains { item in
+                matches(archived: item.filterArchived, active: !item.filterArchived && HomePresentation.isActive(item.session),
+                    sessionTitle: item.session.title ?? "")
+            }
+        }
+        // A task with no execution session still has a real business/workspace association.
+        // Only a real container archive flag supplies archive evidence; business status never does.
+        let containerArchived = groups.flatMap(\.tasks).contains {
+            ($0.boardTaskId == task.id || (task.workspaceTaskId != nil && $0.id == task.workspaceTaskId)) && $0.archived == true
+        }
+        if task.sessions.isEmpty {
+            return !filters.activeOnly && matches(archived: containerArchived, active: false)
+        }
+        return task.sessions.contains { session in
+            matches(archived: session.archived == true || containerArchived, active: !containerArchived && session.archived != true &&
+                (session.inFlight == true || session.permissionBlocked == true || session.executionStatus == "queued"
+                    || ["running", "thinking", "queued", "waiting-input"].contains(session.status)), sessionTitle: session.title)
+        }
     }
 }

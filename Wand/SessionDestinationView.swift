@@ -261,13 +261,11 @@ private struct PtySessionView: View {
             }
         }
         .background { if !usesSystemNavigation { SessionBackSwipeEnabler().allowsHitTesting(false) } }
-        .navigationTitle(usesSystemNavigation && showsNavigationChrome ? topIdentity.title : "")
-        .modifier(SystemSessionSubtitle(enabled: usesSystemNavigation && showsNavigationChrome,
-            subtitle: topIdentity.subtitle))
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(showsNavigationChrome ? .visible : .automatic, for: .navigationBar)
         .toolbar {
-            if showsNavigationChrome && !usesSystemNavigation {
+            if showsNavigationChrome {
                 ToolbarItem(placement: .principal) { titleStatus }
                     .sharedBackgroundVisibility(.hidden)
             }
@@ -354,7 +352,7 @@ private struct PtySessionView: View {
             draftNeedsExpanded = false
         }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active { store.handleEnterForeground(); terminal.foreground() }
+            if newPhase == .active { store.handleEnterForeground(); terminal.foreground(); refreshGitStatus() }
             else if newPhase == .background { store.handleEnterBackground() }
         }
         .overlay(alignment: .top) { connectionBanner }
@@ -839,7 +837,14 @@ private struct PtySessionView: View {
 
     private func refreshGitStatus() {
         Task {
-            gitStatus = try? await api.gitStatus(sessionId: session.id)
+            do {
+                gitStatus = try await api.gitStatus(sessionId: session.id)
+            } catch {
+                guard gitStatus == nil, !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard !Task.isCancelled else { return }
+                gitStatus = try? await api.gitStatus(sessionId: session.id)
+            }
         }
     }
 
@@ -904,7 +909,9 @@ private struct PtySessionView: View {
         var actions = [SessionMenuAction(id: "files", title: "会话文件", symbol: "folder") {
             sessionFiles.show(cwd: store.snapshot?.cwd ?? session.cwd ?? "")
         }]
+        // 终端会话的 git 入口和结构化会话同一套规则：工作区干净、状态未知也保留。
         if let commit = GitQuickCommitMenuAction(status: gitStatus, phase: quickCommitFeedback.phase,
+            hasCwd: !(store.snapshot?.cwd ?? session.cwd ?? "").isEmpty,
             action: { showQuickCommit = true }).item {
             actions.append(commit)
         }
@@ -934,11 +941,10 @@ private struct PtySessionView: View {
                 avatarID: topAvatarIdentity.id, avatarName: topAvatarIdentity.name, avatarValue: topAvatarIdentity.avatar,
                 avatarSize: 30,
                 titleColor: Color.white.opacity(0.88), subtitleColor: Color.white.opacity(0.58),
-                titleSize: 13, subtitleSize: 9, titleWidth: 210, subtitleTruncation: .middle)
+                titleSize: 13, subtitleSize: 9, subtitleTruncation: .middle)
                 .environment(\.colorScheme, .dark)
                 .topicTitleRhythm(store.titleGenerating)
         }
-        .frame(maxWidth: .infinity)
         .shadow(color: Color.black.opacity(0.26), radius: 3, x: 0, y: 1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(chatTopReadback(title: identity.title, subtitle: identity.subtitle, status: topStatusText))

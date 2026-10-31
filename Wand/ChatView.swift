@@ -225,12 +225,16 @@ struct ChatView: View {
         }
         // 点消息区任意空白处收起键盘；输入栏在 VStack 底部，不受 dismiss 手势误伤。
         .background { if !usesSystemNavigation { SessionBackSwipeEnabler().allowsHitTesting(false) } }
-        .navigationTitle(usesSystemNavigation && showsNavigationChrome ? topIdentity.title : "")
-        .modifier(SystemSessionSubtitle(enabled: usesSystemNavigation && showsNavigationChrome, subtitle: topIdentity.subtitle))
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(usesSystemNavigation && showsNavigationChrome ? .visible : (showsNavigationChrome ? .hidden : .automatic), for: .navigationBar)
         .navigationBarBackButtonHidden(!usesSystemNavigation)
         .toolbar {
+            // 系统导航下胶囊就住在导航栏标题槽里，不能浮到栏下面去。
+            if showsNavigationChrome && usesSystemNavigation {
+                ToolbarItem(placement: .principal) { chatIdentityBar(reservesFloatingControls: false) }
+                    .sharedBackgroundVisibility(.hidden)
+            }
             if #available(iOS 27.1, *), usesSystemNavigation && showsNavigationChrome {
                 ToolbarOverflowMenu { chatMenuItems }
             }
@@ -238,21 +242,27 @@ struct ChatView: View {
         .overlay(alignment: .top) {
             if showsNavigationChrome && !usesSystemNavigation {
                 ZStack(alignment: .top) {
-                    ChatTopIdentityBar(title: topIdentity.title, subtitle: topIdentity.subtitle,
-                        attention: topAttention, statusText: visibleIdentityStatus,
-                        avatarID: topAvatarIdentity.id, avatarName: topAvatarIdentity.name,
-                        avatarValue: topAvatarIdentity.avatar,
-                        activity: avatarActivity,
-                        thinking: avatarIsThinking(messages: store.messages,
-                            executing: store.isResponding && store.status == "running" &&
-                                !store.permissionBlocked && store.pendingEscalation == nil))
-                    if !usesSystemNavigation { floatingChatControls }
+                    chatIdentityBar(reservesFloatingControls: true)
+                    floatingChatControls
                 }
             }
         }
         // 关掉系统键盘避让，统一交给 KeyboardObserver 手动抬升（见 bottomBar），
         // 避免「系统抬一次 + 手动抬一次」叠加或两边都不抬的不确定行为。
         .ignoresSafeArea(.keyboard, edges: .bottom)
+    }
+
+    /// 创建页和运行页共用同一颗玻璃胶囊。系统导航把它放进标题槽，普通布局浮在返回键之间。
+    private func chatIdentityBar(reservesFloatingControls: Bool) -> some View {
+        ChatTopIdentityBar(title: topIdentity.title, subtitle: topIdentity.subtitle,
+            attention: topAttention, statusText: visibleIdentityStatus,
+            avatarID: topAvatarIdentity.id, avatarName: topAvatarIdentity.name,
+            avatarValue: topAvatarIdentity.avatar,
+            activity: avatarActivity,
+            thinking: avatarIsThinking(messages: store.messages,
+                executing: store.isResponding && store.status == "running" &&
+                    !store.permissionBlocked && store.pendingEscalation == nil),
+            reservesFloatingControls: reservesFloatingControls)
     }
 
     private var floatingChatControls: some View {
@@ -263,8 +273,11 @@ struct ChatView: View {
         }
     }
 
-    @ViewBuilder private var chatMenuItems: some View {
-        SessionActionPalette(actions: [
+    /// 会话「更多」菜单的主动作：会话文件、对象与目录、变更与提交。
+    /// git 入口只因为「没有工作目录」或「确认不是 git 仓库」缺席；工作区干净、
+    /// 状态还没取到、上一次取失败都仍然可点，点开由面板自己解释状态并提供重试。
+    private var chatPrimaryActions: [SessionMenuAction] {
+        var actions = [
             SessionMenuAction(id: "files", title: "会话文件", symbol: "folder",
                 isEnabled: store.snapshot?.cwd?.isEmpty == false) {
                 composerFocus.borrow("files"); sessionFiles.show(cwd: store.snapshot?.cwd ?? "")
@@ -272,9 +285,17 @@ struct ChatView: View {
             SessionMenuAction(id: "context", title: "对象与目录", symbol: "slider.horizontal.3") {
                 composerChoice = .context
             },
-            SessionMenuAction(id: "git", title: "变更与提交", symbol: "arrow.triangle.branch",
-                isEnabled: gitStatus?.isGit == true) { showQuickCommit = true }
-        ])
+        ]
+        if let git = GitQuickCommitMenuAction(status: gitStatus, phase: quickCommitFeedback.phase,
+            hasCwd: !(store.snapshot?.cwd ?? "").isEmpty,
+            action: { showQuickCommit = true }).item {
+            actions.append(git)
+        }
+        return actions
+    }
+
+    @ViewBuilder private var chatMenuItems: some View {
+        SessionActionPalette(actions: chatPrimaryActions)
         if !hostActions.isEmpty {
             Section {
                 SessionActionPalette(actions: hostActions.map(\.menuAction))
@@ -413,7 +434,7 @@ struct ChatView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             wlog("session", "scenePhase=\(newPhase) session=\(sessionId)")
-            if newPhase == .active { store.handleEnterForeground() }
+            if newPhase == .active { store.handleEnterForeground(); refreshGitStatus() }
             else if newPhase == .background { store.handleEnterBackground() }
         }
         .animation(reduceMotion ? nil : WandMotion.disclosure, value: store.connected)
@@ -623,6 +644,10 @@ struct ChatView: View {
                     .padding(.bottom, 6)
                 }
                 .scrollContentBackground(.hidden)
+                // 不足一屏的内容从顶部排，和 Android LazyColumn 一致。
+                // 贴底只在内容变高时跟随，不把首条短消息在顶对齐和底对齐之间来回拽。
+                .defaultScrollAnchor(.top, for: .alignment)
+                .defaultScrollAnchor(scrollMode == .stickToBottom ? .bottom : nil, for: .sizeChanges)
                 .modifier(DismissKeyboardOnDrag())
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
@@ -718,11 +743,12 @@ struct ChatView: View {
                 .onChange(of: store.pendingEscalation != nil) {
                     scrollToActiveTarget(proxy)
                 }
-                // Collapsing an activity window changes the content height without a new
-                // message revision; keep the stick-to-bottom contract in that case too.
-                .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { old, new in
+                // LazyVStack revises its estimated content height as rows enter the
+                // viewport. Never scroll from this observation: scrollTo realizes more
+                // rows and feeds another height change back into the same loop. Native
+                // sizeChanges anchoring above owns layout-only bottom following.
+                .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { _, new in
                     chatContentHeight = new
-                    if old != new { scrollToActiveTarget(proxy) }
                     // 首次布局可能以 old == new 报到，补页判断只看真实高度，不依赖这次是否变化。
                     fillViewportWithEarlierMessages(viewportHeight: viewportHeight)
                 }
@@ -1260,57 +1286,6 @@ struct ChatView: View {
         (thinkingLevels.first { $0.id == id } ?? thinkingLevels.first)?.shortLabel ?? "自"
     }
 
-    /// 顶栏身份：logo 放在标题左侧，不要再塞进 navigationBarLeading。
-    /// iOS 26 圆形返回键会占掉 leading 区域，badge / 路径叠在返回键下面会变成浅色残影。
-    @ViewBuilder private var providerBadge: some View {
-            BrandLogo(provider: store.snapshot?.provider, color: providerTint.opacity(0.94))
-                .frame(width: 18, height: 18).frame(width: 26, height: 26)
-                .accessibilityLabel(store.snapshot?.providerLabel ?? "执行工具")
-    }
-
-    private var navigationStatus: some View {
-        HStack(spacing: 8) {
-            providerBadge
-            VStack(alignment: .leading, spacing: 1) {
-                Text(navigationStatusTitle)
-                    .font(.wand(size: 15, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .topicTitleRhythm(store.titleGenerating)
-                if let cwd = store.snapshot?.cwd, !cwd.isEmpty {
-                    WandPathRevealText(path: cwd, fontSize: 10, color: Theme.textSecondary)
-                }
-            }
-            .frame(maxWidth: 220, alignment: .leading)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    private var navigationStatusTitle: String {
-        // 会话标题由服务端统一解析并通过 title 下发。currentTaskTitle 只描述当前
-        // 执行进度，不能在响应期间替换标题，否则 iOS 会和 Android 显示不同内容。
-        if store.snapshot?.title?.isEmpty == false {
-            return store.displayTitle
-        }
-        return latestUserMessage
-    }
-
-    private var latestUserMessage: String {
-        for turn in store.messages.reversed() where turn.role == "user" {
-            let text = turn.content.compactMap { block -> String? in
-                guard case .text(let value, _) = block else { return nil }
-                return value
-            }
-            .joined(separator: " ")
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-            if !text.isEmpty { return text }
-        }
-        return store.snapshot?.displayTitle ?? "对话详情"
-    }
-
     // MARK: - 底部栏（权限卡 + 队列 + 输入框）
 
     /// 输入栏上方悬浮的待办进度条数据：当前 turn 的 todos，全部完成后隐藏（对齐 Web）。
@@ -1414,7 +1389,7 @@ struct ChatView: View {
             if !store.queuedMessages.isEmpty || composerDraft.queueRecoveryText != nil {
                 QueueBar(items: store.queuedMessages, expanded: $queueBarExpanded,
                     inFlight: store.queueInFlight,
-                    steering: store.snapshot?.provider == "pi" && store.snapshot?.structuredState?.engine == "core",
+                    steering: store.snapshot?.structuredState?.inputMode == "steer" || (store.snapshot?.provider == "pi" && store.snapshot?.structuredState?.engine == "core"),
                     mutationPending: store.queueMutationPending || composerDraft.queueRetrievalPending,
                     onPromote: { store.promoteQueued(index: $0) },
                     onDelete: { store.deleteQueued(index: $0) },
@@ -1627,7 +1602,16 @@ struct ChatView: View {
 
     private func refreshGitStatus() {
         Task {
-            gitStatus = try? await api.gitStatus(sessionId: sessionId)
+            do {
+                gitStatus = try await api.gitStatus(sessionId: sessionId)
+            } catch {
+                // 一次瞬时失败不能把 git 入口变成“打不开”：入口始终可点，
+                // 这里退避补一次，仍失败就交给面板里的重试。
+                guard gitStatus == nil, !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard !Task.isCancelled else { return }
+                gitStatus = try? await api.gitStatus(sessionId: sessionId)
+            }
         }
     }
 
@@ -2024,6 +2008,16 @@ func shouldLoadEarlierPageToFillViewport(
 ) -> Bool {
     guard canLoadEarlier, !loadingEarlier, viewportHeight > 0, contentHeight > 0 else { return false }
     return contentHeight < viewportHeight * targetScreens
+}
+
+/// 用户气泡最多占阅读宽度的 86%，并至少给左侧留出一截空白。
+/// 短句按内容收缩，长句到上限后换行；上限只随阅读宽度变，不随流式内容或滚动锚点变。
+func userBubbleMaximumWidth(readingWidth: CGFloat, reservedLeading: CGFloat = 48) -> CGFloat {
+    let available = max(0, readingWidth)
+    guard available > 0 else { return 0 }
+    let fraction = floor(available * 0.86)
+    let reserved = max(0, available - reservedLeading)
+    return min(fraction, reserved)
 }
 
 /// 取出一个 MessageDisplayItem 归属的 turn 下标，用于按历史边界分区。
@@ -2844,39 +2838,46 @@ private struct TurnView: View {
                 attachmentsView(parsed.attachmentPaths)
             }
             if !parsed.body.isEmpty {
-                HStack {
-                    Spacer(minLength: 48)
-                    VStack(alignment: .trailing, spacing: 5) {
-                        Text(parsed.body)
-                            .font(.body)
-                            .foregroundColor(Theme.textPrimary)
-                            .lineLimit(collapsed ? 2 : nil)
-                            .truncationMode(.tail)
-                            .textSelection(.enabled)
-                        if canCompact {
-                            Button {
-                                withAnimation(WandMotion.disclosure) {
-                                    userExpanded.toggle()
-                                }
-                            } label: {
-                                Text(collapsed ? "展开" : "收起")
-                                    .font(.wand(size: 12, weight: .semibold))
-                                    .foregroundColor(Theme.textSecondary)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(collapsed ? "展开用户消息" : "收起用户消息")
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(Theme.workspaceSelection)
-                    )
-                }
+                userBody(parsed.body, collapsed: collapsed, canCompact: canCompact)
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    /// 短句按文字收缩贴右；长句到阅读宽度的 86% 后换行。上限在布局时算一次，
+    /// 不随乐观消息、服务端回包或滚动锚点切换。
+    private func userBody(_ body: String, collapsed: Bool, canCompact: Bool) -> some View {
+        VStack(alignment: .trailing, spacing: 5) {
+            Text(body)
+                .font(.body)
+                .foregroundColor(Theme.textPrimary)
+                .lineLimit(collapsed ? 2 : nil)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            if canCompact {
+                Button {
+                    withAnimation(WandMotion.disclosure) {
+                        userExpanded.toggle()
+                    }
+                } label: {
+                    Text(collapsed ? "展开" : "收起")
+                        .font(.wand(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(collapsed ? "展开用户消息" : "收起用户消息")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Theme.workspaceSelection)
+        )
+        .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in
+            userBubbleMaximumWidth(readingWidth: width)
+        }
     }
 
     /// 上传附件：图片走缩略图、非图片走文件块，整体靠右对齐用户侧。

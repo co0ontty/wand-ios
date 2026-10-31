@@ -55,6 +55,8 @@ struct WandTaskComment: Decodable, Equatable, Identifiable {
     let createdAt: String
     var sourceCommentId: String? = nil
     var dispatch: WandTaskCommentDispatch? = nil
+    var purpose: String? = nil
+    var reviewWritebackPending: Bool? = nil
     /// 本轮指令原文（不含 `@员工 ` 前缀）；服务端只在派发过的评论上返回。
     var instruction: String? = nil
     /// 本评论引用到的子任务 ID（`#TASK-133` 的解析结果），按正文出现顺序。
@@ -98,17 +100,20 @@ enum TaskCommentReferenceTargets {
 struct TaskCommentRequestIdentity {
     let key: String
     let requestId: String
+    let purpose: String
     private let defaults: UserDefaults
-    init(taskId: String, body: String, employeeId: String, sourceCommentId: String?, defaults: UserDefaults = .standard) {
+    init(taskId: String, body: String, employeeId: String, sourceCommentId: String?, purpose: String = "execution", defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let data = (try? JSONEncoder().encode([body.trimmingCharacters(in: .whitespacesAndNewlines), employeeId, sourceCommentId ?? ""])) ?? Data()
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         key = "wand.task-comment-request." + taskId + "." + digest
-        requestId = defaults.string(forKey: key) ?? UUID().uuidString
-        defaults.set(requestId, forKey: key)
+        let saved = defaults.string(forKey: key)
+        requestId = saved ?? UUID().uuidString
+        self.purpose = defaults.string(forKey: key + ".purpose") ?? (saved == nil ? purpose : "execution")
+        defaults.set(requestId, forKey: key); defaults.set(self.purpose, forKey: key + ".purpose")
     }
     func settle(_ comment: WandTaskComment) {
-        if comment.dispatch?.deliveryUncertain != true { defaults.removeObject(forKey: key) }
+        if comment.dispatch?.deliveryUncertain != true { defaults.removeObject(forKey: key); defaults.removeObject(forKey: key + ".purpose") }
     }
 }
 

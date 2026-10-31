@@ -34,6 +34,7 @@ final class NewConversationCoordinator: ObservableObject {
 
     enum Phase: Equatable {
         case idle
+        case conversationOnly
         case creating
         case taskAccepted(taskID: String)
         case accepted(sessionID: String, taskID: String?)
@@ -53,6 +54,7 @@ final class NewConversationCoordinator: ObservableObject {
     }
 
     @Published private(set) var phase: Phase
+    @Published private(set) var creationError: String?
     private(set) var unknownOperation: UnknownOperation?
     private(set) var unknownSessionID: String?
     private(set) var unknownTaskID: String?
@@ -61,6 +63,7 @@ final class NewConversationCoordinator: ObservableObject {
     private var acceptedTaskID: String?
     private var taskWasAccepted = false
     private var creationRequestID: String?
+    private(set) var skipsTaskCreation = false
 
     init(defaults: UserDefaults = .standard) {
         self.storageKey = "wand.new-conversation.state.default"
@@ -76,7 +79,7 @@ final class NewConversationCoordinator: ObservableObject {
         restore()
     }
 
-    var canSubmit: Bool { phase == .idle || isDefiniteRejection }
+    var canSubmit: Bool { phase == .idle || phase == .conversationOnly || isDefiniteRejection }
     var currentCreationRequestID: String? { creationRequestID }
     var isDefiniteRejection: Bool { if case .rejected = phase { return true }; return false }
     var acceptedTaskIDForContinuation: String? {
@@ -90,7 +93,7 @@ final class NewConversationCoordinator: ObservableObject {
 
     func retryRejectedTaskCreation() {
         guard case .rejected = phase, !taskWasAccepted else { return }
-        phase = .idle
+        phase = skipsTaskCreation ? .conversationOnly : .idle
     }
 
     func abandonAcceptedSession(sessionID: String) {
@@ -108,6 +111,8 @@ final class NewConversationCoordinator: ObservableObject {
         phase = .idle
         acceptedTaskID = nil
         taskWasAccepted = false
+        skipsTaskCreation = false
+        creationError = nil
         defaults.removeObject(forKey: storageKey)
         creationRequestID = nil
         unknownOperation = nil
@@ -122,6 +127,23 @@ final class NewConversationCoordinator: ObservableObject {
         unknownSessionID = nil
         unknownTaskID = nil
         phase = .taskAccepted(taskID: acceptedTaskID)
+        persist(phase)
+    }
+
+    /// The unknown operation only created a task container; it never sent a message
+    /// or created a session. An explicit choice may continue without that container.
+    func continueWithoutTask() {
+        guard case .deliveryUnknown = phase, unknownOperation == .task,
+              !taskWasAccepted, unknownSessionID == nil else { return }
+        if let saved = defaults.dictionary(forKey: storageKey) {
+            let requestID = creationRequestID ?? UUID().uuidString
+            defaults.set(saved, forKey: "\(storageKey).unresolved-task.\(requestID)")
+        }
+        skipsTaskCreation = true
+        creationRequestID = nil
+        unknownOperation = nil
+        unknownTaskID = nil
+        phase = .conversationOnly
         persist(phase)
     }
 
@@ -147,10 +169,11 @@ final class NewConversationCoordinator: ObservableObject {
     }
 
     func createTask(requestID: String, using operation: () async throws -> String) async -> String? {
-        guard phase == .idle || (isDefiniteRejection && !taskWasAccepted) else { return nil }
+        guard !skipsTaskCreation, phase == .idle || (isDefiniteRejection && !taskWasAccepted) else { return nil }
         if isDefiniteRejection { phase = .idle }
         taskWasAccepted = false
         acceptedTaskID = nil
+        creationError = nil
         creationRequestID = requestID
         unknownOperation = nil
         unknownSessionID = nil
@@ -203,7 +226,7 @@ final class NewConversationCoordinator: ObservableObject {
     func create(requestID: String, using operation: () async throws -> SessionSnapshot) async -> SessionSnapshot? {
         let taskID: String?
         switch phase {
-        case .idle:
+        case .idle, .conversationOnly:
             taskID = nil
         case .rejected where !taskWasAccepted:
             taskID = nil
@@ -215,6 +238,7 @@ final class NewConversationCoordinator: ObservableObject {
         unknownOperation = nil
         unknownSessionID = nil
         unknownTaskID = nil
+        creationError = nil
         creationRequestID = requestID
         if isDefiniteRejection { phase = .idle }
         if let taskID { acceptedTaskID = taskID }
@@ -257,6 +281,7 @@ final class NewConversationCoordinator: ObservableObject {
     }
 
     private func settleFailure(_ error: Error, operation: UnknownOperation) {
+        creationError = error.localizedDescription
         unknownOperation = operation
         unknownSessionID = (error as? UnknownSessionDeliveryError)?.sessionID
         unknownTaskID = (error as? UnknownTaskDeliveryError)?.taskID
@@ -267,6 +292,9 @@ final class NewConversationCoordinator: ObservableObject {
             if taskWasAccepted, let acceptedTaskID {
                 phase = .taskAccepted(taskID: acceptedTaskID)
                 persist(phase)
+            } else if skipsTaskCreation {
+                phase = .rejected(error.localizedDescription)
+                persist(.conversationOnly)
             } else {
                 phase = .rejected(error.localizedDescription)
                 persist(phase)
@@ -275,6 +303,7 @@ final class NewConversationCoordinator: ObservableObject {
         }
         let reason = error.localizedDescription
         var state: [String: Any] = ["phase": "deliveryUnknown", "reason": reason, "operation": operation.rawValue]
+        if skipsTaskCreation { state["skipsTaskCreation"] = true }
         if let creationRequestID { state["requestID"] = creationRequestID }
         if let acceptedTaskID { state["taskID"] = acceptedTaskID }
         if let unknownSessionID { state["sessionID"] = unknownSessionID }
@@ -286,7 +315,11 @@ final class NewConversationCoordinator: ObservableObject {
     private func restore() {
         guard let saved = defaults.dictionary(forKey: storageKey),
               let phaseName = saved["phase"] as? String else { return }
+        skipsTaskCreation = saved["skipsTaskCreation"] as? Bool ?? false
         switch phaseName {
+        case "conversationOnly":
+            skipsTaskCreation = true
+            phase = .conversationOnly
         case "taskAccepted":
             guard let taskID = saved["taskID"] as? String, !taskID.isEmpty else { return }
             taskWasAccepted = true
@@ -318,16 +351,19 @@ final class NewConversationCoordinator: ObservableObject {
         ]
         if let creationRequestID { state["requestID"] = creationRequestID }
         if let acceptedTaskID { state["taskID"] = acceptedTaskID }
+        if skipsTaskCreation { state["skipsTaskCreation"] = true }
+        // A reopened owner must assume unknown delivery. The live owner still has
+        // the request in flight and must not offer recovery before it settles.
         defaults.set(state, forKey: storageKey)
-        phase = .deliveryUnknown("创建结果未知，请先核对")
         unknownOperation = operation
         unknownSessionID = nil
         unknownTaskID = nil
     }
 
     private func persist(_ value: Phase) {
-        let saved: [String: Any]
+        var saved: [String: Any]
         switch value {
+        case .conversationOnly: saved = ["phase": "conversationOnly"]
         case .taskAccepted(let taskID): saved = ["phase": "taskAccepted", "taskID": taskID]
         case .accepted(let sessionID, let taskID):
             var state: [String: Any] = ["phase": "accepted", "sessionID": sessionID]
@@ -343,6 +379,7 @@ final class NewConversationCoordinator: ObservableObject {
             saved = state
         default: defaults.removeObject(forKey: storageKey); return
         }
+        if skipsTaskCreation { saved["skipsTaskCreation"] = true }
         defaults.set(saved, forKey: storageKey)
     }
 }

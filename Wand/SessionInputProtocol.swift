@@ -2,7 +2,7 @@ import Foundation
 
 /// Receipt timing never determines whether an input starts or joins the server queue.
 func structuredInputRequest(input: String) -> [String: Any] {
-    ["input": input, "respondImmediately": true]
+    ["input": input, "respondImmediately": true, "idempotencyKey": UUID().uuidString]
 }
 
 protocol SessionInputTransport {

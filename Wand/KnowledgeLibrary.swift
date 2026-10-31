@@ -2,9 +2,11 @@ import Foundation
 import Combine
 
 enum KnowledgeScope: String, CaseIterable, Codable, Identifiable {
-    case project, personal
+    case global, project, personal
     var id: String { rawValue }
-    var label: String { self == .project ? "项目知识库" : "个人知识库" }
+    var label: String {
+        switch self { case .global: "全局"; case .project: "项目"; case .personal: "个人" }
+    }
 }
 
 struct KnowledgeOwner: Decodable, Identifiable, Equatable {
@@ -17,6 +19,7 @@ struct KnowledgeOwner: Decodable, Identifiable, Equatable {
 struct KnowledgeOwners: Decodable {
     let employees: [KnowledgeOwner]
     let projects: [KnowledgeOwner]
+    var global: KnowledgeOwner? = nil
 }
 
 struct KnowledgeDocument: Decodable, Identifiable, Equatable {
@@ -32,6 +35,12 @@ struct KnowledgeDocument: Decodable, Identifiable, Equatable {
     var directoryName: String { folder.isEmpty ? "未分类" : folder }
 }
 
+struct KnowledgeCliSync: Decodable {
+    let provider: String
+    let path: String
+    let error: String?
+}
+
 struct KnowledgeLibraryPage: Decodable {
     let scope: KnowledgeScope
     let ownerId: String
@@ -40,6 +49,8 @@ struct KnowledgeLibraryPage: Decodable {
     let entries: [KnowledgeDocument]
     let total: Int
     let limit: Int
+    var cliSync: [KnowledgeCliSync]? = nil
+    var syncErrors: [String] { (cliSync ?? []).compactMap { item in item.error.map { "\(item.provider)：\($0)" } } }
 }
 
 struct KnowledgeDraft: Equatable {
@@ -138,7 +149,13 @@ extension WandAPI: KnowledgeService {
         self.service = service; self.scope = scope; self.ownerId = ownerId
     }
     var hasUnsavedChanges: Bool { draft?.isDirty == true }
-    var availableOwners: [KnowledgeOwner] { scope == .project ? owners?.projects ?? [] : owners?.employees ?? [] }
+    var availableOwners: [KnowledgeOwner] {
+        switch scope {
+        case .global: owners?.global.map { [$0] } ?? []
+        case .project: owners?.projects ?? []
+        case .personal: owners?.employees ?? []
+        }
+    }
     var ownerName: String { page?.ownerName ?? availableOwners.first(where: { $0.id == ownerId })?.name ?? "" }
     var readOnly: Bool { page?.readOnly == true || availableOwners.first(where: { $0.id == ownerId })?.isReadOnly == true }
     var selected: KnowledgeDocument? { page?.entries.first { $0.id == selectedID } }

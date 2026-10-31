@@ -813,6 +813,62 @@ private func composerMaximumChannelDelta(_ first: [Int], _ second: [Int]) -> Int
 }
 
 @MainActor final class InputOpeningTests: XCTestCase {
+    /// Exercise the actual chat layout with different window proposals, while keeping the
+    /// same view and draft mounted. This complements, but does not replace, device acceptance.
+    func testChatViewportFillsFourDisplaySizesAndPreservesDraft() async throws {
+        var candidateScene: UIWindowScene?
+        for _ in 0..<100 {
+            candidateScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+            if candidateScene != nil { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let scene = try XCTUnwrap(candidateScene)
+        let id = UUID().uuidString
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9")!, token: nil)
+        let seed = try JSONDecoder().decode(SessionSnapshot.self, from: Data("{\"id\":\"\(id)\",\"sessionKind\":\"structured\",\"status\":\"running\",\"title\":\"一条较长的会话标题用于验证不同设备空间\",\"structuredState\":{\"inFlight\":true},\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"检查消息阅读区域\"}]}]}".utf8))
+        let store = ChatStore(sessionId: id, api: api, drafts: SessionDraftStore(), initialSnapshot: seed)
+        store.composerDraft.text = "需要保留的草稿"
+        let host = UIHostingController(rootView: ChatView(sessionId: id, api: api, sharedStore: store,
+            initialSnapshot: seed).environment(\.usesSystemHomeNavigation, false))
+        host.safeAreaRegions = []
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; store.shutdown() }
+        func editors(_ view: UIView) -> [ComposerUITextView] {
+            (view as? ComposerUITextView).map { [$0] } ?? view.subviews.flatMap(editors)
+        }
+        func controls(_ view: UIView) -> [UIView] {
+            [view] + view.subviews.flatMap(controls)
+        }
+        let sizes: [(String, CGFloat, CGFloat)] = [
+            ("phone", 402, 874), ("folded", 466, 678),
+            ("open-landscape", 951, 669), ("open-portrait", 669, 951)
+        ]
+        var firstEditor: ComposerUITextView?
+        for (name, width, height) in sizes {
+            window.frame = CGRect(x: 0, y: 0, width: width, height: height)
+            host.traitOverrides.verticalSizeClass = width > height ? .compact : .regular
+            host.traitOverrides.horizontalSizeClass = width >= 640 && height >= 480 ? .regular : .compact
+            window.layoutIfNeeded(); host.view.setNeedsLayout(); host.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(400))
+            window.layoutIfNeeded(); host.view.layoutIfNeeded()
+            let editor = try XCTUnwrap(editors(host.view).first, name)
+            if let firstEditor { XCTAssertTrue(editor === firstEditor, name + ": editor instance changed") }
+            else { firstEditor = editor }
+            XCTAssertEqual(editor.text, "需要保留的草稿", name)
+            let editorFrame = editor.convert(editor.bounds, to: host.view)
+            let reading = try XCTUnwrap(composerAccessoryScrollViews(host.view).filter { $0.bounds.height > 100 }
+                .max { $0.bounds.height < $1.bounds.height }, name)
+            let readingFrame = reading.convert(reading.bounds, to: host.view)
+            XCTAssertEqual(readingFrame.width, width, accuracy: 2, name + ": unused horizontal space")
+            XCTAssertGreaterThan(readingFrame.height, height * 0.45, name + ": reading viewport too small")
+            XCTAssertGreaterThanOrEqual(readingFrame.minY, ChatTopLayout.controlsClearance - 1, name)
+            XCTAssertLessThanOrEqual(editorFrame.maxY, height + 1, name + ": editor is outside viewport")
+            XCTAssertGreaterThan(editorFrame.width, width * 0.8, name + ": composer does not use the width")
+            print("CHAT-LAYOUT \(name) reading=\(readingFrame) editor=\(editorFrame)")
+        }
+    }
+
     func testQueueRecoverySlotStaysBoundedWithAndWithoutPendingMessages() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
         let window = UIWindow(windowScene: scene)

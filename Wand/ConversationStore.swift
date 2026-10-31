@@ -47,6 +47,8 @@ final class ConversationOperation: ObservableObject {
 /// execution, permissions and queues; ComposerDraftState still owns all draft recovery.
 @MainActor
 final class ConversationStore: ObservableObject {
+    @Published var listFilters = ConversationListFilters()
+    @Published var listTier = ConversationListTier.all
     let api: WandAPI
     let service: any ConversationService
     @Published private(set) var items: [ConversationInstance] = []

@@ -44,10 +44,16 @@ struct ConversationListView: View {
     let onSwitchServer: () -> Void
     var taskGroups: [TaskDirectoryGroup] = []
     var onOpenSession: (String) -> Void = { _ in }
+    var taskGroupsLoading = false
+    var taskGroupsError: String?
+    var onReloadTaskGroups: () -> Void = {}
     @State private var revealedRowID: String?
     @State private var query = ""
     @State private var creating = false
-    @State private var tier = ConversationListTier.all
+    @State private var filtersOpen = false
+    @State private var filterDraft = ConversationListFilters()
+    @State private var viewportSize = CGSize(width: 320, height: 600)
+    @State private var tierDraft = ConversationListTier.all
     @State private var selecting = false
     @State private var selected = Set<String>()
     @State private var deleteIDs: Set<String> = []
@@ -58,20 +64,56 @@ struct ConversationListView: View {
     @Environment(\.accessibilityReduceMotion) private var reduced
     @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
     private var creationOpen: Bool { creating || store.creatingPresetID != nil }
+    private var tier: ConversationListTier { store.listTier }
+    private var filters: ConversationListFilters { store.listFilters }
+    private var filterCount: Int { filters.count + (tier == .all ? 0 : 1) }
     private var rows: [ConversationInstance] {
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return store.items.filter { tier.contains($0) && (term.isEmpty || $0.title.localizedCaseInsensitiveContains(term)
-            || $0.preview.localizedCaseInsensitiveContains(term) || $0.tasks.contains { $0.task.title.localizedCaseInsensitiveContains(term) }) }
+        store.items.filter { item in
+            guard tier.contains(item) else { return false }
+            if item.kind == "dm" {
+                if !personSessions(item.peerEmployeeId).isEmpty { return true }
+                return filters.isDefault && HomePresentation.matches(query, [item.title, item.preview])
+            }
+            if !matchingGroupTasks(item).isEmpty || !groupSessions(item).isEmpty { return true }
+            return filters.isDefault && HomePresentation.matches(query, [item.title, item.preview])
+        }
+    }
+    private var workspaceOptions: [ConversationWorkspaceOption] {
+        var seen = Set<String>()
+        return taskGroups.filter { $0.isBindableProject && seen.insert($0.workspaceId).inserted }
+            .map { ConversationWorkspaceOption(id: $0.workspaceId, title: $0.workspaceName) }
+            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+    private func workspaceTitle(_ workspace: ConversationWorkspaceFilter) -> String {
+        switch workspace {
+        case .all: return "全部工作区"
+        case .unassigned: return "未分配工作区"
+        case .unknown: return "工作区未知"
+        case .workspace(let id): return workspaceOptions.first { $0.id == id }?.title ?? "工作区不可用（\(id)）"
+        }
+    }
+    private var filterSummary: String {
+        var parts: [String] = []
+        if filters.stage != .all { parts.append(filters.stage.title) }
+        if filters.workspace != .all { parts.append(workspaceTitle(filters.workspace)) }
+        if filters.archive != .all { parts.append(filters.archive.title) }
+        if filters.activeOnly { parts.append("只看活动会话") }
+        if tier != .all { parts.append(tier.title) }
+        return parts.joined(separator: " · ")
+    }
+    private func clearFilters() { store.listFilters = ConversationListFilters(); store.listTier = .all }
+    private func openFilters() {
+        filterDraft = filters; tierDraft = tier; revealedRowID = nil; filtersOpen = true
     }
     private var emptyState: ConversationListEmptyState {
-        .resolve(query: query, totalCount: store.items.count, defaultFilter: tier == .all)
+        .resolve(query: query, totalCount: store.items.count, defaultFilter: filterCount == 0)
     }
     private func recoverEmptyList() {
         switch emptyState {
         case .empty: creating = true; searchFocused = false
         case .search: query = ""; searchFocused = true
-        case .filtered: query = ""; tier = .all; searchFocused = false
-        case .historyOnly: tier = .dissolved; searchFocused = false
+        case .filtered: clearFilters()
+        case .historyOnly: store.listTier = .dissolved; searchFocused = false
         }
     }
     var body: some View {
@@ -87,6 +129,13 @@ struct ConversationListView: View {
                         Button("重试加载对话") { Task { await store.refresh() } }.frame(minHeight: 44)
                     }.listRowBackground(Color.clear)
                 }
+                if taskGroupsLoading { ProgressView("正在加载任务关联").listRowBackground(Color.clear) }
+                if let error = taskGroupsError {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("任务关联加载失败：" + error).font(.caption).foregroundStyle(Theme.danger)
+                        Button("重试加载任务关联", action: onReloadTaskGroups).frame(minHeight: 44)
+                    }.listRowBackground(Color.clear)
+                }
                 if !store.pendingRequests.isEmpty {
                     Section("未确认请求") {
                         ForEach(store.pendingRequests, id: \.self) { request in
@@ -98,13 +147,20 @@ struct ConversationListView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         row(item)
                         if expandedPeople.contains(item.id) || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            ForEach(personSessions(item.peerEmployeeId)) { session in
+                            ForEach(item.kind == "dm" ? personSessions(item.peerEmployeeId) : groupSessions(item)) { session in
                                 Button { onOpenSession(session.session.id) } label: {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(session.session.title ?? "会话").font(.subheadline).lineLimit(1)
-                                        Text(session.session.status ?? "").font(.caption).foregroundStyle(Theme.textSecondary)
-                                    }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).padding(.leading, 56)
-                                }.buttonStyle(.plain).accessibilityLabel("继续会话：\(session.session.title ?? "会话")")
+                                    sessionLabel(session).padding(.leading, 56)
+                                }.buttonStyle(.plain).accessibilityLabel("继续会话：\(session.session.title ?? "会话")，\(session.filterCaption)")
+                            }
+                            if item.kind == "group" {
+                                ForEach(matchingGroupTasks(item)) { task in
+                                    Button { onSelect(item.id) } label: {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(task.task.title).font(.subheadline).lineLimit(1)
+                                            Text(task.filterCaption(in: taskGroups)).font(.caption).foregroundStyle(Theme.textSecondary)
+                                        }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).padding(.leading, 56)
+                                    }.buttonStyle(.plain)
+                                }
                             }
                         }
                     }.tag(item.id)
@@ -118,7 +174,7 @@ struct ConversationListView: View {
                             Button { onSelect(ConversationStore.employeeID(person.id)) } label: {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(person.name).font(.headline).lineLimit(1)
-                                    Text(person.preview).font(.subheadline).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                                    Text("\(personSessions(person.id).count) 条匹配会话").font(.subheadline).foregroundStyle(Theme.textSecondary).lineLimit(1)
                                 }.frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
                             }.buttonStyle(.plain).accessibilityLabel("打开\(person.name)的私聊")
                             Button {
@@ -131,7 +187,7 @@ struct ConversationListView: View {
                         if expandedPeople.contains(ConversationStore.employeeID(person.id)) || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             ForEach(personSessions(person.id)) { session in
                                 Button { onOpenSession(session.session.id) } label: {
-                                    Text(session.session.title ?? "会话").frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).padding(.leading, 28)
+                                    sessionLabel(session).padding(.leading, 28)
                                 }.buttonStyle(.plain)
                             }
                         }
@@ -141,12 +197,12 @@ struct ConversationListView: View {
                     Section("其他会话") {
                         ForEach(unboundSessions) { session in
                             Button { onOpenSession(session.session.id) } label: {
-                                Text(session.session.title ?? "会话").frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                sessionLabel(session)
                             }.buttonStyle(.plain)
                         }
                     }
                 }
-                if rows.isEmpty && unboundSessions.isEmpty && !store.loading && store.error == nil {
+                if rows.isEmpty && sessionOnlyPeople.isEmpty && unboundSessions.isEmpty && !store.loading && !taskGroupsLoading && store.error == nil && taskGroupsError == nil {
                     ContentUnavailableView {
                         Label(emptyState.title, systemImage: emptyState.symbol)
                     } description: {
@@ -163,6 +219,7 @@ struct ConversationListView: View {
             .environment(\.editMode, .constant(selecting ? .active : .inactive))
             .refreshable { revealedRowID = nil; creating = false; await store.refresh() }
             .onChange(of: tier) { _, _ in selected = []; selecting = false; creating = false }
+            .onChange(of: filters) { _, _ in selected = []; selecting = false; revealedRowID = nil }
             if selecting {
                 HStack {
                     Button("完成") { selected = []; selecting = false }
@@ -184,6 +241,7 @@ struct ConversationListView: View {
             }
         }
         .background(Theme.background.ignoresSafeArea())
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { viewportSize = $0 }
         .navigationTitle(usesSystemNavigation ? (tier == .all ? "聊天" : tier.title) : "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(usesSystemNavigation ? .visible : .hidden, for: .navigationBar)
@@ -199,7 +257,12 @@ struct ConversationListView: View {
             }
         }
         .animation(reduced ? nil : WandMotion.expansion, value: creationOpen)
+        .onDisappear { filtersOpen = false }
+        .onChange(of: filtersOpen) { _, open in
+            if !open { filterDraft = filters; tierDraft = tier }
+        }
         .onKeyPress(.escape) {
+            if filtersOpen { filtersOpen = false; return .handled }
             if creationOpen { creating = false; store.creatingPresetID = nil; return .handled }
             if selecting { selected = []; selecting = false; return .handled }
             if !query.isEmpty || searchFocused { query = ""; searchFocused = false; return .handled }
@@ -235,13 +298,39 @@ struct ConversationListView: View {
                     .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
             }
             if !creationOpen {
-                HomeSearchField(placeholder: "搜索聊天或任务", text: $query, focused: $searchFocused)
+                HStack(spacing: 8) {
+                    HomeSearchField(placeholder: "搜索聊天或任务", text: $query, focused: $searchFocused)
+                    Button(action: openFilters) {
+                        VStack(spacing: 0) {
+                            Image(systemName: "line.3.horizontal.decrease")
+                            Text(filterCount == 0 ? "筛选" : "\(filterCount)").font(.caption2)
+                        }.frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(WandQuietButtonStyle())
+                    .accessibilityLabel(filterCount == 0 ? "筛选对话" : "筛选对话，\(filterCount) 项生效")
+                    .popover(isPresented: $filtersOpen, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
+                        ConversationFilterPanel(draft: $filterDraft, tier: $tierDraft, workspaces: workspaceOptions,
+                            availableSize: viewportSize, onCancel: { filtersOpen = false }, onApply: {
+                                store.listFilters = filterDraft; store.listTier = tierDraft; filtersOpen = false
+                            })
+                            .frame(width: min(340, max(240, viewportSize.width - 32)))
+                            .presentationCompactAdaptation(.popover)
+                    }
+                }
+                if filterCount > 0 {
+                    HStack {
+                        Text(filterSummary).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                            .accessibilityLabel(filterSummary)
+                        Spacer(minLength: 4)
+                        Button("清除", action: clearFilters).font(.caption).frame(minWidth: 44, minHeight: 44)
+                    }
+                }
             }
         }.padding(.horizontal, WandLayout.pageInset).padding(.vertical, 4)
     }
     @ViewBuilder private var headerMenuItems: some View {
         Menu {
-            Picker("消息范围", selection: $tier) {
+            Picker("消息范围", selection: $store.listTier) {
                 ForEach(ConversationListTier.allCases, id: \.self) { option in
                     Text(option == .all ? "全部消息" : option.title).tag(option)
                 }
@@ -270,22 +359,47 @@ struct ConversationListView: View {
     }
 
     private var workSessions: [HomeRecentConversation] {
-        HomePresentation.conversations(taskGroups).filter { $0.session.teamChat == nil }
+        guard taskGroupsError == nil else { return [] }
+        let groupSessionIDs = Set(store.items.filter { $0.kind == "group" }
+            .flatMap { [$0.sessionId, $0.communicationSessionId].compactMap { $0 } })
+        return HomePresentation.conversations(taskGroups, includeArchived: true).filter {
+            $0.session.teamChat == nil && !groupSessionIDs.contains($0.id) && filters.matches($0.filterFacts(employees: store.employees), query: query)
+        }
+    }
+    private func groupSessions(_ item: ConversationInstance) -> [HomeRecentConversation] {
+        guard taskGroupsError == nil, item.tasks.isEmpty else { return [] }
+        let ids = Set([item.sessionId, item.communicationSessionId].compactMap { $0 })
+        return HomePresentation.conversations(taskGroups, includeArchived: true).filter {
+            ids.contains($0.id) && filters.matches($0.filterFacts(employees: store.employees), query: query)
+        }
+    }
+    private func matchingGroupTasks(_ item: ConversationInstance) -> [ConversationTask] {
+        guard item.kind == "group" else { return [] }
+        return item.tasks.filter { $0.matchesFilters(filters, query: query, conversationTitle: item.title, groups: taskGroups) }
+    }
+    private func sessionLabel(_ item: HomeRecentConversation) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(item.session.title ?? "会话").font(.subheadline).lineLimit(1)
+            Text(item.filterCaption).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                .accessibilityLabel(item.filterCaption)
+        }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
     }
     private func personSessions(_ employeeId: String?) -> [HomeRecentConversation] {
         guard let employeeId else { return [] }
+        guard tier == .all || tier == .dm else { return [] }
         return workSessions.filter { $0.session.employeeId == employeeId }
     }
     private var unboundSessions: [HomeRecentConversation] {
-        workSessions.filter { $0.session.employeeId == nil }
+        (tier == .all ? workSessions : []).filter { $0.session.employeeId == nil }
     }
-    private var sessionOnlyPeople: [(id: String, name: String, preview: String)] {
+    private var sessionOnlyPeople: [(id: String, name: String)] {
+        guard tier == .all || tier == .dm else { return [] }
         let owned = Set(store.items.compactMap { $0.kind == "dm" ? $0.peerEmployeeId : nil })
         var seen = Set<String>()
-        var rows: [(String, String, String)] = []
+        var rows: [(String, String)] = []
         for item in workSessions {
             guard let employeeId = item.session.employeeId, !owned.contains(employeeId), seen.insert(employeeId).inserted else { continue }
-            rows.append((employeeId, item.session.employeeName ?? "员工", item.session.title ?? "有工作会话，尚未开始私聊"))
+            rows.append((employeeId, item.session.employeeName ?? "员工"))
         }
         return rows
     }
@@ -309,11 +423,14 @@ struct ConversationListView: View {
                         if item.pinnedAt != nil { Image(systemName: "pin.fill").font(.system(size: 12)).foregroundStyle(Theme.textSecondary).accessibilityLabel("已置顶") }
                     }
                     Text(item.unavailableReason ?? item.preview).font(.subheadline).foregroundStyle(Theme.textSecondary).lineLimit(2)
+                    if item.kind == "dm" {
+                        Text("\(personSessions(item.peerEmployeeId).count) 条匹配会话").font(.caption).foregroundStyle(Theme.textSecondary)
+                    }
                     if let external = item.external { Text(external.statusText).font(.caption).foregroundStyle(Theme.textSecondary) }
-                    else if item.kind == "group" { Text("\(item.team?.members.count ?? 0) 人 · \(item.tasks.count) 项任务").font(.caption).foregroundStyle(Theme.textSecondary) }
+                    else if item.kind == "group" { Text("\(item.team?.members.count ?? 0) 人 · \(matchingGroupTasks(item).count) 项匹配任务").font(.caption).foregroundStyle(Theme.textSecondary) }
                 }.frame(maxWidth: .infinity, minHeight: 56, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(WandQuietButtonStyle(tint: Theme.textPrimary))
-            if item.kind == "dm" && !personSessions(item.peerEmployeeId).isEmpty {
+            if !personSessions(item.peerEmployeeId).isEmpty || (item.kind == "group" && (!matchingGroupTasks(item).isEmpty || !groupSessions(item).isEmpty)) {
                 Button {
                     if expandedPeople.contains(item.id) { expandedPeople.remove(item.id) } else { expandedPeople.insert(item.id) }
                 } label: {
@@ -341,6 +458,174 @@ struct ConversationListView: View {
             for id in ids { do { try await store.remove(id) } catch { failed.insert(id); store.reportError(error.localizedDescription) } }
             selected = failed; selecting = !failed.isEmpty; batchBusy = false
         }
+    }
+}
+
+/// Native popover owns outside-tap dismissal; only Apply writes the endpoint-scoped filters.
+private struct ConversationFilterPanel: View {
+    @Binding var draft: ConversationListFilters
+    @Binding var tier: ConversationListTier
+    let workspaces: [ConversationWorkspaceOption]
+    let availableSize: CGSize
+    let onCancel: () -> Void
+    let onApply: () -> Void
+    @State private var workspaceOpen = false
+
+    private var workspaceTitle: String {
+        switch draft.workspace {
+        case .all: return "全部工作区"
+        case .unassigned: return "未分配工作区"
+        case .unknown: return "工作区未知"
+        case .workspace(let id): return workspaces.first { $0.id == id }?.title ?? "工作区不可用（\(id)）"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 8) {
+                Button("取消", action: onCancel).frame(minWidth: 44, minHeight: 44)
+                Text("筛选对话").font(.headline).lineLimit(1).frame(maxWidth: .infinity)
+                Button("重置") { draft = ConversationListFilters(); tier = .all }
+                    .frame(minWidth: 44, minHeight: 44)
+            }.buttonStyle(WandQuietButtonStyle())
+            primaryFields
+            secondaryFields
+            Divider()
+            Button(action: onApply) {
+                Text("应用筛选").frame(maxWidth: .infinity, minHeight: 44)
+            }.buttonStyle(.borderedProminent)
+        }
+        .padding(12)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Theme.background)
+        .onDisappear { workspaceOpen = false }
+        .onKeyPress(.escape) {
+            if workspaceOpen { workspaceOpen = false } else { onCancel() }
+            return .handled
+        }
+    }
+
+    /// Keep all three peer fields in one row, including accessibility text sizes.
+    /// Values truncate visually rather than moving a field below the fold; VoiceOver gets full values.
+    private var primaryFields: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Menu {
+                Picker("任务状态", selection: $draft.stage) {
+                    ForEach(ConversationTaskStage.options, id: \.self) { Text($0.title).tag($0) }
+                }
+            } label: { fieldLabel("状态", value: draft.stage.title) }
+                .accessibilityLabel("任务状态").accessibilityValue(draft.stage.title)
+                .accessibilityIdentifier("conversation-filter-stage")
+                .frame(minWidth: 0, maxWidth: .infinity)
+            Button { workspaceOpen = true } label: { fieldLabel("工作区", value: workspaceTitle) }
+                .accessibilityLabel("工作区").accessibilityValue(workspaceTitle)
+                .accessibilityIdentifier("conversation-filter-workspace")
+                .frame(minWidth: 0, maxWidth: .infinity)
+                .popover(isPresented: $workspaceOpen, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
+                    ConversationWorkspaceFilterPicker(selection: $draft.workspace, workspaces: workspaces,
+                        onClose: { workspaceOpen = false })
+                        .frame(width: min(340, max(240, availableSize.width - 32)))
+                        .frame(idealHeight: min(420, max(180, availableSize.height - 100)),
+                               maxHeight: min(420, max(180, availableSize.height - 100)))
+                        .presentationCompactAdaptation(.popover)
+                }
+            Menu {
+                Picker("归档范围", selection: $draft.archive) {
+                    ForEach(ConversationArchiveScope.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+            } label: { fieldLabel("归档", value: draft.archive.title) }
+                .accessibilityLabel("归档范围").accessibilityValue(draft.archive.title)
+                .accessibilityIdentifier("conversation-filter-archive")
+                .frame(minWidth: 0, maxWidth: .infinity)
+        }.buttonStyle(WandQuietButtonStyle())
+    }
+
+    private var secondaryFields: some View {
+        HStack(spacing: 12) {
+            Menu {
+                Picker("消息范围", selection: $tier) {
+                    ForEach(ConversationListTier.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("消息 · \(tier.title)").lineLimit(1)
+                    Image(systemName: "chevron.down").font(.caption2)
+                }.font(.caption).frame(minWidth: 44, maxWidth: .infinity, minHeight: 44)
+            }.buttonStyle(WandQuietButtonStyle())
+                .accessibilityLabel("消息范围").accessibilityValue(tier.title)
+            Toggle(isOn: $draft.activeOnly) { Text("活动").font(.caption).lineLimit(1) }
+                .toggleStyle(.switch).frame(minWidth: 0, maxWidth: .infinity, minHeight: 44)
+                .accessibilityLabel("只看活动会话")
+        }
+    }
+
+    private func fieldLabel(_ title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption.weight(.semibold)).lineLimit(1)
+            HStack(spacing: 4) {
+                Text(value).font(.caption).lineLimit(1).truncationMode(.tail)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.down").font(.caption2).accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 6).padding(.vertical, 8)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+    }
+}
+
+/// Nested native presentation: selecting/searching affects only the parent's draft.
+/// Back, outside-tap and Escape dismiss this selector first, not the filter panel.
+private struct ConversationWorkspaceFilterPicker: View {
+    @Binding var selection: ConversationWorkspaceFilter
+    let workspaces: [ConversationWorkspaceOption]
+    let onClose: () -> Void
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Button("返回", systemImage: "chevron.left", action: onClose)
+                    .buttonStyle(WandQuietButtonStyle())
+                Text("工作区").font(.headline).lineLimit(1).frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            HomeSearchField(placeholder: "搜索工作区", text: $query, focused: $searchFocused,
+                identifier: "conversation-filter-workspace-search")
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    choice("全部工作区", value: .all)
+                    choice("未分配工作区", value: .unassigned)
+                    if case .workspace(let id) = selection, !workspaces.contains(where: { $0.id == id }) {
+                        Text("所选工作区不可用（\(id)），可重新选择或返回重置。")
+                            .font(.caption).foregroundStyle(Theme.warning)
+                    }
+                    ForEach(workspaces.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }) { option in
+                        choice(option.title, value: .workspace(option.id))
+                    }
+                }
+            }.scrollDismissesKeyboard(.interactively)
+        }
+        .padding(12)
+        .background(Theme.background)
+        .onKeyPress(.escape) { onClose(); return .handled }
+    }
+
+    private func choice(_ title: String, value: ConversationWorkspaceFilter) -> some View {
+        Button {
+            selection = value
+            onClose()
+        } label: {
+            HStack(spacing: 12) {
+                Text(title).foregroundStyle(Theme.textPrimary).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Image(systemName: selection == value ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selection == value ? Theme.brand : Theme.textSecondary)
+            }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+        }.buttonStyle(WandQuietButtonStyle())
+            .accessibilityAddTraits(selection == value ? .isSelected : [])
     }
 }
 

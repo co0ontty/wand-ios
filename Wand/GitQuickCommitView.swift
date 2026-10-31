@@ -34,36 +34,65 @@ final class QuickCommitFeedbackController: ObservableObject {
 }
 
 /// The compact Git action now lives in the same native symbol menu as files.
-/// Keep the original visibility and in-flight gate when projecting it into a palette.
+///
+/// 入口的可达性只由「会话有没有工作目录」和「这里确定不是 git 仓库」决定：
+/// 工作区干净、还没取到状态、取状态失败都仍然给入口，点开后面板自己解释状态并重试。
+/// 以前这里按「有改动才出现」门控，工作区一干净入口就消失，等于 git 页打不开。
 struct GitQuickCommitMenuAction {
     let status: GitStatusResult?
     var phase: QuickCommitToolbarPhase = .idle
+    /// 会话有工作目录才提供入口；状态未知不影响能否打开。
+    var hasCwd = true
     let action: () -> Void
 
     var item: SessionMenuAction? {
         guard shouldShow else { return nil }
-        return SessionMenuAction(id: "git", title: accessibilityLabel,
-            symbol: phase == .done ? "checkmark" : phase == .loading ? "hourglass" : "arrow.triangle.branch",
+        return SessionMenuAction(id: "git", title: title, symbol: symbol,
             isEnabled: phase == .idle, action: action)
     }
 
+    /// 只有「确认不是 git 仓库且读取没有报错」才隐藏：目录被删、权限或命令失败时
+    /// 仍保留入口，让用户能打开面板看到原因并重试。
     private var shouldShow: Bool {
-        guard status?.isGit == true || phase != .idle else { return false }
-        return phase != .idle || totalChanges > 0 || (status?.ahead ?? 0) > 0
+        guard hasCwd else { return false }
+        if phase != .idle { return true }
+        guard let status else { return true }
+        if status.isGit { return true }
+        return !(status.error ?? "").isEmpty
     }
 
     private var totalChanges: Int {
         counts.modified + counts.deleted + counts.added
     }
 
-    private var accessibilityLabel: String {
+    private var symbol: String {
+        switch phase {
+        case .loading: return "hourglass"
+        case .done: return "checkmark"
+        case .idle: return "arrow.triangle.branch"
+        }
+    }
+
+    private var title: String {
         switch phase {
         case .loading:
             return "快捷提交执行中"
         case .done:
             return "快捷提交完成"
         case .idle:
-            return "变更与提交，修改 \(counts.modified)，删除 \(counts.deleted)，新增 \(counts.added)，未推送 \(status?.ahead ?? 0)"
+            guard let status else { return "变更与提交，正在读取 git 状态" }
+            guard status.isGit else {
+                let reason = (status.error ?? "").isEmpty ? "当前目录不是 git 仓库" : "git 状态读取失败"
+                return "变更与提交，\(reason)"
+            }
+            let ahead = status.ahead ?? 0
+            let worktrees = status.worktreeCount ?? 0
+            if totalChanges == 0 && ahead == 0 {
+                return worktrees > 0
+                    ? "变更与提交，工作区干净，\(worktrees) 个 Worktree"
+                    : "变更与提交，工作区干净"
+            }
+            return "变更与提交，修改 \(counts.modified)，删除 \(counts.deleted)，新增 \(counts.added)，未推送 \(ahead)"
         }
     }
 
@@ -122,8 +151,10 @@ struct GitQuickCommitView: View {
     @State private var committing = false
     @State private var autoGenerating = false
     @State private var submoduleIntent = false
-    @State private var archiveRelatedTasks = false
+    @State private var mergingWorktrees = false
     @State private var errorMessage: String?
+    @State private var worktreeFeedback: String?
+    @State private var worktreeSummary: String?
 
     // 结果
     @State private var outcome: CommitOutcome?
@@ -163,11 +194,20 @@ struct GitQuickCommitView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     headerSubtitle
-                    statusFilesSection
-                    if outcome != nil {
-                        resultPanel
+                    if status?.isGit == true {
+                        if let statusError {
+                            staleStatusNotice(statusError)
+                        }
+                        statusFilesSection
+                        if outcome != nil {
+                            resultPanel
+                        } else {
+                            formPanel
+                        }
+                    } else if statusLoading && status == nil {
+                        statusLoadingCard
                     } else {
-                        formPanel
+                        statusUnavailableCard
                     }
                 }
                 .padding(20)
@@ -257,36 +297,104 @@ struct GitQuickCommitView: View {
     // MARK: - 头部与状态
 
     @ViewBuilder private var headerSubtitle: some View {
-        if statusLoading && status == nil {
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("读取 git 状态…")
-                    .font(.wand(size: 13))
-                    .foregroundColor(Theme.textSecondary)
-            }
-        } else if let statusError {
-            Text(statusError)
-                .font(.footnote)
+        if let s = status, s.isGit {
+            let count = s.modifiedCount ?? 0
+            let parts: [String] = [
+                s.branch ?? "(no branch)",
+                count > 0 ? "\(count) 个改动" : "工作区干净",
+            ]
+            + ((s.ahead ?? 0) > 0 ? ["↑\(s.ahead ?? 0)"] : [])
+            + ((s.behind ?? 0) > 0 ? ["↓\(s.behind ?? 0)"] : [])
+            Text(parts.joined(separator: " · "))
+                .font(.wand(size: 12, design: .monospaced))
+                .foregroundColor(Theme.textSecondary)
+                .lineLimit(1)
+        }
+    }
+
+    private var statusLoadingCard: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text("正在读取 git 状态…")
+                .font(.wand(size: 13))
+                .foregroundColor(Theme.textSecondary)
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.border, lineWidth: 1))
+    }
+
+    /// 已经拿到过状态、但这次刷新失败：保留面板里的旧数据，只提示这次没刷新到。
+    private func staleStatusNotice(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(Theme.danger)
-        } else if let s = status {
-            if !s.isGit {
-                Text("当前会话目录不是 git 仓库")
+            Text("刷新失败，显示的是上一次状态：\(message)")
+                .font(.wand(size: 11))
+                .foregroundColor(Theme.textSecondary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            Button("重试") { Task { await loadStatus(force: true) } }
+                .font(.wand(size: 11, weight: .semibold))
+                .foregroundColor(Theme.brand)
+                .disabled(statusLoading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.danger.opacity(0.08)))
+    }
+
+    /// 读不到状态时不能只给一句错误：目录被删、临时失败、真不是仓库要分开说，
+    /// 并且始终留一个原地重试，不让入口“点进来就到底”。
+    private var statusUnavailableCard: some View {
+        let failure = statusError ?? status?.error
+        let notRepository = status?.isGit == false && (failure ?? "").isEmpty
+        let title = notRepository ? "当前会话目录不是 git 仓库" : "暂时读不到 git 状态"
+        let detail = notRepository
+            ? "这个会话的工作目录没有 git 仓库，提交与推送无从谈起。换一个仓库里的会话再试。"
+            : (failure ?? "请求没有拿到结果，可能是网络或服务端临时失败。")
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: notRepository ? "folder.badge.questionmark" : "exclamationmark.triangle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(notRepository ? Theme.textSecondary : Theme.danger)
+                Text(title)
+                    .font(.wand(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                Spacer(minLength: 0)
+            }
+            Text(detail)
+                .font(.wand(size: 12))
+                .foregroundColor(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button {
+                    Task { await loadStatus(force: true) }
+                } label: {
+                    HStack(spacing: 6) {
+                        if statusLoading { ProgressView().controlSize(.small) }
+                        Text(statusLoading ? "重试中…" : "重试")
+                            .font(.wand(size: 13, weight: .semibold))
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.glass).buttonBorderShape(.capsule).tint(Theme.brand)
+                .foregroundColor(Theme.brand)
+                .disabled(statusLoading)
+                Button("关闭") { dismiss() }
                     .font(.wand(size: 13))
                     .foregroundColor(Theme.textSecondary)
-            } else {
-                let count = s.modifiedCount ?? 0
-                let parts: [String] = [
-                    s.branch ?? "(no branch)",
-                    count > 0 ? "\(count) 个改动" : "工作区干净",
-                ]
-                + ((s.ahead ?? 0) > 0 ? ["↑\(s.ahead ?? 0)"] : [])
-                + ((s.behind ?? 0) > 0 ? ["↓\(s.behind ?? 0)"] : [])
-                Text(parts.joined(separator: " · "))
-                    .font(.wand(size: 12, design: .monospaced))
-                    .foregroundColor(Theme.textSecondary)
-                    .lineLimit(1)
             }
         }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .stroke(notRepository ? Theme.border : Theme.danger.opacity(0.35), lineWidth: 1))
     }
 
     @ViewBuilder private var statusFilesSection: some View {
@@ -404,66 +512,24 @@ struct GitQuickCommitView: View {
                 .foregroundColor(Theme.danger)
         }
 
-        // 磁吸 dock（提交中替换为 busy 面板）
-        if committing {
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text(busyLabel)
-                    .font(.wand(size: 13))
-                    .foregroundColor(Theme.textSecondary)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 64)
-            .background(RoundedRectangle(cornerRadius: 14).fill(Theme.surface))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border, lineWidth: 1))
-        } else {
-            Toggle(isOn: $archiveRelatedTasks) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("归档当前任务")
-                        .font(.wand(size: 13, weight: .medium))
-                    Text("提交成功后把这个会话的任务移出列表。其它进行中的任务不动。")
-                        .font(.wand(size: 11))
-                        .foregroundColor(Theme.textSecondary)
-                }
-            }
-            .disabled(!hasChanges || committing)
-            .tint(Theme.brand)
+        MagneticDockView(
+            hasChanges: hasChanges,
+            hasSubmodule: status?.hasSubmodule == true,
+            hasWorktrees: (status?.worktreeCount ?? 0) > 0,
+            ahead: status?.ahead ?? 0,
+            busy: committing || mergingWorktrees || generating || pushing,
+            feedback: committing ? busyLabel : pushing ? "推送中…" : worktreeFeedback,
+            onAction: { action, sub in submit(action: action, includeSubmodule: sub) },
+            onWorktree: mergeWorktrees,
+            onPush: pushCommitsOnly
+        )
+        .frame(height: 200)
 
-            MagneticDockView(
-                hasChanges: hasChanges,
-                hasSubmodule: status?.hasSubmodule == true,
-                onAction: { action, sub in submit(action: action, includeSubmodule: sub) }
-            )
-            .frame(height: 170)
-
-            Text(hasChanges
-                ? "拖动磁吸组合 · 丢进提交区执行 · 单击直接执行该项"
-                    + (archiveRelatedTasks ? "\n本次会归档当前任务" : "")
-                    + (status?.hasSubmodule == true ? "\nSub 球可选，纳入后递归处理 submodule" : "")
-                : "工作区干净，无可提交")
-                .font(.wand(size: 11))
-                .foregroundColor(Theme.textSecondary.opacity(0.8))
-        }
-
-        // 工作区干净但本地领先远端：dock 无事可做，给一个「仅推送」直达按钮。
-        if !hasChanges, let ahead = status?.ahead, ahead > 0, !committing {
-            Button(action: pushCommitsOnly) {
-                HStack(spacing: 8) {
-                    if pushing { ProgressView().controlSize(.small) }
-                    Text(pushing ? "推送中…" : "推送 ↑\(ahead) 个待推 commit")
-                        .font(.wand(size: 13, weight: .medium))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 12).stroke(Theme.brand.opacity(0.5), lineWidth: 1))
-            }
-            .foregroundColor(Theme.brand)
-            .disabled(pushing)
-            if let pushError {
-                Text(pushError).font(.footnote).foregroundColor(Theme.danger)
-            }
-        }
+        Text(worktreeFeedback == "已完成"
+            ? worktreeSummary ?? "已合并并推送"
+            : "点按气泡执行，拖动气泡组合后丢进提交区。Worktree：合并全部工作树到当前分支并推送。")
+            .font(.wand(size: 11))
+            .foregroundColor(Theme.textSecondary)
     }
 
     private var busyLabel: String {
@@ -663,13 +729,12 @@ struct GitQuickCommitView: View {
     /// action ∈ {commit, commit-tag, commit-push, commit-tag-push}，与网页一致；
     /// includeSubmodule 是正交 scope flag。
     private func submit(action: String, includeSubmodule: Bool) {
-        guard !committing, hasChanges else { return }
+        guard !committing, !mergingWorktrees, !generating, hasChanges else { return }
         let withTag = action == "commit-tag" || action == "commit-tag-push"
         let push = action == "commit-push" || action == "commit-tag-push"
         let userTag = withTag ? tagName.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         let msg = message.trimmingCharacters(in: .whitespacesAndNewlines)
         let before = status
-        let archiveIntent = archiveRelatedTasks
 
         committing = true
         onRunning()
@@ -686,13 +751,11 @@ struct GitQuickCommitView: View {
                     tag: userTag.isEmpty ? nil : userTag,
                     autoTag: withTag && userTag.isEmpty,
                     push: push,
-                    submodule: includeSubmodule,
-                    archiveRelatedTasks: archiveIntent
+                    submodule: includeSubmodule
                 )
                 if !(r.archivedTaskIds ?? []).isEmpty {
                     api.taskChanges.send()
                 }
-                let archiveNote = archiveResultNote(requested: archiveIntent, result: r)
                 let o = CommitOutcome(
                     includeSubmodule: includeSubmodule,
                     pushed: r.pushed == true,
@@ -706,11 +769,11 @@ struct GitQuickCommitView: View {
                     submoduleCount: r.submoduleCommits?.count ?? 0
                 )
                 if push && o.pushError == nil {
-                    onCompleted(summaryText(o) + "，已推送" + archiveNote)
+                    onCompleted(summaryText(o) + "，已推送")
                 } else if let pushError = o.pushError {
-                    onFailed("推送失败：\(pushError)" + archiveNote)
+                    onFailed("推送失败：\(pushError)")
                 } else {
-                    onCompleted(summaryText(o) + archiveNote)
+                    onCompleted(summaryText(o))
                 }
             } catch {
                 errorMessage = error.localizedDescription
@@ -718,6 +781,35 @@ struct GitQuickCommitView: View {
             }
             committing = false
             autoGenerating = false
+        }
+    }
+
+    private func mergeWorktrees() {
+        guard !mergingWorktrees, !committing, !pushing,
+              let branch = status?.branch, let head = status?.head else { return }
+        mergingWorktrees = true
+        worktreeFeedback = "合并并推送中…"
+        errorMessage = nil
+        onRunning()
+        Task {
+            do {
+                let result = try await api.mergeWorktrees(sessionId: sessionId, branch: branch, head: head)
+                if result.ok && result.pushed {
+                    worktreeFeedback = "已完成"
+                    worktreeSummary = "已合并 \(result.mergedBranches.count) 个 Worktree 到 \(result.targetBranch) 并推送"
+                    onCompleted("已合并 \(result.mergedBranches.count) 个 Worktree 到 \(result.targetBranch) 并推送")
+                } else {
+                    worktreeFeedback = "操作失败"
+                    errorMessage = result.error ?? "合并或推送未完成"
+                    onFailed(errorMessage ?? "合并失败")
+                }
+            } catch {
+                worktreeFeedback = "操作失败"
+                errorMessage = error.localizedDescription
+                onFailed(error.localizedDescription)
+            }
+            await loadStatus(force: true)
+            mergingWorktrees = false
         }
     }
 
@@ -750,7 +842,7 @@ struct GitQuickCommitView: View {
 
     /// 工作区干净但 ahead > 0 时的「仅推送 commits」。
     private func pushCommitsOnly() {
-        guard !pushing else { return }
+        guard !pushing, !committing, !mergingWorktrees, !generating else { return }
         pushing = true
         onRunning()
         dismiss()
@@ -778,13 +870,6 @@ struct GitQuickCommitView: View {
         }
     }
 
-    private func archiveResultNote(requested: Bool, result: QuickCommitResult) -> String {
-        guard requested else { return "" }
-        if let error = result.archiveError, !error.isEmpty { return "，归档失败：\(error)" }
-        let count = result.archivedTaskIds?.count ?? 0
-        return count > 0 ? "，已归档 \(count) 个关联任务" : "，没有可归档的关联任务"
-    }
-
     private func summaryText(_ outcome: CommitOutcome) -> String {
         let subPrefix = outcome.submoduleCount > 0 ? "已先提交 \(outcome.submoduleCount) 个 submodule，" : ""
         return subPrefix + "已提交"
@@ -801,19 +886,31 @@ struct GitQuickCommitView: View {
 private struct MagneticDockView: View {
     let hasChanges: Bool
     let hasSubmodule: Bool
+    let hasWorktrees: Bool
+    let ahead: Int
+    let busy: Bool
+    let feedback: String?
     let onAction: (String, Bool) -> Void
+    let onWorktree: () -> Void
+    let onPush: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let actionOrder = ["commit", "tag", "push"]
-    private var allIds: [String] { hasSubmodule ? Self.actionOrder + ["sub"] : Self.actionOrder }
+    private var allIds: [String] { Self.actionOrder + (hasSubmodule ? ["sub"] : []) + ["worktree"] }
+
+    private func isEnabled(_ id: String) -> Bool {
+        !busy && (id == "worktree" ? hasWorktrees : id == "push" ? hasChanges || ahead > 0 : hasChanges)
+    }
 
     private static let chipColors: [String: Color] = [
         "commit": Theme.brand,
         "tag": Theme.info,
         "push": Theme.success,
         "sub": Theme.teal,
+        "worktree": Theme.info,
     ]
     private static let chipLabels: [String: String] = [
-        "commit": "Commit", "tag": "Tag", "push": "Push", "sub": "Sub",
+        "commit": "Commit", "tag": "Tag", "push": "Push", "sub": "Sub", "worktree": "Worktree",
     ]
 
     @State private var fieldSize: CGSize = .zero
@@ -911,11 +1008,20 @@ private struct MagneticDockView: View {
                 Color.clear.preference(key: ChipSizeKey.self, value: [id: geo.size])
             }
         )
-        .opacity(!placed ? 0 : (hasChanges ? 1 : 0.45))
-        .scaleEffect(active ? 1.06 : 1)
+        .opacity(!placed ? 0 : (isEnabled(id) ? 1 : 0.45))
+        .scaleEffect(active && !reduceMotion ? 1.06 : 1)
         .offset(x: pos.x, y: pos.y)
         .zIndex(active ? 3 : 2)
-        .allowsHitTesting(hasChanges)
+        .allowsHitTesting(isEnabled(id))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(id == "worktree" ? "合并全部 Worktree 到当前分支并推送" : (Self.chipLabels[id] ?? id))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            guard isEnabled(id) else { return }
+            if id == "worktree" { onWorktree() }
+            else if id == "push" && !hasChanges { onPush() }
+            else { let intent = Self.tapIntent(id); onAction(intent.0, intent.1) }
+        }
         .highPriorityGesture(dragGesture(id))
     }
 
@@ -926,7 +1032,7 @@ private struct MagneticDockView: View {
             Image(systemName: "arrow.right")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundColor(launchTone)
-            Text(hot ? "松手执行" : "提交")
+            Text(feedback ?? (hot ? "松手执行" : "提交"))
                 .font(.wand(size: 12, weight: .medium))
                 .foregroundColor(hot ? launchTone : Theme.textSecondary)
         }
@@ -942,7 +1048,7 @@ private struct MagneticDockView: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: 14))
         .onTapGesture {
-            if hasChanges && dragAnchor == nil { onAction("commit", false) }
+            if hasChanges && !busy && dragAnchor == nil { onAction("commit", false) }
         }
     }
 
@@ -954,35 +1060,24 @@ private struct MagneticDockView: View {
     /// 原位布局：无 Sub 时 ∧ 三角（Commit 顶中 / Tag 左下 / Push 右下），
     /// 有 Sub 时 2×2 网格 —— 对齐网页窄屏 homePositions()。
     private func homePositions() -> [String: CGPoint] {
-        let fw = fieldSize.width
-        let fh = fieldSize.height
-        guard fw > 0, fh > 0 else { return [:] }
-        let h = chipH
-        let m: CGFloat = 8
-        var pos: [String: CGPoint] = [:]
-        if hasSubmodule {
-            let topY = max(m, fh * 0.20 - h / 2)
-            let botY = min(fh - h - m, fh * 0.70 - h / 2)
-            func colL(_ wd: CGFloat) -> CGFloat { max(m, fw * 0.27 - wd / 2) }
-            func colR(_ wd: CGFloat) -> CGFloat { min(fw - wd - m, fw * 0.73 - wd / 2) }
-            pos["commit"] = CGPoint(x: colL(w("commit")), y: topY)
-            pos["tag"] = CGPoint(x: colR(w("tag")), y: topY)
-            pos["push"] = CGPoint(x: colL(w("push")), y: botY)
-            pos["sub"] = CGPoint(x: colR(w("sub")), y: botY)
-        } else {
-            let topY = max(m, fh * 0.18 - h / 2)
-            let botY = min(fh - h - m, fh * 0.72 - h / 2)
-            pos["commit"] = CGPoint(x: max(m, (fw - w("commit")) / 2), y: topY)
-            pos["tag"] = CGPoint(x: max(m, fw * 0.24 - w("tag") / 2), y: botY)
-            pos["push"] = CGPoint(x: min(fw - w("push") - m, fw * 0.76 - w("push") / 2), y: botY)
+        guard fieldSize.width > 0, fieldSize.height > 0 else { return [:] }
+        let rows = CGFloat((allIds.count + 1) / 2)
+        var positions: [String: CGPoint] = [:]
+        for (index, id) in allIds.enumerated() {
+            let row = CGFloat(index / 2)
+            let column = CGFloat(index % 2)
+            let centerX = fieldSize.width * (column == 0 ? 0.27 : 0.73)
+            positions[id] = CGPoint(
+                x: max(4, min(fieldSize.width - w(id) - 4, centerX - w(id) / 2)),
+                y: max(4, (row + 0.5) * fieldSize.height / rows - chipH / 2))
         }
-        return pos
+        return positions
     }
 
     private func placeHome(animated: Bool) {
         let homes = homePositions()
         guard !homes.isEmpty, allIds.allSatisfy({ chipSizes[$0] != nil }) else { return }
-        if animated {
+        if animated && !reduceMotion {
             withAnimation(WandMotion.disclosure) { chipPos = homes }
         } else {
             chipPos = homes
@@ -1012,7 +1107,7 @@ private struct MagneticDockView: View {
                 // 磁吸拾取：只吸主动作球 —— Sub 永不被「路过吸附」（默认不纳入），
                 // 但可作为锚点被显式抓起、反向吸附动作球。
                 let homes = homePositions()
-                for cand in Self.actionOrder where !members.contains(cand) {
+                for cand in Self.actionOrder where id != "worktree" && hasChanges && !members.contains(cand) {
                     guard let hp = homes[cand] else { continue }
                     let center = CGPoint(x: hp.x + w(cand) / 2, y: hp.y + chipH / 2)
                     if hypot(loc.x - center.x, loc.y - center.y) < 58 {
@@ -1059,11 +1154,14 @@ private struct MagneticDockView: View {
 
                 if !moved {
                     // 原地单击 → 直接执行该气泡自己的动作。
-                    let intent = Self.tapIntent(id)
-                    onAction(intent.0, intent.1)
+                    if id == "worktree" { onWorktree() }
+                    else if id == "push" && !hasChanges { onPush() }
+                    else { let intent = Self.tapIntent(id); onAction(intent.0, intent.1) }
                 } else if endHot {
                     // 丢进发射区 → 执行组合动作（commit 永远隐含）。
-                    onAction(Self.compose(members), members.contains("sub"))
+                    if id == "worktree" { onWorktree() }
+                    else if id == "push" && !hasChanges { onPush() }
+                    else { onAction(Self.compose(members), members.contains("sub")) }
                 }
                 // 松手在别处：placeHome 已让全员弹回，不执行任何动作。
             }

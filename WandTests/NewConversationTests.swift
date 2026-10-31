@@ -491,6 +491,60 @@ final class NewConversationTests: XCTestCase {
     }
 
     @MainActor
+    func testChoosingExistingTaskRecoversUnknownTaskWithoutRepeatingCreation() async throws {
+        let (coordinator, defaults, suite) = makeCoordinator()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var taskAttempts = 0
+        let taskID = await coordinator.createTask(requestID: "original-task-request") {
+            taskAttempts += 1
+            throw WandAPI.APIError.network("timeout after task creation")
+        }
+        XCTAssertNil(taskID)
+        XCTAssertNil(coordinator.unknownTaskID, "Older servers do not echo a task ID on failure")
+        let reopened = NewConversationCoordinator(storageKey: "wand.new-conversation.unknown.test", defaults: defaults)
+        XCTAssertFalse(reopened.canSubmit)
+        reopened.rejectUnknownTaskAfterCheck()
+        XCTAssertFalse(reopened.canSubmit, "Reading a list alone cannot prove the request was rejected")
+
+        // Explicitly choosing an existing task accepts only that task, never replays its POST.
+        reopened.resolveUnknownTask("chosen-task")
+        XCTAssertEqual(reopened.phase, .taskAccepted(taskID: "chosen-task"))
+        let duplicate = await reopened.createTask {
+            taskAttempts += 1
+            return "duplicate-task"
+        }
+        XCTAssertNil(duplicate)
+        XCTAssertEqual(taskAttempts, 1)
+        let restored = NewConversationCoordinator(storageKey: "wand.new-conversation.unknown.test", defaults: defaults)
+        XCTAssertEqual(restored.acceptedTaskIDForContinuation, "chosen-task")
+        XCTAssertNil(restored.currentCreationRequestID)
+        let snapshot = try decodeSnapshot(id: "continued-session")
+        let accepted = await restored.create { snapshot }
+        XCTAssertEqual(accepted?.id, snapshot.id)
+        XCTAssertEqual(restored.phase, .accepted(sessionID: snapshot.id, taskID: "chosen-task"))
+    }
+
+    @MainActor
+    func testTaskSelectionCannotUnlockUnknownSessionCreation() async {
+        let (coordinator, defaults, suite) = makeCoordinator()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        coordinator.markTaskAccepted("existing-task")
+        _ = await coordinator.create {
+            throw WandAPI.APIError.network("unknown session delivery")
+        }
+        coordinator.resolveUnknownTask("different-task")
+        XCTAssertEqual(coordinator.unknownOperation, .session)
+        XCTAssertEqual(coordinator.acceptedTaskIDForContinuation, "existing-task")
+        var attempts = 0
+        let duplicate = await coordinator.create {
+            attempts += 1
+            return try self.decodeSnapshot(id: "duplicate")
+        }
+        XCTAssertNil(duplicate)
+        XCTAssertEqual(attempts, 0)
+    }
+
+    @MainActor
     func testAbandonAcceptedSessionKeepsSessionAccepted() async throws {
         let (coordinator, defaults, suite) = makeCoordinator()
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -535,7 +589,7 @@ final class NewConversationTests: XCTestCase {
         }
         await fulfillment(of: [started], timeout: 1)
 
-        if case .deliveryUnknown = coordinator.phase { } else { XCTFail("In-flight task must be represented as unknown") }
+        XCTAssertEqual(coordinator.phase, .creating, "The live task request is still in progress")
         let saved = defaults.dictionary(forKey: key)
         XCTAssertEqual(saved?["phase"] as? String, "deliveryUnknown")
         XCTAssertEqual(saved?["operation"] as? String, "task")
@@ -574,7 +628,7 @@ final class NewConversationTests: XCTestCase {
         }
         await fulfillment(of: [started], timeout: 1)
 
-        if case .deliveryUnknown = coordinator.phase { } else { XCTFail("In-flight session must be represented as unknown") }
+        XCTAssertEqual(coordinator.phase, .creating, "The live session request is still in progress")
         let saved = defaults.dictionary(forKey: key)
         XCTAssertEqual(saved?["phase"] as? String, "deliveryUnknown")
         XCTAssertEqual(saved?["operation"] as? String, "session")

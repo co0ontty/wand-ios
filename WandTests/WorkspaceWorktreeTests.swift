@@ -206,15 +206,8 @@ final class WorkspaceWorktreeTests: XCTestCase {
             provider: .qoder,
             prompt: "合并任务书"
         )
-        XCTAssertEqual(request.path, "/api/sessions")
-        XCTAssertEqual(request.body["kind"], .string("pty"))
-        XCTAssertEqual(request.body["command"], .string("qodercli"))
-        XCTAssertEqual(request.body["provider"], .string("qoder"))
-        XCTAssertEqual(request.body["cwd"], .string("/repo"))
-        XCTAssertEqual(request.body["mode"], .string("managed"))
-        XCTAssertEqual(request.body["initialInput"], .string("合并任务书"))
-        XCTAssertEqual(request.body["sessionSource"], .string("interactive"))
-        XCTAssertEqual(request.body["workspaceId"], .string("ws-merge"))
+        XCTAssertEqual(request.path, "/api/workspaces/ws-merge/worktree-merge-agent")
+        XCTAssertEqual(request.body["prompt"], .string("合并任务书"))
         XCTAssertNil(request.body["workspaceTaskId"])
     }
 
@@ -425,6 +418,29 @@ final class WorkspaceWorktreeTests: XCTestCase {
         XCTAssertTrue(store.taskGroups.first?.tasks.isEmpty == true)
     }
 
+    func testArchivedAggregateMetadataSurvivesRenameAndIsRemovedOnlyOnDelete() async throws {
+        let service = MockWorktreeMergeService()
+        let group = try taskGroup(workspaceId: "ws-a", taskName: "旧名称")
+        var task = try XCTUnwrap(group.tasks.first)
+        task.archived = true
+        task.boardTaskStatus = "review"
+        task.parentWorkspaceTaskId = "ancestor"
+        service.taskGroups = [group.replacing(tasks: [task])]
+        service.updatedTask = try decode(WorkspaceTask.self, from: #"{"id":"task-1","workspaceId":"ws-a","name":"新名称","status":"active","createdAt":""}"#)
+        let store = WorkspaceStore(api: service, serverID: "archived-metadata")
+        await store.loadTaskGroups()
+        XCTAssertTrue(store.taskGroups.first?.tasks.isEmpty == true)
+        _ = try await store.renameWorkspaceTask(workspaceId: "ws-a", taskId: "task-1", name: "新名称")
+        let renamed = try XCTUnwrap(store.conversationTaskGroups.first?.tasks.first)
+        XCTAssertEqual(renamed.name, "新名称")
+        XCTAssertEqual(renamed.archived, true)
+        XCTAssertEqual(renamed.boardTaskStatus, "review")
+        XCTAssertEqual(renamed.parentWorkspaceTaskId, "ancestor")
+        XCTAssertTrue(store.taskGroups.first?.tasks.isEmpty == true)
+        try await store.deleteWorkspaceTask(workspaceId: "ws-a", taskId: "task-1")
+        XCTAssertTrue(store.conversationTaskGroups.first?.tasks.isEmpty == true)
+    }
+
     func testTaskAggregateRejectsRefreshStartedBeforeRename() async throws {
         let service = MockWorktreeMergeService()
         let oldGroup = try taskGroup(workspaceId: "ws-a", taskName: "旧名称")
@@ -475,9 +491,8 @@ final class WorkspaceWorktreeTests: XCTestCase {
 
     // MARK: - Store flows
 
-    func testStartWorktreeMergeAgentPrefersWorkspaceProviderThenServerDefault() async throws {
+    func testStartWorktreeMergeAgentInvokesSystemMergeAgentWithOverviewPrompt() async throws {
         let service = MockWorktreeMergeService()
-        service.defaultProvider = .opencode
         let store = WorkspaceStore(api: service, serverID: "server-merge")
         // 先加载索引，让 store 记住服务器默认 provider。
         await store.loadWorkspaceIndex()
@@ -489,7 +504,7 @@ final class WorkspaceWorktreeTests: XCTestCase {
             overview: overview,
             selectedTaskIds: ["task-ready"]
         )
-        XCTAssertEqual(service.capturedProviders, [.grok])
+        XCTAssertEqual(service.capturedPrompts.count, 1)
         XCTAssertTrue(service.capturedPrompts[0].contains("唯一目标分支：main"))
 
         let withoutProvider = try workspace(id: "ws-b", defaultProviderJSON: "null")
@@ -498,7 +513,8 @@ final class WorkspaceWorktreeTests: XCTestCase {
             overview: overview,
             selectedTaskIds: ["task-ready"]
         )
-        XCTAssertEqual(service.capturedProviders, [.grok, .opencode])
+        XCTAssertEqual(service.capturedPrompts.count, 2)
+        XCTAssertTrue(service.capturedPrompts[1].contains("唯一目标分支：main"))
     }
 
     func testCreateWorkspaceTaskRefreshesTaskListAndReturnsOpenableTask() async throws {
@@ -799,6 +815,14 @@ private final class MockWorktreeMergeService: WorkspaceServing {
 
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview {
         throw MockError.unavailable
+    }
+
+    func startWorktreeMergeAgent(
+        workspace: Workspace,
+        prompt: String
+    ) async throws -> SessionSnapshot {
+        capturedPrompts.append(prompt)
+        return try mergeSnapshot()
     }
 
     func startWorktreeMergeAgent(

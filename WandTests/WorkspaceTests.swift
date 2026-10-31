@@ -311,7 +311,7 @@ final class WorkspaceTests: XCTestCase {
         )
         XCTAssertEqual(
             TaskListPresentation.orderedTaskSummaries(older.tasks + newer.tasks).map(\.id),
-            ["older-task", "newer-task"]
+            ["newer-task", "older-task"]
         )
     }
 
@@ -1042,6 +1042,219 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertTrue(service.createRequests.isEmpty)
     }
 
+    private var archiveTaskGroupsJSON: String {
+        #"""
+        [{"workspaceId":"ws","workspaceName":"Wand","workspaceCwd":"/repo","tasks":[
+          {"id":"current","workspaceId":"ws","name":"Current","status":"done","boardTaskStatus":"archived","archived":false,"createdAt":"","cwd":"/repo","totalSessions":2,"sessions":[{"id":"live","archived":false},{"id":"old","archived":true}]},
+          {"id":"archived","workspaceId":"ws","name":"Archived","status":"active","boardTaskStatus":"review","archived":true,"createdAt":"","cwd":"/repo","totalSessions":1,"sessions":[{"id":"in-archived-task","archived":false,"status":"thinking"}]}],
+          "standaloneSessions":[{"id":"standalone"},{"id":"archived-standalone","archived":true}]},
+         {"workspaceId":"wand-global","workspaceName":"Global","workspaceCwd":"/global","global":true,"tasks":[],"standaloneSessions":[{"id":"hidden-global","archived":true}]},
+         {"workspaceId":"cwd:old","workspaceName":"Old","workspaceCwd":"/old","synthetic":true,"tasks":[],"standaloneSessions":[{"id":"hidden-synthetic","archived":true}]}]
+        """#
+    }
+
+    func testTaskGroupsAPIIncludesArchivedOnInitialAndRevisionRequestsWithoutChangingLegacyPickerScope() async throws {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9/task-groups-" + UUID().uuidString)!, token: nil)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [WorkspaceTaskGroupsURLProtocol.self]
+        api.endpointSession.session = URLSession(configuration: config, delegate: api.endpointSession, delegateQueue: nil)
+        defer { WorkspaceTaskGroupsURLProtocol.respond = nil; SelfSignedSession.resetEndpoint(api.baseURL) }
+        let json = archiveTaskGroupsJSON
+        let revision = "rev&+/#?"
+        var calls = 0
+        WorkspaceTaskGroupsURLProtocol.respond = { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertTrue(request.url!.path.hasSuffix("/api/tasks"))
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems ?? []
+            XCTAssertEqual(query.first { $0.name == "includeArchived" }?.value, "1")
+            let requestedRevision = query.first { $0.name == "revision" }?.value
+            XCTAssertEqual(requestedRevision, calls == 1 ? revision : "")
+            calls += 1
+            // Match the server contract: omitting revision returns the legacy array.
+            guard let requestedRevision else { return json }
+            if requestedRevision == revision {
+                return #"{"unchanged":true,"revision":"\#(revision)","groups":[]}"#
+            }
+            return #"{"unchanged":false,"revision":"\#(revision)","groups":\#(json)}"#
+        }
+        let initial = try await api.listTaskGroupsPage(revision: nil)
+        XCTAssertFalse(initial.unchanged)
+        XCTAssertEqual(initial.revision, revision, "First read must request a verifiable snapshot")
+        XCTAssertEqual(initial.groups.first?.tasks.count, 2)
+        XCTAssertEqual(initial.groups.first?.tasks.last?.archived, true)
+        let unchanged = try await api.listTaskGroupsPage(revision: revision)
+        XCTAssertTrue(unchanged.unchanged)
+        XCTAssertEqual(unchanged.revision, revision)
+        XCTAssertTrue(unchanged.groups.isEmpty)
+        let pickerGroups = try await api.listTaskGroups()
+        XCTAssertEqual(calls, 3)
+        XCTAssertEqual(pickerGroups.map(\.id), ["ws"])
+        XCTAssertEqual(pickerGroups.first?.tasks.map(\.id), ["current"])
+        XCTAssertEqual(pickerGroups.first?.tasks.first?.sessions.map(\.id), ["live"])
+    }
+
+    func testNewWorkspaceTaskCreatesOneSessionWithCanonicalBinding() async throws {
+        let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:9/create-work-" + UUID().uuidString)!, token: nil)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [WorkspaceTaskGroupsURLProtocol.self]
+        api.endpointSession.session = URLSession(configuration: config, delegate: api.endpointSession, delegateQueue: nil)
+        let suite = "WorkspaceCreationTests." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        let coordinator = NewConversationCoordinator(storageKey: "create", defaults: defaults)
+        defer {
+            WorkspaceTaskGroupsURLProtocol.respond = nil
+            SelfSignedSession.resetEndpoint(api.baseURL)
+            defaults.removePersistentDomain(forName: suite)
+        }
+        var routes: [String] = []
+        WorkspaceTaskGroupsURLProtocol.respond = { request in
+            let route = request.url!.path
+            routes.append(route)
+            var bodyData = request.httpBody ?? Data()
+            if bodyData.isEmpty, let stream = request.httpBodyStream {
+                stream.open()
+                defer { stream.close() }
+                var buffer = [UInt8](repeating: 0, count: 1024)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    guard count > 0 else { break }
+                    bodyData.append(contentsOf: buffer.prefix(count))
+                }
+            }
+            let body = (try? JSONSerialization.jsonObject(with: bodyData)) as? [String: Any]
+            if route.hasSuffix("/api/workspaces/workspace/tasks") {
+                XCTAssertEqual(request.httpMethod, "POST")
+                XCTAssertEqual(body?["creationRequestId"] as? String, "task-request")
+                XCTAssertEqual(body?["description"] as? String, "first message")
+                return #"{"id":"created-task","workspaceId":"workspace","name":"Task","status":"active","cwd":"/repo/.worktrees/task","isolated":true}"#
+            }
+            if route.hasSuffix("/api/workspace-tasks/created-task") {
+                XCTAssertEqual(request.httpMethod, "GET")
+                return #"{"id":"created-task","workspaceId":"workspace","name":"Task","status":"active","createdAt":"","cwd":"/repo/.worktrees/task","isolated":true,"sessions":[]}"#
+            }
+            XCTAssertTrue(route.hasSuffix("/api/sessions"))
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(body?["workspaceId"] as? String, "workspace")
+            XCTAssertEqual(body?["workspaceTaskId"] as? String, "created-task")
+            XCTAssertEqual(body?["cwd"] as? String, "/repo/.worktrees/task")
+            XCTAssertEqual(body?["creationRequestId"] as? String, "session-request")
+            XCTAssertNil(body?["prompt"], "First message is handed to the session composer only after creation")
+            return #"{"id":"created-session","workspaceId":"workspace","workspaceTaskId":"created-task","sessionKind":"structured","status":"idle"}"#
+        }
+        let taskID = await coordinator.createTask(requestID: "task-request") {
+            try await api.createWorkspaceTask(workspaceId: "workspace", name: "", worktree: false,
+                                              description: "first message", creationRequestId: "task-request").id
+        }
+        let detail = try await api.getWorkspaceTask(taskId: XCTUnwrap(taskID))
+        let session = await coordinator.create(requestID: "session-request") {
+            try await api.createSession(kind: "structured", provider: "pi", cwd: detail.cwd,
+                                        workspaceId: detail.workspaceId, workspaceTaskId: detail.id,
+                                        creationRequestId: "session-request")
+        }
+        XCTAssertEqual(session?.id, "created-session")
+        XCTAssertEqual(coordinator.phase, .accepted(sessionID: "created-session", taskID: "created-task"))
+        XCTAssertEqual(routes.count, 3, "One task POST, one canonical directory read, one session POST")
+        coordinator.resetAfterHandoff(sessionID: "created-session")
+        XCTAssertTrue(coordinator.canSubmit)
+    }
+
+    func testArchiveInclusiveTaskGroupsHaveSeparateCurrentProjectionAndRealArchiveFacts() throws {
+        let full = try TaskGroupsPage.decode(from: Data(archiveTaskGroupsJSON.utf8)).groups
+        let current = TaskGroupsPage.currentGroups(full)
+        XCTAssertEqual(full.count, 3)
+        XCTAssertEqual(current.map(\.id), ["ws"])
+        XCTAssertEqual(current.first?.tasks.map(\.id), ["current"])
+        XCTAssertEqual(current.first?.tasks.first?.totalSessions, 1)
+        XCTAssertEqual(current.first?.tasks.first?.boardTaskStatus, "archived", "business stage must not hide an unarchived container")
+        XCTAssertEqual(current.first?.standaloneSessions.map(\.id), ["standalone"])
+        XCTAssertEqual(Set(HomePresentation.conversations(full).map(\.id)), ["live", "standalone"])
+        let sessions = HomePresentation.conversations(full, includeArchived: true)
+        let inArchivedTask = try XCTUnwrap(sessions.first { $0.id == "in-archived-task" })
+        let facts = inArchivedTask.filterFacts(employees: [])
+        XCTAssertTrue(facts.archived)
+        XCTAssertFalse(facts.active)
+        XCTAssertEqual(facts.stage, .review, "status is trusted even without boardTaskId")
+        XCTAssertTrue(ConversationListFilters().matches(facts))
+        XCTAssertFalse(ConversationListFilters(archive: .current).matches(facts))
+        XCTAssertTrue(ConversationListFilters(archive: .archived).matches(facts))
+        let live = try XCTUnwrap(sessions.first { $0.id == "live" })
+        XCTAssertFalse(live.filterArchived, "board status archived must not supply the container archive flag")
+        XCTAssertEqual(live.filterStage, .archived)
+        let archivedTask = try XCTUnwrap(full.first?.tasks.last)
+        XCTAssertEqual(archivedTask.replacingSessions([]).archived, true)
+        XCTAssertEqual(HomePresentation.replacing(archivedTask, sessions: []).archived, true)
+        let legacy = try decode(WorkspaceTaskSummary.self, from: #"{"id":"legacy","workspaceId":"ws","name":"Legacy","status":"done","createdAt":"","cwd":"/","sessions":[]}"#)
+        XCTAssertNil(legacy.archived)
+        let groupTask = try decode(ConversationTask.self, from: #"{"task":{"id":"board","workspaceId":"ws","workspaceTaskId":"archived","status":"review"},"runs":[]}"#)
+        XCTAssertTrue(groupTask.matchesFilters(ConversationListFilters(archive: .archived), query: "", conversationTitle: "Group", groups: full))
+        XCTAssertFalse(groupTask.matchesFilters(ConversationListFilters(archive: .current), query: "", conversationTitle: "Group", groups: full))
+    }
+
+    func testCurrentTaskGroupsPreserveUnchangedCountsAndSubtractOnlyRemovedSessions() throws {
+        let group = try decode(TaskDirectoryGroup.self, from: #"""
+        {"workspaceId":"ws","workspaceName":"Wand","workspaceCwd":"/repo","standaloneSessions":[],"tasks":[
+          {"id":"legacy","workspaceId":"ws","name":"Legacy","status":"active","createdAt":"","cwd":"/","sessions":[{"id":"a"}]},
+          {"id":"partial","workspaceId":"ws","name":"Partial","status":"active","createdAt":"","cwd":"/","totalSessions":20,"sessions":[{"id":"b"}]},
+          {"id":"filtered","workspaceId":"ws","name":"Filtered","status":"active","createdAt":"","cwd":"/","totalSessions":20,"sessions":[{"id":"c"},{"id":"d","archived":true}]},
+          {"id":"filtered-legacy","workspaceId":"ws","name":"Filtered legacy","status":"active","createdAt":"","cwd":"/","sessions":[{"id":"e"},{"id":"f","archived":true}]}]}
+        """#)
+        let tasks = try XCTUnwrap(TaskGroupsPage.currentGroups([group]).first?.tasks)
+        XCTAssertEqual(tasks[0], group.tasks[0])
+        XCTAssertNil(tasks[0].totalSessions)
+        XCTAssertNil(tasks[0].parentWorkspaceTaskId)
+        XCTAssertEqual(tasks[1], group.tasks[1])
+        XCTAssertEqual(tasks[1].totalSessions, 20)
+        XCTAssertEqual(tasks[2].totalSessions, 19)
+        XCTAssertEqual(tasks[2].sessions.map(\.id), ["c"])
+        XCTAssertEqual(tasks[3].totalSessions, 1)
+    }
+
+    func testCurrentTaskGroupsRetainArchivedAncestorsAcrossGroupsWithoutKeepingUnrelatedArchives() throws {
+        let groups = try decode([TaskDirectoryGroup].self, from: #"""
+        [{"workspaceId":"ws","workspaceName":"Wand","workspaceCwd":"/repo","standaloneSessions":[],"tasks":[
+          {"id":"child","workspaceId":"ws","name":"Child","status":"active","createdAt":"","cwd":"/","parentWorkspaceTaskId":"parent","sessions":[]},
+          {"id":"unrelated","workspaceId":"ws","name":"Unrelated","status":"active","createdAt":"","cwd":"/","archived":true,"sessions":[]}]},
+         {"workspaceId":"cwd:parent","workspaceName":"Parent","workspaceCwd":"/parent","synthetic":true,"standaloneSessions":[],"tasks":[
+          {"id":"parent","workspaceId":"ws","name":"Parent","status":"active","createdAt":"","cwd":"/","archived":true,"parentWorkspaceTaskId":"grandparent","totalSessions":8,"sessions":[{"id":"old","archived":true}]},
+          {"id":"grandparent","workspaceId":"ws","name":"Grandparent","status":"active","createdAt":"","cwd":"/","archived":true,"parentWorkspaceTaskId":"parent","sessions":[]}]}]
+        """#)
+        let projected = TaskGroupsPage.currentGroups(groups)
+        XCTAssertEqual(projected.map(\.id), ["ws", "cwd:parent"])
+        XCTAssertEqual(projected.flatMap(\.tasks).map(\.id), ["child", "parent", "grandparent"])
+        let parent = try XCTUnwrap(projected.last?.tasks.first)
+        XCTAssertEqual(parent.archived, true)
+        XCTAssertEqual(parent.totalSessions, 7)
+        XCTAssertEqual(parent.parentWorkspaceTaskId, "grandparent")
+        XCTAssertEqual(parent.replacingSessions([]).parentWorkspaceTaskId, "grandparent")
+        XCTAssertEqual(HomePresentation.replacing(parent, sessions: []).parentWorkspaceTaskId, "grandparent")
+        XCTAssertTrue(TaskGroupsPage.currentGroups([groups[1]]).isEmpty, "an archived cycle without active descendants is not retained")
+        let missing = groups[0].replacing(tasks: [groups[0].tasks[0]])
+        XCTAssertEqual(TaskGroupsPage.currentGroups([missing]).first?.tasks.count, 1, "missing ancestors are not synthesized")
+    }
+
+    func testTaskGroupsOwnerKeepsBothScopesAcrossUnchangedAndFailedRefresh() async throws {
+        let service = MockWorkspaceService()
+        service.directoryGroups = try TaskGroupsPage.decode(from: Data(archiveTaskGroupsJSON.utf8)).groups
+        service.taskGroupsPageRevision = "full-page-revision"
+        let store = WorkspaceStore(api: service, serverID: "archive-scopes")
+        await store.loadTaskGroups()
+        let full = store.conversationTaskGroups
+        let current = store.taskGroups
+        XCTAssertEqual(full.first?.tasks.count, 2)
+        XCTAssertEqual(current.first?.tasks.count, 1)
+        service.directoryGroups = []
+        service.taskGroupsPageUnchanged = true
+        await store.loadTaskGroups(force: true)
+        XCTAssertEqual(store.conversationTaskGroups, full)
+        XCTAssertEqual(store.taskGroups, current)
+        XCTAssertEqual(service.taskGroupsRequestedRevisions.compactMap { $0 }, ["full-page-revision"])
+        service.taskGroupsPageError = MockWorkspaceService.MockError.missingTask
+        await store.loadTaskGroups(force: true)
+        XCTAssertNotNil(store.taskGroupsError)
+        XCTAssertEqual(store.conversationTaskGroups, full)
+        XCTAssertEqual(store.taskGroups, current)
+    }
+
     func testTaskGroupsPageDecodesArrayAndRevisionEnvelope() throws {
         let arrayJSON = "[{\"workspaceId\":\"ws\",\"workspaceName\":\"Wand\",\"workspaceCwd\":\"/repo\",\"synthetic\":false,\"tasks\":[],\"standaloneSessions\":[]}]"
         let arrayPage = try TaskGroupsPage.decode(from: Data(arrayJSON.utf8))
@@ -1276,6 +1489,10 @@ private final class MockWorkspaceService: WorkspaceServing {
 
     var workspaces: [Workspace] = []
     var directoryGroups: [TaskDirectoryGroup] = []
+    var taskGroupsPageRevision: String?
+    var taskGroupsPageUnchanged = false
+    var taskGroupsPageError: Error?
+    var taskGroupsRequestedRevisions: [String?] = []
     var tasks: [String: [WorkspaceTask]] = [:]
     var taskDetails: [String: WorkspaceTaskDetail] = [:]
     var taskDelays: [String: UInt64] = [:]
@@ -1469,7 +1686,9 @@ private final class MockWorkspaceService: WorkspaceServing {
     }
 
     func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage {
-        TaskGroupsPage(groups: directoryGroups, revision: revision, unchanged: false)
+        taskGroupsRequestedRevisions.append(revision)
+        if let taskGroupsPageError { throw taskGroupsPageError }
+        return TaskGroupsPage(groups: directoryGroups, revision: taskGroupsPageRevision ?? revision, unchanged: taskGroupsPageUnchanged)
     }
 
     func deleteWorkspaceSessions(sessionIds: [String]) async throws -> Int {
@@ -1499,9 +1718,32 @@ private final class MockWorkspaceService: WorkspaceServing {
 
     func startWorktreeMergeAgent(
         workspace: Workspace,
+        prompt: String
+    ) async throws -> SessionSnapshot {
+        throw MockError.createUnavailable
+    }
+
+    func startWorktreeMergeAgent(
+        workspace: Workspace,
         provider: WandProvider,
         prompt: String
     ) async throws -> SessionSnapshot {
         throw MockError.createUnavailable
     }
+}
+
+
+private final class WorkspaceTaskGroupsURLProtocol: URLProtocol {
+    static var respond: ((URLRequest) -> String)?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let response = Self.respond else { return }
+        let body = response(request)
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }

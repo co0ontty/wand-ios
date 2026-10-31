@@ -125,6 +125,7 @@ struct WorkspaceListView: View {
     @State private var conversationOrganizationControllers: [String: ConversationOrganizationController] = [:]
 
     @State private var reviewTarget: Workspace?
+    @State private var sectionCreateTarget: TaskDirectoryGroup?
     @State private var moveSessionTarget: WorkspaceSessionSummary?
     @State private var toastMessage: String?
     @State private var revealedRowID: String?
@@ -321,6 +322,9 @@ struct WorkspaceListView: View {
 
     private var sheetContent: some View {
         alertContent
+            .sheet(item: $sectionCreateTarget) { group in
+                WorkspaceSectionCreateSheet(store: store, group: group) {}
+            }
             .sheet(item: $moveSessionTarget) { session in
                 SessionMoveSheet(
                     store: store,
@@ -440,7 +444,7 @@ struct WorkspaceListView: View {
     private var confirmTitle: String {
         switch pendingConfirm {
         case .archiveTask: return "归档任务？"
-        case .deleteTask: return "删除任务并清理 Worktree？"
+        case .deleteTask(let task): return task.kind == "section" ? "删除分区？" : "删除任务并清理 Worktree？"
         case .clearSessions: return "清空全部终端？"
         case .deleteSession: return "删除终端？"
         case .deleteWorkspace: return "删除工作区？"
@@ -480,7 +484,7 @@ struct WorkspaceListView: View {
         case .archiveTask(let task):
             return "「\(task.name)」会从侧栏隐藏并移入任务看板的归档任务，终端继续运行、Worktree 保留。"
         case .deleteTask(let task):
-            return "任务「\(task.name)」及其会话和独立 worktree 将被删除，此操作无法撤销。"
+            return task.kind == "section" ? "删除分区「\(task.name)」，会话移回工作区并继续保留。" : "任务「\(task.name)」及其会话和独立 worktree 将被删除，此操作无法撤销。"
         case .clearSessions(let task):
             return "将结束并删除「\(task.name)」的 \(task.listedSessionCount) 个终端，此操作无法撤销。"
         case .deleteSession(let session):
@@ -689,7 +693,7 @@ struct WorkspaceListView: View {
     }
 
     private var modalVisible: Bool {
-        reviewTarget != nil || moveSessionTarget != nil
+        reviewTarget != nil || moveSessionTarget != nil || sectionCreateTarget != nil
             || renameTarget != nil || renameDirectoryTarget != nil || conversationOrganizationTarget != nil || pendingConfirm != nil
     }
 
@@ -840,7 +844,7 @@ struct WorkspaceListView: View {
                 beginManagedSelection(); selectedSessionIds.insert(item.session.id)
             }
             Button { Task { await toggleArchive(item.session) } } label: { Label("归档会话", systemImage: "archivebox") }
-            Button { moveSessionTarget = item.session } label: { Label("移动到任务", systemImage: "folder") }
+            Button { moveSessionTarget = item.session } label: { Label("移动到分区", systemImage: "folder") }
             Button(role: .destructive) { presentConfirm(.deleteSession(item.session)) } label: { Label("删除会话", systemImage: "trash") }
         }
         .homeSwipeActions(id: "recent-" + item.id, revealedID: $revealedRowID,
@@ -1056,6 +1060,9 @@ struct WorkspaceListView: View {
             .listRowSeparator(.hidden)
         }
         if expanded {
+            if !group.standaloneSessions.isEmpty {
+                standaloneSessionSection(group, fold: fold)
+            }
             ForEach(TaskListPresentation.orderedTaskSummaries(group.tasks).filter {
                 fold != .running || $0.hasActiveExecution || !HomePresentation.sessions($0.sessions, fold: .running).isEmpty
             }) { summary in
@@ -1068,16 +1075,14 @@ struct WorkspaceListView: View {
                     .padding(.vertical, 10)
                     .workspaceTreeRow(.task)
             }
-            if !group.standaloneSessions.isEmpty {
-                standaloneSessionSection(group, fold: fold)
-            }
         }
     }
 
     @ViewBuilder
     private func standaloneSessionSection(_ group: TaskDirectoryGroup, fold: HomeFoldMode) -> some View {
-        let expanded = searchingWorkspaces || !(temporaryExpandedWorkspaces.contains(group.id)
+        let expanded = group.tasks.isEmpty || searchingWorkspaces || !(temporaryExpandedWorkspaces.contains(group.id)
             ? temporaryCollapsedLoose.contains(group.id) : collapsedLooseGroups.contains(group.id))
+        if !group.tasks.isEmpty {
         Button {
             toggleCollapsedLooseGroup(group.id)
         } label: {
@@ -1085,6 +1090,11 @@ struct WorkspaceListView: View {
                 Text("未分组会话（\(group.standaloneSessions.count)）")
                     .font(.wand(size: 12, weight: .medium))
                     .foregroundColor(Theme.textMuted)
+                if group.standaloneSessions.contains(where: TaskListPresentation.hasLiveActivity) {
+                    Text("· 在跑")
+                        .font(.wand(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.success)
+                }
                 Spacer(minLength: 6)
                 treeDisclosureCaret(expanded: expanded)
             }
@@ -1094,11 +1104,12 @@ struct WorkspaceListView: View {
         .buttonStyle(.plain)
         .accessibilityLabel(expanded ? "收起未分组会话" : "展开未分组会话")
         .workspaceTreeRow(.task)
+        }
         if expanded {
             let split = WorkspaceSessionSummary.splitArchived(HomePresentation.sessions(group.standaloneSessions, fold: fold))
             ForEach(split.active) { session in
                 standaloneSessionRow(session, workspace: workspace(from: group))
-                    .workspaceTreeRow(.session)
+                    .workspaceTreeRow(group.tasks.isEmpty ? .task : .session)
             }
             if !attentionOnly && fold != .running && !split.archived.isEmpty {
                 archivedLooseSessions(split.archived, group: group)
@@ -1156,6 +1167,9 @@ struct WorkspaceListView: View {
             } label: {
                 Label("根据会话内容自动分组", systemImage: "wand.and.stars")
             }
+            Button { sectionCreateTarget = group } label: {
+                Label("新建分区", systemImage: "folder.badge.plus")
+            }
             if !group.isGlobal {
                 Button {
                     renameDirectoryDraft = group.workspaceName
@@ -1188,8 +1202,8 @@ struct WorkspaceListView: View {
 
     private func directoryRowActions(_ group: TaskDirectoryGroup) -> [HomeRowAction] {
         var actions = [
-            HomeRowAction(id: "new", title: "新建任务", symbol: "plus") {
-                presentNewTaskSheet(cwd: group.workspaceCwd, workspaceId: group.isBindableProject ? group.workspaceId : nil)
+            HomeRowAction(id: "new", title: "新建分区", symbol: "folder.badge.plus") {
+                sectionCreateTarget = group
             },
             HomeRowAction(id: "organize", title: "整理", symbol: "wand.and.stars", tint: Theme.info) {
                 presentConversationOrganization(group)
@@ -1340,14 +1354,14 @@ struct WorkspaceListView: View {
                 .fill((isSelecting ? selectedTaskIds.contains(summary.id) : selected) ? Theme.brandSoft : Color.clear)
         )
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("任务 \(summary.name)")
+        .accessibilityLabel("\(summary.kind == "section" ? "分区" : "任务") \(summary.name)")
         .contextMenu { taskSummaryContextMenu(summary, workspace: workspace, task: task) }
         .homeSwipeActions(id: "task-" + summary.id, revealedID: $revealedRowID, actions: [
             HomeRowAction(id: "new", title: "新建会话", symbol: "plus") { onRequestNewSession?(workspace, task) },
             HomeRowAction(id: "rename", title: "重命名", symbol: "pencil", tint: Theme.info) {
                 renameDraft = summary.name; renameError = nil; renameTarget = task
             },
-            HomeRowAction(id: "archive", title: "归档", symbol: "archivebox", tint: Theme.warning) { presentConfirm(.archiveTask(task)) }
+            HomeRowAction(id: "archive", title: summary.kind == "section" ? "删除分区" : "归档", symbol: summary.kind == "section" ? "trash" : "archivebox", tint: Theme.warning) { presentConfirm(summary.kind == "section" ? .deleteTask(task) : .archiveTask(task)) }
         ], enabled: !isSelecting && !creationBusy, surface: Theme.surface)
     }
 
@@ -1373,6 +1387,22 @@ struct WorkspaceListView: View {
                     .foregroundStyle(Theme.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("task-name-" + summary.id)
+                if summary.listedSessionCount > 0 {
+                    HStack(spacing: 4) {
+                        Text("\(summary.listedSessionCount) 个会话")
+                            .font(.wand(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.textSecondary)
+                        if summary.hasActiveExecution {
+                            Text("· 在跑")
+                                .font(.wand(size: 11, weight: .semibold))
+                                .foregroundStyle(Theme.success)
+                        }
+                    }
+                } else {
+                    Text("暂无会话")
+                        .font(.wand(size: 11, weight: .regular))
+                        .foregroundStyle(Theme.textMuted)
+                }
             }
             .multilineTextAlignment(.leading)
             Spacer(minLength: 0)
@@ -1448,7 +1478,7 @@ struct WorkspaceListView: View {
             collapsedTaskIds.remove(summary.id)
             onOpenTask(workspace, task)
         } label: {
-            Label("打开任务", systemImage: "arrow.forward")
+            Label(summary.kind == "section" ? "打开分区" : "打开任务", systemImage: "arrow.forward")
         }
         Button {
             collapsedTaskIds.remove(summary.id)
@@ -1479,17 +1509,19 @@ struct WorkspaceListView: View {
                 Label("并行任务", systemImage: "square.stack.3d.up")
             }
         }
+        if summary.kind != "section" {
         Button {
             presentAfterSwipe { pendingConfirm = .archiveTask(task) }
         } label: {
             Label(summary.isIsolated ? "归档任务（保留 Worktree）" : "归档任务", systemImage: "archivebox")
         }
-        // 归档是软删除；只有隔离任务才真删并清理 worktree（对齐 web 端）。
-        if summary.isIsolated {
+        }
+        // Deleting a section keeps its sessions.
+        if summary.isIsolated || summary.kind == "section" {
             Button(role: .destructive) {
                 presentConfirm(.deleteTask(task))
             } label: {
-                Label("删除任务并清理 Worktree", systemImage: "trash")
+                Label(summary.kind == "section" ? "删除分区（保留会话）" : "删除任务并清理 Worktree", systemImage: "trash")
             }
         }
     }
@@ -1565,7 +1597,7 @@ struct WorkspaceListView: View {
             Button {
                 moveSessionTarget = session
             } label: {
-                Label("移动到任务", systemImage: "folder")
+                Label("移动到分区", systemImage: "folder")
             }
             Button {
                 Task { await toggleArchive(session) }
@@ -1798,7 +1830,7 @@ struct WorkspaceListView: View {
             Button {
                 moveSessionTarget = session
             } label: {
-                Label("移动到任务", systemImage: "folder")
+                Label("移动到分区", systemImage: "folder")
             }
             Button {
                 Task { await toggleArchive(session) }
@@ -1890,5 +1922,49 @@ struct WorkspaceListView: View {
             .font(.footnote)
             .foregroundColor(Theme.danger)
             .padding(.vertical, 6)
+    }
+}
+
+/// Focused native form shared by directory and session move actions.
+struct WorkspaceSectionCreateSheet: View {
+    @ObservedObject var store: WorkspaceStore
+    let group: TaskDirectoryGroup
+    var sessionId: String? = nil
+    var onCreated: () async -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("分区名称", text: $name).disabled(busy)
+                    Text("在 \(group.workspaceName) 中整理会话，不创建任务卡。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if let error { Text(error).foregroundStyle(Theme.danger) }
+            }
+            .navigationTitle(sessionId == nil ? "新建分区" : "新建分区并移入")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(busy) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(busy ? "创建中…" : "创建") {
+                        guard !busy else { return }
+                        busy = true
+                        Task {
+                            do {
+                                try await store.createSection(name: name.trimmingCharacters(in: .whitespacesAndNewlines), group: group, sessionId: sessionId)
+                                await onCreated()
+                                dismiss()
+                            } catch { self.error = error.localizedDescription }
+                            busy = false
+                        }
+                    }.disabled(busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }.interactiveDismissDisabled(busy)
+        }
     }
 }

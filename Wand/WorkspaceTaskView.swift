@@ -55,7 +55,7 @@ struct WorkspaceTaskSessionList: View {
                         }.buttonStyle(.plain).accessibilityIdentifier("task-session-open-" + session.id)
                         Menu {
                             Button("打开", systemImage: "arrow.forward") { onOpen(session) }
-                            Button("移动到任务", systemImage: "folder") { onMove(session) }
+                            Button("移动到分区", systemImage: "folder") { onMove(session) }
                             Button("删除终端", systemImage: "trash", role: .destructive) { onDelete(session) }
                         } label: { Image(systemName: "ellipsis").frame(width: 44, height: 44) }
                             .accessibilityLabel("终端操作：" + (session.title ?? session.providerLabel))
@@ -268,6 +268,7 @@ struct WorkspaceTaskView: View {
     }
 
     /// 顶栏标题做成胶囊：左侧是圆圈里的头像，允许略微探出胶囊边缘，右侧是当前标题。
+    /// 宽度交给导航栏的标题槽：长短标题的胶囊都占满可用宽度。
     private var workspaceNavigationTitle: some View {
         let chrome = workspaceTaskNavigationChrome(taskName: task.name, workspaceName: workspace.name)
         let identity = titleAvatarIdentity

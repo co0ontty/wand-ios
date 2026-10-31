@@ -948,6 +948,11 @@ final class CurrentAndroidParityTests: XCTestCase {
         let workspace = try String(contentsOf: root.appendingPathComponent("Wand/WorkspaceTaskView.swift"), encoding: .utf8)
         let capsule = try String(contentsOf: root.appendingPathComponent("Wand/TopCapsuleTitle.swift"), encoding: .utf8)
         XCTAssertTrue(chat.contains("ChatTopIdentityBar(title: topIdentity.title"))
+        XCTAssertTrue(chat.contains("ToolbarItem(placement: .principal) { chatIdentityBar(reservesFloatingControls: false) }"),
+                      "系统导航下标题胶囊要住在导航栏标题槽里，不能浮到栏下面")
+        XCTAssertTrue(try String(contentsOf: root.appendingPathComponent("Wand/NewConversationView.swift"), encoding: .utf8)
+            .contains("ToolbarItem(placement: .principal) { pendingIdentityBar(reservesFloatingControls: false) }"),
+                      "创建页系统导航不能退回纯文字标题")
         XCTAssertFalse(chat.contains("TopChatCompanion"), "结构化会话仍在画头像")
         XCTAssertFalse(chat.contains("companionFace"), "结构化会话残留头像绘制")
         XCTAssertTrue(chat.contains("chatTopIdentity(taskTitle: hostTitle"))

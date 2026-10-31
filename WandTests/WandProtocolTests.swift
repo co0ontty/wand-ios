@@ -49,6 +49,14 @@ private final class OrganizationAPIStub: ConversationOrganizationAPI {
 }
 
 final class WandProtocolTests: XCTestCase {
+    func testPiInputModeUsesServerCapabilityAndAcceptsLegacySnapshots() throws {
+        let decoder = JSONDecoder()
+        let current = try decoder.decode(StructuredSessionState.self, from: Data(#"{"runner":"pi-cli-json","engine":"cli","inputMode":"steer","inFlight":true}"#.utf8))
+        XCTAssertEqual(current.inputMode, "steer")
+        let legacy = try decoder.decode(StructuredSessionState.self, from: Data(#"{"engine":"cli","inFlight":true}"#.utf8))
+        XCTAssertNil(legacy.inputMode)
+    }
+
     func testDingTalkMirrorMetadataDoesNotInventAnInternalTeam() throws {
         let data = Data(#"{"id":"dingtalk_fixture","kind":"group","title":"外部群","external":{"provider":"dingtalk","groupId":"fixture-group","syncState":"at_only","historyComplete":false,"bindings":[{"id":"binding","employeeId":"e_fixture","state":"verifying"}]}}"#.utf8)
         let mirror = try JSONDecoder().decode(ConversationInstance.self, from: data)
@@ -155,7 +163,9 @@ final class WandProtocolTests: XCTestCase {
         let body = structuredInputRequest(input: "next message")
         XCTAssertEqual(body["input"] as? String, "next message")
         XCTAssertEqual(body["respondImmediately"] as? Bool, true)
-        XCTAssertEqual(Set(body.keys), ["input", "respondImmediately"])
+        XCTAssertEqual(Set(body.keys), ["input", "respondImmediately", "idempotencyKey"])
+        XCTAssertNotNil(UUID(uuidString: body["idempotencyKey"] as? String ?? ""))
+        XCTAssertNotEqual(body["idempotencyKey"] as? String, structuredInputRequest(input: "next message")["idempotencyKey"] as? String)
     }
 
     func testOnlyDefinitePreAcceptanceFailuresRestoreInput() {
@@ -826,6 +836,17 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertFalse(shouldCompactUserBody("简短问题"))
         XCTAssertTrue(shouldCompactUserBody(String(repeating: "a", count: 73)))
         XCTAssertTrue(shouldCompactUserBody("第一行\n第二行\n第三行"))
+    }
+
+    func testUserBubbleWidthStaysInsideAStableReadingCap() {
+        XCTAssertEqual(userBubbleMaximumWidth(readingWidth: 0), 0)
+        XCTAssertEqual(userBubbleMaximumWidth(readingWidth: 390), 335)
+        XCTAssertEqual(userBubbleMaximumWidth(readingWidth: 760), 653)
+        // 上限只跟阅读宽度走：同一屏里短句和长句共用一个上限，不会互相撑开。
+        XCTAssertEqual(
+            userBubbleMaximumWidth(readingWidth: 390),
+            userBubbleMaximumWidth(readingWidth: 390, reservedLeading: 48)
+        )
     }
 
     func testReplyPreviewCompactsMarkdownAndWhitespace() {

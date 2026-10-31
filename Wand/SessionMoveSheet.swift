@@ -16,6 +16,7 @@ struct SessionMoveSheet: View {
     @State private var busy = false
     @State private var errorMessage: String?
     @State private var reloadNonce = 0
+    @State private var creatingSection = false
 
     private var allTargets: [SessionMoveTarget] {
         SessionMovePresentation.targets(groups: groups, sessionId: sessionId)
@@ -41,7 +42,7 @@ struct SessionMoveSheet: View {
                 WandAmbientBackground()
                 content
             }
-            .navigationTitle("移动会话到任务")
+            .navigationTitle("移动会话到分区")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -59,6 +60,15 @@ struct SessionMoveSheet: View {
             .interactiveDismissDisabled(busy)
         }
         .task(id: reloadNonce) { await load() }
+        .sheet(isPresented: $creatingSection) {
+            if let group = sourceGroup {
+                WorkspaceSectionCreateSheet(store: store, group: group, sessionId: sessionId) {
+                    await store.loadTaskGroups(force: true)
+                    onMoved()
+                    dismiss()
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -69,7 +79,7 @@ struct SessionMoveSheet: View {
                     .font(.wand(size: 15, weight: .semibold))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(2)
-                Text("只改变任务归属，保留运行目录、历史和正在执行的 CLI。")
+                Text("只改变分区归属，保留运行目录、历史和正在执行的 CLI。")
                     .font(.footnote)
                     .foregroundColor(Theme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -89,7 +99,7 @@ struct SessionMoveSheet: View {
                     Text(errorMessage)
                         .font(.footnote)
                         .foregroundColor(Theme.danger)
-                    Button("重新加载任务") { reloadNonce += 1 }
+                    Button("重新加载分区") { reloadNonce += 1 }
                         .font(.wand(size: 13, weight: .semibold))
                         .foregroundColor(Theme.brand)
                         .disabled(busy)
@@ -100,6 +110,15 @@ struct SessionMoveSheet: View {
             }
 
             List {
+                if let group = sourceGroup, !loading {
+                    Button("新建分区并移入", systemImage: "folder.badge.plus") { creatingSection = true }
+                        .disabled(busy)
+                    if group.tasks.contains(where: { $0.sessions.contains(where: { $0.id == sessionId }) }) {
+                        Button("移回工作区（不分区）", systemImage: "arrow.uturn.backward") {
+                            Task { await unassign() }
+                        }.disabled(busy)
+                    }
+                }
                 if !loading, errorMessage == nil, !targets.contains(where: { !$0.current }) {
                     Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         ? "还没有其他任务，请先创建一个任务分组。"
@@ -126,7 +145,7 @@ struct SessionMoveSheet: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Theme.textMuted)
-            TextField("搜索任务或工作区", text: $query)
+            TextField("搜索分区或工作区", text: $query)
                 .font(.wand(size: 14))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -178,7 +197,7 @@ struct SessionMoveSheet: View {
                 }
                 Spacer(minLength: 8)
                 if target.current {
-                    Text("当前任务")
+                    Text("当前分区")
                         .font(.wand(size: 11))
                         .foregroundColor(Theme.textMuted)
                 }
@@ -190,6 +209,25 @@ struct SessionMoveSheet: View {
         .disabled(busy || target.current)
         .accessibilityLabel("移动到 \(target.name)，\(target.subtitle(ambiguous: ambiguousKeys.contains(target.key)))")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var sourceGroup: TaskDirectoryGroup? {
+        groups.first { group in
+            group.standaloneSessions.contains { $0.id == sessionId }
+                || group.tasks.contains { $0.sessions.contains { $0.id == sessionId } }
+        }
+    }
+
+    private func unassign() async {
+        guard !busy else { return }
+        busy = true
+        do {
+            try await store.unassignSession(sessionId)
+            await store.loadTaskGroups(force: true)
+            onMoved()
+            dismiss()
+        } catch { errorMessage = error.localizedDescription }
+        busy = false
     }
 
     private func load() async {

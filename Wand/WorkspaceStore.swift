@@ -2,6 +2,8 @@ import Foundation
 import Combine
 
 protocol WorkspaceServing: AnyObject {
+    func createWorkspaceSection(name: String, cwd: String, workspaceId: String?, sessionId: String?) async throws -> WorkspaceTask
+    func unassignWorkspaceSession(sessionId: String) async throws
     func listWorkspaces() async throws -> [Workspace]
     func listWorkspaceTasks(workspaceId: String) async throws -> [WorkspaceTask]
     func updateWorkspaceTask(taskId: String, name: String?) async throws -> WorkspaceTask
@@ -67,7 +69,6 @@ protocol WorkspaceServing: AnyObject {
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview
     func startWorktreeMergeAgent(
         workspace: Workspace,
-        provider: WandProvider,
         prompt: String
     ) async throws -> SessionSnapshot
 }
@@ -148,7 +149,11 @@ final class WorkspaceStore: ObservableObject {
     /// 项目直属会话（未绑定任务的会话），按项目缓存，展开项目行时加载。
     @Published private(set) var standaloneSessions: [String: [WorkspaceSessionSummary]] = [:]
     @Published private(set) var standaloneSessionErrors: [String: String] = [:]
-    /// 跨目录任务聚合（GET /api/tasks）；加载失败时置空并回退到逐项目拉取。
+    /// Full GET /api/tasks page, including archived tasks/sessions, owned once for IM filtering.
+    @Published private(set) var conversationTaskGroups: [TaskDirectoryGroup] = [] {
+        didSet { taskGroups = TaskGroupsPage.currentGroups(conversationTaskGroups) }
+    }
+    /// Derived only from the full page; existing home/workspace screens keep their original scope.
     @Published private(set) var taskGroups: [TaskDirectoryGroup] = []
     @Published private(set) var taskGroupsError: String?
     @Published private(set) var taskGroupsLoading = false
@@ -357,7 +362,7 @@ final class WorkspaceStore: ObservableObject {
             currentWorkspace = updated
         }
         invalidateTaskGroupsLoad()
-        taskGroups = taskGroups.map { group in
+        conversationTaskGroups = conversationTaskGroups.map { group in
             guard group.workspaceId == workspaceId else { return group }
             return TaskDirectoryGroup(
                 workspaceId: group.workspaceId,
@@ -376,7 +381,7 @@ final class WorkspaceStore: ObservableObject {
     /// 级联删除项目（任务、会话与独立 worktree 一并清理），并清理本地状态。
     func deleteWorkspace(workspaceId: String) async throws {
         var deletedSessionIds = Set(standaloneSessions[workspaceId]?.map(\.id) ?? [])
-        for group in taskGroups {
+        for group in conversationTaskGroups {
             if group.workspaceId == workspaceId { deletedSessionIds.formUnion(group.standaloneSessions.map(\.id)) }
             for task in group.tasks where task.workspaceId == workspaceId {
                 deletedSessionIds.formUnion(task.sessions.map(\.id))
@@ -411,7 +416,7 @@ final class WorkspaceStore: ObservableObject {
         standaloneSessionGenerations[workspaceId, default: 0] &+= 1
         loadingStandaloneSessions.remove(workspaceId)
         invalidateTaskGroupsLoad()
-        taskGroups.removeAll { $0.workspaceId == workspaceId }
+        conversationTaskGroups.removeAll { $0.workspaceId == workspaceId }
         if currentWorkspace?.id == workspaceId {
             currentWorkspace = nil
             currentTask = nil
@@ -475,10 +480,10 @@ final class WorkspaceStore: ObservableObject {
     /// 跨目录任务聚合：任务视图数据源；失败不阻塞项目树。
     /// force 用于下拉刷新和 10s 轮询；首次加载仍可跳过已有缓存。
     func loadTaskGroups(force: Bool = false) async {
-        if !force && !taskGroups.isEmpty { return }
+        if !force && !conversationTaskGroups.isEmpty { return }
         taskGroupsGeneration &+= 1
         let generation = taskGroupsGeneration
-        if taskGroups.isEmpty { taskGroupsLoading = true }
+        if conversationTaskGroups.isEmpty { taskGroupsLoading = true }
         defer {
             if generation == taskGroupsGeneration { taskGroupsLoading = false }
         }
@@ -489,7 +494,7 @@ final class WorkspaceStore: ObservableObject {
                 taskGroupsError = nil
                 return
             }
-            taskGroups = applyingWorkspaceGroupOrder(page.groups, order: pendingGroupOrder)
+            conversationTaskGroups = applyingWorkspaceGroupOrder(page.groups, order: pendingGroupOrder)
             taskGroupsRevision = page.revision
             taskGroupsError = nil
             await syncCurrentTaskMetadata()
@@ -501,11 +506,11 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func moveWorkspaceGroup(_ id: String, to targetID: String) {
-        guard id != targetID, let from = taskGroups.firstIndex(where: { $0.id == id }),
-              let to = taskGroups.firstIndex(where: { $0.id == targetID }) else { return }
-        var next = taskGroups
+        guard id != targetID, let from = conversationTaskGroups.firstIndex(where: { $0.id == id }),
+              let to = conversationTaskGroups.firstIndex(where: { $0.id == targetID }) else { return }
+        var next = conversationTaskGroups
         let moved = next.remove(at: from); next.insert(moved, at: to)
-        taskGroups = next
+        conversationTaskGroups = next
         pendingGroupOrder = next.map(\.id)
         savePendingGroupOrder()
     }
@@ -529,8 +534,8 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    /// 直接拉一份不经展示层过滤的分组（含已完成任务），供「移动会话」选目的地。
-    /// 不改 taskGroups：侧栏缓存由下一次轮询/显式刷新接管。
+    /// 直接拉一份含已完成但未归档任务的分组，保留「移动会话」目的地原有范围。
+    /// 不改 conversationTaskGroups：侧栏缓存由下一次轮询/显式刷新接管。
     func freshTaskGroups() async throws -> [TaskDirectoryGroup] {
         try await api.listTaskGroups()
     }
@@ -625,24 +630,24 @@ final class WorkspaceStore: ObservableObject {
 
     private func upsertCreatedTaskSummary(_ summary: WorkspaceTaskSummary, workspace: Workspace) {
         let normalizedCwd = normalizeWorkspaceDirectory(summary.cwd.isEmpty ? workspace.cwd : summary.cwd)
-        let matchingIndex = taskGroups.firstIndex { group in
+        let matchingIndex = conversationTaskGroups.firstIndex { group in
             if group.isGlobal { return false }
             if group.workspaceId == workspace.id, group.isBindableProject { return true }
             return normalizeWorkspaceDirectory(group.workspaceCwd) == normalizedCwd
         }
         if let matchingIndex {
-            let group = taskGroups[matchingIndex]
+            let group = conversationTaskGroups[matchingIndex]
             let tasks = group.tasks.contains(where: { $0.id == summary.id })
                 ? group.tasks
                 : group.tasks + [summary]
-            taskGroups[matchingIndex] = group.replacing(tasks: tasks)
+            conversationTaskGroups[matchingIndex] = group.replacing(tasks: tasks)
             return
         }
         let synthetic = workspace.name.isEmpty || groupLooksGlobal(workspace)
         let displayName = synthetic
             ? (normalizedCwd.split(separator: "/").map(String.init).last ?? normalizedCwd)
             : workspace.name
-        taskGroups.append(TaskDirectoryGroup(
+        conversationTaskGroups.append(TaskDirectoryGroup(
             workspaceId: synthetic ? "cwd:\(normalizedCwd)" : workspace.id,
             workspaceName: displayName,
             workspaceCwd: normalizedCwd.isEmpty ? workspace.cwd : normalizedCwd,
@@ -659,7 +664,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     /// Worktree 合并：用审查结果生成任务书并启动只绑定项目的托管 Agent 会话。
-    /// provider 回退：项目默认 → 服务器默认 → Claude。
+    /// 系统运维功能统一由「勤劳的初二」执行，工具与模型走初二候选链。
     func startWorktreeMergeAgent(
         workspace: Workspace,
         overview: WorkspaceWorktreeOverview,
@@ -670,10 +675,8 @@ final class WorkspaceStore: ObservableObject {
             overview: overview,
             selectedTaskIds: selectedTaskIds
         )
-        let provider = workspace.defaultProvider ?? serverDefaultProvider
         return try await api.startWorktreeMergeAgent(
             workspace: workspace,
-            provider: provider,
             prompt: prompt
         )
     }
@@ -696,7 +699,7 @@ final class WorkspaceStore: ObservableObject {
             currentTask = updated
         }
         invalidateTaskGroupsLoad()
-        taskGroups = taskGroups.map { group in
+        conversationTaskGroups = conversationTaskGroups.map { group in
             let tasks = group.tasks.map { summary in
                 guard summary.id == taskId else { return summary }
                 return WorkspaceTaskSummary(
@@ -714,7 +717,11 @@ final class WorkspaceStore: ObservableObject {
                     sessions: summary.sessions,
                     totalSessions: summary.totalSessions,
                     executionStatus: summary.executionStatus,
-                    queuedExecutionCount: summary.queuedExecutionCount
+                    queuedExecutionCount: summary.queuedExecutionCount,
+                    boardTaskId: summary.boardTaskId,
+                    boardTaskStatus: summary.boardTaskStatus,
+                    archived: summary.archived,
+                    parentWorkspaceTaskId: summary.parentWorkspaceTaskId
                 )
             }
             return TaskDirectoryGroup(
@@ -732,7 +739,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func deleteWorkspaceTask(workspaceId: String, taskId: String) async throws {
-        var deletedSessionIds = Set(taskGroups.flatMap(\.tasks).filter { $0.id == taskId }.flatMap { $0.sessions.map(\.id) })
+        var deletedSessionIds = Set(conversationTaskGroups.flatMap(\.tasks).filter { $0.id == taskId }.flatMap { $0.sessions.map(\.id) })
         if let detail = try? await api.getWorkspaceTask(taskId: taskId) {
             deletedSessionIds.formUnion(detail.sessions.map(\.id))
         }
@@ -746,7 +753,7 @@ final class WorkspaceStore: ObservableObject {
             tasksByWorkspace[workspaceId] = list
         }
         invalidateTaskGroupsLoad()
-        taskGroups = taskGroups.map { group in
+        conversationTaskGroups = conversationTaskGroups.map { group in
             TaskDirectoryGroup(
                 workspaceId: group.workspaceId,
                 workspaceName: group.workspaceName,
@@ -819,6 +826,21 @@ final class WorkspaceStore: ObservableObject {
         await loadTaskGroups(force: true)
     }
 
+    func createSection(name: String, group: TaskDirectoryGroup, sessionId: String? = nil) async throws {
+        _ = try await api.createWorkspaceSection(name: name, cwd: group.workspaceCwd,
+            workspaceId: group.isBindableProject ? group.workspaceId : nil, sessionId: sessionId)
+        invalidateTaskGroupsLoad()
+        await loadTaskGroups(force: true)
+        await refreshCurrentTaskInBackground()
+    }
+
+    func unassignSession(_ sessionId: String) async throws {
+        try await api.unassignWorkspaceSession(sessionId: sessionId)
+        invalidateTaskGroupsLoad()
+        await loadTaskGroups(force: true)
+        await refreshCurrentTaskInBackground()
+    }
+
     /// 移动会话归属：不动运行目录、不重启 CLI，只改任务归属。
     func moveSession(sessionId: String, toTaskId: String) async throws {
         try await api.moveWorkspaceSession(taskId: toTaskId, sessionId: sessionId)
@@ -844,7 +866,14 @@ final class WorkspaceStore: ObservableObject {
             tasksByWorkspace[workspaceId] = list
         }
         invalidateTaskGroupsLoad()
-        taskGroups = taskGroups.map { $0.replacing(tasks: $0.tasks.filter { $0.id != taskId }) }
+        conversationTaskGroups = conversationTaskGroups.map { group in
+            group.replacing(tasks: group.tasks.map { task in
+                guard task.id == taskId else { return task }
+                var archived = task
+                archived.archived = true
+                return archived
+            })
+        }
         if currentTask?.id == taskId {
             currentTask = nil
             currentWorkspace = nil
@@ -877,7 +906,7 @@ final class WorkspaceStore: ObservableObject {
     /// （同端移动会话、看板改名都不会经过本机的 mutation 路径）。
     private func syncCurrentTaskMetadata() async {
         guard let task = currentTask, let detail = taskState.detail, detail.id == task.id else { return }
-        guard let live = taskGroups.lazy.flatMap(\.tasks).first(where: { $0.id == task.id }) else { return }
+        guard let live = conversationTaskGroups.lazy.flatMap(\.tasks).first(where: { $0.id == task.id }) else { return }
         if live.name != task.name || live.status != task.status {
             currentTask = live.asTask()
         }

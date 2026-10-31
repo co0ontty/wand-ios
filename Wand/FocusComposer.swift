@@ -41,8 +41,13 @@ struct ChatDetailLayout<Content: View, Composer: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
                 .padding(.top, topClearance)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onReadingTap)
+                .background {
+                    // 空白阅读区才收键盘。整页 contentShape + onTapGesture 会先于
+                    // 子视图的 Toggle / Menu 命中，把核对开关和邀请菜单全部吃掉。
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: onReadingTap)
+                }
             composer()
                 .padding(.bottom, keyboardLift)
         }
@@ -287,9 +292,31 @@ struct ChatTopIdentityBar: View {
     var activity: AvatarFileActivity = .idle
     var thinking = false
     var speaking = false
+    /// 普通浮层按整屏扣掉返回键和更多按钮；系统标题槽已经是这段净宽，不再二次扣减。
+    var reservesFloatingControls = true
     private var identityMetrics = ChatIdentityLayoutMetrics()
 
     var body: some View {
+        if reservesFloatingControls {
+            floatingIdentity
+        } else {
+            // 导航栏标题槽给出净宽，胶囊背景填满它；长标题仍在槽内缩放、截断。
+            // 这里不能套 GeometryReader——工具栏只给一个压缩提议，量到的宽度会把胶囊挤窄。
+            HStack(spacing: 6) {
+                if attention != .quiet { dot }
+                TopCapsuleTitle(title: title, subtitle: subtitle,
+                    avatarID: avatarID, avatarName: avatarName, avatarValue: avatarValue,
+                    avatarSize: 30, titleSize: 13, subtitleSize: 11,
+                    activity: activity, thinking: thinking, speaking: speaking)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(chatTopReadback(title: title, subtitle: subtitle, status: statusText))
+            .accessibilityIdentifier("chat-visible-identity")
+        }
+    }
+
+    /// 浮在返回键与更多按钮之间，长短标题都铺满这条可用带子。
+    private var floatingIdentity: some View {
         GeometryReader { area in
             let band = ChatTopLayout.identityBand(width: area.size.width)
             HStack(spacing: 6) {
@@ -297,10 +324,8 @@ struct ChatTopIdentityBar: View {
                 TopCapsuleTitle(title: title, subtitle: subtitle,
                     avatarID: avatarID, avatarName: avatarName, avatarValue: avatarValue,
                     avatarSize: 30, titleSize: 13, subtitleSize: 11,
-                    titleWidth: max(48, band.width - 67),
                     activity: activity, thinking: thinking, speaking: speaking)
             }
-            // 身份文字只在返回键与右侧两枚按钮之间的带子里排布，长标题省略号不会压到按钮。
             .frame(width: band.width)
             .position(x: band.center, y: identityMetrics.identityClearance / 2)
         }

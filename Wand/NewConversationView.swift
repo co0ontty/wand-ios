@@ -130,7 +130,6 @@ struct NewConversationView: View {
         case model, mode, thinking, employee, task, workspace
         var id: String { rawValue }
     }
-    @State private var confirmedCheckedSessions = false
     private var focused: Bool {
         get { composerFocus.focused }
         nonmutating set { composerFocus.focused = newValue }
@@ -199,10 +198,9 @@ struct NewConversationView: View {
         if case .deliveryUnknown = coordinator.phase { return true }
         return false
     }
-    private var unknownConfirmationLabel: String {
-        coordinator.unknownOperation == .task
-            ? "我已检查任务列表，确认没有刚创建的任务"
-            : "我已检查会话列表，确认没有刚创建的对话"
+    private var unknownCreationMessage: String? {
+        guard case .deliveryUnknown(let reason) = coordinator.phase else { return nil }
+        return reason
     }
     private var canSubmit: Bool {
         let hasTaskSelection = taskOwnership != "existing" || isSelectedTaskAvailable
@@ -231,7 +229,7 @@ struct NewConversationView: View {
 
     private var hasOutstandingCreation: Bool {
         switch coordinator.phase {
-        case .idle, .rejected: return false
+        case .idle, .conversationOnly, .rejected: return false
         case .creating, .taskAccepted, .accepted, .deliveryUnknown: return true
         }
     }
@@ -249,12 +247,14 @@ struct NewConversationView: View {
 
     var body: some View {
         conversationForm
-            .navigationTitle(usesSystemNavigation && !embedded ? pendingTitle : "")
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(embedded ? .automatic : (usesSystemNavigation ? .visible : .hidden), for: .navigationBar)
             .navigationBarBackButtonHidden(creating || (!embedded && !usesSystemNavigation))
             .toolbar {
                 if usesSystemNavigation && !embedded {
+                    ToolbarItem(placement: .principal) { pendingIdentityBar(reservesFloatingControls: false) }
+                        .sharedBackgroundVisibility(.hidden)
                     if #available(iOS 27.1, *) {
                         ToolbarOverflowMenu {
                             contextOptions.disabled(creating || loading)
@@ -264,12 +264,7 @@ struct NewConversationView: View {
             }
             .overlay(alignment: .top) {
                 if !embedded && !usesSystemNavigation {
-                    ChatTopIdentityBar(title: pendingTitle, subtitle: cwd,
-                        attention: .quiet, statusText: "发送后开始工作",
-                        avatarID: selectedEmployee?.id ?? "e_wand_default",
-                        avatarName: selectedEmployee?.name ?? "赛博虎妞",
-                        avatarValue: selectedEmployee?.avatar ?? "plush-cat:v1:silver",
-                        activity: .idle, thinking: false)
+                    pendingIdentityBar(reservesFloatingControls: true)
                     FloatingChatControls(onBack: cancel) {
                         Menu { contextOptions } label: { FloatingChatIcon(symbol: "ellipsis") }
                             .accessibilityLabel("对话选项").disabled(creating)
@@ -320,6 +315,17 @@ struct NewConversationView: View {
 
     private var pendingTitle: String {
         boundTask?.name ?? (taskOwnership == "new" ? "新建任务" : "新对话")
+    }
+
+    /// 发送前后是同一颗胶囊：系统导航放进标题槽，普通布局浮在返回键之间。
+    private func pendingIdentityBar(reservesFloatingControls: Bool) -> some View {
+        ChatTopIdentityBar(title: pendingTitle, subtitle: cwd,
+            attention: .quiet, statusText: "发送后开始工作",
+            avatarID: selectedEmployee?.id ?? "e_wand_default",
+            avatarName: selectedEmployee?.name ?? "赛博虎妞",
+            avatarValue: selectedEmployee?.avatar ?? "plush-cat:v1:silver",
+            activity: .idle, thinking: false,
+            reservesFloatingControls: reservesFloatingControls)
     }
 
     private func cancel() {
@@ -382,7 +388,7 @@ struct NewConversationView: View {
                             turnRunning: false, hasDraft: true,
                             canSubmit: primaryActionEnabled,
                             message: nil,
-                            sendLabel: isUnknown ? "检查并继续" : canResumeCreation ? "继续创建" : "发送",
+                            sendLabel: isUnknown ? unknownRecoveryLabel : canResumeCreation ? "继续创建" : "发送",
                             onSend: performPrimaryAction, onStop: {}
                         )
                     },
@@ -438,6 +444,10 @@ struct NewConversationView: View {
             normalizeThinkingEffort()
         }
         .onChange(of: taskOwnership) { _, value in
+            if coordinator.skipsTaskCreation, value == "new" {
+                taskOwnership = "none"
+                return
+            }
             if value == "existing", selectedTaskID.isEmpty {
                 selectedTaskID = existingTasks.first?.id ?? ""
             }
@@ -697,7 +707,14 @@ struct NewConversationView: View {
                 else { employeeOverride = selectedEmployee != nil; mode = value }
             case .thinking: employeeOverride = selectedEmployee != nil; thinkingEffort = value
             case .employee: contactSubject = ContactExecutionSubject(type: "employee", id: value)
-            case .task: selectedTaskID = value; taskOwnership = "existing"
+            case .task:
+                if isUnknown, coordinator.unknownOperation == .task {
+                    guard let task = existingTasks.first(where: { $0.id == value && $0.archived != true }) else { return }
+                    selectTaskForContinuation(task)
+                } else {
+                    selectedTaskID = value
+                    taskOwnership = "existing"
+                }
             case .workspace: targetWorkspaceID = value
             }
         }
@@ -708,13 +725,16 @@ struct NewConversationView: View {
         case .mode: return "权限模式"
         case .thinking: return "思考深度"
         case .employee: return "执行员工"
-        case .task: return "已有任务"
+        case .task: return isUnknown ? "选择已创建的任务继续" : "已有任务"
         case .workspace: return "所属项目"
         }
     }
     private func selectionNotice(_ selected: Selection) -> String? {
         if selected == .employee { return contactsError }
         if selected == .task && !taskListLoaded { return "任务列表尚未加载，请重试。" }
+        if selected == .task && isUnknown {
+            return "请选择要继续的已创建任务。草稿会保留，再次发送时仅在所选任务中创建会话。"
+        }
         if selected == .thinking && dynamicThinkingEffortOptions(provider: provider, selectedModel: model,
             defaultModel: configModel(for: provider), models: providerModels,
             providerEfforts: modelCatalog?.thinkingEfforts(for: provider) ?? []) == nil {
@@ -746,7 +766,7 @@ struct NewConversationView: View {
             return SearchableChoiceSection(id: selected.rawValue, items: contactEmployees.filter { !$0.archived && !$0.agents.isEmpty }
                 .map { SearchableChoiceItem(id: $0.id, label: $0.name) }, selectedId: selectedEmployee?.id ?? "", searchable: true)
         case .task:
-            return SearchableChoiceSection(id: selected.rawValue, items: existingTasks.map { SearchableChoiceItem(id: $0.id, label: taskPickerTitle($0)) },
+            return SearchableChoiceSection(id: selected.rawValue, items: existingTasks.filter { $0.archived != true }.map { SearchableChoiceItem(id: $0.id, label: taskPickerTitle($0)) },
                 selectedId: selectedTaskID, searchable: true)
         case .workspace:
             return SearchableChoiceSection(id: selected.rawValue, items: [SearchableChoiceItem(id: "", label: "按工作目录创建")]
@@ -757,12 +777,30 @@ struct NewConversationView: View {
     @ViewBuilder private var creationFeedback: some View {
         if isUnknown {
             VStack(alignment: .leading, spacing: 8) {
-                Text(errorMessage ?? "创建结果未知。请先检查会话列表，确认是否已创建。")
+                Text(errorMessage ?? unknownCreationMessage ?? "上次创建尚未确认，输入已保留。")
                     .font(.footnote).foregroundStyle(Theme.danger)
-                Toggle(unknownConfirmationLabel, isOn: $confirmedCheckedSessions).font(.footnote)
-                if coordinator.unknownOperation == nil || (coordinator.unknownOperation == .session && coordinator.unknownSessionID == nil) || (coordinator.unknownOperation == .task && coordinator.unknownTaskID == nil) {
-                    Text("当前服务端没有返回创建请求标识。仅查看列表无法证明没有创建成功，因此不会允许重试。")
-                        .font(.caption).foregroundStyle(Theme.textSecondary)
+                Text(coordinator.unknownOperation == .task
+                     ? "可以读取任务列表，选择要继续的任务。输入会保留，任务不会重复创建。"
+                     : "先读取已创建的会话。若上次没有收到会话标识，请返回会话列表打开已有对话。")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+                Button(unknownRecoveryLabel, systemImage: coordinator.unknownOperation == .task ? "checklist" : "arrow.clockwise") {
+                    performPrimaryAction()
+                }
+                .buttonStyle(WandQuietButtonStyle())
+                .disabled(!primaryActionEnabled)
+                .accessibilityIdentifier("pending-creation-recovery")
+                if coordinator.unknownOperation == .task {
+                    Button("跳过任务，直接开始对话", systemImage: "bubble.left") {
+                        coordinator.continueWithoutTask()
+                        guard coordinator.skipsTaskCreation else { return }
+                        taskOwnership = "none"
+                        selectedTaskID = ""
+                        workspaceSelectionIsLocked = false
+                        clearFrozenDraft()
+                        errorMessage = "输入已保留。点击发送直接开始对话；上次任务结果保留，不会重复创建。"
+                    }
+                    .buttonStyle(WandQuietButtonStyle()).disabled(creating)
+                    .accessibilityIdentifier("pending-creation-without-task")
                 }
             }
         } else if let errorMessage {
@@ -777,9 +815,15 @@ struct NewConversationView: View {
         }
     }
 
+    private var unknownRecoveryLabel: String {
+        coordinator.unknownOperation == .task ? "选择已有任务继续" : "读取已创建的会话"
+    }
+
     private var primaryActionEnabled: Bool {
-        !creating && !isComposing && !stagedAttachments.isUploading &&
-            (isUnknown ? confirmedCheckedSessions : (canResumeCreation || canSubmit))
+        let canRecover = coordinator.unknownOperation == .task
+            || (coordinator.unknownOperation == .session && coordinator.unknownSessionID != nil)
+        return !creating && !isComposing && !stagedAttachments.isUploading &&
+            (isUnknown ? canRecover : (canResumeCreation || canSubmit))
     }
 
     private func performPrimaryAction() {
@@ -792,7 +836,7 @@ struct NewConversationView: View {
             case .task:
                 Task { await verifyUnknownTaskCreation() }
             case .session:
-                Task { await loadSessionList() }
+                Task { await verifyUnknownSessionCreation() }
             case nil:
                 errorMessage = "创建请求缺少可核对的请求标识，无法安全继续；请保留此页面并联系支持。"
             }
@@ -905,71 +949,59 @@ struct NewConversationView: View {
         return created.id
     }
 
-    private func loadSessionList() async {
+    private func verifyUnknownSessionCreation() async {
+        guard !creating, isUnknown, coordinator.unknownOperation == .session,
+              let sessionID = coordinator.unknownSessionID else { return }
+        creating = true
+        defer { creating = false }
         do {
-            let firstPage = try await api.fetchSessionList(offset: 0, limit: 100)
-            var entries = firstPage.entries
-            var offset = entries.count
-            while offset < firstPage.total {
-                let page = try await api.fetchSessionList(offset: offset, limit: 100, revision: firstPage.revision)
-                guard page.revision == firstPage.revision, !page.entries.isEmpty else {
-                    throw WandAPI.APIError.network("会话列表在核对期间发生变化，请重试核对。")
-                }
-                entries += page.entries
-                offset += page.entries.count
+            let snapshot = try await api.getSession(id: sessionID)
+            guard snapshot.id == sessionID else {
+                throw WandAPI.APIError.network("返回的会话与上次创建标识不一致。")
             }
-            guard offset >= firstPage.total else {
-                throw WandAPI.APIError.network("会话列表不完整，无法确认创建结果。")
-            }
-            guard coordinator.currentCreationRequestID != nil else {
-                throw WandAPI.APIError.network("创建请求缺少可核对标识，无法安全关联会话。")
-            }
-            let sessionID = coordinator.unknownSessionID
-            if let sessionID, let entry = entries.first(where: { $0.session?.id == sessionID }),
-               let session = entry.session {
-                coordinator.resolveUnknownSession(session)
-                resumeAcceptedSession(session.id, text: text, textRevision: pendingDraftRevision,
-                                      sourceText: text, attachmentRevision: pendingAttachmentRevision,
-                                      attachments: stagedAttachments)
-                return
-            }
-            coordinator.rejectUnknownSessionAfterCheck()
-            confirmedCheckedSessions = false
-            errorMessage = "会话列表中未找到可确认的会话，但当前服务端不支持按创建请求核对结果。为避免重复创建，请勿再次发送。"
+            coordinator.resolveUnknownSession(snapshot)
+            errorMessage = "已找回创建的会话，输入已保留。点击发送继续。"
         } catch {
-            errorMessage = "无法核对会话列表：\(error.localizedDescription)"
+            errorMessage = "无法读取已创建的会话：\(error.localizedDescription)"
         }
     }
 
+    private func selectTaskForContinuation(_ task: WorkspaceTaskSummary) {
+        guard isUnknown, coordinator.unknownOperation == .task else { return }
+        coordinator.resolveUnknownTask(task.id)
+        taskOwnership = "existing"
+        selectedTaskID = task.id
+        workspaceSelectionIsLocked = true
+        cwd = task.cwd
+        errorMessage = "已选择任务「\(task.name)」。草稿已保留，再次发送会继续创建会话。"
+    }
+
     private func verifyUnknownTaskCreation() async {
+        guard !creating, isUnknown, coordinator.unknownOperation == .task else { return }
+        creating = true
+        defer { creating = false }
         do {
             let page = try await api.listTaskGroupsPage(revision: nil)
-            guard !page.unchanged, page.revision != nil else {
-                throw WandAPI.APIError.network("当前服务端未提供可验证的任务列表快照，无法安全核对创建结果。")
+            guard !page.unchanged else {
+                throw WandAPI.APIError.network("未取得完整任务列表，请重试读取。")
             }
-            let groups = page.groups
-            let workspaces = try await api.listWorkspaces()
-            availableWorkspaces = workspaces
-            existingTasks = groups.flatMap(\.tasks)
+            // Explicit selection only needs real task identities, not proof that an
+            // earlier request was absent. Legacy array responses remain usable.
+            existingTasks = page.groups.flatMap(\.tasks)
             taskListLoaded = true
-            guard coordinator.currentCreationRequestID != nil else {
-                throw WandAPI.APIError.network("创建请求缺少可核对标识，无法安全关联任务。")
-            }
-            let taskID = coordinator.unknownTaskID
-            if let taskID, let task = existingTasks.first(where: { $0.id == taskID }) {
-                coordinator.resolveUnknownTask(task.id)
-                taskOwnership = "existing"
-                selectedTaskID = task.id
-                workspaceSelectionIsLocked = true
-                cwd = task.cwd
-                errorMessage = "任务已创建，已选择该任务。再次发送只会继续创建会话。"
+            if let taskID = coordinator.unknownTaskID,
+               let task = existingTasks.first(where: { $0.id == taskID && $0.archived != true }) {
+                selectTaskForContinuation(task)
                 return
             }
-            coordinator.rejectUnknownTaskAfterCheck()
-            confirmedCheckedSessions = false
-            errorMessage = "任务列表中未找到可确认的任务，但当前服务端不支持按创建请求核对结果。为避免重复创建，请勿再次发送。"
+            guard existingTasks.contains(where: { $0.archived != true }) else {
+                errorMessage = "没有可继续的任务。输入已保留，请稍后重试读取；上次请求不会自动重发。"
+                return
+            }
+            errorMessage = "请选择要继续的任务，输入会保留。"
+            open(.task)
         } catch {
-            errorMessage = "无法核对任务列表：\(error.localizedDescription)"
+            errorMessage = "无法读取任务列表：\(error.localizedDescription)"
         }
     }
 
@@ -1069,7 +1101,12 @@ struct NewConversationView: View {
                 loading = false
                 return
             }
-            if let requestedTaskID = initialWorkspaceTaskID,
+            if coordinator.skipsTaskCreation {
+                taskOwnership = "none"
+                selectedTaskID = ""
+                workspaceSelectionIsLocked = false
+            }
+            if let requestedTaskID = initialWorkspaceTaskID, !coordinator.skipsTaskCreation,
                let task = existingTasks.first(where: { $0.id == requestedTaskID }) {
                 selectedTaskID = task.id
                 taskOwnership = "existing"
@@ -1192,6 +1229,8 @@ struct NewConversationView: View {
                 creating = false
                 if case .deliveryUnknown(let reason) = coordinator.phase {
                     errorMessage = "创建结果未知，请核对会话列表。\n\(reason)"
+                } else {
+                    errorMessage = coordinator.creationError ?? "会话未能创建，请检查执行设置后重试。"
                 }
                 return
             }
@@ -1225,10 +1264,8 @@ struct NewConversationView: View {
         }
     }
 
-    private func submit(afterUnknownAcknowledgement: Bool = false) {
-        guard afterUnknownAcknowledgement ? (!creating && didLoadConfiguration && !loading &&
-            (sessionKind != "structured" || !normalizedText.isEmpty || stagedAttachments.stagedAttachmentCount > 0) && !cwd.isEmpty &&
-            (taskOwnership != "existing" || isSelectedTaskAvailable)) : canSubmit else { return }
+    private func submit() {
+        guard canSubmit else { return }
         focused = false
         creating = true
         errorMessage = nil
@@ -1244,7 +1281,7 @@ struct NewConversationView: View {
         let frozenEmployeeOverride = employeeOverride
         let frozenDraftRevision = self.frozenDraftRevision ?? pendingDraftRevision
         let frozenAttachmentRevision = self.frozenAttachmentRevision ?? pendingAttachmentRevision
-        let frozenOwnership = taskOwnership
+        let frozenOwnership = coordinator.skipsTaskCreation && taskOwnership == "new" ? "none" : taskOwnership
         let frozenTaskID = selectedTaskID
         let frozenTaskName = newTaskName.trimmingCharacters(in: .whitespacesAndNewlines)
         let frozenWorktree = worktreeEnabled
@@ -1346,6 +1383,8 @@ struct NewConversationView: View {
                 } else if case .rejected(let reason) = coordinator.phase {
                     errorMessage = reason
                     coordinator.retryRejectedTaskCreation()
+                } else {
+                    errorMessage = coordinator.creationError ?? "任务已保留，会话未能创建，请检查执行设置后重试。"
                 }
                 return
             }

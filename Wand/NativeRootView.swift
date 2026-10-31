@@ -538,7 +538,9 @@ struct NativeRootView: View {
                         ConversationListView(store: conversations, onSelect: openConversation,
                             onEmployee: { selectedContactEmployeeID = $0 }, onSettings: { showSettings = true },
                             onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) },
-                            taskGroups: workspaceStore.taskGroups, onOpenSession: openWorkspaceStandaloneSession)
+                            taskGroups: workspaceStore.conversationTaskGroups, onOpenSession: openWorkspaceStandaloneSession,
+                            taskGroupsLoading: workspaceStore.taskGroupsLoading, taskGroupsError: workspaceStore.taskGroupsError,
+                            onReloadTaskGroups: { Task { await workspaceStore.loadTaskGroups(force: true) } })
                             .transition(.opacity)
                     } else if homeListMode == .contacts {
                         ContactsView(api: api, store: contactsStore, onBack: { setHomeListMode(.im) },

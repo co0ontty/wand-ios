@@ -82,24 +82,17 @@ func changesTaskHierarchy(method: String, path: String) -> Bool {
     return route == "/api/sessions/batch-delete"
 }
 
-/// Worktree 合并 Agent 的托管会话请求：mode=managed + initialInput 任务书，
+/// Worktree 合并 Agent 的托管会话请求：由系统运维员工「勤劳的初二」执行，
 /// 会话只绑定项目、不绑定任务（对齐 web 端 startWorktreeMergeAgent）。
 func worktreeMergeAgentRequest(
     workspace: Workspace,
-    provider: WandProvider,
+    provider: WandProvider? = nil,
     prompt: String
 ) -> WorkspaceTaskWindowRequest {
     WorkspaceTaskWindowRequest(
-        path: "/api/sessions",
+        path: "/api/workspaces/\(workspace.id)/worktree-merge-agent",
         body: [
-            "kind": .string("pty"),
-            "command": .string(provider == .qoder ? "qodercli" : provider.rawValue),
-            "provider": .string(provider.rawValue),
-            "cwd": .string(workspace.cwd),
-            "mode": .string("managed"),
-            "initialInput": .string(prompt),
-            "sessionSource": .string("interactive"),
-            "workspaceId": .string(workspace.id),
+            "prompt": .string(prompt),
         ]
     )
 }
@@ -200,6 +193,17 @@ private struct WorkspaceLayoutResponse: Decodable {
 }
 
 extension WandAPI {
+    func createWorkspaceSection(name: String, cwd: String, workspaceId: String? = nil, sessionId: String? = nil) async throws -> WorkspaceTask {
+        var body: [String: Any] = ["name": name, "cwd": cwd]
+        if let workspaceId { body["workspaceId"] = workspaceId }
+        if let sessionId { body["sessionId"] = sessionId }
+        return try await request(WorkspaceTask.self, method: "POST", path: "/api/workspace-sections", body: body)
+    }
+
+    func unassignWorkspaceSession(sessionId: String) async throws {
+        _ = try await requestData(method: "POST", path: "/api/workspace-sections/unassign", body: ["sessionId": sessionId])
+    }
+
     func listWorkspaces() async throws -> [Workspace] {
         let workspaces = try await request([Workspace].self, method: "GET", path: "/api/workspaces")
         return workspaces.sorted { lhs, rhs in
@@ -445,12 +449,11 @@ extension WandAPI {
             parentTaskId: parentTaskId,
             creationRequestId: creationRequestId
         )
-        return try await request(
+        return try await requestCreatedResource(
             WorkspaceTaskCreation.self,
-            method: "POST",
             path: requestSpec.path,
             body: requestSpec.foundationBody
-        )
+        ) { UnknownTaskDeliveryError(taskID: $0, cause: $1) }
     }
 
     func createStandaloneTask(
@@ -469,12 +472,11 @@ extension WandAPI {
             parentTaskId: parentTaskId,
             creationRequestId: creationRequestId
         )
-        return try await request(
+        return try await requestCreatedResource(
             WorkspaceTaskCreation.self,
-            method: "POST",
             path: requestSpec.path,
             body: requestSpec.foundationBody
-        )
+        ) { UnknownTaskDeliveryError(taskID: $0, cause: $1) }
     }
 
     /// 跨目录任务聚合列表（GET /api/tasks）：目录组一级容器，
@@ -483,16 +485,18 @@ extension WandAPI {
         _ = try await requestData(method: "PUT", path: "/api/workspaces/order", body: ["ids": ids])
     }
 
+    /// Legacy task pickers keep their non-archived scope; the owner consumes the full page below.
     func listTaskGroups() async throws -> [TaskDirectoryGroup] {
-        try await listTaskGroupsPage(revision: nil).groups
+        TaskGroupsPage.currentGroups(try await listTaskGroupsPage(revision: nil).groups)
     }
 
     func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage {
-        var path = "/api/tasks"
-        if let revision, !revision.isEmpty {
-            path += "?revision=\(percentEncodePathComponent(revision))"
-        }
-        let data = try await requestData(method: "GET", path: path)
+        // An empty revision opts into the versioned envelope on the first read.
+        // Omitting it asks the server for a legacy array without a verifiable revision.
+        let data = try await requestData(method: "GET", path: "/api/tasks", queryItems: [
+            URLQueryItem(name: "includeArchived", value: "1"),
+            URLQueryItem(name: "revision", value: revision ?? ""),
+        ])
         return try TaskGroupsPage.decode(from: data)
     }
 
@@ -507,12 +511,10 @@ extension WandAPI {
 
     func startWorktreeMergeAgent(
         workspace: Workspace,
-        provider: WandProvider,
         prompt: String
     ) async throws -> SessionSnapshot {
         let requestSpec = worktreeMergeAgentRequest(
             workspace: workspace,
-            provider: provider,
             prompt: prompt
         )
         return try await request(
@@ -521,6 +523,14 @@ extension WandAPI {
             path: requestSpec.path,
             body: requestSpec.foundationBody
         )
+    }
+
+    func startWorktreeMergeAgent(
+        workspace: Workspace,
+        provider: WandProvider,
+        prompt: String
+    ) async throws -> SessionSnapshot {
+        try await startWorktreeMergeAgent(workspace: workspace, prompt: prompt)
     }
 
     func workspacePathSuggestions(query: String) async throws -> [WorkspacePathSuggestion] {

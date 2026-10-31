@@ -5,6 +5,64 @@ import WebKit
 @testable import Wand
 
 final class HomeParityTests: XCTestCase {
+    func testConversationFilterTaskProjectionDecodesBusinessStageAndKeepsArchivedSessions() throws {
+        func group(_ status: Any = NSNull(), containerStatus: String = "done") throws -> TaskDirectoryGroup {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "workspaceId": "wand", "workspaceName": "Wand", "workspaceCwd": "/work/wand",
+                "tasks": [["id": "container", "workspaceId": "wand", "name": "修复", "status": containerStatus,
+                           "boardTaskId": "board", "boardTaskStatus": status, "createdAt": "", "cwd": "/work/wand",
+                           "sessions": [["id": "a", "workspaceTaskId": "container", "employeeId": "person", "archived": true]]]],
+                "standaloneSessions": [["id": "b", "employeeId": "person"], ["id": "c", "workspaceTaskId": "missing"]]
+            ] as [String: Any])
+            return try JSONDecoder().decode(TaskDirectoryGroup.self, from: data)
+        }
+        let unknown = try group()
+        let all = HomePresentation.conversations([unknown], includeArchived: true)
+        XCTAssertEqual(all.count, 3)
+        XCTAssertEqual(all.first { $0.id == "a" }?.filterStage, .unknown, "container done must never become business review")
+        XCTAssertEqual(all.first { $0.id == "b" }?.filterStage, ConversationTaskStage.none)
+        XCTAssertEqual(all.first { $0.id == "c" }?.filterStage, .unknown)
+        XCTAssertEqual(HomePresentation.conversations([unknown]).count, 2)
+        let review = try group("done")
+        let task = try XCTUnwrap(review.tasks.first)
+        XCTAssertEqual(task.boardTaskId, "board")
+        XCTAssertEqual(HomePresentation.replacing(task, sessions: []).boardTaskStatus, "done")
+        XCTAssertEqual(HomePresentation.conversations([review], includeArchived: true).first { $0.id == "a" }?.filterStage, .review)
+        let legacy = try JSONDecoder().decode(WorkspaceTaskSummary.self, from: Data(#"{"id":"legacy","workspaceId":"wand","name":"old","status":"active","createdAt":"","cwd":"/","sessions":[]}"#.utf8))
+        XCTAssertNil(legacy.boardTaskId)
+        XCTAssertNil(legacy.boardTaskStatus)
+    }
+
+    func testConversationGroupFiltersUseRealTaskAssociationNotContainerLifecycle() throws {
+        func task(_ status: String?, workspace: String) throws -> ConversationTask {
+            var raw: [String: Any] = ["id": "board", "workspaceId": workspace, "title": "验收"]
+            if let status { raw["status"] = status }
+            return try JSONDecoder().decode(ConversationTask.self, from: JSONSerialization.data(withJSONObject: ["task": raw, "runs": []]))
+        }
+        let filter = ConversationListFilters(stage: .review, workspace: .workspace("wand"))
+        let wrongWorkspace = try task("done", workspace: "other")
+        let wrongStage = try task("doing", workspace: "wand")
+        XCTAssertFalse([wrongWorkspace, wrongStage].contains { $0.matchesFilters(filter, query: "", conversationTitle: "群聊", groups: []) })
+        XCTAssertTrue(try task("done", workspace: "wand").matchesFilters(filter, query: "验收", conversationTitle: "群聊", groups: []))
+        XCTAssertEqual(try task(nil, workspace: "wand").filterStage, .unknown)
+        XCTAssertFalse(try task(nil, workspace: "wand").matchesFilters(ConversationListFilters(stage: .todo), query: "", conversationTitle: "群聊", groups: []))
+        let group = try JSONDecoder().decode(TaskDirectoryGroup.self, from: JSONSerialization.data(withJSONObject: [
+            "workspaceId": "wand", "workspaceName": "Wand", "workspaceCwd": "/work/wand", "standaloneSessions": [],
+            "tasks": [["id": "container", "workspaceId": "wand", "name": "修复", "status": "active", "boardTaskId": "board",
+                       "createdAt": "", "cwd": "/work/wand", "sessions": [
+                        ["id": "archived", "archived": true, "title": "归档记录"],
+                        ["id": "live", "archived": false, "title": "活动记录", "status": "thinking"]
+                       ]]]
+        ] as [String: Any]))
+        var scope = filter
+        scope.activeOnly = true
+        let association = try task("done", workspace: "wand")
+        XCTAssertFalse(association.matchesFilters(scope, query: "归档记录", conversationTitle: "群聊", groups: [group]))
+        XCTAssertTrue(association.matchesFilters(scope, query: "活动记录", conversationTitle: "群聊", groups: [group]))
+        scope.activeOnly = false; scope.archive = .archived
+        XCTAssertTrue(association.matchesFilters(scope, query: "归档记录", conversationTitle: "群聊", groups: [group]))
+    }
+
     func testPersonSessionWorkspaceLabelIsCompactAndOmitsGlobalOwnership() throws {
         func label(_ name: String, cwd: String = "/work/wand", global: Bool = false, id: String = "w") throws -> String? {
             let data = try JSONSerialization.data(withJSONObject: [

@@ -123,6 +123,30 @@ struct WandTaskAcceptance: Codable, Equatable {
     let evidence: String
     let blocker: String
     let acceptedAt: String?
+    let confirmedRevision: Int?
+
+    init(evidence: String, blocker: String, acceptedAt: String?, confirmedRevision: Int? = nil) {
+        self.evidence = evidence; self.blocker = blocker; self.acceptedAt = acceptedAt; self.confirmedRevision = confirmedRevision
+    }
+
+    private enum CodingKeys: String, CodingKey { case evidence, blocker, acceptedAt, confirmedRevision }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        evidence = (try? c.decode(String.self, forKey: .evidence)) ?? ""
+        blocker = (try? c.decode(String.self, forKey: .blocker)) ?? ""
+        acceptedAt = try? c.decodeIfPresent(String.self, forKey: .acceptedAt)
+        confirmedRevision = try? c.decodeIfPresent(Int.self, forKey: .confirmedRevision)
+    }
+}
+
+struct WandTaskVerification: Codable, Equatable {
+    let verdict: String
+    let evidence: String
+    let blocker: String
+    let reviewedAt: String?
+    let revision: Int
+    let sourceSessionId: String?
+    let reviewerId: String?
 }
 
 
@@ -163,7 +187,7 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         case taskDescription = "description"
         case status, priority, labels, dueDate
         case sortOrder, agent, createdAt, updatedAt, sessionIds, sessions, workspace
-        case milestone, workspaceTaskId, parentTaskId, executionSubject, acceptance, queuedCommentCount, executionStatus, queuedExecutionCount
+        case milestone, workspaceTaskId, parentTaskId, executionSubject, acceptance, deliveryRevision, verification, legacyReview, workflowVersion, queuedCommentCount, executionStatus, queuedExecutionCount
     }
 
     let id: String
@@ -192,6 +216,12 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
     let parentTaskId: String?
     let executionSubject: ContactExecutionSubject?
     let acceptance: WandTaskAcceptance?
+    let deliveryRevision: Int
+    let workflowVersion: Int?
+    let verification: WandTaskVerification?
+    let legacyReview: Bool
+    var aiVerificationCurrent: Bool { verification?.revision == deliveryRevision && verification?.verdict == "passed" && verification?.evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false && verification?.blocker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true }
+    var humanAcceptanceCurrent: Bool { acceptance?.acceptedAt?.isEmpty == false && acceptance?.confirmedRevision == deliveryRevision && acceptance?.evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false && acceptance?.blocker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true }
     /// 该任务还有多少条派发在员工并发上限后排队；任务仍留在活动列。
     let queuedCommentCount: Int
     let executionStatus: String?
@@ -212,7 +242,8 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         title = (try? container.decode(String.self, forKey: .title)) ?? "任务"
         titleSource = (try? container.decode(String.self, forKey: .titleSource)) ?? "user"
         description = (try? container.decode(String.self, forKey: .taskDescription)) ?? ""
-        status = (try? container.decode(String.self, forKey: .status)) ?? "todo"
+        let rawStatus = (try? container.decode(String.self, forKey: .status)) ?? "todo"
+        status = rawStatus == "done" ? "review" : rawStatus
         priority = (try? container.decode(String.self, forKey: .priority)) ?? "none"
         labels = (try? container.decode([String].self, forKey: .labels)) ?? []
         dueDate = try? container.decodeIfPresent(String.self, forKey: .dueDate)
@@ -230,6 +261,10 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
         parentTaskId = (rawParentTaskId?.isEmpty == false) ? rawParentTaskId : nil
         executionSubject = try? container.decodeIfPresent(ContactExecutionSubject.self, forKey: .executionSubject)
         acceptance = try? container.decodeIfPresent(WandTaskAcceptance.self, forKey: .acceptance)
+        deliveryRevision = max(0, (try? container.decode(Int.self, forKey: .deliveryRevision)) ?? 0)
+        workflowVersion = try? container.decodeIfPresent(Int.self, forKey: .workflowVersion)
+        verification = try? container.decodeIfPresent(WandTaskVerification.self, forKey: .verification)
+        legacyReview = ((try? container.decodeIfPresent(Bool.self, forKey: .legacyReview)) ?? false) || rawStatus == "done"
         queuedCommentCount = max(0, (try? container.decode(Int.self, forKey: .queuedCommentCount)) ?? 0)
         executionStatus = try? container.decodeIfPresent(String.self, forKey: .executionStatus)
         queuedExecutionCount = try? container.decodeIfPresent(Int.self, forKey: .queuedExecutionCount)
@@ -237,14 +272,17 @@ struct WandBoardTask: Decodable, Identifiable, Equatable {
 }
 
 enum WandBoardStatus: String, CaseIterable, Identifiable {
-    case backlog, todo, doing, done
+    case backlog, todo, doing, review, ready, done
+    static var allCases: [WandBoardStatus] { [.backlog, .todo, .doing, .review, .ready] }
     var id: String { rawValue }
     var label: String {
         switch self {
         case .backlog: return "待立项"
-        case .todo: return "待办"
-        case .doing: return "进行中"
-        case .done: return "等你确认"
+        case .todo: return "等待认领"
+        case .doing: return "执行中"
+        case .review: return "待验收"
+        case .ready: return "待归档"
+        case .done: return "待验收（旧数据）"
         }
     }
     var empty: String {
@@ -252,7 +290,9 @@ enum WandBoardStatus: String, CaseIterable, Identifiable {
         case .backlog: return "还没有待立项任务"
         case .todo: return "还没有待办任务"
         case .doing: return "暂无进行中的任务"
-        case .done: return "还没有等你确认的任务"
+        case .review: return "还没有待验收的任务"
+        case .ready: return "还没有待归档的任务"
+        case .done: return "还没有待验收的旧任务"
         }
     }
 }
@@ -331,6 +371,10 @@ func wandBoardAgentTitle(_ provider: String, _ agent: WandBoardTaskAgent?, _ cat
     return [tool, model, wandBoardModeLabel(agent.mode)]
         .filter { !$0.isEmpty }
         .joined(separator: " · ")
+}
+
+func wandBoardWorkflowBody(action: String, requestId: String, expectedUpdatedAt: String, evidence: String, blocker: String) -> [String: Any] {
+    ["workflow": ["action": action, "requestId": requestId, "expectedUpdatedAt": expectedUpdatedAt, "evidence": evidence, "blocker": blocker]]
 }
 
 func wandBoardProviderLabel(_ provider: String) -> String {
@@ -553,7 +597,7 @@ func wandBoardSwipeSystemImage(_ action: WandBoardSwipeAction) -> String {
 }
 
 func wandBoardToggledStatus(_ status: String) -> String {
-    (status == "done" || status == "archived") ? "todo" : "done"
+    status == "archived" ? "todo" : status == "todo" ? "doing" : status
 }
 
 func wandBoardSessionRunning(_ status: String) -> Bool { status == "running" }
@@ -712,7 +756,7 @@ func wandBoardCardDue(
 
 /// 已关闭的任务不再算逾期：做完/归档之后日期只剩记录意义。
 func wandBoardIsOverdue(_ dueDate: String, status: String, today: String = wandBoardTodayIso()) -> Bool {
-    status != "done" && status != "archived" && dueDate < today
+    status != "archived" && dueDate < today
 }
 
 /// 本机今天的 ISO 日期（与 Web 的 isoDate(new Date()) 同为浏览器/设备本地时区）。
@@ -738,7 +782,7 @@ func wandBoardSessionSummary(_ sessions: [WandBoardTaskSession]) -> String {
 
 func wandBoardProcessingLabel(_ task: WandBoardTask) -> String? {
     guard task.status == "doing" else { return nil }
-    if task.acceptance?.acceptedAt != nil { return "验收通过 · 已完成" }
+    if task.humanAcceptanceCurrent { return "人工已确认 · 已完成" }
     if let blocker = task.acceptance?.blocker, !blocker.isEmpty { return "待处理：\(blocker)" }
     let running = task.executionStatus == "running" || task.sessions.contains { $0.activityLabel == "运行中" }
     if running { return "正在处理..." }
@@ -761,6 +805,23 @@ struct WandBoardTaskStats: Equatable {
     var accepted: Int
     var remaining: Int
     var high: Int
+    var backlog: Int = 0
+    var review: Int = 0
+    var ready: Int = 0
+}
+
+func wandBoardGoalProjection(all: [WandBoardTask], matched: [WandBoardTask]) -> [WandBoardTask] {
+    let byId = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
+    var visible = Set<String>()
+    for item in matched {
+        var root = item
+        var seen = Set([root.id])
+        while let parentId = root.parentTaskId, !seen.contains(parentId), let parent = byId[parentId] {
+            seen.insert(parentId); root = parent
+        }
+        visible.insert(root.id)
+    }
+    return all.filter { visible.contains($0.id) }
 }
 
 func wandBoardTaskStats(_ tasks: [WandBoardTask]) -> WandBoardTaskStats {
@@ -773,11 +834,11 @@ func wandBoardTaskStats(_ tasks: [WandBoardTask]) -> WandBoardTaskStats {
         switch task.status {
         case "todo": todo += 1
         case "doing": doing += 1
-        case "done": done += 1
+        case "review", "ready": done += 1
         default: break
         }
-        if task.acceptance?.acceptedAt != nil { accepted += 1 }
-        if task.priority == "high" || task.priority == "urgent" {
+        if task.humanAcceptanceCurrent { accepted += 1 }
+        if task.status != "archived" && (task.priority == "high" || task.priority == "urgent") {
             high += 1
         }
     }
@@ -787,8 +848,11 @@ func wandBoardTaskStats(_ tasks: [WandBoardTask]) -> WandBoardTaskStats {
         doing: doing,
         done: done,
         accepted: accepted,
-        remaining: todo + doing,
-        high: high
+        remaining: tasks.filter { $0.status != "archived" && !$0.humanAcceptanceCurrent }.count,
+        high: high,
+        backlog: tasks.filter { $0.status == "backlog" }.count,
+        review: tasks.filter { $0.status == "review" }.count,
+        ready: tasks.filter { $0.status == "ready" }.count
     )
 }
 

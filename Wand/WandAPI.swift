@@ -185,6 +185,28 @@ final class WandAPI: SessionInputTransport {
         }
     }
 
+    /// A successful create response may contain a real ID even when another field
+    /// cannot be decoded. Keep that ID for a read-only recovery; never repeat POST.
+    func requestCreatedResource<T: Decodable>(
+        _ type: T.Type,
+        path: String,
+        body: [String: Any],
+        timeout: TimeInterval = 30,
+        unknownDelivery: (String, Error) -> Error
+    ) async throws -> T {
+        let data = try await requestData(method: "POST", path: path, body: body, timeout: timeout)
+        do {
+            return try JSONDecoder().decode(type, from: data)
+        } catch {
+            let cause = APIError.network("创建响应解析失败：\(error.localizedDescription)")
+            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let id = object["id"] as? String, !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw unknownDelivery(id, cause)
+            }
+            throw cause
+        }
+    }
+
     /// 路径参数不能使用 urlPathAllowed（其包含 `/`），否则 tool use id 中的
     /// 分隔符可能改变 endpoint 路径层级。
     func percentEncodePathComponent(_ value: String) -> String {
@@ -464,7 +486,10 @@ final class WandAPI: SessionInputTransport {
         var body: [String: Any] = ["input": input]
         if let view { body["view"] = view }
         if let shortcutKey { body["shortcutKey"] = shortcutKey }
-        if respondImmediately { body["respondImmediately"] = true }
+        if respondImmediately {
+            body["respondImmediately"] = true
+            body["idempotencyKey"] = UUID().uuidString
+        }
         return try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions/\(id)/input", body: body)
     }
 
@@ -696,7 +721,15 @@ final class WandAPI: SessionInputTransport {
         if let employeeId, !employeeId.isEmpty { body["employeeId"] = employeeId }
         if overrideCli { body["overrideCli"] = true }
         if let creationRequestId, !creationRequestId.isEmpty { body["creationRequestId"] = creationRequestId }
-        return try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions", body: body, timeout: timeout)
+        return try await requestCreatedResource(SessionSnapshot.self, path: "/api/sessions", body: body, timeout: timeout) {
+            UnknownSessionDeliveryError(sessionID: $0, cause: $1)
+        }
+    }
+
+    func mergeWorktrees(sessionId: String, branch: String, head: String) async throws -> WorktreeBatchResult {
+        try await request(WorktreeBatchResult.self, method: "POST",
+            path: "/api/sessions/\(sessionId)/git/merge-worktrees",
+            body: ["expectedBranch": branch, "expectedHead": head], timeout: 180)
     }
 
     // MARK: - Git 快速提交
@@ -862,7 +895,11 @@ final class WandAPI: SessionInputTransport {
 
     // MARK: - 任务管理
 
-    func postBoardTaskComment(id: String, requestId: String, body: String, employeeId: String?, sourceCommentId: String?) async throws -> WandTaskComment {
+    func postBoardTaskComment(id: String, requestId: String, body: String, employeeId: String?, sourceCommentId: String?, purpose: String? = nil) async throws -> WandTaskComment {
+        if purpose == "review", employeeId != nil {
+            let task = try await getBoardTask(id: id)
+            guard task.id == id && task.workflowVersion == 1 else { throw APIError.server(status: 409, message: "服务端尚不支持验收派发；草稿与原请求标识已保留，请更新服务并核对，不会改用普通执行。") }
+        }
         // An unfinished mention must never fall through to the ordinary-comment route.
         if employeeId?.isEmpty != false, let message = TaskCommentMention.validationMessage(body, name: "") {
             throw APIError.server(status: 400, message: message)
@@ -871,6 +908,7 @@ final class WandAPI: SessionInputTransport {
         var payload: [String: Any] = ["requestId": requestId, "body": body]
         if let employeeId { payload["employeeId"] = employeeId }
         if let sourceCommentId { payload["sourceCommentId"] = sourceCommentId }
+        if employeeId != nil, let purpose { payload["purpose"] = purpose }
         return try await request(Response.self, method: "POST", path: "/api/wand-tasks/\(percentEncodePathComponent(id))/comments", body: payload).comment
     }
 
@@ -960,12 +998,14 @@ final class WandAPI: SessionInputTransport {
     }
 
     func updateBoardTask(id: String, body: [String: Any]) async throws -> WandBoardTask {
-        try await request(
+        let task = try await request(
             WandBoardTask.self,
             method: "PATCH",
             path: "/api/wand-tasks/\(percentEncodePathComponent(id))",
             body: body
         )
+        if body["workflow"] != nil && (task.workflowVersion != 1 || task.id != id) { throw APIError.server(status: 409, message: "服务端不支持两级验收或回执不匹配当前任务；请更新服务并核对，不能将此响应当作验收通过。") }
+        return task
     }
 
     func deleteBoardTask(id: String) async throws {

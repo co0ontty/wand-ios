@@ -476,10 +476,17 @@ struct WorkspaceTask: Codable, Equatable, Identifiable {
     let status: String
     let createdAt: String
     let lastOpenedAt: String?
+    var kind: String? = nil
 }
 
 /// GET /api/tasks 聚合行：任务 + 运行期派生字段；目录信息在 TaskDirectoryGroup 上。
 struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
+    var kind: String? = nil
+    /// Linked wand_tasks business metadata; workspace lifecycle status remains independent.
+    var boardTaskId: String? = nil
+    var boardTaskStatus: String? = nil
+    var archived: Bool? = nil
+    var parentWorkspaceTaskId: String? = nil
     var executionStatus: String? = nil
     var queuedExecutionCount: Int? = nil
     var hasQueuedExecution: Bool { executionStatus == "queued" }
@@ -516,8 +523,14 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
         sessions: [WorkspaceSessionSummary],
         totalSessions: Int? = nil,
         executionStatus: String? = nil,
-        queuedExecutionCount: Int? = nil
+        queuedExecutionCount: Int? = nil,
+        boardTaskId: String? = nil,
+        boardTaskStatus: String? = nil,
+        archived: Bool? = nil,
+        parentWorkspaceTaskId: String? = nil,
+        kind: String? = nil
     ) {
+        self.kind = kind
         self.id = id
         self.workspaceId = workspaceId
         self.name = name
@@ -533,6 +546,19 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
         self.totalSessions = totalSessions ?? sessions.count
         self.executionStatus = executionStatus
         self.queuedExecutionCount = queuedExecutionCount
+        self.boardTaskId = boardTaskId
+        self.boardTaskStatus = boardTaskStatus
+        self.archived = archived
+        self.parentWorkspaceTaskId = parentWorkspaceTaskId
+    }
+
+    func replacingSessions(_ sessions: [WorkspaceSessionSummary], totalSessions: Int? = nil) -> WorkspaceTaskSummary {
+        WorkspaceTaskSummary(id: id, workspaceId: workspaceId, name: name, worktree: worktree,
+            layout: layout, status: status, createdAt: createdAt, lastOpenedAt: lastOpenedAt,
+            cwd: cwd, isolated: isolated, worktreeError: worktreeError, sessions: sessions,
+            totalSessions: totalSessions ?? self.totalSessions, executionStatus: executionStatus,
+            queuedExecutionCount: queuedExecutionCount, boardTaskId: boardTaskId, boardTaskStatus: boardTaskStatus,
+            archived: archived, parentWorkspaceTaskId: parentWorkspaceTaskId, kind: kind)
     }
 
     func asTask() -> WorkspaceTask {
@@ -544,7 +570,8 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
             layout: layout,
             status: status,
             createdAt: createdAt,
-            lastOpenedAt: lastOpenedAt
+            lastOpenedAt: lastOpenedAt,
+            kind: kind
         )
     }
 }
@@ -556,6 +583,7 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
     let workspaceName: String
     let workspaceCwd: String
     let createdAt: String?
+    let latestActivityAt: String?
     let synthetic: Bool?
     let global: Bool?
     let tasks: [WorkspaceTaskSummary]
@@ -568,6 +596,28 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
     /// 可归属的真实项目：排除合成目录组和隐藏的全局空间。
     var isBindableProject: Bool { !isSynthetic && !isGlobal }
 
+    init(
+        workspaceId: String,
+        workspaceName: String,
+        workspaceCwd: String,
+        createdAt: String? = nil,
+        latestActivityAt: String? = nil,
+        synthetic: Bool? = nil,
+        global: Bool? = nil,
+        tasks: [WorkspaceTaskSummary],
+        standaloneSessions: [WorkspaceSessionSummary]
+    ) {
+        self.workspaceId = workspaceId
+        self.workspaceName = workspaceName
+        self.workspaceCwd = workspaceCwd
+        self.createdAt = createdAt
+        self.latestActivityAt = latestActivityAt
+        self.synthetic = synthetic
+        self.global = global
+        self.tasks = tasks
+        self.standaloneSessions = standaloneSessions
+    }
+
     /// 仅用于展示层改写（重命名小组 / 剔掉已完成任务），不改动服务端数据。
     func replacing(
         workspaceName: String? = nil,
@@ -579,6 +629,7 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
             workspaceName: workspaceName ?? self.workspaceName,
             workspaceCwd: workspaceCwd,
             createdAt: createdAt,
+            latestActivityAt: latestActivityAt,
             synthetic: synthetic,
             global: global,
             tasks: tasks ?? self.tasks,
@@ -616,6 +667,33 @@ struct TaskGroupsPage: Equatable {
     let groups: [TaskDirectoryGroup]
     let revision: String?
     let unchanged: Bool
+
+    /// Legacy home/workspace consumers keep their non-archived projection while IM uses the full page.
+    static func currentGroups(_ groups: [TaskDirectoryGroup]) -> [TaskDirectoryGroup] {
+        let allTasks = groups.flatMap(\.tasks)
+        let parents = Dictionary(allTasks.map { ($0.id, $0.parentWorkspaceTaskId) }, uniquingKeysWith: { first, _ in first })
+        var keep = Set(allTasks.filter { $0.archived != true }.map(\.id))
+        // Match the server's default scope: active descendants need their archived ancestor containers.
+        for task in allTasks where task.archived != true {
+            var parent = task.parentWorkspaceTaskId
+            var seen = Set<String>()
+            while let id = parent, seen.insert(id).inserted {
+                keep.insert(id)
+                parent = parents[id] ?? nil
+            }
+        }
+        return groups.compactMap { group in
+            let tasks = group.tasks.filter { keep.contains($0.id) }.map { task in
+                let sessions = task.sessions.filter { $0.archived != true }
+                let removedCount = task.sessions.count - sessions.count
+                guard removedCount > 0 else { return task }
+                return task.replacingSessions(sessions, totalSessions: max(0, task.listedSessionCount - removedCount))
+            }
+            let standalone = group.standaloneSessions.filter { $0.archived != true }
+            guard (!group.isSynthetic && !group.isGlobal) || !tasks.isEmpty || !standalone.isEmpty else { return nil }
+            return group.replacing(tasks: tasks, standaloneSessions: standalone)
+        }
+    }
 
     static func decode(from data: Data) throws -> TaskGroupsPage {
         let object = try JSONSerialization.jsonObject(with: data)
@@ -739,7 +817,8 @@ enum TaskListPresentation {
             // 仅展示层处理：已完成任务仍保留在看板和会话导航里。
             group.replacing(
                 workspaceName: group.isGlobal ? unassignedWorkspaceName : group.workspaceName,
-                tasks: group.tasks.filter { $0.status != "done" }
+                tasks: orderedTaskSummaries(group.tasks.filter { $0.status != "done" }),
+                standaloneSessions: group.standaloneSessions.sorted { ($0.startedAt ?? "") > ($1.startedAt ?? "") }
             )
         }
         .filter { !$0.isGlobal || !$0.tasks.isEmpty || !$0.standaloneSessions.isEmpty }
@@ -751,7 +830,14 @@ enum TaskListPresentation {
     static let unassignedWorkspaceName = "未归属工作区"
 
     static func orderedTaskSummaries(_ tasks: [WorkspaceTaskSummary]) -> [WorkspaceTaskSummary] {
-        tasks
+        tasks.sorted { left, right in
+            let l = left.createdAt.trimmingCharacters(in: .whitespacesAndNewlines)
+            let r = right.createdAt.trimmingCharacters(in: .whitespacesAndNewlines)
+            if l == r { return left.id < right.id }
+            if l.isEmpty { return false }
+            if r.isEmpty { return true }
+            return l > r
+        }
     }
 
     static func hasLiveActivity(_ group: TaskDirectoryGroup) -> Bool {
