@@ -839,6 +839,12 @@ struct ConversationDetailView: View {
         let filter = store.filters[id] ?? ""
         return detail?.messages.filter { filter.isEmpty || $0.taskId == filter } ?? []
     }
+    init(id: String, store: ConversationStore, onOpenSession: @escaping (String) -> Void,
+         onOpenConversation: @escaping (String) -> Void, onEmployee: @escaping (String) -> Void) {
+        self.id = id; self.store = store; self.onOpenSession = onOpenSession
+        self.onOpenConversation = onOpenConversation; self.onEmployee = onEmployee
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let detail {

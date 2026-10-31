@@ -113,6 +113,8 @@ struct ChatDesignPreview: View {
     private var expanded: Bool {
         catComposerExpanded(editing: editing, focused: focused, keyboard: keyboard.isVisible, failed: failed, unconfirmed: failed)
     }
+    init() {}
+
     var body: some View {
         NavigationStack {
             GeometryReader { root in

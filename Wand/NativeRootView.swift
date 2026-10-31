@@ -1529,6 +1529,7 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
         host.view.backgroundColor = .clear
         view.backgroundColor = .clear
         attachHost(to: slots[0])
+        #if compiler(>=6.4)
         if #available(iOS 27.1, *) {
             registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge) {
                 (controller: SystemHomeTabController, _: UITraitCollection) in
@@ -1541,6 +1542,7 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
                 if update.hinge != nil { self?.enableSystemNavigation() }
             })
         }
+        #endif
     }
 
     func update(content: AnyView, mode: HomeListMode, enabled: Bool, navigationVisible: Bool = true,
@@ -1608,6 +1610,7 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
 
     private func discoverSystemNavigation() {
         guard !usesSystemNavigation, !policyUpdateScheduled else { return }
+        #if compiler(>=6.4)
         if #available(iOS 27.1, *) {
             let windowPrefersVerticalBars = view.window.map {
                 $0.traitCollection.verticalBarEdge != .unspecified
@@ -1618,6 +1621,7 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
             guard supportsSystemBars else { return }
             enableSystemNavigation()
         }
+        #endif
     }
 
     private func enableSystemNavigation() {
