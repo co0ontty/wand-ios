@@ -82,3 +82,25 @@ struct TopCapsuleTitle: View {
         }
     }
 }
+
+// Xcode 26 cannot resolve the iOS 27.1 SDK symbol even inside #available.
+// Keep the native menu available when a build made with that SDK runs on iOS 27.1.
+#if compiler(<6.4)
+struct ToolbarOverflowMenu<Content: View>: ToolbarContent {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                content
+            } label: {
+                Label("更多操作", systemImage: "ellipsis")
+            }
+        }
+    }
+}
+#endif
