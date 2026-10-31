@@ -489,6 +489,7 @@ final class HomeParityTests: XCTestCase {
 
     @MainActor
     func testFreshNativeBarContextUsesSystemNavigationThroughSizeAndDetailChanges() async throws {
+        #if compiler(>=6.4)
         guard #available(iOS 27.1, *) else { throw XCTSkip("Native vertical-bar and hinge APIs require iOS 27.1") }
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let controller = SystemHomeTabController()
@@ -584,6 +585,9 @@ final class HomeParityTests: XCTestCase {
         XCTAssertTrue(slots[controller.selectedIndex].children.first === originalHost)
         XCTAssertEqual(activations, 1)
         sample("returned-home")
+        #else
+        throw XCTSkip("Native vertical-bar and hinge APIs require the iOS 27.1 SDK")
+        #endif
     }
 
     @MainActor
@@ -1002,6 +1006,7 @@ final class HomeParityTests: XCTestCase {
         XCTAssertFalse(controller.tabBarController(controller, shouldSelect: slots[0]))
         XCTAssertEqual(requests, [.board], "Busy navigation cannot dispatch another switch")
         XCTAssertTrue(slots.allSatisfy { !$0.tabBarItem.isEnabled })
+        #if compiler(>=6.4)
         if #available(iOS 27.1, *) {
             let hasCurrentBarOrDivisionEvidence = controller.traitCollection.verticalBarEdge != .unspecified ||
                 window.traitCollection.verticalBarEdge != .unspecified ||
@@ -1014,6 +1019,10 @@ final class HomeParityTests: XCTestCase {
             XCTAssertFalse(controller.usesSystemNavigation)
             XCTAssertTrue(controller.isTabBarHidden)
         }
+        #else
+        XCTAssertFalse(controller.usesSystemNavigation)
+        XCTAssertTrue(controller.isTabBarHidden)
+        #endif
     }
 
     @MainActor

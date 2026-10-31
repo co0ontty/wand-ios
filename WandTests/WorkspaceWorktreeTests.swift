@@ -614,6 +614,14 @@ final class WorkspaceWorktreeTests: XCTestCase {
 
 @MainActor
 private final class MockWorktreeMergeService: WorkspaceServing {
+    func createWorkspaceSection(name: String, cwd: String, workspaceId: String?, sessionId: String?) async throws -> WorkspaceTask {
+        XCTFail("Unexpected workspace-section creation in this fixture")
+        throw MockError.unavailable
+    }
+    func unassignWorkspaceSession(sessionId: String) async throws {
+        XCTFail("Unexpected workspace-session unassignment in this fixture")
+        throw MockError.unavailable
+    }
     /// 归档 / 刚完成确认的记录：这两类调用不能靠返回值推断，只能看实际请求。
     var archivedSessionRequests: [(ids: [String], archived: Bool)] = []
     var completionViewRequests: [(sessionId: String, revision: Int)] = []
