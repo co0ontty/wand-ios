@@ -129,6 +129,24 @@ final class ConversationStore: ObservableObject {
         }
         if let selectedID { select(selectedID) }
     }
+    func startDirectory() {
+        guard !active else { return }
+        active = true
+        selectedID = nil
+        refreshTask = Task {
+            while !Task.isCancelled, active {
+                await refreshDirectory()
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
+    }
+    func refreshDirectory() async {
+        do {
+            employees = try await service.listContactEmployees()
+            presets = try await service.listContactTeams()
+            projects = try await service.listWorkspaces()
+        } catch { /* Directory metadata must not replace the session list's error state. */ }
+    }
     func shutdown() {
         active = false; listRevision += 1
         refreshNotice?.cancel(); refreshNotice = nil

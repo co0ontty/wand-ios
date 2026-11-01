@@ -334,15 +334,8 @@ struct ContactTeamProfilePanel: View {
             if candidates.isEmpty {
                 Text("AI 团队需要先选择一个已有项目。")
                     .font(.caption).foregroundStyle(Theme.textSecondary)
-            } else {
-                Picker("工作项目", selection: $model.selectedWorkspaceID) {
-                    Text("选择项目").tag("")
-                    ForEach(candidates) { Text($0.name.isEmpty ? $0.id : $0.name).tag($0.id) }
-                }
-                if !model.selectedWorkspaceID.isEmpty && !candidates.contains(where: { $0.id == model.selectedWorkspaceID }) {
-                    Text("原项目已不可用，请重新选择项目。").font(.caption).foregroundStyle(Theme.danger)
-                }
             }
+            WorkspaceSelector(selection: $model.selectedWorkspaceID, choices: candidates.map { (id: $0.id, name: $0.name.isEmpty ? $0.id : $0.name) }, emptyLabel: "选择工作区")
             WandFormField("开工说明") {
                 TextField("要做什么？成员会按职责分工执行", text: $model.note, axis: .vertical)
                     .lineLimit(3...8).accessibilityLabel("开工说明").accessibilityIdentifier("contact-team-start-note")
@@ -579,6 +572,7 @@ struct ContactRunView: View {
                             }
                         }
                         if detail.run.status == "awaiting_approval" {
+                            TextField("退回修改原因", text: $model.text).textFieldStyle(.roundedBorder)
                             HStack {
                                 ContactActionButton(title: "批准计划", phase: model.phase, disabled: model.unconfirmed) { model.action("approve") }
                                 Button("退回修改") { model.action("reject", body: ["feedback": model.text], clearText: true) }
@@ -598,25 +592,14 @@ struct ContactRunView: View {
             else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
             if model.unconfirmed {
                 VStack(spacing: 6) {
-                    Text("操作结果未确认，请先核对群聊和运行状态。").font(.caption).foregroundStyle(Theme.danger)
+                    Text("操作结果未确认，请先核对团队执行状态。").font(.caption).foregroundStyle(Theme.danger)
                     Button("我已核对，开始新的操作") { model.acknowledgedUnknown() }.font(.caption)
                 }.padding(8)
             } else if let error = model.error ?? model.loadError { Text(error).font(.caption).foregroundStyle(Theme.danger).padding(8) }
-            HStack(alignment: .bottom) {
-                IMEAwareComposerTextView(text: $model.text, placeholder: "给团队留言", isFocused: focused,
-                                         maximumHeight: 120, submitOnReturn: false, onFocusChange: { focused = $0 },
-                                         onCompositionChange: { composing = $0 }, onSubmit: reply,
-                                         onHeightChange: { height = $0 })
-                    .frame(height: max(34, height))
-                NativeComposerActionButton(phase: model.phase, turnRunning: false,
-                                           hasDraft: !model.text.isEmpty,
-                                           canSubmit: model.detail != nil && !composing && !model.unconfirmed && !model.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                                           message: model.error, onSend: reply, onStop: {})
-            }.padding(12).background(Theme.surface)
-                .disabled(model.phase == .sending)
+
         }
         .background(Theme.background)
-        .navigationTitle(model.detail?.title ?? "任务处理群").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle(model.detail?.title ?? "团队执行").navigationBarTitleDisplayMode(.inline)
         .wandToolbarSurface()
         .task {
             model.activate()

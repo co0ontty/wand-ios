@@ -18,6 +18,7 @@ struct TaskBoardView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
+    @Environment(\.systemHomeVerticalBarVisible) private var verticalBarVisible
     @State private var tasks: [WandBoardTask] = []
     @State private var workspaces: [Workspace] = []
     @State private var catalog: ModelsResponse?
@@ -163,7 +164,7 @@ struct TaskBoardView: View {
                         Button("新建任务", systemImage: "plus") { openCreate("backlog") }
                             .disabled(busy || (loading && tasks.isEmpty))
                     }
-                    if #available(iOS 27.1, *), let overviewBar {
+                    if #available(iOS 27.1, *), !verticalBarVisible, let overviewBar {
                         ToolbarOverflowMenu {
                             Section(overviewBar.serverDisplayName) {
                                 Button("设置", systemImage: "gearshape", action: overviewBar.onOpenSettings)
@@ -397,6 +398,7 @@ struct TaskBoardView: View {
                 Menu {
                     Button("所有项目") { filterWorkspaceId = "" }
                     ForEach(workspaces) { workspace in Button(workspace.name) { filterWorkspaceId = workspace.id } }
+                    AddWorkspaceButton { workspace in workspaces.append(workspace); filterWorkspaceId = workspace.id }
                 } label: {
                     Label(workspaces.first(where: { $0.id == filterWorkspaceId })?.name ?? "所有项目", systemImage: "folder")
                         .font(.subheadline).lineLimit(1)
@@ -1445,17 +1447,9 @@ private struct TaskBoardDetailView: View {
                         Text(priority.label).tag(priority.rawValue)
                     }
                 }
-                Picker("工作区", selection: Binding(
-                    get: { task.workspaceId ?? "" },
-                    set: { value in
-                        Task { await onPatch(["workspaceId": value.isEmpty ? NSNull() : value]) }
-                    }
-                )) {
-                    Text("未归属工作区（使用临时目录）").tag("")
-                    ForEach(workspaces) { workspace in
-                        Text(workspace.name).tag(workspace.id)
-                    }
-                }
+                WorkspaceSelector(selection: Binding(get: { task.workspaceId ?? "" }, set: { value in
+                    Task { await onPatch(["workspaceId": value.isEmpty ? NSNull() : value]) }
+                }), choices: workspaces.map { (id: $0.id, name: $0.name) })
             }
             Section {
               DisclosureGroup("CLI / 团队兼容派发", isExpanded: $legacyDispatchOpen) {
@@ -1821,12 +1815,7 @@ private struct TaskBoardCreateView: View {
                 TextField("任务标题（可选）", text: $title, prompt: Text("不填写则按描述自动生成"))
                 TextField(dispatches ? "描述（作为第一次指派）" : "描述（只创建任务）", text: $description, axis: .vertical)
                     .lineLimit(3...8)
-                Picker("工作区", selection: $workspaceId) {
-                    Text("未归属工作区（使用临时目录）").tag("")
-                    ForEach(workspaces) { workspace in
-                        Text(workspace.name).tag(workspace.id)
-                    }
-                }
+                WorkspaceSelector(selection: $workspaceId, choices: workspaces.map { (id: $0.id, name: $0.name) })
                 ContactExecutionSubjectPicker(subject: $subject, employees: employees, teams: teams,
                     teamAllowed: !workspaceId.isEmpty && workspaceId != "wand-global", error: contactsError, onRetry: onContactsRetry)
                 if subject == nil {

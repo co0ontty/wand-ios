@@ -38,7 +38,8 @@ enum HomeListMode: String, Equatable {
     var next: HomeListMode { self == .board ? .sessions : .board }
 
     static func fromStorage(_ value: String?) -> HomeListMode {
-        HomeListMode(rawValue: value ?? "") ?? .im
+        let mode = HomeListMode(rawValue: value ?? "") ?? .sessions
+        return mode == .im ? .sessions : mode
     }
 }
 
@@ -53,7 +54,7 @@ struct NativeRootView: View {
     @State private var pendingHomeMode: HomeListMode?
     @State private var showSettings = false
     @State private var showMissions = false
-    @AppStorage(HomeListMode.storageKey) private var homeListModeRaw = HomeListMode.im.rawValue
+    @AppStorage(HomeListMode.storageKey) private var homeListModeRaw = HomeListMode.sessions.rawValue
     @State private var isSelectingHome = false
     @State private var serverUpdate: ServerUpdateInfo?
     @State private var dismissedUpdateVersion: String?
@@ -107,6 +108,7 @@ struct NativeRootView: View {
     @State private var homeContactsGeneration = 0
     @State private var homeModalVisible = false
     @State private var homeMutationBusy = false
+    @State private var systemConversationHome = false
     @State private var visibleCompletionSnapshot: SessionSnapshot?
     @State private var selectedTaskSessionId: String?
     @State private var selectedTaskShowsPicker = false
@@ -157,17 +159,29 @@ struct NativeRootView: View {
             mode: homeListMode,
             enabled: phase == .ready && !contactsStore.busy && !homeMutationBusy && !knowledgeStore.busy,
             navigationVisible: isHomeNavigationVisible,
-            onSelect: requestSystemHomeMode
+            showsRootTabs: false,
+            onSelect: requestSystemHomeMode,
+            onSystemNavigation: {
+                systemConversationHome = true
+                setHomeListMode(.sessions)
+            }
         ) {
             AdaptiveNavigationContainer(
                 selection: navigationSelection,
                 parents: contactNavigationParents,
                 fullWidthRoot: homeListMode == .knowledge,
                 sidebar: { sidebarContent.disabled(homeMutationBusy) },
-                detail: { marker in contactDestination(marker) }
+                detail: { marker in
+                    contactDestination(marker)
+                        .modifier(conversationHomeToolbar(enabled: navigationSelection.wrappedValue == nil,
+                            inDetailColumn: true))
+                        .modifier(SystemDetailBackToolbar(visible: marker != nil,
+                            busy: homeMutationBusy || contactsStore.busy || contactsStore.editorDirty))
+                }
             )
             .environmentObject(store)
         }
+        .environment(\.workspaceAPI, api)
         .background(homeListMode.canvas.ignoresSafeArea())
         .safeAreaInset(edge: .top, spacing: 0) { AppUpdateBanner(updater: appUpdater) }
         .animation(WandMotion.disclosure, value: appUpdater.promptVersion)
@@ -325,11 +339,6 @@ struct NativeRootView: View {
                 openCreatedConversation(snapshot)
             }
             .id(creationID)
-        } else if let marker, marker.hasPrefix("wand:conversation:") {
-            ConversationDetailView(id: String(marker.dropFirst("wand:conversation:".count)), store: conversations,
-                onOpenSession: openWorkspaceStandaloneSession, onOpenConversation: openConversation,
-                onEmployee: { selectedContactEmployeeID = $0 })
-                .id(marker)
         } else if marker == "wand:contacts" {
             ContactsView(api: api, store: contactsStore, onBack: {
                 guard !contactsStore.busy else { return }
@@ -525,30 +534,45 @@ struct NativeRootView: View {
             case .ready:
                 HomeSidebarLayout {
                 VStack(spacing: 0) {
+                    if homeListMode != .sessions && homeListMode != .im && !systemConversationHome {
+                        HStack {
+                            Button("工作区", systemImage: "chevron.left") { requestSystemHomeMode(.sessions) }
+                                .frame(minHeight: 44)
+                            Spacer()
+                            HomeFeatureMenu(onMode: requestSystemHomeMode, onSettings: { showSettings = true },
+                                onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) })
+                        }.padding(.horizontal, WandLayout.pageInset)
+                    }
                     if shouldShowUpdateBanner {
                         updateBanner
                             .padding(.horizontal, 16)
                             .padding(.top, 8)
                             .padding(.bottom, 4)
                     }
-                    if homeListMode == .sessions {
-                        InlineHomeChrome { homeOverviewBar.disabled(homeMutationBusy) }
-                    }
-                    if homeListMode == .im {
-                        ConversationListView(store: conversations, onSelect: openConversation,
-                            onEmployee: { selectedContactEmployeeID = $0 }, onSettings: { showSettings = true },
+                    if homeListMode == .im || homeListMode == .sessions {
+                        UnifiedConversationSidebar(store: conversations, workspaceStore: workspaceStore,
+                            groups: workspaceStore.conversationTaskGroups,
+                            selectedSessionID: selectedSessionID, selectedConversationID: selectedConversationID,
+                            loading: workspaceStore.taskGroupsLoading, error: workspaceStore.taskGroupsError,
+                            onOpenSession: openWorkspaceStandaloneSession,
+                            onCreate: { workspace in
+                                let group = workspaceStore.conversationTaskGroups.first { $0.workspaceId == workspace }
+                                beginPendingConversation(cwd: group?.workspaceCwd ?? "", workspaceID: workspace)
+                            }, onReload: { Task { await workspaceStore.loadTaskGroups(force: true); await conversations.refreshDirectory() } },
+                            showsFilters: navigationSelection.wrappedValue == nil,
+                            onMode: requestSystemHomeMode, onSettings: { showSettings = true },
                             onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) },
-                            taskGroups: workspaceStore.conversationTaskGroups, onOpenSession: openWorkspaceStandaloneSession,
-                            taskGroupsLoading: workspaceStore.taskGroupsLoading, taskGroupsError: workspaceStore.taskGroupsError,
-                            onReloadTaskGroups: { Task { await workspaceStore.loadTaskGroups(force: true) } })
+                            onSessionDeleted: { id in
+                                if selectedSessionID == id { selectedSessionID = nil }
+                                if selectedTaskSessionId == id { selectedTaskSessionId = nil }
+                            },
+                            onModalVisibilityChanged: { homeModalVisible = $0 },
+                            onMutationBusyChanged: { homeMutationBusy = $0 })
                             .transition(.opacity)
                     } else if homeListMode == .contacts {
-                        ContactsView(api: api, store: contactsStore, onBack: { setHomeListMode(.im) },
+                        ContactsView(api: api, store: contactsStore, onBack: { setHomeListMode(.sessions) },
                             onOpenSession: { snapshot in openWorkspaceStandaloneSession(snapshot.id) }, onOpenRun: openTeamRun,
-                            onNewConversation: { employeeID in
-                                beginPendingConversation(employeeID: employeeID)
-                            },
-                            onOpenConversation: openConversation, onTeamConversation: openPresetConversation, embedded: true,
+                            embedded: true,
                             serverDisplayName: profile.displayName, onOpenSettings: { showSettings = true },
                             onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) })
                             .transition(.opacity)
@@ -666,31 +690,43 @@ struct NativeRootView: View {
                 }
                 .animation(reducedMotion ? nil : WandMotion.stateSwap, value: homeListMode)
                 } navigation: {
-                    // The Form owns keyboard avoidance. Root navigation must not become
-                    // a second toolbar above a docked keyboard (floating keyboards keep it).
-                    if isHomeNavigationVisible {
-                        HStack {
-                            Spacer(minLength: 8)
-                            HomeMenuPill(mode: homeListMode, onMode: requestSystemHomeMode,
-                                canSelect: { _ in !contactsStore.busy && !homeMutationBusy && !knowledgeStore.busy })
-                            .disabled(homeMutationBusy)
-                            Spacer(minLength: 8)
-                        }
-                        .padding(.vertical, 8)
-                        .transition(.opacity)
-                    }
+                    EmptyView()
                 }
                 .navigationBarTitleDisplayMode(.inline)
                 .modifier(WorkspaceSystemToolbar(
-                    enabled: homeListMode == .sessions,
+                    enabled: homeListMode == .sessions && !systemConversationHome,
                     busy: homeMutationBusy,
                     serverName: profile.displayName,
                     onNewTask: startWorkspaceTask,
                     onSettings: { showSettings = true },
                     onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) }
                 ))
+                .modifier(conversationHomeToolbar(enabled: navigationSelection.wrappedValue == nil))
             }
         }
+    }
+
+    private func conversationHomeToolbar(enabled: Bool, inDetailColumn: Bool = false) -> ConversationHomeToolbar {
+        ConversationHomeToolbar(
+            store: conversations,
+            groups: workspaceStore.conversationTaskGroups,
+            enabled: enabled,
+            showsFilters: navigationSelection.wrappedValue == nil && (homeListMode == .sessions || homeListMode == .im),
+            showsListActions: navigationSelection.wrappedValue == nil,
+            onCreate: {
+                let workspaces = conversations.listFilters.workspaces
+                if workspaces.count == 1, case .workspace(let id) = workspaces.first! {
+                    let group = workspaceStore.conversationTaskGroups.first { $0.workspaceId == id }
+                    beginPendingConversation(cwd: group?.workspaceCwd ?? "", workspaceID: id)
+                } else { beginPendingConversation() }
+            },
+            onSettings: { showSettings = true },
+            onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) },
+            onMode: requestSystemHomeMode,
+            inDetailColumn: inDetailColumn,
+            showsCreate: homeListMode == .sessions || homeListMode == .im,
+            showsReturnToSessions: homeListMode != .sessions && homeListMode != .im
+        )
     }
 
     private func startWorkspaceTask() {
@@ -739,7 +775,7 @@ struct NativeRootView: View {
                 onPickerRequestConsumed: { selectedTaskShowsPicker = false },
                 onOpenParallel: { showMissions = true },
                 onOpenTaskBoard: { selectedWorkspaceTask = nil; setHomeListMode(.board) },
-                onOpenChat: { selectedWorkspaceTask = nil; setHomeListMode(.im) },
+                onOpenChat: { selectedWorkspaceTask = nil; setHomeListMode(.sessions) },
                 onSessionPresentationChanged: { id in
                     guard selectedWorkspaceTask?.task.id == selection.task.id else { return }
                     selectedTaskSessionId = id
@@ -759,8 +795,9 @@ struct NativeRootView: View {
 
     private var emptyDetailPlaceholder: some View {
         VStack(spacing: 12) {
-            WandBrandMark(size: 48)
-            Text("选择一个任务")
+            Image(systemName: homeListMode == .im || homeListMode == .sessions ? "bubble.left.and.bubble.right" : "square.grid.2x2")
+                .font(.largeTitle).foregroundStyle(Theme.textMuted).accessibilityHidden(true)
+            Text(homeListMode == .im || homeListMode == .sessions ? "选择一个会话" : "选择一个任务")
                 .font(.wand(size: 14))
                 .foregroundColor(Theme.textSecondary)
         }
@@ -980,10 +1017,7 @@ struct NativeRootView: View {
         selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
         selectedTaskSessionId = nil; selectedTaskShowsPicker = false
         showingContacts = false; selectedConversationID = nil; selectedContactRunID = runId
-        Task {
-            guard let detail = try? await api.contactRun(runId), selectedContactRunID == runId else { return }
-            if let conversationID = detail.run.conversationId, !conversationID.isEmpty { openConversation(conversationID) }
-        }
+
     }
 
     private func clearCompletionIntent() {
@@ -1056,19 +1090,6 @@ struct NativeRootView: View {
         openCompletionIntent(snapshot.id)
         SessionPresenceController.shared.sync(snapshot: snapshot, serverID: serverID)
         Task { await workspaceStore.loadWorkspaceIndex() }
-    }
-
-    private func openConversation(_ id: String) {
-        presentNewConversation = false
-        selectedWorkspaceTask = nil; selectedSessionID = nil; selectedSnapshot = nil
-        selectedContactRunID = nil; showingContacts = false
-        selectedConversationID = id; homeListModeRaw = HomeListMode.im.rawValue
-        conversations.select(id); clearCompletionIntent()
-    }
-
-    private func openPresetConversation(_ templateID: String) {
-        setHomeListMode(.im)
-        conversations.creatingPresetID = templateID
     }
 
     private func openWorkspaceStandaloneSession(_ sessionID: String) {
@@ -1233,7 +1254,7 @@ struct NativeRootView: View {
         authenticationRetryAttempt = 0
         phase = .ready
         appUpdater.setActive(scenePhase == .active)
-        conversations.start()
+        conversations.startDirectory()
         startSystemSocket(generation: generation)
         refreshServerUpdateInfo(generation: generation)
         refreshHomeContacts()
@@ -1414,6 +1435,24 @@ private struct SystemHomeNavigationKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct SystemHomeVerticalBarKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private struct SystemHomeToolbarInDetailKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+/// 展开态侧栏的收起入口由内容行承载（系统栏位已交给右侧动作），
+/// 所以容器把折叠动作和当前折叠状态投影给侧栏与详情两侧。
+private struct SystemHomeSidebarToggleKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+private struct SystemHomeSidebarCollapsedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 /// Embedded details (for example the board) keep their own navigation state.
 /// Only their chrome visibility is projected upward; root does not copy selection.
 struct HomeNavigationHiddenKey: PreferenceKey {
@@ -1443,6 +1482,27 @@ extension EnvironmentValues {
         get { self[SystemHomeNavigationKey.self] }
         set { self[SystemHomeNavigationKey.self] = newValue }
     }
+
+    var systemHomeVerticalBarVisible: Bool {
+        get { self[SystemHomeVerticalBarKey.self] }
+        set { self[SystemHomeVerticalBarKey.self] = newValue }
+    }
+
+    var systemHomeToolbarInDetail: Bool {
+        get { self[SystemHomeToolbarInDetailKey.self] }
+        set { self[SystemHomeToolbarInDetailKey.self] = newValue }
+    }
+
+    /// nil 表示当前布局没有可折叠的侧栏（单栏返回栈）。
+    var systemHomeSidebarToggle: (() -> Void)? {
+        get { self[SystemHomeSidebarToggleKey.self] }
+        set { self[SystemHomeSidebarToggleKey.self] = newValue }
+    }
+
+    var systemHomeSidebarCollapsed: Bool {
+        get { self[SystemHomeSidebarCollapsedKey.self] }
+        set { self[SystemHomeSidebarCollapsedKey.self] = newValue }
+    }
 }
 
 /// One hosting controller for the existing navigation tree, never four live copies.
@@ -1452,15 +1512,20 @@ struct SystemHomeNavigation<Content: View>: View {
     let mode: HomeListMode
     let enabled: Bool
     var navigationVisible = true
+    var showsRootTabs = true
     let onSelect: (HomeListMode) -> Void
+    var onSystemNavigation: () -> Void = {}
     @ViewBuilder var content: () -> Content
     @State private var systemOwnsContainerSafeArea = false
     @State private var contentHidesNavigation = false
 
     var body: some View {
         SystemHomeNavigationHost(mode: mode, enabled: enabled,
-            navigationVisible: navigationVisible && !contentHidesNavigation, onSelect: onSelect,
-            onSystemNavigation: { systemOwnsContainerSafeArea = true }) {
+            navigationVisible: navigationVisible && !contentHidesNavigation, showsRootTabs: showsRootTabs,
+            onSelect: onSelect, onSystemNavigation: {
+                systemOwnsContainerSafeArea = true
+                onSystemNavigation()
+            }) {
                 content().onPreferenceChange(HomeNavigationHiddenKey.self) { contentHidesNavigation = $0 }
             }
             // This representable encloses another UIHostingController. Keep its
@@ -1481,6 +1546,7 @@ private struct SystemHomeNavigationHost<Content: View>: UIViewControllerRepresen
     let mode: HomeListMode
     let enabled: Bool
     let navigationVisible: Bool
+    let showsRootTabs: Bool
     let onSelect: (HomeListMode) -> Void
     let onSystemNavigation: () -> Void
     @ViewBuilder var content: () -> Content
@@ -1495,17 +1561,20 @@ private struct SystemHomeNavigationHost<Content: View>: UIViewControllerRepresen
         controller.onSystemNavigation = onSystemNavigation
         controller.update(content: AnyView(content().environment(\.colorScheme, scheme)
             .environment(\.layoutDirection, direction)), mode: mode, enabled: enabled,
-            navigationVisible: navigationVisible, onSelect: onSelect)
+            navigationVisible: navigationVisible, showsRootTabs: showsRootTabs, onSelect: onSelect)
     }
 }
 
 final class SystemHomeTabController: UITabBarController, UITabBarControllerDelegate {
-    static let modes: [HomeListMode] = [.im, .sessions, .knowledge, .board]
+    static let modes: [HomeListMode] = [.sessions, .knowledge, .board]
     private let host = UIHostingController(rootView: AnyView(Color.clear))
     private var content = AnyView(Color.clear)
     private var slots: [UIViewController] = []
     private var enabled = false
     private var navigationVisible = true
+    private var showsRootTabs = true
+    private var verticalBarVisible = false
+    private var barUpdateScheduled = false
     private var onSelect: (HomeListMode) -> Void = { _ in }
     var onSystemNavigation: () -> Void = {}
     private(set) var usesSystemNavigation = false
@@ -1515,7 +1584,7 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
         super.viewDidLoad()
         delegate = self
         mode = .tabBar
-        let symbols = ["bubble.left.and.bubble.right", "folder", "doc.text", "square.grid.2x2"]
+        let symbols = ["folder", "doc.text", "square.grid.2x2"]
         slots = Self.modes.enumerated().map { index, destination in
             let slot = UIViewController()
             slot.tabBarItem = UITabBarItem(title: destination.label,
@@ -1546,11 +1615,12 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
     }
 
     func update(content: AnyView, mode: HomeListMode, enabled: Bool, navigationVisible: Bool = true,
-                onSelect: @escaping (HomeListMode) -> Void) {
+                showsRootTabs: Bool = true, onSelect: @escaping (HomeListMode) -> Void) {
         loadViewIfNeeded()
         self.content = content
         self.enabled = enabled
         self.navigationVisible = navigationVisible
+        self.showsRootTabs = showsRootTabs
         self.onSelect = onSelect
         // Duo's reserved bar regions can sit outside the SwiftUI content rect.
         // Give every backing container the same adaptive page color rather than
@@ -1564,12 +1634,18 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
             selectedIndex = index
         }
         updateNavigationVisibility()
-        host.rootView = AnyView(content.environment(\.usesSystemHomeNavigation, usesSystemNavigation))
+        updateHostedContent()
+    }
+
+    private func updateHostedContent() {
+        host.rootView = AnyView(content
+            .environment(\.usesSystemHomeNavigation, usesSystemNavigation)
+            .environment(\.systemHomeVerticalBarVisible, verticalBarVisible))
     }
 
     private func updateNavigationVisibility() {
-        isTabBarHidden = !usesSystemNavigation || !navigationVisible
-        slots.forEach { $0.tabBarItem.isEnabled = enabled && navigationVisible }
+        isTabBarHidden = !usesSystemNavigation || !navigationVisible || !showsRootTabs
+        slots.forEach { $0.tabBarItem.isEnabled = enabled && navigationVisible && showsRootTabs }
     }
 
     private func attachHost(to slot: UIViewController) {
@@ -1609,6 +1685,7 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
     }
 
     private func discoverSystemNavigation() {
+        refreshBarDirection()
         guard !usesSystemNavigation, !policyUpdateScheduled else { return }
         #if compiler(>=6.4)
         if #available(iOS 27.1, *) {
@@ -1624,6 +1701,23 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
         #endif
     }
 
+    private func refreshBarDirection() {
+        #if compiler(>=6.4)
+        if #available(iOS 27.1, *) {
+            let vertical = traitCollection.verticalBarEdge != .unspecified ||
+                view.window.map { $0.traitCollection.verticalBarEdge != .unspecified } == true
+            guard vertical != verticalBarVisible, !barUpdateScheduled else { return }
+            barUpdateScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.barUpdateScheduled = false
+                self.verticalBarVisible = vertical
+                self.updateHostedContent()
+            }
+        }
+        #endif
+    }
+
     private func enableSystemNavigation() {
         guard !usesSystemNavigation, !policyUpdateScheduled else { return }
         policyUpdateScheduled = true
@@ -1632,7 +1726,7 @@ final class SystemHomeTabController: UITabBarController, UITabBarControllerDeleg
             self.usesSystemNavigation = true
             self.onSystemNavigation()
             self.updateNavigationVisibility()
-            self.host.rootView = AnyView(self.content.environment(\.usesSystemHomeNavigation, true))
+            self.updateHostedContent()
         }
     }
 
@@ -1688,22 +1782,27 @@ struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
         // into a zero-initialized State first mounts a compact stack, then replaces
         // it with a regular split that can inherit a secondary-only presentation.
         GeometryReader { proxy in
+            let wideSystemLayout = usesSystemNavigation && !fullWidthRoot
+                && usesWideListDetail(width: proxy.size.width, height: proxy.size.height)
             Group {
                 if usesSystemNavigation {
-                    systemLayout
+                    if wideSystemLayout { wideLayout }
+                    else { systemStack }
                 } else if !fullWidthRoot && usesWideListDetail(width: proxy.size.width, height: proxy.size.height) {
                     wideLayout
                 } else {
                     narrowLayout
                 }
             }
+            // A narrow primary column stays compact even in an expanded window.
+            // Pick one shared-bar owner from the container, never from a column's traits.
+            .environment(\.systemHomeToolbarInDetail, wideSystemLayout)
         }
     }
 
-    /// Duo already presents one destination at a time. Keep its list and every
-    /// detail in one real native stack, so UIKit can reveal the actual previous
-    /// controller instead of crossing to an unmounted split column.
-    private var systemLayout: some View {
+    /// A single-column route needs real pushed controllers for interactive back.
+    /// Expanded layouts keep the sidebar in the native split container.
+    private var systemStack: some View {
         NavigationStack(path: systemNavigationPath) {
             sidebar()
                 .navigationDestination(for: String.self) { marker in
@@ -1725,20 +1824,46 @@ struct AdaptiveNavigationContainer<Sidebar: View, Detail: View>: View {
         })
     }
 
+    private var sidebarCollapsed: Bool { columnVisibility == .detailOnly }
+
+    private func toggleSidebar() {
+        columnVisibility = sidebarCollapsed ? .all : .detailOnly
+    }
+
     private var wideLayout: some View {
         NavigationSplitView(columnVisibility: $columnVisibility, preferredCompactColumn: $compactColumn) {
             sidebar()
                 .navigationSplitViewColumnWidth(min: 320, ideal: 360, max: 420)
+                .environment(\.systemHomeSidebarToggle, { toggleSidebar() })
+                .environment(\.systemHomeSidebarCollapsed, sidebarCollapsed)
         } detail: {
             NavigationStack { detail(selection ?? parents.last) }
                 .id(selection ?? parents.last)
+                .environment(\.systemHomeBack, usesSystemNavigation ? {
+                    if selection != nil { selection = nil }
+                    else if !parents.isEmpty { parents.removeLast() }
+                } : nil)
+                .environment(\.systemHomeSidebarToggle, { toggleSidebar() })
+                .environment(\.systemHomeSidebarCollapsed, sidebarCollapsed)
         }
         .navigationSplitViewStyle(.automatic)
         .onChange(of: selection ?? parents.last, initial: true) { _, destination in
             if destination == nil {
                 columnVisibility = .all
                 compactColumn = .sidebar
+            } else {
+                compactColumn = .detail
             }
+        }
+        .onChange(of: compactColumn) { _, column in
+            // UIKit's split back button changes the visible column, not our route binding.
+            // Clear the route as well so the returned list regains its own toolbar.
+            guard usesSystemNavigation, column == .sidebar,
+                  selection != nil || !parents.isEmpty else { return }
+            selection = nil
+            parents = []
+            // Route owners can reject leaving while a mutation is in flight.
+            if selection != nil || !parents.isEmpty { compactColumn = .detail }
         }
     }
 
@@ -1785,6 +1910,39 @@ private struct InlineHomeChrome<Content: View>: View {
     @ViewBuilder var content: () -> Content
     var body: some View {
         if !usesSystemNavigation { content() }
+    }
+}
+
+private struct SystemDetailBackToolbar: ViewModifier {
+    let visible: Bool
+    let busy: Bool
+    @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
+    @Environment(\.systemHomeBack) private var onBack
+    @Environment(\.systemHomeToolbarInDetail) private var usesSplitNavigation
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if usesSystemNavigation, visible {
+            if usesSplitNavigation, let onBack {
+                // The expanded detail is a column root, so its button clears the
+                // selected route. It is not a replacement for a pushed back item.
+                content
+                    .navigationBarBackButtonHidden(true)
+                    .toolbar {
+                        ToolbarItem(placement: .navigation) {
+                            Button("返回", systemImage: "chevron.left", action: onBack)
+                                .labelStyle(.iconOnly)
+                                .disabled(busy)
+                                .accessibilityIdentifier("home-detail-back")
+                        }
+                    }
+            } else {
+                // Keep the same page mounted as the root busy/dirty guard changes.
+                // UIKit owns the back item and edge/content interactive pop.
+                content.navigationBarBackButtonHidden(busy)
+            }
+        } else {
+            content
+        }
     }
 }
 

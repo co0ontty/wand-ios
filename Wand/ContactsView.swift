@@ -57,9 +57,6 @@ struct ContactsView: View {
     let onBack: () -> Void
     let onOpenSession: (SessionSnapshot) -> Void
     let onOpenRun: (String) -> Void
-    var onNewConversation: ((String) -> Void)? = nil
-    var onOpenConversation: ((String) -> Void)? = nil
-    var onTeamConversation: ((String) -> Void)? = nil
     var embedded = false
     var serverDisplayName: String? = nil
     var onOpenSettings: (() -> Void)? = nil
@@ -271,15 +268,10 @@ struct ContactsView: View {
                 .font(.caption).disabled(store.busy)
         }.padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
     }
-    private func contactActions(key: String, onMessage: @escaping () -> Void) -> [HomeRowAction] {
-        [
-            HomeRowAction(id: "message", title: "聊天", symbol: "bubble.left", perform: {
-                requestPanelChange { clearPanels(); onMessage() }
-            }),
-            HomeRowAction(id: "profile", title: "资料", symbol: "person.crop.circle", tint: Theme.info) {
-                requestPanelChange { clearPanels(); expandedID = key }
-            }
-        ]
+    private func contactActions(key: String) -> [HomeRowAction] {
+        [HomeRowAction(id: "profile", title: "资料", symbol: "person.crop.circle", tint: Theme.info) {
+            requestPanelChange { clearPanels(); expandedID = key }
+        }]
     }
 
     @ViewBuilder private func employeeRow(_ employee: SiliconEmployee) -> some View {
@@ -298,35 +290,22 @@ struct ContactsView: View {
                 Button {
                     requestPanelChange {
                         clearPanels()
-                        if let onOpenConversation { onOpenConversation(ConversationStore.employeeID(employee.id)) }
-                        else if let onNewConversation { onNewConversation(employee.id) }
-                        else { store.openEmployee(employee.id, onOpen: onOpenSession) }
+                        expandedID = key
                     }
                 } label: {
                     ContactConversationLabel(name: employee.name,
                         subtitle: employee.displayTags.joined(separator: " · "),
                         busy: store.busyContact == key)
                 }.buttonStyle(.plain).disabled(store.busy || store.unconfirmedActions.contains(key))
-                    .accessibilityLabel("进入员工对话：\(employee.name)")
+                    .accessibilityLabel("员工资料：\(employee.name)")
             }
-            .homeSwipeActions(id: key, revealedID: $revealedRowID, actions: contactActions(key: key, onMessage: {
-                if let onOpenConversation { onOpenConversation(ConversationStore.employeeID(employee.id)) }
-                else if let onNewConversation { onNewConversation(employee.id) }
-                else { store.openEmployee(employee.id, onOpen: onOpenSession) }
-            }), enabled: !store.busy && !store.editorDirty)
+            .homeSwipeActions(id: key, revealedID: $revealedRowID, actions: contactActions(key: key), enabled: !store.busy && !store.editorDirty)
             if let error = store.rowErrors[key] {
                 if store.unconfirmedActions.contains(key) { uncertainty(key) }
                 else { Text(error).font(.caption).foregroundStyle(Theme.danger) }
             }
             if expandedID == key {
-                EmployeeProfilePanel(id: employee.id, api: api, directory: store, onMessage: {
-                    requestPanelChange {
-                        clearPanels()
-                        if let onOpenConversation { onOpenConversation(ConversationStore.employeeID(employee.id)) }
-                        else if let onNewConversation { onNewConversation(employee.id) }
-                        else { store.openEmployee(employee.id, onOpen: onOpenSession) }
-                    }
-                }) { closePanels() }
+                EmployeeProfilePanel(id: employee.id, api: api, directory: store) { closePanels() }
                     .id(employee.id).transition(.opacity)
             }
             Divider().padding(.leading, 52)
@@ -347,19 +326,15 @@ struct ContactsView: View {
                 .buttonStyle(.plain).accessibilityLabel("团队资料：\(team.name)")
                 Button { requestPanelChange {
                     clearPanels()
-                    if let onTeamConversation { onTeamConversation(team.id) }
-                    else { store.openTeam(team.id, onOpen: onOpenRun) }
+                    expandedID = key
                 } } label: {
                     ContactConversationLabel(name: team.name,
                         subtitle: "\(team.members.count) 位成员" + (team.description.isEmpty ? "" : " · " + team.description),
                         busy: store.busyContact == key)
                 }.buttonStyle(.plain).disabled(store.busy || store.unconfirmedActions.contains(key))
-                    .accessibilityLabel("新建团队群聊：\(team.name)")
+                    .accessibilityLabel("团队资料：\(team.name)")
             }
-            .homeSwipeActions(id: key, revealedID: $revealedRowID, actions: contactActions(key: key, onMessage: {
-                if let onTeamConversation { onTeamConversation(team.id) }
-                else { store.openTeam(team.id, onOpen: onOpenRun) }
-            }), enabled: !store.busy && !store.editorDirty)
+            .homeSwipeActions(id: key, revealedID: $revealedRowID, actions: contactActions(key: key), enabled: !store.busy && !store.editorDirty)
             if let error = store.rowErrors[key] {
                 if store.unconfirmedActions.contains(key) { uncertainty(key) }
                 else { Text(error).font(.caption).foregroundStyle(Theme.danger) }
@@ -382,7 +357,7 @@ struct HomeMenuPill: UIViewRepresentable {
     @Environment(\.isEnabled) private var enabled
     @Environment(\.colorScheme) private var scheme
     private static let modes = SystemHomeTabController.modes
-    private static let symbols = ["bubble.left.and.bubble.right", "folder", "doc.text", "square.grid.2x2"]
+    private static let symbols = ["folder", "doc.text", "square.grid.2x2"]
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 

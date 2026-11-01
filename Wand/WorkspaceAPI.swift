@@ -123,6 +123,7 @@ func createWorkspaceRequest(
     var body: [String: WorkspaceRequestValue] = [
         "name": .string(name),
         "cwd": .string(cwd),
+        "userAdded": .bool(true),
     ]
     if let defaultProvider {
         body["defaultProvider"] = .string(defaultProvider.rawValue)

@@ -370,7 +370,7 @@ final class WorkspaceStore: ObservableObject {
                 workspaceCwd: updated.cwd,
                 createdAt: group.createdAt,
                 synthetic: group.synthetic,
-                global: group.global,
+                global: group.global, userAdded: group.userAdded, directoryVisible: group.directoryVisible,
                 tasks: group.tasks,
                 standaloneSessions: group.standaloneSessions
             )
@@ -730,7 +730,7 @@ final class WorkspaceStore: ObservableObject {
                 workspaceCwd: group.workspaceCwd,
                 createdAt: group.createdAt,
                 synthetic: group.synthetic,
-                global: group.global,
+                global: group.global, userAdded: group.userAdded, directoryVisible: group.directoryVisible,
                 tasks: tasks,
                 standaloneSessions: group.standaloneSessions
             )
@@ -760,7 +760,7 @@ final class WorkspaceStore: ObservableObject {
                 workspaceCwd: group.workspaceCwd,
                 createdAt: group.createdAt,
                 synthetic: group.synthetic,
-                global: group.global,
+                global: group.global, userAdded: group.userAdded, directoryVisible: group.directoryVisible,
                 tasks: group.tasks.filter { $0.id != taskId },
                 standaloneSessions: group.standaloneSessions
             )

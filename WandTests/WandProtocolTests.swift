@@ -1393,7 +1393,7 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertEqual(WandProvider.codex.structuredRunner, "codex-cli-exec")
         XCTAssertEqual(WandProvider.opencode.structuredRunner, "opencode-cli-run")
         XCTAssertEqual(WandProvider.grok.structuredRunner, "grok-cli-headless")
-        XCTAssertEqual(WandProvider.qoder.structuredRunner, "qoder-cli-print")
+        XCTAssertEqual(WandProvider.qoder.structuredRunner, "qoder-cli-acp")
     }
 
     func testProviderModeClampUsesSupportedFallbackAndSafeDefault() {

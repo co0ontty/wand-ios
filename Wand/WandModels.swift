@@ -85,7 +85,7 @@ enum WandProvider: String, CaseIterable, Identifiable, Codable {
         case .codex: return "codex-cli-exec"
         case .opencode: return "opencode-cli-run"
         case .grok: return "grok-cli-headless"
-        case .qoder: return "qoder-cli-print"
+        case .qoder: return "qoder-cli-acp"
         case .pi: return "pi-cli-json"
         }
     }
@@ -813,9 +813,10 @@ struct ConversationTurn: Decodable {
     let usage: TurnUsage?
     let createdAt: String?
     let completedAt: String?
+    let readAt: String?
     let resourceSelection: ResourceSelectionNotice?
 
-    private enum CodingKeys: String, CodingKey { case role, content, usage, createdAt, completedAt, resourceSelection }
+    private enum CodingKeys: String, CodingKey { case role, content, usage, createdAt, completedAt, readAt, resourceSelection }
 
     init(
         role: String,
@@ -823,6 +824,7 @@ struct ConversationTurn: Decodable {
         usage: TurnUsage? = nil,
         createdAt: String? = nil,
         completedAt: String? = nil,
+        readAt: String? = nil,
         resourceSelection: ResourceSelectionNotice? = nil
     ) {
         self.role = role
@@ -830,6 +832,7 @@ struct ConversationTurn: Decodable {
         self.usage = usage
         self.createdAt = createdAt
         self.completedAt = completedAt
+        self.readAt = readAt
         self.resourceSelection = resourceSelection
     }
 
@@ -840,6 +843,7 @@ struct ConversationTurn: Decodable {
         usage = try? c.decode(TurnUsage.self, forKey: .usage)
         createdAt = try? c.decodeIfPresent(String.self, forKey: .createdAt)
         completedAt = try? c.decodeIfPresent(String.self, forKey: .completedAt)
+        readAt = try? c.decodeIfPresent(String.self, forKey: .readAt)
         // 逐块容错：单个块解析失败不拖垮整条消息。
         var blocks: [ContentBlock] = []
         if var arr = try? c.nestedUnkeyedContainer(forKey: .content) {
@@ -1015,6 +1019,21 @@ struct StructuredSessionState: Decodable {
 
 /// SessionSnapshot 的客户端子集。GET /api/sessions 返回 slim 版（无 messages），
 /// GET /api/sessions/:id?format=chat 与 ws init 返回带 messages 的完整版。
+/// Codex 下一条输入预测。`state == "ready"` 时 `text` 是可编辑草稿建议；
+/// `unsupported` / `failed` 时 `reason` 是如实原因（账户或协议不支持）。
+/// 预测只由用户显式触发，客户端不得自动发送。
+struct CodexPrediction: Decodable {
+    let state: String
+    let text: String?
+    let reason: String?
+
+    var suggestion: String? {
+        guard state == "ready" else { return nil }
+        let trimmed = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 struct SessionSnapshot: Decodable, Identifiable {
     let id: String
     let sessionKind: String?

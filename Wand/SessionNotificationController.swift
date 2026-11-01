@@ -62,26 +62,6 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         )
     }
 
-    func sendWebNotification(
-        title: String,
-        body: String,
-        tag: String,
-        serverID: String? = nil
-    ) {
-        guard ServerStore.shared.notificationsEnabled else { return }
-        let sessionId = sessionId(from: tag)
-        let serverID = serverID ?? ServerStore.shared.activeServerID
-        if sessionId != nil, let serverID, RemoteNotificationController.shared.suppressesLocal(for: serverID) { return }
-        send(
-            id: normalizedIdentifier(tag: tag, sessionId: sessionId, serverID: serverID),
-            title: title.isEmpty ? "Wand" : title,
-            body: body,
-            sessionId: sessionId,
-            serverID: serverID,
-            interruptionLevel: .active
-        )
-    }
-
     /// 从全局会话快照识别状态跃迁。首次同步只建立基线，避免冷启动把旧状态全通知一遍。
     func reconcile(snapshots: [SessionSnapshot], serverID: String? = nil) {
         let serverID = serverID ?? ServerStore.shared.activeServerID ?? "legacy"
@@ -157,12 +137,16 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         return .idle
     }
 
+    /// 与服务器 APNs 正文同口径：先给具体任务名（会话标题），没有标题才用摘要，最后才用兜底文案。
+    /// 正在执行的子任务名与标题不同时补一行；两者相同不重复，避免正文被重复文案挤满。
     private func notificationBody(for snapshot: SessionSnapshot, fallback: String) -> String {
-        let detail = snapshot.currentTaskTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let detail, !detail.isEmpty, detail != snapshot.displayTitle {
-            return "\(snapshot.displayTitle)\n\(detail)"
-        }
-        return snapshot.displayTitle == "会话" ? fallback : snapshot.displayTitle
+        let name = [snapshot.title, snapshot.summary]
+            .compactMap { $0?.singleLineNotificationText }
+            .first { !$0.isEmpty }
+        let detail = snapshot.currentTaskTitle?.singleLineNotificationText ?? ""
+        var lines = name.map { [$0] } ?? []
+        if !detail.isEmpty, detail != name { lines.append(detail) }
+        return lines.isEmpty ? fallback : lines.joined(separator: "\n")
     }
 
     private func send(
@@ -188,24 +172,14 @@ final class SessionNotificationController: NSObject, UNUserNotificationCenterDel
         }
         center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
     }
-
-    private func sessionId(from tag: String) -> String? {
-        for prefix in ["permission:wand-perm-", "task-ended:wand-ended-", "wand-perm-", "wand-ended-"]
-        where tag.hasPrefix(prefix) {
-            return String(tag.dropFirst(prefix.count))
-        }
-        return nil
-    }
-
-    private func normalizedIdentifier(tag: String, sessionId: String?, serverID: String?) -> String {
-        guard let sessionId else { return tag.isEmpty ? UUID().uuidString : tag }
-        let scope = serverID.map { ".\($0)" } ?? ""
-        if tag.contains("perm") { return "wand.permission\(scope).\(sessionId)" }
-        if tag.contains("ended") { return "wand.completed\(scope).\(sessionId)" }
-        return tag
-    }
 }
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
+    /// 通知正文只排单行：标题里的换行与连续空白压成空格，避免把正文挤断或撑成多行空白。
+    var singleLineNotificationText: String {
+        components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
 }

@@ -23,6 +23,10 @@ protocol SessionFilesService {
     func writeFile(_ file: SessionFilePreview, content: String) async throws -> SessionFileWriteResult
 }
 extension WandAPI: SessionFilesService {
+    func listDirectory(_ query: String) async throws -> DirectoryListing {
+        try await listDirectory(query, foldersOnly: false)
+    }
+
     func previewFile(_ path: String) async throws -> SessionFilePreview {
         let result = try await request(SessionFilePreview.self, method: "GET", path: "/api/file-preview", queryItems: [URLQueryItem(name: "path", value: path)])
         guard result.path == path else { throw APIError.network("文件回执身份不一致") }

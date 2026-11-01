@@ -2,8 +2,8 @@ import XCTest
 @testable import Wand
 
 final class ConversationListFiltersTests: XCTestCase {
-    private func facts(_ stage: ConversationTaskStage = .review, workspace: String = "wand", archived: Bool = false, active: Bool = false, text: String = "修复搜索") -> ConversationFilterFacts {
-        ConversationFilterFacts(stage: stage, workspace: .workspace(workspace), archived: archived, active: active, searchText: text)
+    private func facts(_ stage: ConversationTaskStage = .review, workspace: String = "wand", archived: Bool = false, active: Bool = false, text: String = "修复搜索", employee: String = "none") -> ConversationFilterFacts {
+        ConversationFilterFacts(stage: stage, workspace: .workspace(workspace), archived: archived, active: active, searchText: text, employee: employee)
     }
 
     func testStatusAndWorkspaceMustMatchTheSameSession() {
@@ -46,18 +46,18 @@ final class ConversationListFiltersTests: XCTestCase {
         XCTAssertFalse(unavailable.contains { filters.matches($0) })
     }
 
-    func testDefaultArchiveScopeIsAllAndDoesNotCountAsAFilter() {
+    func testDefaultArchiveScopeIsCurrentAndDoesNotCountAsAFilter() {
         let filters = ConversationListFilters()
-        XCTAssertEqual(filters.archive, .all)
+        XCTAssertEqual(filters.archive, .current)
         XCTAssertEqual(filters.count, 0)
         XCTAssertTrue(filters.isDefault)
         XCTAssertTrue(filters.matches(facts()))
-        XCTAssertTrue(filters.matches(facts(archived: true)))
-        let current = ConversationListFilters(archive: .current)
-        XCTAssertEqual(current.count, 1)
-        XCTAssertFalse(current.isDefault)
-        XCTAssertTrue(current.matches(facts()))
-        XCTAssertFalse(current.matches(facts(archived: true)))
+        XCTAssertFalse(filters.matches(facts(archived: true)))
+        let all = ConversationListFilters(archive: .all)
+        XCTAssertEqual(all.count, 1)
+        XCTAssertFalse(all.isDefault)
+        XCTAssertTrue(all.matches(facts()))
+        XCTAssertTrue(all.matches(facts(archived: true)))
     }
 
     func testTaskArchiveIsIndependentOfConversationArchive() {
@@ -86,12 +86,27 @@ final class ConversationListFiltersTests: XCTestCase {
         XCTAssertFalse(ConversationListFilters(workspace: .workspace("deleted-id")).matches(facts()))
     }
 
+    func testEmployeeFilterMatchesByEmployeeId() {
+        let e1 = facts(text: "员工1", employee: "emp-1")
+        let e2 = facts(text: "员工2", employee: "emp-2")
+        let unassigned = facts(text: "未分配", employee: "none")
+        let filters = ConversationListFilters(employees: ["emp-1"])
+        XCTAssertTrue(filters.matches(e1))
+        XCTAssertFalse(filters.matches(e2))
+        XCTAssertFalse(filters.matches(unassigned))
+        let multi = ConversationListFilters(employees: ["emp-1", "none"])
+        XCTAssertTrue(multi.matches(e1))
+        XCTAssertFalse(multi.matches(e2))
+        XCTAssertTrue(multi.matches(unassigned))
+        XCTAssertEqual(filters.count, 1)
+    }
+
     func testDraftResetAndCancelDoNotMutateAppliedFilters() {
         let applied = ConversationListFilters(stage: .review, workspace: .workspace("wand"), archive: .current, activeOnly: true)
         var draft = applied
         draft = ConversationListFilters()
         XCTAssertTrue(draft.isDefault)
-        XCTAssertEqual(applied.count, 4)
+        XCTAssertEqual(applied.count, 3, "the default archive scope is never an active filter")
         draft = applied // reopening discards the previous draft
         XCTAssertEqual(draft, applied)
     }

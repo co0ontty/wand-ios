@@ -116,7 +116,7 @@ struct ConversationMessage: Decodable, Identifiable {
     var id: String { messageId ?? [requestId ?? "", turn.role, turn.createdAt ?? "", sessionLink?.sessionId ?? "", author?.id ?? ""].joined(separator: ":") }
     var taskId: String? { conversationTarget?.taskId ?? conversationLink?.taskId }
     var renderRevision: Int {
-        var hash = Hasher(); hash.combine(id)
+        var hash = Hasher(); hash.combine(id); hash.combine(turn.readAt)
         hash.combine(sessionPreview?.text); hash.combine(sessionPreview?.status)
         hash.combine(taskPreview?.text); hash.combine(taskPreview?.status)
         for block in turn.content {
@@ -363,7 +363,7 @@ extension ConversationTask {
         let group = groups.first { group in
             group.tasks.contains { $0.boardTaskId == task.id || (task.workspaceTaskId != nil && $0.id == task.workspaceTaskId) }
         } ?? groups.first { $0.workspaceId == task.workspaceId }
-        return .resolve(id: group?.workspaceId ?? task.workspaceId, synthetic: group?.isSynthetic ?? false, global: group?.isGlobal ?? false)
+        return .resolve(id: group?.workspaceId ?? task.workspaceId, synthetic: group?.userAdded != true || (group?.isSynthetic ?? false), global: group?.isGlobal ?? false)
     }
     func filterWorkspaceTitle(in groups: [TaskDirectoryGroup]) -> String {
         switch filterWorkspace(in: groups) {
@@ -377,9 +377,9 @@ extension ConversationTask {
     }
     func matchesFilters(_ filters: ConversationListFilters, query: String, conversationTitle: String, groups: [TaskDirectoryGroup]) -> Bool {
         let searchText = [conversationTitle, task.title, filterWorkspaceTitle(in: groups)].joined(separator: " ")
-        func matches(archived: Bool, active: Bool, sessionTitle: String = "") -> Bool {
+        func matches(archived: Bool, active: Bool, sessionTitle: String = "", employee: String = "none") -> Bool {
             filters.matches(ConversationFilterFacts(stage: filterStage, workspace: filterWorkspace(in: groups),
-                archived: archived, active: active, searchText: searchText + " " + sessionTitle), query: query)
+                archived: archived, active: active, searchText: searchText + " " + sessionTitle, employee: employee), query: query)
         }
         // Conversation summaries can carry raw board tasks without embedded sessions.
         // Join only by explicit board/container IDs, never cwd or a time-window guess.
@@ -390,7 +390,7 @@ extension ConversationTask {
         if !linked.isEmpty {
             return linked.contains { item in
                 matches(archived: item.filterArchived, active: !item.filterArchived && HomePresentation.isActive(item.session),
-                    sessionTitle: item.session.title ?? "")
+                    sessionTitle: item.session.title ?? "", employee: item.session.employeeId ?? "none")
             }
         }
         // A task with no execution session still has a real business/workspace association.

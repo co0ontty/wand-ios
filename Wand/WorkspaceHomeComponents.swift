@@ -409,3 +409,32 @@ struct HomeRecentGroupHeader: View {
         }
     }
 }
+
+/// Read-only activity projection matching the Web sidebar vocabulary.
+struct SessionListStatus: View {
+    let session: WorkspaceSessionSummary
+    private var presentation: (String, String, Color) {
+        if session.archived == true { return ("已归档", "archivebox", Theme.textSecondary) }
+        let status = session.activityStatus.replacingOccurrences(of: "_", with: "-")
+        switch status {
+        case "permission", "permission-blocked": return ("等待授权", "lock", Theme.warning)
+        case "waiting-input": return ("等待回答", "questionmark.circle", Theme.warning)
+        case "reconnecting": return ("重连中", "arrow.trianglehead.2.clockwise.rotate.90", Theme.warning)
+        case "failed": return ("失败", "exclamationmark.circle", Theme.danger)
+        case "thinking": return ("思考中", "brain", Theme.info)
+        case "running": return ("运行中", "arrow.trianglehead.2.clockwise.rotate.90", Theme.success)
+        case "queued": return ("排队中", "clock", Theme.textSecondary)
+        default:
+            if session.isJustCompleted { return ("刚完成 · 未查看", "checkmark.circle", Theme.success) }
+            if status == "exited" { return ("已结束", "stop.circle", Theme.textSecondary) }
+            if status == "stopped" { return ("已停止", "stop.circle", Theme.textSecondary) }
+            return ("空闲", "circle", Theme.textSecondary)
+        }
+    }
+    var body: some View {
+        let (label, symbol, tint) = presentation
+        Label(label, systemImage: symbol)
+            .font(.caption2.weight(.semibold)).foregroundStyle(tint)
+            .accessibilityLabel("执行状态：" + label)
+    }
+}

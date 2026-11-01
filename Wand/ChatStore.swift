@@ -682,7 +682,7 @@ final class ChatStore: ObservableObject {
                 }
             }
             return ConversationTurn(role: turn.role, content: content, usage: turn.usage,
-                                    createdAt: turn.createdAt, completedAt: turn.completedAt, resourceSelection: turn.resourceSelection)
+                                    createdAt: turn.createdAt, completedAt: turn.completedAt, readAt: turn.readAt, resourceSelection: turn.resourceSelection)
         }
     }
 
@@ -1455,6 +1455,7 @@ final class ChatStore: ObservableObject {
                         usage: head.usage,
                         createdAt: head.createdAt,
                         completedAt: head.completedAt,
+                        readAt: head.readAt,
                         resourceSelection: head.resourceSelection
                     )
                     leadingBlockOffset = page.blockOffset

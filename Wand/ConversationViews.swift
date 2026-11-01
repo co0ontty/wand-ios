@@ -96,7 +96,15 @@ struct ConversationListView: View {
         var parts: [String] = []
         if filters.stage != .all { parts.append(filters.stage.title) }
         if filters.workspace != .all { parts.append(workspaceTitle(filters.workspace)) }
-        if filters.archive != .all { parts.append(filters.archive.title) }
+        if !filters.employees.isEmpty {
+            let names = filters.employees.sorted().map { id in
+                store.employees.first { $0.id == id }?.name
+                    ?? HomePresentation.conversations(taskGroups, includeArchived: true).first { $0.session.employeeId == id }?.session.employeeName
+                    ?? "员工不可用"
+            }
+            parts.append("员工：" + names.joined(separator: "、"))
+        }
+        if filters.archive != .current { parts.append(filters.archive.title) }
         if filters.activeOnly { parts.append("只看活动会话") }
         if tier != .all { parts.append(tier.title) }
         return parts.joined(separator: " · ")
@@ -605,6 +613,7 @@ private struct ConversationWorkspaceFilterPicker: View {
                     ForEach(workspaces.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }) { option in
                         choice(option.title, value: .workspace(option.id))
                     }
+                    AddWorkspaceButton { workspace in selection = .workspace(workspace.id); onClose() }
                 }
             }.scrollDismissesKeyboard(.interactively)
         }
@@ -1094,7 +1103,8 @@ struct ConversationDetailView: View {
         guard scrollPinned, !userScrolling else { scrollScheduler.cancel(); return }
         scrollScheduler.request {
             guard scrollPinned, !userScrolling else { return }
-            proxy.scrollTo("im-tail", anchor: .bottom)
+            // 仅让末尾可见；强制底边对齐会覆盖短消息的顶对齐并制造顶部空白。
+            proxy.scrollTo("im-tail")
         }
     }
     private func messageView(_ message: ConversationMessage, detail: ConversationInstance) -> some View {
@@ -1498,10 +1508,7 @@ private struct ConversationComposerView: View {
                     .buttonStyle(WandQuietButtonStyle()).accessibilityLabel("关闭派发设置")
             }
             if dispatch {
-                Picker("项目", selection: $workspaceID) {
-                    Text("选择项目").tag("")
-                    ForEach(contactProjectCandidates(store.projects)) { Text($0.name).tag($0.id) }
-                }.frame(minHeight: 44)
+                WorkspaceSelector(selection: $workspaceID, choices: contactProjectCandidates(store.projects).map { (id: $0.id, name: $0.name) }, emptyLabel: "选择项目").frame(minHeight: 44)
             }
             Text("工作目录（可选）").font(.caption).foregroundStyle(Theme.textSecondary)
             TextField("沿用当前目录", text: $cwd).textInputAutocapitalization(.never).autocorrectionDisabled()

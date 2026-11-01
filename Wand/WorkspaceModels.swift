@@ -373,10 +373,12 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
     let permissionBlocked: Bool?
     let providerCliExitCode: Int?
     var ptyCommandRunning: Bool? = nil
+    var engine: String? = nil
 
     init(snapshot: SessionSnapshot) {
         id = snapshot.id
         provider = snapshot.provider
+        engine = snapshot.structuredState?.engine
         sessionKind = snapshot.sessionKind
         runner = snapshot.runner
         title = snapshot.title
@@ -439,7 +441,10 @@ struct WorkspaceSessionSummary: Codable, Equatable, Identifiable {
     }
 
     var providerLabel: String {
-        guard let provider, !provider.isEmpty else { return "终端" }
+        guard let provider, !provider.isEmpty, !["shell", "terminal"].contains(provider) else { return "终端" }
+        if WandProvider.normalizedID(provider) == "pi", ["sdk", "core"].contains(engine ?? "") {
+            return WandAgentTool.wandAgent.title
+        }
         return WandProvider.title(for: provider)
     }
 
@@ -586,6 +591,8 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
     let latestActivityAt: String?
     let synthetic: Bool?
     let global: Bool?
+    let userAdded: Bool?
+    let directoryVisible: Bool?
     let tasks: [WorkspaceTaskSummary]
     let standaloneSessions: [WorkspaceSessionSummary]
 
@@ -594,7 +601,7 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
     /// 服务端会在 global 组上打标；老服务端只给 `wand-global` 这个 ID，两边都要认。
     var isGlobal: Bool { (global ?? false) || workspaceId == "wand-global" }
     /// 可归属的真实项目：排除合成目录组和隐藏的全局空间。
-    var isBindableProject: Bool { !isSynthetic && !isGlobal }
+    var isBindableProject: Bool { userAdded == true && !isSynthetic && !isGlobal }
 
     init(
         workspaceId: String,
@@ -604,6 +611,8 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
         latestActivityAt: String? = nil,
         synthetic: Bool? = nil,
         global: Bool? = nil,
+        userAdded: Bool? = nil,
+        directoryVisible: Bool? = nil,
         tasks: [WorkspaceTaskSummary],
         standaloneSessions: [WorkspaceSessionSummary]
     ) {
@@ -614,6 +623,8 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
         self.latestActivityAt = latestActivityAt
         self.synthetic = synthetic
         self.global = global
+        self.userAdded = userAdded
+        self.directoryVisible = directoryVisible
         self.tasks = tasks
         self.standaloneSessions = standaloneSessions
     }
@@ -632,6 +643,8 @@ struct TaskDirectoryGroup: Codable, Equatable, Identifiable {
             latestActivityAt: latestActivityAt,
             synthetic: synthetic,
             global: global,
+            userAdded: userAdded,
+            directoryVisible: directoryVisible,
             tasks: tasks ?? self.tasks,
             standaloneSessions: standaloneSessions ?? self.standaloneSessions
         )

@@ -516,6 +516,12 @@ final class WandAPI: SessionInputTransport {
         try await request(SessionSnapshot.self, method: "POST", path: "/api/sessions/\(id)/stop", body: [:])
     }
 
+    /// Codex 下一条输入预测：只由用户点击触发（会调用模型），unsupported 时如实返回原因。
+    func codexPrediction(sessionId: String) async throws -> CodexPrediction {
+        try await request(CodexPrediction.self, method: "POST", path: "/api/sessions/\(sessionId)/prediction",
+                          body: [:], timeout: 60)
+    }
+
     // MARK: - 排队消息（仅结构化会话）
 
     /// 由服务端按 index 摘掉队列项并立即发送，避免客户端与自动 flush 重复发送。
@@ -1047,12 +1053,12 @@ final class WandAPI: SessionInputTransport {
 
     // MARK: - 目录与配置
 
-    func listDirectory(_ query: String) async throws -> DirectoryListing {
+    func listDirectory(_ query: String, foldersOnly: Bool = false) async throws -> DirectoryListing {
         try await request(
             DirectoryListing.self,
             method: "GET",
             path: "/api/directory",
-            queryItems: [URLQueryItem(name: "q", value: query)]
+            queryItems: [URLQueryItem(name: "q", value: query), URLQueryItem(name: "foldersOnly", value: foldersOnly ? "true" : "false")]
         )
     }
 

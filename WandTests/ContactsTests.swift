@@ -487,14 +487,7 @@ final class ContactsTests: XCTestCase {
         let api = WandAPI(baseURL: URL(string: "http://127.0.0.1:1")!, token: nil)
         window.rootViewController = UIHostingController(rootView:
             ContactsView(api: api, store: store, onBack: {}, onOpenSession: { _ in XCTFail("Must use stable IM identity") },
-                onOpenRun: { _ in XCTFail("Must use team conversation callback") },
-                onOpenConversation: { id in
-                    XCTAssertEqual(id, ConversationStore.employeeID("touch-employee"))
-                    employeeCalls += 1; employee.fulfill()
-                }, onTeamConversation: { id in
-                    XCTAssertEqual(id, "touch-team")
-                    teamCalls += 1; team.fulfill()
-                }, embedded: true))
+                onOpenRun: { _ in XCTFail("Must use team conversation callback") }, embedded: true))
         window.makeKeyAndVisible()
         defer { window.isHidden = true }
         await fulfillment(of: [employee, team], timeout: 90)

@@ -51,10 +51,16 @@ struct KnowledgeLibraryView: View {
             if store.scope == .global {
                 Text("所有员工、项目与 CLI").font(.callout).foregroundStyle(.secondary)
             } else {
+            if store.scope == .project {
+                WorkspaceSelector(selection: Binding(get: { store.ownerId }, set: { store.changeOwner($0) }), choices: store.availableOwners.map { (id: $0.id, name: $0.name) }, emptyLabel: "选择工作区", onCreated: { workspace in
+                    Task { await store.loadOwners(); store.changeOwner(workspace.id) }
+                }).disabled(store.busy)
+            } else {
             Picker(store.scope == .personal ? "员工" : "项目", selection: Binding(get: { store.ownerId }, set: { store.changeOwner($0) })) {
                 if store.availableOwners.isEmpty { Text(store.loading ? "正在加载…" : "暂无可选对象").tag("") }
                 ForEach(store.availableOwners) { Text($0.name + ($0.isReadOnly ? "（只读）" : "")).tag($0.id) }
             }.disabled(store.busy || store.availableOwners.isEmpty)
+            }
             }
             }
             HomeSearchField(placeholder: "搜索文档", text: $store.query, focused: $searchFocused, identifier: "knowledge-search")

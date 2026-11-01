@@ -146,6 +146,8 @@ struct ChatView: View {
     @StateObject private var quickCommitFeedback = QuickCommitFeedbackController()
     /// 停止任务二次确认弹窗开关：点停止按钮先弹确认，避免误触中断正在跑的任务。
     @State private var showStopConfirm = false
+    /// 「预测下一条」请求在途：入口原地显示进度，结果只填入空草稿，永不自动发送。
+    @State private var predictingNextInput = false
     /// 输入栏上方队列的原位展开状态。
     @State private var queueBarExpanded = false
     @State private var todoBarExpanded = false
@@ -156,6 +158,7 @@ struct ChatView: View {
     @State private var expandedHistoryBoundaryAbsolute: Int?
     /// 用户手动收起的助手回复，使用绝对 turn 下标避免历史 prepend 后串状态。
     @State private var collapsedAssistantTurns: Set<Int> = []
+    @State private var floatingMenuExpanded = false
     @StateObject private var scrollScheduler = ChatScrollScheduler()
     @State private var messageProjection = ChatProjectionCache<[MessageDisplayItem]>()
     @State private var subagentProjection = ChatProjectionCache<[SubagentActivity]>()
@@ -242,6 +245,15 @@ struct ChatView: View {
         .overlay(alignment: .top) {
             if showsNavigationChrome && !usesSystemNavigation {
                 ZStack(alignment: .top) {
+                    // 展开菜单时的透明遮罩：点击任意其他区域收起
+                    if floatingMenuExpanded {
+                        Color.clear.contentShape(Rectangle())
+                            .ignoresSafeArea()
+                            .onTapGesture {
+                                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { floatingMenuExpanded = false }
+                            }
+                            .accessibilityHidden(true)
+                    }
                     chatIdentityBar(reservesFloatingControls: true)
                     floatingChatControls
                 }
@@ -267,10 +279,30 @@ struct ChatView: View {
 
     private var floatingChatControls: some View {
         FloatingChatControls(onBack: { dismiss() }) {
-            Menu { chatMenuItems } label: { FloatingChatIcon(symbol: "ellipsis") }
-                .accessibilityLabel("更多会话功能")
+            ExpandableFloatingMenu(
+                actions: chatPrimaryActions,
+                secondaryActions: chatSecondaryActions,
+                isExpanded: $floatingMenuExpanded)
                 .accessibilityValue("\(store.displayEmployeeName ?? "当前会话")，\(store.snapshot?.cwd ?? "未选择目录")")
         }
+    }
+
+    /// 浮动菜单的次要动作（停止、预测等），展开后插入主动作下方。
+    private var chatSecondaryActions: [SessionMenuAction] {
+        var result: [SessionMenuAction] = []
+        if store.isResponding {
+            result.append(SessionMenuAction(id: "stop", title: "停止当前任务", symbol: "stop", role: .destructive) {
+                showStopConfirm = true
+            })
+        }
+        if store.snapshot?.provider == "codex", !store.isResponding,
+           draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            result.append(SessionMenuAction(id: "predict", title: predictingNextInput ? "正在预测…" : "预测下一条",
+                                            symbol: "sparkles", isEnabled: !predictingNextInput) {
+                predictNextInput()
+            })
+        }
+        return result
     }
 
     /// 会话「更多」菜单的主动作：会话文件、对象与目录、变更与提交。
@@ -308,6 +340,42 @@ struct ChatView: View {
                         showStopConfirm = true
                     }
                 ])
+            }
+        }
+        if store.snapshot?.provider == "codex", !store.isResponding,
+           draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Section {
+                SessionActionPalette(actions: [
+                    SessionMenuAction(id: "predict", title: predictingNextInput ? "正在预测…" : "预测下一条",
+                                      symbol: "sparkles", isEnabled: !predictingNextInput) {
+                        predictNextInput()
+                    }
+                ])
+            }
+        }
+    }
+
+    /// 让 Codex 根据本会话预测下一条输入。只由用户点击触发（会调用模型），
+    /// 结果只填入空草稿；期间用户已经开始输入就放弃落地，不覆盖草稿、不自动发送。
+    private func predictNextInput() {
+        guard !predictingNextInput else { return }
+        predictingNextInput = true
+        let target = sessionId
+        Task { @MainActor in
+            defer { predictingNextInput = false }
+            do {
+                let prediction = try await api.codexPrediction(sessionId: target)
+                guard let suggestion = prediction.suggestion else {
+                    store.toast = prediction.reason ?? "当前账户不支持预测下一条。"
+                    return
+                }
+                guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    store.toast = "预测已返回，但草稿已变化，未覆盖。"
+                    return
+                }
+                composerDraft.text = suggestion
+            } catch {
+                store.toast = error.localizedDescription
             }
         }
     }
@@ -661,29 +729,7 @@ struct ChatView: View {
                             }
                         }
                 )
-                .overlay(alignment: .trailing) {
-                    if store.messages.count >= 2 {
-                        ConversationTurnScrubber(
-                            itemCount: store.messages.count,
-                            currentItem: visibleTurnIndex,
-                            currentPreview: scrubberUserPreview(turns: store.messages, index: visibleTurnIndex)
-                        ) { index, animate in
-                            guard store.messages.indices.contains(index) else { return }
-                            visibleTurnIndex = index
-                            scrollMode = .manual
-                            let targetID = scrubberScrollID(for: index)
-                            if animate {
-                                withAnimation(WandMotion.scroll) {
-                                    proxy.scrollTo(targetID, anchor: .top)
-                                }
-                            } else {
-                                proxy.scrollTo(targetID, anchor: .top)
-                            }
-                        }
-                        .padding(.trailing, 3)
-                        .padding(.vertical, 12)
-                    }
-                }
+                .overlay(alignment: .trailing) { historyScrubber(proxy) }
                 .overlay(alignment: .bottomTrailing) {
                     if scrollMode == .manual {
                         jumpToLatestButton(proxy)
@@ -1047,15 +1093,17 @@ struct ChatView: View {
         }
     }
 
-    /// 根据当前模式同步滚动：贴底跟随，或尊重用户手动浏览。
+    /// 只滚动到末尾可见，手动浏览时不抢位置。显式 .bottom 会把不足一屏的内容
+    /// 拉离顶部，与短内容的 .top alignment 交替生效；nil 只做最小必要滚动，
+    /// 首条消息保持顶对齐，超出视口的长回复仍跟随到末尾。
     private func scrollToActiveTarget(_ proxy: ScrollViewProxy, animated: Bool = false) {
         guard scrollMode != .manual else { scrollScheduler.cancel(); return }
         scrollScheduler.request {
             guard scrollMode != .manual else { return }
             if animated && !reduceMotion {
-                withAnimation(WandMotion.scroll) { proxy.scrollTo("chat-bottom", anchor: .bottom) }
+                withAnimation(WandMotion.scroll) { proxy.scrollTo("chat-bottom") }
             } else {
-                proxy.scrollTo("chat-bottom", anchor: .bottom)
+                proxy.scrollTo("chat-bottom")
             }
         }
     }
@@ -1812,6 +1860,33 @@ struct ChatView: View {
             if store.canChangeDirectory { showDirectoryPicker = true }
             else { store.toast = "当前会话目录固定；更换目录请创建新会话" }
         default: break
+        }
+    }
+
+    @ViewBuilder
+    private func historyScrubber(_ proxy: ScrollViewProxy) -> some View {
+        let targets = store.messages.indices.filter { store.messages[$0].role == "user" }
+        if targets.count >= 2 {
+            ConversationTurnScrubber(
+                itemCount: targets.count,
+                currentItem: targets.lastIndex(where: { $0 <= visibleTurnIndex }) ?? 0,
+                preview: { item in scrubberUserPreview(turns: store.messages, index: targets[item]) }
+            ) { item, animate in
+                guard targets.indices.contains(item) else { return }
+                let index = targets[item]
+                visibleTurnIndex = index
+                scrollMode = .manual
+                let targetID = scrubberScrollID(for: index)
+                if animate {
+                    withAnimation(WandMotion.scroll) {
+                        proxy.scrollTo(targetID, anchor: .top)
+                    }
+                } else {
+                    proxy.scrollTo(targetID, anchor: .top)
+                }
+            }
+            .padding(.trailing, 3)
+            .padding(.vertical, 12)
         }
     }
 
@@ -2702,7 +2777,10 @@ func scrubberUserPreview(turns: [ConversationTurn], index: Int) -> String {
         let turn = turns[position]
         guard turn.role == "user" else { continue }
         let preview = conversationTurnPreview(turn)
-        return preview.isEmpty ? "用户消息" : preview
+        let reply = turns.dropFirst(position + 1).prefix(while: { $0.role != "user" })
+            .filter { $0.role == "assistant" }.map { conversationTurnPreview($0) }
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        return (preview.isEmpty ? "用户消息" : preview) + "\n" + (reply.isEmpty ? "暂无回复摘要" : String(reply.prefix(240)))
     }
     return ""
 }
@@ -2839,6 +2917,10 @@ private struct TurnView: View {
             }
             if !parsed.body.isEmpty {
                 userBody(parsed.body, collapsed: collapsed, canCompact: canCompact)
+            }
+            if turn.readAt?.isEmpty == false {
+                Text("已读").font(.caption2).foregroundStyle(Theme.textSecondary)
+                    .accessibilityLabel("已读，服务端已接收并开始处理")
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -4122,9 +4204,11 @@ private func toolLabel(_ name: String) -> String {
         case "send_input", "send_message": return "发送子任务消息"
         case "wait", "wait_agent": return "等待子代理"
         case "close_agent": return "关闭子代理"
+        case "review": return "代码评审"
         default: return "多 Agent 协作"
         }
     }
+    if lower.contains("contextcompaction") { return "压缩上下文" }
     if lower == "tool_search" || lower.contains("toolsearch") { return "查找可用工具" }
     if lower.contains("apply_patch") || lower.contains("patch_apply") { return "应用补丁" }
     if lower.contains("view_image") || lower.contains("imagegen") { return "处理图片" }
@@ -5835,14 +5919,14 @@ struct QueueBar: View {
 private struct ConversationTurnScrubber: View {
     let itemCount: Int
     let currentItem: Int
-    let currentPreview: String
+    let preview: (Int) -> String
     let onSelect: (Int, Bool) -> Void
 
     @State private var dragging = false
     @State private var lastEmittedIndex = -1
 
     private var displayedItem: Int {
-        min(max(currentItem, 0), max(itemCount - 1, 0))
+        min(max(dragging && lastEmittedIndex >= 0 ? lastEmittedIndex : currentItem, 0), max(itemCount - 1, 0))
     }
 
     private var railHeight: CGFloat {
@@ -5852,11 +5936,11 @@ private struct ConversationTurnScrubber: View {
     var body: some View {
         rail
             .overlay(alignment: .trailing) {
-                if dragging && !currentPreview.isEmpty {
-                    Text(currentPreview)
+                if dragging {
+                    Text(preview(displayedItem))
                         .font(.wand(size: 13))
                         .foregroundColor(Theme.textPrimary)
-                        .lineLimit(2)
+                        .lineLimit(4)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
                         .frame(minWidth: 120, maxWidth: 280, alignment: .leading)
@@ -5896,6 +5980,8 @@ private struct ConversationTurnScrubber: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                     .contentShape(Rectangle())
                     .onTapGesture { onSelect(index, true) }
+                    .accessibilityLabel("提问 \(index + 1)：\(preview(index))")
+                    .accessibilityAddTraits(.isButton)
             }
         }
         .scaleEffect(dragging ? 1.18 : 1, anchor: .trailing)
@@ -5911,10 +5997,10 @@ private struct ConversationTurnScrubber: View {
                     let index = min(max(Int(ratio * CGFloat(itemCount)), 0), itemCount - 1)
                     if index != lastEmittedIndex {
                         lastEmittedIndex = index
-                        onSelect(index, false)
                     }
                 }
                 .onEnded { _ in
+                    if lastEmittedIndex >= 0 { onSelect(lastEmittedIndex, true) }
                     dragging = false
                     lastEmittedIndex = -1
                 }

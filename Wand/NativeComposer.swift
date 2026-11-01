@@ -337,7 +337,7 @@ struct FloatingChatControls<Actions: View>: View {
     let onBack: () -> Void
     @ViewBuilder let actions: () -> Actions
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(alignment: .top, spacing: 4) {
             Button(action: onBack) { FloatingChatIcon(symbol: "chevron.left") }
                 .buttonStyle(.glass).buttonBorderShape(.circle)
                 .frame(width: ChatTopLayout.controlTouch, height: ChatTopLayout.controlTouch)
@@ -379,6 +379,59 @@ struct SessionActionPalette: View {
             .labelStyle(.iconOnly)
             .menuActionDismissBehavior(.enabled)
         }
+    }
+}
+
+/// 原地纵向展开的浮动菜单：点击 `…` 后动作图标从触发点上方逐个冒出，
+/// 每个按钮保持与返回键相同的圆形玻璃样式；点击任意动作或关闭键后收起。
+/// `…` ⇄ `×` 用交叉淡入 + 轻微旋转变形，符合动效约定第 4 条。
+struct ExpandableFloatingMenu: View {
+    let actions: [SessionMenuAction]
+    /// 额外的 section（停止、预测等），扁平化传入。
+    var secondaryActions: [SessionMenuAction] = []
+    @Binding var isExpanded: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var allActions: [SessionMenuAction] {
+        let primary = actions.filter { $0.isEnabled }
+        let secondary = secondaryActions.filter { $0.isEnabled }
+        return primary + secondary
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            // 展开态：动作按钮从上到下排列（视觉上从触发点向上生长）
+            if isExpanded {
+                ForEach(Array(allActions.enumerated()), id: \.element.id) { index, item in
+                    Button {
+                        withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { isExpanded = false }
+                        item.action()
+                    } label: {
+                        FloatingChatIcon(symbol: item.symbol)
+                    }
+                    .buttonStyle(.glass).buttonBorderShape(.circle)
+                    .frame(width: ChatTopLayout.controlTouch, height: ChatTopLayout.controlTouch)
+                    .accessibilityLabel(item.title)
+                    .accessibilityIdentifier("floating-menu-" + item.id)
+                    .transition(.scale(scale: 0.01, anchor: .bottom)
+                        .combined(with: .opacity))
+                    .zIndex(Double(allActions.count - index))
+                }
+            }
+
+            // 触发按钮：… ⇄ × 变形
+            Button {
+                withAnimation(reduceMotion ? nil : WandMotion.stateSwap) { isExpanded.toggle() }
+            } label: {
+                FloatingChatIcon(symbol: isExpanded ? "xmark" : "ellipsis")
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .animation(reduceMotion ? nil : WandMotion.stateSwap, value: isExpanded)
+            }
+            .buttonStyle(.glass).buttonBorderShape(.circle)
+            .frame(width: ChatTopLayout.controlTouch, height: ChatTopLayout.controlTouch)
+            .accessibilityLabel(isExpanded ? "收起菜单" : "更多会话功能")
+        }
+        .animation(reduceMotion ? nil : WandMotion.expansion, value: isExpanded)
     }
 }
 

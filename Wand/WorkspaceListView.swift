@@ -605,7 +605,7 @@ struct WorkspaceListView: View {
         List {
             if !isSelecting { homeSearchAndActivity }
             let visible = HomePresentation.visibleGroups(
-                TaskListPresentation.orderedDirectoryGroups(store.taskGroups),
+                TaskListPresentation.orderedDirectoryGroups(store.taskGroups.filter { $0.userAdded == true }),
                 query: searchQuery, attentionOnly: attentionOnly, employees: employees)
             if let error = store.orderSaveError {
                 HStack { Text(error).font(.caption).foregroundStyle(Theme.danger); Spacer(); Button("重试保存顺序") { store.savePendingGroupOrder() } }.padding(8)
@@ -634,13 +634,17 @@ struct WorkspaceListView: View {
                         workspaceCreateExpanded.toggle()
                     }
                 }, creatingExpanded: workspaceCreateExpanded, disabled: workspaceCreateBusy)
-                if workspaceCreateExpanded {
-                    WorkspaceCreatePanel(api: api, store: store, onCreated: { workspace in
-                        workspaceCreateExpanded = false
-                        showToast("已创建工作区「\(workspace.name)」")
-                    }, onBusy: { workspaceCreateBusy = $0 })
-                    .listRowBackground(Theme.background)
-                    .listRowSeparator(.hidden)
+                Color.clear.frame(height: 0).sheet(isPresented: $workspaceCreateExpanded) {
+                    NavigationStack {
+                        ScrollView {
+                            WorkspaceCreatePanel(api: api, store: store, onCreated: { _ in
+                                workspaceCreateExpanded = false
+                            }, onBusy: { workspaceCreateBusy = $0 }).padding()
+                        }.navigationTitle("添加工作区")
+                            .toolbar { ToolbarItem(placement: .cancellationAction) {
+                                Button("取消") { workspaceCreateExpanded = false }.disabled(workspaceCreateBusy)
+                            } }
+                    }.interactiveDismissDisabled(workspaceCreateBusy)
                 }
             }
             if visible.isEmpty && store.taskGroupsError == nil && !store.taskGroupsLoading {
@@ -822,7 +826,7 @@ struct WorkspaceListView: View {
                         .font(.subheadline.weight(.medium)).foregroundStyle(Theme.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                     if !secondary {
-                        Text([directEmployee ? conversationTitle : nil, item.task?.name, item.session.teamStep?.teamName, item.group.isGlobal ? nil : item.group.workspaceName]
+                        Text([item.session.providerLabel, directEmployee ? conversationTitle : nil, item.task?.name, item.session.teamStep?.teamName, item.group.isGlobal ? nil : item.group.workspaceName]
                             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
                             .font(.caption).foregroundStyle(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -853,25 +857,16 @@ struct WorkspaceListView: View {
 
     @ViewBuilder
     private func recentConversationLeading(_ item: HomeRecentConversation, secondary: Bool) -> some View {
-        if !secondary, let employeeId = item.session.employeeId {
-            let employee = employees.first { $0.id == employeeId }
-            ContactAvatar(
-                id: employeeId,
-                avatar: employee?.avatar ?? item.session.employeeAvatar ?? "",
-                systemKey: employee?.systemKey,
-                size: 28
-            )
-        } else if secondary, item.session.employeeId != nil {
-            BrandLogo(provider: item.session.provider ?? "terminal", color: Theme.brand)
-                .frame(width: 17, height: 17)
-        } else if !secondary, item.session.teamChat != nil {
+        if !secondary, item.session.teamChat != nil {
             Image(systemName: "person.3.fill")
                 .foregroundColor(Theme.brand)
                 .frame(width: 28, height: 28)
                 .background(Theme.brandSoft, in: RoundedRectangle(cornerRadius: 8))
-        } else {
+        } else if secondary {
             BrandLogo(provider: item.session.provider ?? "terminal", color: Theme.brand)
-                .frame(width: secondary ? 17 : 28, height: secondary ? 17 : 28)
+                .frame(width: 17, height: 17)
+        } else {
+            SessionToolMark(provider: item.session.provider)
         }
     }
 

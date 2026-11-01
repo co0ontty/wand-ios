@@ -211,7 +211,7 @@ struct DirectoryBrowserView: View {
         loading = true
         errorMessage = nil
         do {
-            let listing = try await api.listDirectory(requestedPath)
+            let listing = try await api.listDirectory(requestedPath, foldersOnly: true)
             guard generation == requestGeneration, currentPath == requestedPath else { return }
             items = listing.items
             // 服务端会把 ~ 之类输入解析为绝对路径；用首项的父路径回填展示。

@@ -284,7 +284,7 @@ enum HomePresentation {
 
 extension HomeRecentConversation {
     var filterWorkspace: ConversationWorkspaceFilter {
-        .resolve(id: group.workspaceId, synthetic: group.isSynthetic, global: group.isGlobal)
+        .resolve(id: group.workspaceId, synthetic: group.isSynthetic || group.userAdded != true, global: group.isGlobal)
     }
     var filterWorkspaceTitle: String {
         filterWorkspace == .unassigned ? "未分配工作区" : group.workspaceName
@@ -298,6 +298,8 @@ extension HomeRecentConversation {
         ConversationFilterFacts(stage: filterStage, workspace: filterWorkspace,
             archived: filterArchived, active: !filterArchived && HomePresentation.isActive(session),
             searchText: (HomePresentation.sessionFields(session, employees: employees)
-                + [task?.name, filterWorkspaceTitle]).compactMap { $0 }.joined(separator: " "))
+                + [task?.name, filterWorkspaceTitle]).compactMap { $0 }.joined(separator: " "),
+            runtime: filterArchived ? ConversationRuntime.resolveArchived(session) : ConversationRuntime.resolve(session),
+            employee: session.employeeId ?? "none")
     }
 }
