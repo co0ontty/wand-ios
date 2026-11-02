@@ -178,6 +178,7 @@ struct ConversationFilterCapsule: View {
     var showsTitle = true
     var onAddWorkspace: (() -> Void)? = nil
     var onExpand: (() -> Void)? = nil
+    var isExpanded = false
     @Environment(\.isEnabled) private var enabled
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
     @State private var open = false
@@ -279,7 +280,11 @@ struct ConversationFilterCapsule: View {
                 }
                 let layout = vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
                 layout {
-                    Image(systemName: allSymbol)
+                    ZStack {
+                        Image(systemName: allSymbol).opacity(isExpanded ? 0 : 1)
+                        Image(systemName: "xmark").opacity(isExpanded ? 1 : 0)
+                            .rotationEffect(.degrees(reducedMotion || isExpanded ? 0 : -90))
+                    }
                         .font(.title3)
                         .frame(width: WandLayout.controlTouch, height: WandLayout.controlTouch)
                         .background(selectedCount == 0 ? Theme.brandSoft : Color.clear, in: Circle())
@@ -443,17 +448,7 @@ struct ConversationFilterCapsule: View {
     }
 }
 
-/// A vertical action column with adjacent labels keeps each symbol self-explanatory.
-private struct SidebarActionMenu: View {
-    let onTrigger: () -> Void
-
-    var body: some View {
-        Button("更多", systemImage: "ellipsis", action: onTrigger)
-            .accessibilityIdentifier("home-sidebar-actions")
-    }
-}
-
-/// Native bar slots own placement; the session store remains the only filter owner.
+/// The whole rail has one native slot, so expanding never creates an overflow menu.
 struct ConversationHomeToolbar: ViewModifier {
     @ObservedObject var store: ConversationStore
     let groups: [TaskDirectoryGroup]
@@ -467,12 +462,13 @@ struct ConversationHomeToolbar: ViewModifier {
     var inDetailColumn = false
     var showsCreate = true
     var showsReturnToSessions = false
-    enum ActiveToolbarExpansion: Equatable {
-        case none, more, runtime, workspace
-    }
-    @State private var activeExpansion: ActiveToolbarExpansion = .none
+    private enum RailSlot: Int, CaseIterable { case create, more, runtime, workspace, employee }
+    @State private var expanded: RailSlot?
+    @State private var railTop: CGFloat = 0
+    @State private var contentBottom: CGFloat = 0
     @State private var addingWorkspace = false
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
+    @Environment(\.isEnabled) private var controlsEnabled
     @Environment(\.systemHomeToolbarInDetail) private var toolbarInDetail
     @Environment(\.systemHomeVerticalBarVisible) private var verticalBarVisible
     @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
@@ -493,9 +489,48 @@ struct ConversationHomeToolbar: ViewModifier {
             return ConversationEmployeeOption(id: id, title: name.isEmpty ? store.employees.first { $0.id == id }?.name ?? "员工" : name)
         }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
+    private var slots: [RailSlot] {
+        (showsListActions ? (showsCreate ? [.create, .more] : [.more]) : []) +
+            (showsFilters ? [.runtime, .workspace, .employee] : [])
+    }
+    private let railSpacing: CGFloat = 12
+    private func controlHeight(_ slot: RailSlot) -> CGFloat {
+        slot == .create || slot == .more ? WandLayout.controlTouch : WandLayout.controlTouch * 2 + 4
+    }
+    private var railHeight: CGFloat {
+        // Reserve one option row even below the last capsule, within the native slot.
+        let naturalHeight = slots.reduce(WandLayout.controlTouch) { $0 + controlHeight($1) + railSpacing }
+        return contentBottom > railTop && railTop > 0
+            ? min(naturalHeight, max(WandLayout.controlTouch, contentBottom - railTop))
+            : naturalHeight
+    }
+    private var expansionHeight: CGFloat {
+        guard let expanded else { return 0 }
+        let preceding = slots.prefix { $0 != expanded }.reduce(0) { $0 + controlHeight($1) + railSpacing }
+        return max(WandLayout.controlTouch, railHeight - preceding - controlHeight(expanded) - railSpacing)
+    }
+    private var selectedWorkspaces: Set<ConversationWorkspaceFilter> {
+        store.listFilters.workspaces.isEmpty && store.listFilters.workspace != .all
+            ? [store.listFilters.workspace] : store.listFilters.workspaces
+    }
+    private func expand(_ slot: RailSlot?) {
+        withAnimation(reducedMotion ? nil : WandMotion.expansion) { expanded = expanded == slot ? nil : slot }
+    }
+    private func perform(_ action: () -> Void) {
+        expand(nil)
+        action()
+    }
 
     func body(content: Content) -> some View {
         toolbarContent(content)
+            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { bottom in
+                if abs(contentBottom - bottom) > 1 { contentBottom = bottom }
+            }
+            .overlay {
+                if expanded != nil {
+                    Color.clear.contentShape(Rectangle()).onTapGesture { expand(nil) }
+                }
+            }
             .sheet(isPresented: $addingWorkspace) {
                 WorkspaceAddDialog(api: store.api) { workspace in
                     store.listFilters.workspace = .all
@@ -503,214 +538,169 @@ struct ConversationHomeToolbar: ViewModifier {
                     addingWorkspace = false
                 }
             }
-            .overlay {
-                if verticalBarVisible && activeExpansion != .none {
-                    verticalExpansionOverlay
-                }
+            .onDisappear { expanded = nil }
+            .onChange(of: enabled && controlsEnabled) { _, value in if !value { expanded = nil } }
+            .onChange(of: verticalBarVisible) { _, _ in expanded = nil; railTop = 0 }
+            .onChange(of: showsFilters) { _, _ in expanded = nil }
+            .onChange(of: showsListActions) { _, _ in expanded = nil }
+            .onKeyPress(.escape) {
+                guard expanded != nil else { return .ignored }
+                expand(nil)
+                return .handled
             }
     }
 
-    private func initials(_ value: String) -> String {
-        let words = value.components(separatedBy: CharacterSet(charactersIn: " _-/")).filter { !$0.isEmpty }
-        return (words.count > 1 ? words.prefix(2).map { String($0.prefix(1)) }.joined() : String(value.prefix(2))).uppercased()
-    }
-
-    @ViewBuilder
-    private var verticalExpansionOverlay: some View {
-        GeometryReader { proxy in
-            let railWidth: CGFloat = 44
-            let topInset: CGFloat = 175
-            let maxHeight: CGFloat = min(480, proxy.size.height - topInset - 20)
-
-            ZStack(alignment: .topTrailing) {
-                Color.black.opacity(0.001)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(reducedMotion ? nil : WandMotion.expansion) {
-                            activeExpansion = .none
+    private var verticalRail: some View {
+        VStack(spacing: 0) {
+            ForEach(slots, id: \.self) { slot in
+                let followsExpansion = expanded.map { slot.rawValue > $0.rawValue } ?? false
+                VStack(spacing: 0) {
+                    railControl(slot)
+                        .opacity(expanded == nil || expanded == slot ? 1 : 0)
+                        .allowsHitTesting(expanded == nil || expanded == slot)
+                        .accessibilityHidden(expanded != nil && expanded != slot)
+                        .frame(height: followsExpansion ? 0 : controlHeight(slot))
+                        .clipped()
+                    if expanded == slot {
+                        ScrollView(.vertical) {
+                            VStack(spacing: 8) { railChoices }
+                                .padding(.vertical, 4)
                         }
+                        .scrollBounceBehavior(.basedOnSize)
+                        .scrollClipDisabled()
+                        .frame(height: expansionHeight)
+                        .clipShape(ConversationRailScrollClip())
+                        .padding(.top, railSpacing)
+                        .accessibilityIdentifier("home-rail-options")
+                        .transition(reducedMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
                     }
-
-                VStack(spacing: 8) {
-                    Button {
-                        withAnimation(reducedMotion ? nil : WandMotion.expansion) {
-                            activeExpansion = .none
-                        }
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(Theme.textPrimary)
-                            .frame(width: railWidth, height: railWidth)
-                            .wandGlassCapsule()
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("收起")
-
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(spacing: 8) {
-                            switch activeExpansion {
-                            case .none:
-                                EmptyView()
-                            case .more:
-                                if sidebarToggle != nil, sidebarCollapsed {
-                                    railAction("显示会话列表", symbol: "sidebar.left") {
-                                        withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-                                        sidebarToggle?()
-                                    }
-                                }
-                                if showsReturnToSessions {
-                                    railAction("返回工作区", symbol: "arrow.left") {
-                                        withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-                                        onMode(.sessions)
-                                    }
-                                }
-                                railAction("知识库", symbol: "doc.text") {
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-                                    onMode(.knowledge)
-                                }
-                                railAction("任务", symbol: "square.grid.2x2") {
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-                                    onMode(.board)
-                                }
-                                railAction("设置", symbol: "gearshape") {
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-                                    onSettings()
-                                }
-                                railAction("切换服务器", symbol: "server.rack") {
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-                                    onSwitchServer()
-                                }
-                            case .runtime:
-                                railAction("全部运行状态", symbol: "square.3.layers.3d", selected: store.listFilters.runtimes.isEmpty) {
-                                    store.listFilters.runtimes = []
-                                    store.listFilters.activeOnly = false
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-                                }
-                                ForEach(ConversationRuntime.options, id: \.self) { value in
-                                    railAction(value.title, symbol: value.symbol, selected: store.listFilters.runtimes.contains(value)) {
-                                        store.listFilters.activeOnly = false
-                                        if !store.listFilters.runtimes.insert(value).inserted {
-                                            store.listFilters.runtimes.remove(value)
-                                        }
-                                    }
-                                }
-                            case .workspace:
-                                let selectedWorkspaces: Set<ConversationWorkspaceFilter> = store.listFilters.workspaces.isEmpty && store.listFilters.workspace != .all
-                                    ? [store.listFilters.workspace] : store.listFilters.workspaces
-                                railAction("全部工作区", symbol: "square.stack", selected: selectedWorkspaces.isEmpty) {
-                                    store.listFilters.workspaces = []
-                                    store.listFilters.workspace = .all
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-                                }
-                                railAction("未分配工作区", symbol: "folder", selected: selectedWorkspaces.contains(.unassigned)) {
-                                    store.listFilters.workspace = .all
-                                    if !store.listFilters.workspaces.insert(.unassigned).inserted {
-                                        store.listFilters.workspaces.remove(.unassigned)
-                                    }
-                                }
-                                ForEach(workspaces) { workspace in
-                                    railAction(workspace.title, symbol: "folder", monogram: initials(workspace.title),
-                                               selected: selectedWorkspaces.contains(.workspace(workspace.id))) {
-                                        store.listFilters.workspace = .all
-                                        let filter = ConversationWorkspaceFilter.workspace(workspace.id)
-                                        if !store.listFilters.workspaces.insert(filter).inserted {
-                                            store.listFilters.workspaces.remove(filter)
-                                        }
-                                    }
-                                }
-                                railAction("添加工作区", symbol: "plus", selected: false) {
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-                                    addingWorkspace = true
-                                }
-                            }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                    .frame(maxHeight: maxHeight)
                 }
-                .frame(width: railWidth)
-                .padding(.trailing, 23)
-                .padding(.top, topInset)
+                .padding(.bottom, followsExpansion || expanded == slot ? 0 : railSpacing)
             }
-            .ignoresSafeArea()
-            .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .topTrailing)))
+            Spacer(minLength: 0)
         }
-        .onKeyPress(.escape) {
-            guard activeExpansion != .none else { return .ignored }
-            withAnimation(reducedMotion ? nil : WandMotion.expansion) { activeExpansion = .none }
-            return .handled
+        .frame(width: 48, height: railHeight, alignment: .top)
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top in
+            if abs(railTop - top) > 1 { railTop = top }
+        }
+        .foregroundStyle(Theme.brand)
+    }
+
+    @ViewBuilder private func railControl(_ slot: RailSlot) -> some View {
+        switch slot {
+        case .create:
+            Button(action: onCreate) {
+                Image(systemName: "plus").font(.title3).frame(width: 44, height: 44).wandGlassCapsule()
+            }.buttonStyle(.plain).accessibilityLabel("新建会话").accessibilityIdentifier("unified-new-session")
+        case .more:
+            Button { expand(.more) } label: {
+                ZStack {
+                    Image(systemName: "ellipsis").opacity(expanded == .more ? 0 : 1)
+                    Image(systemName: "xmark").opacity(expanded == .more ? 1 : 0)
+                        .rotationEffect(.degrees(reducedMotion || expanded == .more ? 0 : -90))
+                }.font(.title3).frame(width: 44, height: 44).wandGlassCapsule()
+            }.buttonStyle(.plain).accessibilityLabel(expanded == .more ? "收起功能菜单" : "更多")
+                .accessibilityIdentifier("home-sidebar-actions")
+        case .runtime, .workspace, .employee:
+            ConversationFilterCapsule(dimension: slot == .runtime ? .runtime : slot == .workspace ? .workspace : .employee,
+                filters: $store.listFilters, workspaces: workspaces, employees: employees, vertical: true, showsTitle: false,
+                onAddWorkspace: { addingWorkspace = true }, onExpand: { expand(slot) }, isExpanded: expanded == slot)
         }
     }
 
+    @ViewBuilder private var railChoices: some View {
+        switch expanded {
+        case .more:
+            if sidebarCollapsed, let sidebarToggle { railAction("显示会话列表", symbol: "sidebar.left") { perform(sidebarToggle) } }
+            if showsReturnToSessions { railAction("返回工作区", symbol: "arrow.left") { perform { onMode(.sessions) } } }
+            railAction("知识库", symbol: "doc.text") { perform { onMode(.knowledge) } }
+            railAction("任务", symbol: "square.grid.2x2") { perform { onMode(.board) } }
+            railAction("设置", symbol: "gearshape") { perform(onSettings) }
+            railAction("切换服务器", symbol: "server.rack") { perform(onSwitchServer) }
+        case .runtime:
+            railAction("全部运行状态", symbol: "square.3.layers.3d", selected: store.listFilters.runtimes.isEmpty) {
+                perform { store.listFilters.runtimes = []; store.listFilters.activeOnly = false }
+            }
+            ForEach(ConversationRuntime.options, id: \.self) { value in
+                railAction(value.title, symbol: value.symbol, selected: store.listFilters.runtimes.contains(value)) {
+                    store.listFilters.activeOnly = false
+                    if !store.listFilters.runtimes.insert(value).inserted { store.listFilters.runtimes.remove(value) }
+                }
+            }
+        case .workspace:
+            railAction("全部工作区", symbol: "square.stack", selected: selectedWorkspaces.isEmpty) {
+                perform { store.listFilters.workspaces = []; store.listFilters.workspace = .all }
+            }
+            railAction("未分配工作区", symbol: "folder", selected: selectedWorkspaces.contains(.unassigned)) { toggleWorkspace(.unassigned) }
+            ForEach(workspaces) { workspace in
+                railAction(workspace.title, symbol: "folder", monogram: String(workspace.title.prefix(2)).uppercased(),
+                    selected: selectedWorkspaces.contains(.workspace(workspace.id))) { toggleWorkspace(.workspace(workspace.id)) }
+            }
+            railAction("添加工作区", symbol: "plus") { perform { addingWorkspace = true } }
+        case .employee:
+            railAction("全部员工", symbol: "person.2", selected: store.listFilters.employees.isEmpty) {
+                perform { store.listFilters.employees = [] }
+            }
+            railAction("未分配员工", symbol: "person", selected: store.listFilters.employees.contains("none")) { toggleEmployee("none") }
+            ForEach(employees) { employee in
+                railAction(employee.title, symbol: "person", monogram: String(employee.title.prefix(2)).uppercased(),
+                    selected: store.listFilters.employees.contains(employee.id)) { toggleEmployee(employee.id) }
+            }
+        case .create, nil: EmptyView()
+        }
+    }
+    private func toggleWorkspace(_ value: ConversationWorkspaceFilter) {
+        var values = selectedWorkspaces
+        if !values.insert(value).inserted { values.remove(value) }
+        store.listFilters.workspace = .all
+        store.listFilters.workspaces = values
+    }
+    private func toggleEmployee(_ id: String) {
+        if !store.listFilters.employees.insert(id).inserted { store.listFilters.employees.remove(id) }
+    }
     private func railAction(_ title: String, symbol: String, monogram: String? = nil, selected: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            ZStack(alignment: .bottomTrailing) {
-                Image(systemName: symbol)
-                    .font(.title3)
-                    .foregroundStyle(selected ? Theme.brand : Theme.textPrimary)
-                    .frame(width: 44, height: 44)
-                if let monogram {
-                    Text(monogram)
-                        .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundStyle(Theme.textPrimary)
-                        .lineLimit(1)
-                        .padding(.horizontal, 2)
-                        .padding(.vertical, 0.5)
-                        .background(Theme.surfaceSoft, in: RoundedRectangle(cornerRadius: 2.5, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-                                .stroke(Theme.border.opacity(0.65), lineWidth: 0.5)
-                        )
-                        .offset(x: -4, y: -4)
+            HStack(spacing: 8) {
+                Text(title).font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    .lineLimit(2).padding(.horizontal, 12).frame(minHeight: 36)
+                    .wandGlassCapsule(tint: selected ? Theme.brandSoft : nil)
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: symbol).font(.title3).frame(width: 44, height: 44)
+                    if let monogram { Text(monogram).font(.caption2).padding(2).background(Theme.surfaceSoft, in: Capsule()) }
+                    if selected { Image(systemName: "checkmark.circle.fill").font(.caption).background(Theme.surface, in: Circle()) }
                 }
-                if selected && monogram == nil {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Theme.brand)
-                        .background(Color.white, in: Circle())
-                        .offset(x: 2, y: 2)
-                }
+                .foregroundStyle(Theme.brand)
+                .wandGlassCapsule(tint: selected ? Theme.brandSoft : nil)
             }
-            .frame(width: 44, height: 44)
-            .background(selected ? Theme.brandSoft : Color.clear, in: Circle())
-            .wandGlassCapsule(tint: selected ? Theme.brandSoft : nil)
+            .fixedSize()
+            .contentShape(Rectangle())
+            .frame(width: 44, alignment: .trailing)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
         .accessibilityValue(selected ? "已选中" : "未选中")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityShowsLargeContentViewer { Label(title, systemImage: symbol) }
     }
 
     @ViewBuilder private func toolbarContent(_ content: Content) -> some View {
         #if compiler(>=6.4)
-        if #available(iOS 27.1, *), enabled && usesSystemNavigation,
-           inDetailColumn == toolbarInDetail {
-            content
-                .toolbar(verticalBarVisible && activeExpansion != .none ? .hidden : .visible, for: .navigationBar)
-                .toolbar {
+        if #available(iOS 27.1, *), enabled && usesSystemNavigation, inDetailColumn == toolbarInDetail {
+            content.toolbar(.visible, for: .navigationBar).toolbar {
+                if verticalBarVisible {
+                    ToolbarItem(placement: .primaryAction) { verticalRail }
+                        .axisBehavior(.verticalPreferred)
+                        .sharedBackgroundVisibility(.hidden)
+                } else {
                     if showsListActions {
                         if showsCreate {
                             ToolbarItem(placement: .primaryAction) {
-                                Button("新建会话", systemImage: "plus", action: onCreate)
-                                    .accessibilityIdentifier("unified-new-session")
+                                Button("新建会话", systemImage: "plus", action: onCreate).accessibilityIdentifier("unified-new-session")
                             }
                         }
-                        if verticalBarVisible {
-                            ToolbarItem(placement: .primaryAction) {
-                                SidebarActionMenu(onTrigger: {
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) {
-                                        activeExpansion = (activeExpansion == .more ? .none : .more)
-                                    }
-                                })
-                            }
-                        } else {
                         ToolbarOverflowMenu {
-                            if sidebarToggle != nil, sidebarCollapsed {
-                                Button("显示会话列表", systemImage: "sidebar.left") { sidebarToggle?() }
-                            }
-                            if showsReturnToSessions {
-                                Button("返回工作区", systemImage: "chevron.left") { onMode(.sessions) }
-                            }
+                            if sidebarCollapsed, let sidebarToggle { Button("显示会话列表", systemImage: "sidebar.left", action: sidebarToggle) }
+                            if showsReturnToSessions { Button("返回工作区", systemImage: "chevron.left") { onMode(.sessions) } }
                             Section {
                                 Button("知识库", systemImage: "doc.text") { onMode(.knowledge) }
                                 Button("任务", systemImage: "square.grid.2x2") { onMode(.board) }
@@ -720,46 +710,32 @@ struct ConversationHomeToolbar: ViewModifier {
                                 Button("切换服务器", systemImage: "server.rack", action: onSwitchServer)
                             }
                         }
-                        }
                     }
                     if showsFilters {
-                        ToolbarItem(placement: verticalBarVisible ? .primaryAction : .bottomBar) {
-                            ConversationFilterCapsule(dimension: .runtime, filters: $store.listFilters,
-                                workspaces: workspaces, vertical: verticalBarVisible, showsTitle: !verticalBarVisible,
-                                onExpand: {
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) {
-                                        activeExpansion = (activeExpansion == .runtime ? .none : .runtime)
-                                    }
-                                })
-                        }
-                        .axisBehavior(.verticalPreferred)
-                        .sharedBackgroundVisibility(.hidden)
-                        ToolbarItem(placement: verticalBarVisible ? .primaryAction : .bottomBar) {
-                            ConversationFilterCapsule(dimension: .workspace, filters: $store.listFilters,
-                                workspaces: workspaces, vertical: verticalBarVisible, showsTitle: !verticalBarVisible,
-                                onAddWorkspace: { addingWorkspace = true },
-                                onExpand: {
-                                    withAnimation(reducedMotion ? nil : WandMotion.expansion) {
-                                        activeExpansion = (activeExpansion == .workspace ? .none : .workspace)
-                                    }
-                                })
-                        }
-                        .axisBehavior(.verticalPreferred)
-                        .sharedBackgroundVisibility(.hidden)
-                        if !verticalBarVisible {
-                            ToolbarItem(placement: .bottomBar) {
-                                ConversationFilterCapsule(dimension: .employee, filters: $store.listFilters,
-                                    workspaces: workspaces, employees: employees, vertical: verticalBarVisible)
-                            }
-                            .axisBehavior(.verticalPreferred)
-                            .sharedBackgroundVisibility(.hidden)
-                        }
+                        ToolbarItem(placement: .bottomBar) {
+                            ConversationFilterCapsule(dimension: .runtime, filters: $store.listFilters, workspaces: workspaces, vertical: false)
+                        }.sharedBackgroundVisibility(.hidden)
+                        ToolbarItem(placement: .bottomBar) {
+                            ConversationFilterCapsule(dimension: .workspace, filters: $store.listFilters, workspaces: workspaces, vertical: false,
+                                onAddWorkspace: { addingWorkspace = true })
+                        }.sharedBackgroundVisibility(.hidden)
+                        ToolbarItem(placement: .bottomBar) {
+                            ConversationFilterCapsule(dimension: .employee, filters: $store.listFilters, workspaces: workspaces, employees: employees, vertical: false)
+                        }.sharedBackgroundVisibility(.hidden)
                     }
                 }
+            }
         } else { content }
         #else
         content
         #endif
+    }
+}
+
+/// Clip vertical scrolling while keeping labels beside the native icon column visible.
+private struct ConversationRailScrollClip: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(CGRect(x: rect.minX - rect.width * 8, y: rect.minY, width: rect.width * 9, height: rect.height))
     }
 }
 

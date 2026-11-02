@@ -704,7 +704,7 @@ struct NativeRootView: View {
             groups: workspaceStore.conversationTaskGroups,
             enabled: enabled,
             showsFilters: navigationSelection.wrappedValue == nil && (homeListMode == .sessions || homeListMode == .im),
-            showsListActions: navigationSelection.wrappedValue == nil && (homeListMode == .sessions || homeListMode == .im),
+            showsListActions: navigationSelection.wrappedValue == nil,
             onCreate: {
                 let workspaces = conversations.listFilters.workspaces
                 if workspaces.count == 1, case .workspace(let id) = workspaces.first! {
