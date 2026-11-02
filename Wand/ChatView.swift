@@ -1362,8 +1362,14 @@ struct ChatView: View {
                         expanded: $todoBarExpanded).id(store.sessionId)
                 }
                 composerQueueAccessory
-                inputBar
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerMeasuredHeight = $0 }
+                if store.snapshot?.historyOnly == true {
+                    Label("历史回复 · 只读，执行会话已回收", systemImage: "doc.text")
+                        .font(.caption).foregroundStyle(Theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    inputBar
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerMeasuredHeight = $0 }
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 6)
@@ -1740,7 +1746,7 @@ struct ChatView: View {
         // 结构化会话不存在「已结束」终止态：停止只回到 idle，真失败也能再发消息触发
         // 服务端 --resume 续接。所以发送只看草稿是否非空，不再被 sessionEnded 卡死。
         // 组字未确认时不能发，否则会把拼音半成品送出去，或把候选确认键当成发送。
-        !store.inputSending &&
+        store.snapshot?.historyOnly != true && !store.inputSending &&
         !store.providerSwitching && !store.directoryChanging && !attachments.isUploading &&
         !composerDraft.isUnconfirmed(composerDraft.submission().prompt) && composerDraftIsSendable(
             draft,

@@ -1230,7 +1230,7 @@ private struct ConversationReplyCard: View {
             HStack {
                 Text(message.sessionPreview?.label ?? "准备中").font(.caption).foregroundStyle(Theme.textSecondary)
                 Spacer(minLength: 8)
-                Button("继续此工作", action: onOpen).font(.caption).frame(minHeight: 44)
+                Button(message.sessionPreview?.historyOnly == true ? "查看历史回复" : "继续此工作", action: onOpen).font(.caption).frame(minHeight: 44)
                     .disabled(message.sessionPreview?.status == "unavailable")
             }
             SessionProtocolPanel(store: execution)

@@ -51,15 +51,17 @@ struct ConversationPreview: Decodable {
     let runId: String?
     let status: String
     let text: String
-    private enum CodingKeys: String, CodingKey { case runId, status, text }
-    init(status: String, text: String, runId: String? = nil) {
-        self.status = status; self.text = String(text.suffix(4000)); self.runId = runId
+    let historyOnly: Bool
+    private enum CodingKeys: String, CodingKey { case runId, status, text, historyOnly }
+    init(status: String, text: String, runId: String? = nil, historyOnly: Bool = false) {
+        self.status = status; self.text = String(text.suffix(4000)); self.runId = runId; self.historyOnly = historyOnly
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(status: try c.decodeIfPresent(String.self, forKey: .status) ?? "starting",
                   text: try c.decodeIfPresent(String.self, forKey: .text) ?? "",
-                  runId: try c.decodeIfPresent(String.self, forKey: .runId))
+                  runId: try c.decodeIfPresent(String.self, forKey: .runId),
+                  historyOnly: try c.decodeIfPresent(Bool.self, forKey: .historyOnly) ?? false)
     }
     var label: String {
         switch status {

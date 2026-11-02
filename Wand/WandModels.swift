@@ -1087,6 +1087,7 @@ struct SessionSnapshot: Decodable, Identifiable {
     var teamChat: HomeTeamChatIdentity? = nil
     var teamStep: HomeTeamStepIdentity? = nil
     var directoryLocked: Bool? = nil
+    var historyOnly: Bool? = nil
 
     var agentTool: WandAgentTool { WandAgentTool(provider: provider, engine: structuredState?.engine) }
     var isStructured: Bool { (sessionKind ?? "pty") == "structured" }

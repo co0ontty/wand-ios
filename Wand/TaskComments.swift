@@ -10,13 +10,16 @@ enum TaskCommentStatusLabels {
     static let labels: [String: String] = [
         "paused": "已暂停", "queued": "排队中", "pending": "等待确认", "accepted": "已创建执行", "running": "执行中", "blocked": "等待审批",
         "idle": "本轮已结束", "exited": "会话已退出", "stopped": "已停止", "failed": "执行失败",
-        "done": "已完成", "unknown": "送达未知 · 不会重放", "history": "历史会话", "unavailable": "会话不可用",
+        "done": "本轮已结束", "unknown": "送达未知 · 不会重放", "history": "历史会话", "unavailable": "会话不可用",
     ]
     /// 未知状态的统一回落文案。
     static let unknown = "状态未确认"
 }
 
 struct WandTaskCommentDispatch: Decodable, Equatable {
+    var executionTaskId: String? = nil
+    var deliveryStatus: String? = nil
+    var blocker: String? = nil
     let employeeId: String
     let employeeName: String
     let state: String
@@ -48,6 +51,7 @@ struct WandTaskCommentDispatch: Decodable, Equatable {
 
 
 struct WandTaskComment: Decodable, Equatable, Identifiable {
+    var activityTaskId: String? = nil
     let id: String
     let taskId: String
     let authorName: String
@@ -258,7 +262,7 @@ struct WandTaskCommentState {
 
     mutating func accept(_ comments: [WandTaskComment], taskId: String, requestId: UUID) {
         guard self.taskId == taskId, self.requestId == requestId else { return }
-        self.comments = comments.filter { $0.taskId == taskId }
+        self.comments = comments.filter { ($0.taskId == taskId || $0.activityTaskId == taskId || $0.dispatch?.executionTaskId == taskId) }
         firstPage = self.comments
         olderComments = []
     }
@@ -266,7 +270,7 @@ struct WandTaskCommentState {
     /// 轮询到最新一页：保留用户已经翻出来的更早评论。
     mutating func mergeFirstPage(_ comments: [WandTaskComment], totalCount: Int?, nextCursor: String?, taskId: String, requestId: UUID) {
         guard self.taskId == taskId, self.requestId == requestId else { return }
-        firstPage = comments.filter { $0.taskId == taskId }
+        firstPage = comments.filter { ($0.taskId == taskId || $0.activityTaskId == taskId || $0.dispatch?.executionTaskId == taskId) }
         self.totalCount = totalCount
         self.nextCursor = nextCursor
         self.comments = merged(olderComments + firstPage)
@@ -276,7 +280,7 @@ struct WandTaskCommentState {
     /// 只校验任务归属：轮询会换请求标识，拿它当守卫会把这一页丢掉。
     mutating func prependOlderPage(_ comments: [WandTaskComment], nextCursor: String?, taskId: String) {
         guard self.taskId == taskId else { return }
-        olderComments = comments.filter { $0.taskId == taskId } + olderComments
+        olderComments = comments.filter { ($0.taskId == taskId || $0.activityTaskId == taskId || $0.dispatch?.executionTaskId == taskId) } + olderComments
         self.nextCursor = nextCursor
         self.comments = merged(olderComments + firstPage)
     }

@@ -274,6 +274,7 @@ final class ChatStore: ObservableObject {
 
     /// 先登记订阅再连接：覆盖首次 REST 尚未完成时快速返回、socket 从未订阅过的情形。
     private func connectSocket() {
+        guard snapshot?.historyOnly != true else { return }
         socket.subscribe(sessionId: sessionId)
         socket.connect()
     }
@@ -320,6 +321,7 @@ final class ChatStore: ObservableObject {
     /// connect() 每次会 generation += 1 新建 task，幂等但有握手成本，所以用 connected 守卫；
     /// 无论是否重连都拉一份最新快照（requestResync 未订阅时自身 no-op），消除后台期间可能的过期状态。
     func handleEnterForeground() {
+        guard snapshot?.historyOnly != true else { return }
         socket.reconnectForForeground()
         refreshEmployeeDefinition()
         if snapshot != nil {
@@ -392,6 +394,7 @@ final class ChatStore: ObservableObject {
         let previousCompletion = snapshot?.completionRevision ?? 0
         let previousViewed = snapshot?.viewedCompletionRevision ?? 0
         self.snapshot = snap
+        if snap.historyOnly == true { socket.close() }
         snapshot?.completionRevision = max(previousCompletion, snap.completionRevision ?? 0)
         snapshot?.viewedCompletionRevision = max(previousViewed, snap.viewedCompletionRevision ?? 0)
         if employeeDefinitionID != snap.employeeId { refreshEmployeeDefinition() }
@@ -698,7 +701,7 @@ final class ChatStore: ObservableObject {
         onFailure: (() -> Void)? = nil
     ) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !inputSending, !providerSwitching, !directoryChanging, !composerDraft.retired else { return false }
+        guard snapshot?.historyOnly != true, !trimmed.isEmpty, !inputSending, !providerSwitching, !directoryChanging, !composerDraft.retired else { return false }
         guard !composerDraft.isUnconfirmed(trimmed) else {
             finishInputFeedback(accepted: false, message: "上一条消息送达结果未知，请先核对会话，不要重复发送。")
             return false

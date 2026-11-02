@@ -172,7 +172,7 @@ struct TaskBoardView: View {
                         Button("新建任务", systemImage: "plus") { openCreate("backlog") }
                             .disabled(busy || (loading && tasks.isEmpty))
                     }
-                    if #available(iOS 27.1, *), !verticalBarVisible, let overviewBar {
+                    if #available(iOS 27.1, *), !embedded, !verticalBarVisible, let overviewBar {
                         ToolbarOverflowMenu {
                             Section(overviewBar.serverDisplayName) {
                                 Button("设置", systemImage: "gearshape", action: overviewBar.onOpenSettings)
@@ -1409,9 +1409,9 @@ private struct TaskBoardDetailView: View {
                 let gap = !acceptanceBlocker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 let actions: [(String, String, Bool)] = [
                     ("submit", "提交 AI 验收", task.status == "doing" && proof && !gap),
-                    ("pass", "记录 AI 通过", task.status == "review" && proof && !gap && childTasks.allSatisfy { $0.aiVerificationCurrent }),
+                    ("pass", "记录 AI 通过", task.status == "review" && proof && !gap && childTasks.allSatisfy { ["review", "ready", "archived"].contains($0.status) && ($0.acceptance?.blocker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }),
                     ("fail", "验收失败并退回", task.status == "review" && gap),
-                    ("accept", "确认并归档", task.status == "ready" && task.aiVerificationCurrent && proof && !gap && childTasks.allSatisfy { $0.humanAcceptanceCurrent }),
+                    ("accept", "确认并归档", task.status == "ready" && task.aiVerificationCurrent && proof && !gap && childTasks.allSatisfy { $0.aiVerificationCurrent }),
                     ("return", "退回执行", task.status == "ready" && gap)
                 ]
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 130))], alignment: .leading, spacing: 8) {
@@ -1434,7 +1434,7 @@ private struct TaskBoardDetailView: View {
                 }
                 if receiptWorkflow != nil { Text(workflowSucceeded ? "动作已由服务端确认；下一步以当前阶段为准。" : "动作未确认，草稿与请求标识已保留，请核对任务及服务版本。").font(.caption).foregroundStyle(workflowSucceeded ? Theme.textSecondary : Theme.warning) }
                 Text(task.humanAcceptanceCurrent ? "人工已确认 · 已归档" : task.aiVerificationCurrent ? "AI 已通过 · 人工未确认" : task.legacyReview ? "历史验收待核对" : "尚未通过 AI 验收").font(.subheadline.weight(.semibold))
-                if childTasks.contains(where: { !$0.humanAcceptanceCurrent }) { Text("仍有子任务未由人工确认，主目标需要独立整体验收。").font(.caption).foregroundStyle(Theme.warning) }
+                if childTasks.contains(where: { !$0.humanAcceptanceCurrent }) { Text("主目标整体验收会覆盖已交付的实现子任务；通过后统一由你确认归档。").font(.caption).foregroundStyle(Theme.warning) }
                 if task.status == "review" { Text("验收派发仍需明确 @员工，回填不能代替人工确认。").font(.caption).foregroundStyle(Theme.textSecondary) }
             }
             Section("属性") {

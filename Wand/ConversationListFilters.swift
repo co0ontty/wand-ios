@@ -466,6 +466,7 @@ struct ConversationHomeToolbar: ViewModifier {
     @State private var expanded: RailSlot?
     @State private var railTop: CGFloat = 0
     @State private var contentBottom: CGFloat = 0
+    @State private var labelActions: [String: (frame: CGRect, action: () -> Void)] = [:]
     @State private var addingWorkspace = false
     @Environment(\.accessibilityReduceMotion) private var reducedMotion
     @Environment(\.isEnabled) private var controlsEnabled
@@ -506,8 +507,7 @@ struct ConversationHomeToolbar: ViewModifier {
     }
     private var expansionHeight: CGFloat {
         guard let expanded else { return 0 }
-        let preceding = slots.prefix { $0 != expanded }.reduce(0) { $0 + controlHeight($1) + railSpacing }
-        return max(WandLayout.controlTouch, railHeight - preceding - controlHeight(expanded) - railSpacing)
+        return max(0, railHeight - controlHeight(expanded) - railSpacing)
     }
     private var selectedWorkspaces: Set<ConversationWorkspaceFilter> {
         store.listFilters.workspaces.isEmpty && store.listFilters.workspace != .all
@@ -528,7 +528,15 @@ struct ConversationHomeToolbar: ViewModifier {
             }
             .overlay {
                 if expanded != nil {
-                    Color.clear.contentShape(Rectangle()).onTapGesture { expand(nil) }
+                    Color.clear.contentShape(Rectangle())
+                        .onTapGesture(coordinateSpace: .global) { point in
+                            // Labels extend into the content area; retain the row's own action there.
+                            if point.y >= railTop + railHeight - expansionHeight,
+                               point.y < railTop + railHeight,
+                               let hit = labelActions.values.first(where: { $0.frame.contains(point) }) {
+                                hit.action()
+                            } else { expand(nil) }
+                        }
                 }
             }
             .sheet(isPresented: $addingWorkspace) {
@@ -538,7 +546,7 @@ struct ConversationHomeToolbar: ViewModifier {
                     addingWorkspace = false
                 }
             }
-            .onDisappear { expanded = nil }
+            .onDisappear { expanded = nil; labelActions = [:] }
             .onChange(of: enabled && controlsEnabled) { _, value in if !value { expanded = nil } }
             .onChange(of: verticalBarVisible) { _, _ in expanded = nil; railTop = 0 }
             .onChange(of: showsFilters) { _, _ in expanded = nil }
@@ -552,30 +560,28 @@ struct ConversationHomeToolbar: ViewModifier {
 
     private var verticalRail: some View {
         VStack(spacing: 0) {
-            ForEach(slots, id: \.self) { slot in
-                let followsExpansion = expanded.map { slot.rawValue > $0.rawValue } ?? false
-                VStack(spacing: 0) {
-                    railControl(slot)
-                        .opacity(expanded == nil || expanded == slot ? 1 : 0)
-                        .allowsHitTesting(expanded == nil || expanded == slot)
-                        .accessibilityHidden(expanded != nil && expanded != slot)
-                        .frame(height: followsExpansion ? 0 : controlHeight(slot))
-                        .clipped()
-                    if expanded == slot {
-                        ScrollView(.vertical) {
-                            VStack(spacing: 8) { railChoices }
-                                .padding(.vertical, 4)
-                        }
-                        .scrollBounceBehavior(.basedOnSize)
-                        .scrollClipDisabled()
-                        .frame(height: expansionHeight)
-                        .clipShape(ConversationRailScrollClip())
-                        .padding(.top, railSpacing)
-                        .accessibilityIdentifier("home-rail-options")
-                        .transition(reducedMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
-                    }
+            if let expanded {
+                // Render only the active slot: hidden fixed-size capsules must not
+                // participate in the native toolbar's vertical layout.
+                railControl(expanded)
+                    .frame(height: controlHeight(expanded))
+                ScrollView(.vertical) {
+                    VStack(spacing: 8) { railChoices }
                 }
-                .padding(.bottom, followsExpansion || expanded == slot ? 0 : railSpacing)
+                .id(expanded)
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollClipDisabled()
+                .frame(height: expansionHeight)
+                .clipShape(ConversationRailScrollClip())
+                .padding(.top, railSpacing)
+                .accessibilityIdentifier("home-rail-options")
+                .transition(reducedMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+            } else {
+                ForEach(slots, id: \.self) { slot in
+                    railControl(slot)
+                        .frame(height: controlHeight(slot))
+                        .padding(.bottom, railSpacing)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -633,7 +639,7 @@ struct ConversationHomeToolbar: ViewModifier {
             }
             railAction("未分配工作区", symbol: "folder", selected: selectedWorkspaces.contains(.unassigned)) { toggleWorkspace(.unassigned) }
             ForEach(workspaces) { workspace in
-                railAction(workspace.title, symbol: "folder", monogram: String(workspace.title.prefix(2)).uppercased(),
+                railAction(workspace.title, symbol: "folder", identifier: workspace.id, monogram: String(workspace.title.prefix(2)).uppercased(),
                     selected: selectedWorkspaces.contains(.workspace(workspace.id))) { toggleWorkspace(.workspace(workspace.id)) }
             }
             railAction("添加工作区", symbol: "plus") { perform { addingWorkspace = true } }
@@ -643,7 +649,7 @@ struct ConversationHomeToolbar: ViewModifier {
             }
             railAction("未分配员工", symbol: "person", selected: store.listFilters.employees.contains("none")) { toggleEmployee("none") }
             ForEach(employees) { employee in
-                railAction(employee.title, symbol: "person", monogram: String(employee.title.prefix(2)).uppercased(),
+                railAction(employee.title, symbol: "person", identifier: employee.id, monogram: String(employee.title.prefix(2)).uppercased(),
                     selected: store.listFilters.employees.contains(employee.id)) { toggleEmployee(employee.id) }
             }
         case .create, nil: EmptyView()
@@ -658,12 +664,16 @@ struct ConversationHomeToolbar: ViewModifier {
     private func toggleEmployee(_ id: String) {
         if !store.listFilters.employees.insert(id).inserted { store.listFilters.employees.remove(id) }
     }
-    private func railAction(_ title: String, symbol: String, monogram: String? = nil, selected: Bool = false, action: @escaping () -> Void) -> some View {
+    private func railAction(_ title: String, symbol: String, identifier: String? = nil, monogram: String? = nil, selected: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Text(title).font(.subheadline).foregroundStyle(Theme.textPrimary)
                     .lineLimit(2).padding(.horizontal, 12).frame(minHeight: 36)
                     .wandGlassCapsule(tint: selected ? Theme.brandSoft : nil)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                        labelActions[identifier ?? title] = (frame, action)
+                    }
+                    .onDisappear { labelActions.removeValue(forKey: identifier ?? title) }
                 ZStack(alignment: .bottomTrailing) {
                     Image(systemName: symbol).font(.title3).frame(width: 44, height: 44)
                     if let monogram { Text(monogram).font(.caption2).padding(2).background(Theme.surfaceSoft, in: Capsule()) }

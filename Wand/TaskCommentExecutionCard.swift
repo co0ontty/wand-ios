@@ -111,6 +111,10 @@ struct TaskCommentExecutionCard: View {
         VStack(alignment: .leading, spacing: 8) {
             header
             Divider()
+            if let delivery = dispatch?.deliveryStatus {
+                Text(delivery == "submitted" ? "交付已提交" : "尚未提交交付").font(.caption).foregroundStyle(.secondary)
+            }
+            if let blocker = dispatch?.blocker, !blocker.isEmpty { Text("待处理：" + blocker).font(.caption) }
             bodyRows
             referenceRow
             if expanded { detail }
