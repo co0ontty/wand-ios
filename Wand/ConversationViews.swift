@@ -931,11 +931,8 @@ struct ConversationDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(usesSystemNavigation ? .visible : .hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(!usesSystemNavigation)
-        .toolbar {
-            if #available(iOS 27.1, *), usesSystemNavigation {
-                ToolbarOverflowMenu { conversationMenuItems }
-            }
-        }
+        .modifier(SessionDetailToolbar(enabled: usesSystemNavigation,
+            actions: conversationMenuActions + conversationManagementActions))
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .overlay(alignment: .top) { if !usesSystemNavigation { navigation } }
         .environment(\.chatAPI, store.api)
@@ -1004,20 +1001,20 @@ struct ConversationDetailView: View {
     }
     @ViewBuilder private var conversationMenuItems: some View {
         SessionActionPalette(actions: conversationMenuActions)
-        if let detail {
-            let actions = ConversationManagementAction.available(for: detail)
-            if !actions.isEmpty {
-                Section {
-                    SessionActionPalette(actions: actions.map { action in
-                        SessionMenuAction(id: action.rawValue, title: action.title(for: detail), symbol: action.symbol,
-                            isEnabled: !managementBusy && !store.mutationBusy,
-                            role: action == .restore ? nil : .destructive) {
-                                composerFocus.collapse()
-                                if action == .restore { manage(action) } else { managementAction = action }
-                            }
-                    })
+        if !conversationManagementActions.isEmpty {
+            Section { SessionActionPalette(actions: conversationManagementActions) }
+        }
+    }
+
+    private var conversationManagementActions: [SessionMenuAction] {
+        guard let detail else { return [] }
+        return ConversationManagementAction.available(for: detail).map { action in
+            SessionMenuAction(id: action.rawValue, title: action.title(for: detail), symbol: action.symbol,
+                isEnabled: !managementBusy && !store.mutationBusy,
+                role: action == .restore ? nil : .destructive) {
+                    composerFocus.collapse()
+                    if action == .restore { manage(action) } else { managementAction = action }
                 }
-            }
         }
     }
 

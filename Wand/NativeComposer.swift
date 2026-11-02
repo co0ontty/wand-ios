@@ -357,7 +357,171 @@ struct SessionMenuAction: Identifiable {
     let symbol: String
     var isEnabled = true
     var role: ButtonRole? = nil
+    var dismissOnSelection = true
     let action: () -> Void
+}
+
+/// Detail actions use the same unboxed, in-place rail as the home screen.
+/// Non-vertical system bars keep their native overflow presentation.
+struct SessionDetailToolbar: ViewModifier {
+    var enabled: Bool
+    let actions: [SessionMenuAction]
+    var closesOnActionsChange = true
+    var reservedActionCount = 0
+    var onDismiss: () -> Void = {}
+    @State private var expanded = false
+    @State private var railTop: CGFloat = 0
+    @State private var contentBottom: CGFloat = 0
+    @State private var labelFrames: [String: CGRect] = [:]
+    @Environment(\.systemHomeVerticalBarVisible) private var verticalBarVisible
+    @Environment(\.accessibilityReduceMotion) private var reducedMotion
+    @Environment(\.isEnabled) private var controlsEnabled
+
+    private var railHeight: CGFloat {
+        let natural = WandLayout.controlTouch + 12 + CGFloat(max(reservedActionCount, actions.count)) * 52
+        return contentBottom > railTop && railTop > 0
+            ? min(natural, max(WandLayout.controlTouch, contentBottom - railTop)) : natural
+    }
+
+    private func close() {
+        withAnimation(reducedMotion ? nil : WandMotion.expansion) { expanded = false }
+    }
+
+    func body(content: Content) -> some View {
+        toolbarContent(content)
+            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { contentBottom = $0 }
+            .overlay {
+                if enabled && verticalBarVisible && expanded {
+                    Color.clear.contentShape(Rectangle())
+                        .onTapGesture(coordinateSpace: .global) { point in
+                            // Native toolbar labels overflow into the reading area, just as on Home.
+                            if point.y >= railTop + WandLayout.controlTouch + 12,
+                               point.y < railTop + railHeight,
+                               let item = actions.first(where: { labelFrames[$0.id]?.contains(point) == true }) {
+                                guard controlsEnabled && item.isEnabled else { return }
+                                if item.dismissOnSelection { close() }
+                                item.action()
+                            } else { close() }
+                        }
+                }
+            }
+            .onChange(of: enabled && controlsEnabled) { _, value in if !value { expanded = false } }
+            .onChange(of: verticalBarVisible) { _, _ in expanded = false; railTop = 0 }
+            .onChange(of: actions.map(\.id)) { _, _ in
+                labelFrames = labelFrames.filter { id, _ in actions.contains { $0.id == id } }
+                if closesOnActionsChange { close() }
+            }
+            .onChange(of: expanded) { _, value in if !value { onDismiss() } }
+            .onDisappear { expanded = false; labelFrames = [:]; onDismiss() }
+            .onKeyPress(.escape) {
+                guard expanded else { return .ignored }
+                close(); return .handled
+            }
+    }
+
+    @ViewBuilder private func toolbarContent(_ content: Content) -> some View {
+        #if compiler(>=6.4)
+        if #available(iOS 27.1, *), enabled {
+            content.toolbar {
+                if verticalBarVisible {
+                    ToolbarItem(placement: .primaryAction) { rail }
+                        .axisBehavior(.verticalPreferred)
+                        .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarOverflowMenu { SessionActionPalette(actions: actions) }
+                }
+            }
+        } else { content }
+        #else
+        if #available(iOS 27.1, *), enabled {
+            content.toolbar { ToolbarOverflowMenu { SessionActionPalette(actions: actions) } }
+        } else { content }
+        #endif
+    }
+
+    private var rail: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(reducedMotion ? nil : WandMotion.expansion) { expanded.toggle() }
+            } label: {
+                ZStack {
+                    Image(systemName: "ellipsis").opacity(expanded ? 0 : 1)
+                    Image(systemName: "xmark").opacity(expanded ? 1 : 0)
+                        .rotationEffect(.degrees(reducedMotion || expanded ? 0 : -90))
+                }
+                .font(.title3).frame(width: 44, height: 44).wandGlassCapsule()
+            }
+            .buttonStyle(.plain)
+            .frame(height: WandLayout.controlTouch)
+            .accessibilityLabel(expanded ? "收起会话工具栏" : "更多会话功能")
+            .accessibilityIdentifier("session-rail-toggle")
+            if expanded {
+                ScrollView(.vertical) {
+                    VStack(spacing: 8) {
+                        ForEach(actions) { item in
+                            ConversationRailActionRow(title: item.title, symbol: item.symbol,
+                                tint: item.role == .destructive ? Theme.danger : Theme.brand,
+                                onLabelFrame: { labelFrames[item.id] = $0 }) {
+                                    if item.dismissOnSelection { close() }
+                                    item.action()
+                                }
+                                .disabled(!item.isEnabled)
+                                .accessibilityIdentifier("session-menu-" + item.id)
+                        }
+                    }
+                }
+                .id(actions.map(\.id))
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollClipDisabled()
+                .frame(height: max(0, railHeight - WandLayout.controlTouch - 12))
+                .clipShape(ConversationRailScrollClip())
+                .padding(.top, 12)
+                .accessibilityIdentifier("session-rail-options")
+                .transition(reducedMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(width: 48, height: railHeight, alignment: .top)
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { railTop = $0 }
+        .foregroundStyle(Theme.brand)
+    }
+}
+
+/// Shared home/detail rail row: a readable label beside its own icon, not a menu card.
+struct ConversationRailActionRow: View {
+    let title: String
+    let symbol: String
+    var monogram: String? = nil
+    var selected = false
+    var tint: Color = Theme.brand
+    var onLabelFrame: (CGRect) -> Void = { _ in }
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Text(title).font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    .lineLimit(2).padding(.horizontal, 12).frame(minHeight: 36)
+                    .wandGlassCapsule(tint: selected ? Theme.brandSoft : nil)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { onLabelFrame($0) }
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: symbol).font(.title3).frame(width: 44, height: 44)
+                    if let monogram { Text(monogram).font(.caption2).padding(2).background(Theme.surfaceSoft, in: Capsule()) }
+                    if selected { Image(systemName: "checkmark.circle.fill").font(.caption).background(Theme.surface, in: Circle()) }
+                }
+                .foregroundStyle(tint)
+                .wandGlassCapsule(tint: selected ? Theme.brandSoft : nil)
+            }
+            .fixedSize()
+            .contentShape(Rectangle())
+            .frame(width: 44, alignment: .trailing)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(selected ? "已选中" : "未选中")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityShowsLargeContentViewer { Label(title, systemImage: symbol) }
+    }
 }
 
 /// Native menu shelves own hit testing, dismissal, VoiceOver and placement.

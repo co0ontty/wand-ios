@@ -75,6 +75,7 @@ struct NewConversationView: View {
     var onCancel: (() -> Void)? = nil
 
     @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
+    @Environment(\.systemHomeVerticalBarVisible) private var verticalBarVisible
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -126,6 +127,8 @@ struct NewConversationView: View {
     @State private var showTextEditor = false
     @State private var editingDirectory = false
     @State private var editingValue = ""
+    private enum RailSection { case root, execution, tools, kind, task, directory }
+    @State private var railSection: RailSection = .root
     private enum Selection: String, Identifiable {
         case model, mode, thinking, employee, task, workspace
         var id: String { rawValue }
@@ -255,13 +258,17 @@ struct NewConversationView: View {
                 if usesSystemNavigation && !embedded {
                     ToolbarItem(placement: .principal) { pendingIdentityBar(reservesFloatingControls: false) }
                         .sharedBackgroundVisibility(.hidden)
-                    if #available(iOS 27.1, *) {
+                    if #available(iOS 27.1, *), !verticalBarVisible {
                         ToolbarOverflowMenu {
                             contextOptions.disabled(creating || loading)
                         }
                     }
                 }
             }
+            .modifier(SessionDetailToolbar(enabled: usesSystemNavigation && !embedded && verticalBarVisible,
+                actions: creationRailActions, closesOnActionsChange: false,
+                reservedActionCount: max(10, WandAgentTool.allCases.count + 1),
+                onDismiss: { railSection = .root }))
             .overlay(alignment: .top) {
                 if !embedded && !usesSystemNavigation {
                     pendingIdentityBar(reservesFloatingControls: true)
@@ -586,6 +593,88 @@ struct NewConversationView: View {
             Menu { taskOptions } label: { Label(taskLabel, systemImage: "checklist") }
         }
         Menu { directoryOptions } label: { Label(directoryLabel, systemImage: "folder") }
+    }
+
+    /// The vertical toolbar changes its own rows instead of opening nested menu cards.
+    private var creationRailActions: [SessionMenuAction] {
+        var actions: [SessionMenuAction] = []
+        if railSection != .root {
+            actions.append(railBranch("back", title: "返回对话选项", symbol: "arrow.left", section: .root))
+        }
+        switch railSection {
+        case .root:
+            actions.append(railBranch("execution", title: subjectLabel, symbol: "person.crop.circle", section: .execution))
+            if !embedded {
+                actions.append(railBranch("task", title: taskLabel, symbol: "checklist", section: .task))
+            }
+            actions.append(railBranch("directory", title: directoryLabel, symbol: "folder", section: .directory))
+        case .execution:
+            if sessionKind == "structured" {
+                actions.append(SessionMenuAction(id: "employee", title: "选择员工…", symbol: "person") { open(.employee) })
+                if selectedEmployee != nil {
+                    actions.append(SessionMenuAction(id: "employee-defaults", title: "恢复员工默认设置",
+                        symbol: "arrow.counterclockwise", isEnabled: employeeOverride, action: restoreEmployeeDefaults))
+                }
+            }
+            if sessionKind != "shell" {
+                actions.append(railBranch("tools", title: selectedEmployee == nil ? "执行工具" : "本次执行工具",
+                    symbol: "wrench.and.screwdriver", section: .tools))
+                if selectedEmployee != nil {
+                    actions.append(SessionMenuAction(id: "direct-tool", title: "直接使用执行工具", symbol: "terminal") { contactSubject = nil })
+                }
+            }
+            actions.append(railBranch("kind", title: "会话类型", symbol: "text.bubble", section: .kind))
+        case .tools:
+            for tool in WandAgentTool.allCases where sessionKind == "structured" || !tool.structuredOnly {
+                actions.append(SessionMenuAction(id: "tool-" + tool.id, title: tool.title,
+                    symbol: provider == tool.provider.rawValue && engine == tool.engine ? "checkmark.circle.fill" : "terminal") {
+                        employeeOverride = selectedEmployee != nil
+                        provider = tool.provider.rawValue
+                        engine = tool.engine
+                        if tool.structuredOnly { sessionKind = "structured" }
+                    })
+            }
+        case .kind:
+            for (value, title) in [("structured", "对话"), ("pty", "PTY"), ("shell", "空白终端")] {
+                actions.append(SessionMenuAction(id: "kind-" + value, title: title,
+                    symbol: sessionKind == value ? "checkmark.circle.fill" : "terminal") { sessionKind = value })
+            }
+        case .task:
+            actions.append(SessionMenuAction(id: "task-none", title: "不归属任务",
+                symbol: taskOwnership == "none" ? "checkmark.circle.fill" : "checklist") { taskOwnership = "none" })
+            actions.append(SessionMenuAction(id: "task-new", title: "新建任务",
+                symbol: taskOwnership == "new" ? "checkmark.circle.fill" : "plus", dismissOnSelection: false) { taskOwnership = "new" })
+            actions.append(SessionMenuAction(id: "task-existing", title: "选择已有任务…", symbol: "checklist") { open(.task) })
+            if taskOwnership == "new" {
+                actions.append(SessionMenuAction(id: "task-name", title: newTaskName.isEmpty ? "任务名称 · 自动" : "任务名称 · " + newTaskName,
+                    symbol: "pencil") { editText(directory: false) })
+                actions.append(SessionMenuAction(id: "task-workspace", title: "所属项目 · " + (taskWorkspaceOptions.first { $0.id == targetWorkspaceID }?.name ?? "按目录创建"),
+                    symbol: "folder") { open(.workspace) })
+                actions.append(SessionMenuAction(id: "task-worktree", title: "隔离 worktree",
+                    symbol: worktreeEnabled ? "checkmark.circle.fill" : "arrow.triangle.branch", dismissOnSelection: false) { worktreeEnabled.toggle() })
+            }
+        case .directory:
+            if workspaceSelectionIsLocked {
+                actions.append(SessionMenuAction(id: "directory-locked", title: "工作目录由所属任务确定", symbol: "lock", isEnabled: false) {})
+            } else {
+                for (index, path) in recentPaths.prefix(8).enumerated() {
+                    actions.append(SessionMenuAction(id: "directory-\(index)", title: path.path,
+                        symbol: path.path == cwd ? "checkmark.circle.fill" : "folder") { cwd = path.path })
+                }
+                actions.append(SessionMenuAction(id: "directory-other", title: "输入其他目录…", symbol: "folder") { editText(directory: true) })
+            }
+        }
+        return actions.map { item in
+            var item = item
+            item.isEnabled = item.isEnabled && !creating && !loading
+            return item
+        }
+    }
+
+    private func railBranch(_ id: String, title: String, symbol: String, section: RailSection) -> SessionMenuAction {
+        SessionMenuAction(id: id, title: title, symbol: symbol, dismissOnSelection: false) {
+            withAnimation(reduceMotion ? nil : WandMotion.expansion) { railSection = section }
+        }
     }
 
     @ViewBuilder private var executionOptions: some View {

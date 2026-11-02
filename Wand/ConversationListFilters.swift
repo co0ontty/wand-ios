@@ -665,32 +665,9 @@ struct ConversationHomeToolbar: ViewModifier {
         if !store.listFilters.employees.insert(id).inserted { store.listFilters.employees.remove(id) }
     }
     private func railAction(_ title: String, symbol: String, identifier: String? = nil, monogram: String? = nil, selected: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Text(title).font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    .lineLimit(2).padding(.horizontal, 12).frame(minHeight: 36)
-                    .wandGlassCapsule(tint: selected ? Theme.brandSoft : nil)
-                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-                        labelActions[identifier ?? title] = (frame, action)
-                    }
-                    .onDisappear { labelActions.removeValue(forKey: identifier ?? title) }
-                ZStack(alignment: .bottomTrailing) {
-                    Image(systemName: symbol).font(.title3).frame(width: 44, height: 44)
-                    if let monogram { Text(monogram).font(.caption2).padding(2).background(Theme.surfaceSoft, in: Capsule()) }
-                    if selected { Image(systemName: "checkmark.circle.fill").font(.caption).background(Theme.surface, in: Circle()) }
-                }
-                .foregroundStyle(Theme.brand)
-                .wandGlassCapsule(tint: selected ? Theme.brandSoft : nil)
-            }
-            .fixedSize()
-            .contentShape(Rectangle())
-            .frame(width: 44, alignment: .trailing)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .accessibilityValue(selected ? "已选中" : "未选中")
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .accessibilityShowsLargeContentViewer { Label(title, systemImage: symbol) }
+        ConversationRailActionRow(title: title, symbol: symbol, monogram: monogram,
+            selected: selected, onLabelFrame: { labelActions[identifier ?? title] = ($0, action) }, action: action)
+            .onDisappear { labelActions.removeValue(forKey: identifier ?? title) }
     }
 
     @ViewBuilder private func toolbarContent(_ content: Content) -> some View {
@@ -743,7 +720,7 @@ struct ConversationHomeToolbar: ViewModifier {
 }
 
 /// Clip vertical scrolling while keeping labels beside the native icon column visible.
-private struct ConversationRailScrollClip: Shape {
+struct ConversationRailScrollClip: Shape {
     func path(in rect: CGRect) -> Path {
         Path(CGRect(x: rect.minX - rect.width * 8, y: rect.minY, width: rect.width * 9, height: rect.height))
     }

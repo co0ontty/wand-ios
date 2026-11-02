@@ -238,10 +238,9 @@ struct ChatView: View {
                 ToolbarItem(placement: .principal) { chatIdentityBar(reservesFloatingControls: false) }
                     .sharedBackgroundVisibility(.hidden)
             }
-            if #available(iOS 27.1, *), usesSystemNavigation && showsNavigationChrome {
-                ToolbarOverflowMenu { chatMenuItems }
-            }
         }
+        .modifier(SessionDetailToolbar(enabled: usesSystemNavigation && showsNavigationChrome,
+            actions: chatPrimaryActions + hostActions.map(\.menuAction) + chatSecondaryActions))
         .overlay(alignment: .top) {
             if showsNavigationChrome && !usesSystemNavigation {
                 ZStack(alignment: .top) {
@@ -324,35 +323,6 @@ struct ChatView: View {
             actions.append(git)
         }
         return actions
-    }
-
-    @ViewBuilder private var chatMenuItems: some View {
-        SessionActionPalette(actions: chatPrimaryActions)
-        if !hostActions.isEmpty {
-            Section {
-                SessionActionPalette(actions: hostActions.map(\.menuAction))
-            }
-        }
-        if store.isResponding {
-            Section {
-                SessionActionPalette(actions: [
-                    SessionMenuAction(id: "stop", title: "停止当前任务", symbol: "stop", role: .destructive) {
-                        showStopConfirm = true
-                    }
-                ])
-            }
-        }
-        if store.snapshot?.provider == "codex", !store.isResponding,
-           draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            Section {
-                SessionActionPalette(actions: [
-                    SessionMenuAction(id: "predict", title: predictingNextInput ? "正在预测…" : "预测下一条",
-                                      symbol: "sparkles", isEnabled: !predictingNextInput) {
-                        predictNextInput()
-                    }
-                ])
-            }
-        }
     }
 
     /// 让 Codex 根据本会话预测下一条输入。只由用户点击触发（会调用模型），
