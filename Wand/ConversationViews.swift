@@ -51,6 +51,7 @@ struct ConversationListView: View {
     @State private var query = ""
     @State private var creating = false
     @State private var filtersOpen = false
+    @State private var addingWorkspace = false
     @State private var filterDraft = ConversationListFilters()
     @State private var viewportSize = CGSize(width: 320, height: 600)
     @State private var tierDraft = ConversationListTier.all
@@ -267,7 +268,13 @@ struct ConversationListView: View {
         .animation(reduced ? nil : WandMotion.expansion, value: creationOpen)
         .onDisappear { filtersOpen = false }
         .onChange(of: filtersOpen) { _, open in
-            if !open { filterDraft = filters; tierDraft = tier }
+            if !open && !addingWorkspace { filterDraft = filters; tierDraft = tier }
+        }
+        .sheet(isPresented: $addingWorkspace, onDismiss: { filtersOpen = true }) {
+            WorkspaceAddDialog(api: store.api) { workspace in
+                filterDraft.workspace = .workspace(workspace.id)
+                addingWorkspace = false
+            }
         }
         .onKeyPress(.escape) {
             if filtersOpen { filtersOpen = false; return .handled }
@@ -318,7 +325,10 @@ struct ConversationListView: View {
                     .accessibilityLabel(filterCount == 0 ? "筛选对话" : "筛选对话，\(filterCount) 项生效")
                     .popover(isPresented: $filtersOpen, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
                         ConversationFilterPanel(draft: $filterDraft, tier: $tierDraft, workspaces: workspaceOptions,
-                            availableSize: viewportSize, onCancel: { filtersOpen = false }, onApply: {
+                            availableSize: viewportSize, onAddWorkspace: {
+                                addingWorkspace = true
+                                filtersOpen = false
+                            }, onCancel: { filtersOpen = false }, onApply: {
                                 store.listFilters = filterDraft; store.listTier = tierDraft; filtersOpen = false
                             })
                             .frame(width: min(340, max(240, viewportSize.width - 32)))
@@ -386,11 +396,19 @@ struct ConversationListView: View {
         return item.tasks.filter { $0.matchesFilters(filters, query: query, conversationTitle: item.title, groups: taskGroups) }
     }
     private func sessionLabel(_ item: HomeRecentConversation) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(item.session.title ?? "会话").font(.subheadline).lineLimit(1)
-            Text(item.filterCaption).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
-                .accessibilityLabel(item.filterCaption)
-        }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.session.title ?? "会话").font(.subheadline).lineLimit(1)
+                HStack(spacing: 5) {
+                    BrandLogo(provider: item.session.provider)
+                        .frame(width: 12, height: 12)
+                        .accessibilityHidden(true)
+                    Text(item.filterCaption).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                        .accessibilityLabel(item.filterCaption)
+                }
+            }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            SessionStatusGlyph(session: item.session, size: 14)
+        }
     }
     private func personSessions(_ employeeId: String?) -> [HomeRecentConversation] {
         guard let employeeId else { return [] }
@@ -475,6 +493,7 @@ private struct ConversationFilterPanel: View {
     @Binding var tier: ConversationListTier
     let workspaces: [ConversationWorkspaceOption]
     let availableSize: CGSize
+    let onAddWorkspace: () -> Void
     let onCancel: () -> Void
     let onApply: () -> Void
     @State private var workspaceOpen = false
@@ -531,6 +550,7 @@ private struct ConversationFilterPanel: View {
                 .frame(minWidth: 0, maxWidth: .infinity)
                 .popover(isPresented: $workspaceOpen, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
                     ConversationWorkspaceFilterPicker(selection: $draft.workspace, workspaces: workspaces,
+                        onAddWorkspace: { workspaceOpen = false; onAddWorkspace() },
                         onClose: { workspaceOpen = false })
                         .frame(width: min(340, max(240, availableSize.width - 32)))
                         .frame(idealHeight: min(420, max(180, availableSize.height - 100)),
@@ -589,6 +609,7 @@ private struct ConversationFilterPanel: View {
 private struct ConversationWorkspaceFilterPicker: View {
     @Binding var selection: ConversationWorkspaceFilter
     let workspaces: [ConversationWorkspaceOption]
+    let onAddWorkspace: () -> Void
     let onClose: () -> Void
     @State private var query = ""
     @FocusState private var searchFocused: Bool
@@ -613,7 +634,10 @@ private struct ConversationWorkspaceFilterPicker: View {
                     ForEach(workspaces.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }) { option in
                         choice(option.title, value: .workspace(option.id))
                     }
-                    AddWorkspaceButton { workspace in selection = .workspace(workspace.id); onClose() }
+                    Button("添加工作区", systemImage: "plus") {
+                        searchFocused = false
+                        onAddWorkspace()
+                    }
                 }
             }.scrollDismissesKeyboard(.interactively)
         }

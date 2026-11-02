@@ -194,19 +194,8 @@ struct WorkspaceSelector: View {
     }
 }
 
-struct AddWorkspaceButton: View {
-    var onCreated: (Workspace) -> Void = { _ in }
-    @Environment(\.workspaceAPI) private var api
-    @State private var adding = false
-    var body: some View {
-        Button("添加工作区", systemImage: "plus") { adding = true }
-            .sheet(isPresented: $adding) {
-                if let api { WorkspaceAddDialog(api: api) { workspace in onCreated(workspace); adding = false } }
-            }
-    }
-}
-
-private struct WorkspaceAddDialog: View {
+/// 由页面的稳定容器呈现，不挂在会随键盘/滚动消失的菜单或列表行上。
+struct WorkspaceAddDialog: View {
     let api: WandAPI
     let onCreated: (Workspace) -> Void
     @StateObject private var store: WorkspaceStore

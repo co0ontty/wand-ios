@@ -519,7 +519,9 @@ struct GitQuickCommitView: View {
             ahead: status?.ahead ?? 0,
             busy: committing || mergingWorktrees || generating || pushing,
             feedback: committing ? busyLabel : pushing ? "推送中…" : worktreeFeedback,
-            onAction: { action, sub in submit(action: action, includeSubmodule: sub) },
+            onAction: { action, sub, worktree in
+                submit(action: action, includeSubmodule: sub, includeWorktrees: worktree)
+            },
             onWorktree: mergeWorktrees,
             onPush: pushCommitsOnly
         )
@@ -527,7 +529,7 @@ struct GitQuickCommitView: View {
 
         Text(worktreeFeedback == "已完成"
             ? worktreeSummary ?? "已合并并推送"
-            : "点按气泡执行，拖动气泡组合后丢进提交区。Worktree：合并全部工作树到当前分支并推送。")
+            : "点按气泡执行，拖动可用气泡互相吸附。含 Worktree 的组合先提交并推送所选操作，再合并全部工作树并推送。")
             .font(.wand(size: 11))
             .foregroundColor(Theme.textSecondary)
     }
@@ -727,11 +729,15 @@ struct GitQuickCommitView: View {
     }
 
     /// action ∈ {commit, commit-tag, commit-push, commit-tag-push}，与网页一致；
-    /// includeSubmodule 是正交 scope flag。
-    private func submit(action: String, includeSubmodule: Bool) {
-        guard !committing, !mergingWorktrees, !generating, hasChanges else { return }
+    /// Sub 纳入子模块；Worktree 在所选提交操作成功后继续合并并推送。
+    private func submit(action: String, includeSubmodule: Bool, includeWorktrees: Bool = false) {
+        guard !committing, !mergingWorktrees, !pushing, !generating, hasChanges else { return }
+        if includeWorktrees && status?.branch?.isEmpty != false {
+            errorMessage = "当前分支不可用，请刷新 Git 状态后重试。"
+            return
+        }
         let withTag = action == "commit-tag" || action == "commit-tag-push"
-        let push = action == "commit-push" || action == "commit-tag-push"
+        let push = includeWorktrees || action == "commit-push" || action == "commit-tag-push"
         let userTag = withTag ? tagName.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         let msg = message.trimmingCharacters(in: .whitespacesAndNewlines)
         let before = status
@@ -744,6 +750,7 @@ struct GitQuickCommitView: View {
         errorMessage = nil
         pushError = nil
         Task {
+            var completedCommit: String?
             do {
                 let r = try await api.quickCommit(
                     sessionId: sessionId,
@@ -768,7 +775,29 @@ struct GitQuickCommitView: View {
                     oldCommitSubject: before?.lastCommit?.subject ?? "",
                     submoduleCount: r.submoduleCommits?.count ?? 0
                 )
-                if push && o.pushError == nil {
+                if includeWorktrees {
+                    completedCommit = summaryText(o) + (o.pushed ? "，已推送" : "")
+                    // 先推送所选子模块/Tag，确保合并后的父仓库不引用未推送的子模块。
+                    guard r.ok, o.pushed, o.pushError == nil else {
+                        throw NSError(domain: "GitQuickCommit", code: 1, userInfo: [
+                            NSLocalizedDescriptionKey: o.pushError ?? "提交或推送未完成，已停止合并 Worktree。"
+                        ])
+                    }
+                    let current = try await api.gitStatus(sessionId: sessionId)
+                    guard let branch = before?.branch, current.branch == branch,
+                          let commitHash = r.commit?.hash, !commitHash.isEmpty,
+                          let head = current.head, head.hasPrefix(commitHash) else {
+                        throw NSError(domain: "GitQuickCommit", code: 1, userInfo: [
+                            NSLocalizedDescriptionKey: "当前分支或提交已经变化，请刷新 Git 状态后单独合并 Worktree。"
+                        ])
+                    }
+                    autoGenerating = false
+                    worktreeFeedback = "合并并推送中…"
+                    let summary = try await performWorktreeMerge(branch: branch, head: head)
+                    worktreeFeedback = "已完成"
+                    worktreeSummary = summary
+                    onCompleted((completedCommit ?? "") + "；" + summary)
+                } else if push && o.pushError == nil {
                     onCompleted(summaryText(o) + "，已推送")
                 } else if let pushError = o.pushError {
                     onFailed("推送失败：\(pushError)")
@@ -776,12 +805,25 @@ struct GitQuickCommitView: View {
                     onCompleted(summaryText(o))
                 }
             } catch {
-                errorMessage = error.localizedDescription
-                onFailed(error.localizedDescription)
+                let progress = completedCommit.map { $0 + "；Worktree 未完成：" } ?? ""
+                errorMessage = progress + error.localizedDescription
+                if includeWorktrees { worktreeFeedback = "操作失败" }
+                onFailed(errorMessage ?? error.localizedDescription)
             }
             committing = false
             autoGenerating = false
+            if includeWorktrees { await loadStatus(force: true) }
         }
+    }
+
+    private func performWorktreeMerge(branch: String, head: String) async throws -> String {
+        let result = try await api.mergeWorktrees(sessionId: sessionId, branch: branch, head: head)
+        guard result.ok && result.pushed else {
+            throw NSError(domain: "GitQuickCommit", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: result.error ?? "合并或推送未完成"
+            ])
+        }
+        return "已合并 \(result.mergedBranches.count) 个 Worktree 到 \(result.targetBranch) 并推送"
     }
 
     private func mergeWorktrees() {
@@ -793,16 +835,10 @@ struct GitQuickCommitView: View {
         onRunning()
         Task {
             do {
-                let result = try await api.mergeWorktrees(sessionId: sessionId, branch: branch, head: head)
-                if result.ok && result.pushed {
-                    worktreeFeedback = "已完成"
-                    worktreeSummary = "已合并 \(result.mergedBranches.count) 个 Worktree 到 \(result.targetBranch) 并推送"
-                    onCompleted("已合并 \(result.mergedBranches.count) 个 Worktree 到 \(result.targetBranch) 并推送")
-                } else {
-                    worktreeFeedback = "操作失败"
-                    errorMessage = result.error ?? "合并或推送未完成"
-                    onFailed(errorMessage ?? "合并失败")
-                }
+                let summary = try await performWorktreeMerge(branch: branch, head: head)
+                worktreeFeedback = "已完成"
+                worktreeSummary = summary
+                onCompleted(summary)
             } catch {
                 worktreeFeedback = "操作失败"
                 errorMessage = error.localizedDescription
@@ -890,7 +926,7 @@ private struct MagneticDockView: View {
     let ahead: Int
     let busy: Bool
     let feedback: String?
-    let onAction: (String, Bool) -> Void
+    let onAction: (String, Bool, Bool) -> Void
     let onWorktree: () -> Void
     let onPush: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1016,12 +1052,7 @@ private struct MagneticDockView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(id == "worktree" ? "合并全部 Worktree 到当前分支并推送" : (Self.chipLabels[id] ?? id))
         .accessibilityAddTraits(.isButton)
-        .accessibilityAction {
-            guard isEnabled(id) else { return }
-            if id == "worktree" { onWorktree() }
-            else if id == "push" && !hasChanges { onPush() }
-            else { let intent = Self.tapIntent(id); onAction(intent.0, intent.1) }
-        }
+        .accessibilityAction { execute([id]) }
         .highPriorityGesture(dragGesture(id))
     }
 
@@ -1048,7 +1079,7 @@ private struct MagneticDockView: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: 14))
         .onTapGesture {
-            if hasChanges && !busy && dragAnchor == nil { onAction("commit", false) }
+            if dragAnchor == nil { execute(["commit"]) }
         }
     }
 
@@ -1057,8 +1088,7 @@ private struct MagneticDockView: View {
     private var chipH: CGFloat { chipSizes.values.first?.height ?? 38 }
     private func w(_ id: String) -> CGFloat { chipSizes[id]?.width ?? 86 }
 
-    /// 原位布局：无 Sub 时 ∧ 三角（Commit 顶中 / Tag 左下 / Push 右下），
-    /// 有 Sub 时 2×2 网格 —— 对齐网页窄屏 homePositions()。
+    /// 所有可见胶囊按两列布局，Sub 与 Worktree 共用相同的命中和吸附规则。
     private func homePositions() -> [String: CGPoint] {
         guard fieldSize.width > 0, fieldSize.height > 0 else { return [:] }
         let rows = CGFloat((allIds.count + 1) / 2)
@@ -1104,10 +1134,9 @@ private struct MagneticDockView: View {
                 }
                 guard dragMoved else { return }
 
-                // 磁吸拾取：只吸主动作球 —— Sub 永不被「路过吸附」（默认不纳入），
-                // 但可作为锚点被显式抓起、反向吸附动作球。
+                // 所有可用胶囊都能双向吸附；未进入组合的 Sub 不扩大提交范围。
                 let homes = homePositions()
-                for cand in Self.actionOrder where id != "worktree" && hasChanges && !members.contains(cand) {
+                for cand in allIds where isEnabled(cand) && !members.contains(cand) {
                     guard let hp = homes[cand] else { continue }
                     let center = CGPoint(x: hp.x + w(cand) / 2, y: hp.y + chipH / 2)
                     if hypot(loc.x - center.x, loc.y - center.y) < 58 {
@@ -1154,14 +1183,10 @@ private struct MagneticDockView: View {
 
                 if !moved {
                     // 原地单击 → 直接执行该气泡自己的动作。
-                    if id == "worktree" { onWorktree() }
-                    else if id == "push" && !hasChanges { onPush() }
-                    else { let intent = Self.tapIntent(id); onAction(intent.0, intent.1) }
+                    execute([id])
                 } else if endHot {
-                    // 丢进发射区 → 执行组合动作（commit 永远隐含）。
-                    if id == "worktree" { onWorktree() }
-                    else if id == "push" && !hasChanges { onPush() }
-                    else { onAction(Self.compose(members), members.contains("sub")) }
+                    // 以完整组合执行，起手胶囊不改变组合含义。
+                    execute(members)
                 }
                 // 松手在别处：placeHome 已让全员弹回，不执行任何动作。
             }
@@ -1178,14 +1203,12 @@ private struct MagneticDockView: View {
         return "commit"
     }
 
-    /// 单击气泡的直发动作（tag/push 隐含 commit；sub 是正交 scope 修饰符）。
-    private static func tapIntent(_ id: String) -> (String, Bool) {
-        switch id {
-        case "tag": return ("commit-tag", false)
-        case "push": return ("commit-push", false)
-        case "sub": return ("commit", true)
-        default: return ("commit", false)
-        }
+    private func execute(_ members: [String]) {
+        guard !members.isEmpty, members.allSatisfy({ isEnabled($0) }) else { return }
+        let worktree = members.contains("worktree")
+        if worktree && (members.count == 1 || !hasChanges) { onWorktree() }
+        else if !hasChanges && members.contains("push") { onPush() }
+        else { onAction(Self.compose(members), members.contains("sub"), worktree) }
     }
 }
 

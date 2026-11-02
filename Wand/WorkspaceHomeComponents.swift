@@ -438,3 +438,137 @@ struct SessionListStatus: View {
             .accessibilityLabel("执行状态：" + label)
     }
 }
+
+/// 与 Web 端 TaskStatusGlyph 保持一致的运行状态动效图标：
+/// - running / thinking: 顺滑旋转追逐光轨
+/// - attention: 琥珀色感叹徽章持续呼吸动效
+/// - queued: 灰色小时钟
+/// - completed: 浅绿对勾徽章
+/// - failed: 红色错号徽章
+/// - idle / exited / stopped: 静默隐藏
+struct SessionStatusGlyph: View {
+    let session: WorkspaceSessionSummary
+    var size: CGFloat = 16
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    enum VisualStatus: Equatable {
+        case running
+        case thinking
+        case attention(String)
+        case queued
+        case completed
+        case failed
+        case hidden
+    }
+
+    private var visualStatus: VisualStatus {
+        guard session.archived != true else { return .hidden }
+        let status = session.activityStatus.replacingOccurrences(of: "_", with: "-")
+        switch status {
+        case "permission", "permission-blocked":
+            return .attention("等待授权")
+        case "waiting-input":
+            return .attention("等待回答")
+        case "reconnecting":
+            return .attention("重连中")
+        case "failed":
+            return .failed
+        case "thinking":
+            return .thinking
+        case "running":
+            return .running
+        case "queued":
+            return .queued
+        default:
+            if session.isJustCompleted { return .completed }
+            return .hidden
+        }
+    }
+
+    var body: some View {
+        Group {
+            switch visualStatus {
+            case .running:
+                SessionStatusSpinTrack(tint: Theme.success, size: size, reduceMotion: reduceMotion)
+                    .accessibilityLabel("运行中")
+            case .thinking:
+                SessionStatusSpinTrack(tint: Theme.info, size: size, reduceMotion: reduceMotion)
+                    .accessibilityLabel("思考中")
+            case .attention(let label):
+                SessionStatusAttentionBadge(size: size, reduceMotion: reduceMotion)
+                    .accessibilityLabel(label)
+            case .queued:
+                Image(systemName: "clock")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+                    .foregroundColor(Theme.textSecondary)
+                    .accessibilityLabel("排队中")
+            case .completed:
+                Image(systemName: "checkmark.circle.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+                    .foregroundColor(Theme.success)
+                    .accessibilityLabel("刚完成")
+            case .failed:
+                Image(systemName: "xmark.circle.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+                    .foregroundColor(Theme.danger)
+                    .accessibilityLabel("失败")
+            case .hidden:
+                EmptyView()
+            }
+        }
+    }
+}
+
+/// 旋转光轨动效：底轨 + 顺滑旋转弧线
+private struct SessionStatusSpinTrack: View {
+    let tint: Color
+    let size: CGFloat
+    let reduceMotion: Bool
+    @State private var spinning = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(tint.opacity(0.22), lineWidth: max(1.5, size * 0.12))
+            Circle()
+                .trim(from: 0.05, to: 0.7)
+                .stroke(tint, style: StrokeStyle(lineWidth: max(1.5, size * 0.12), lineCap: .round))
+                .rotationEffect(.degrees(spinning && !reduceMotion ? 360 : 0))
+        }
+        .frame(width: size, height: size)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                spinning = true
+            }
+        }
+    }
+}
+
+/// 琥珀色感叹徽章：持续呼吸动效
+private struct SessionStatusAttentionBadge: View {
+    let size: CGFloat
+    let reduceMotion: Bool
+    @State private var breathing = false
+
+    var body: some View {
+        Image(systemName: "exclamationmark.circle.fill")
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size)
+            .foregroundColor(Theme.warning)
+            .opacity(breathing && !reduceMotion ? 1.0 : 0.45)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
+                    breathing = true
+                }
+            }
+    }
+}

@@ -37,10 +37,12 @@ struct BrandLogo: View {
                 .aspectRatio(contentMode: .fit)
         case .opencode:
             OfficialOpenCodeLogo()
+        case .pi:
+            OfficialPiLogo()
         case .claude:
             BrandLogoShape(provider: provider)
                 .fill(BrandLogoPalette.claude)
-        case .codex, .grok, .pi:
+        case .codex, .grok:
             BrandLogoShape(provider: provider)
                 .fill(monoFill)
         }
@@ -76,6 +78,47 @@ private struct OfficialOpenCodeLogo: View {
             var window = Path(CGRect(x: 128 * sx, y: 96 * sy, width: 256 * sx, height: 320 * sy))
             window.addRect(CGRect(x: 192 * sx, y: 160 * sy, width: 128 * sx, height: 192 * sy))
             context.fill(window, with: .color(.white), style: FillStyle(eoFill: true))
+        }
+        .aspectRatio(1, contentMode: .fit)
+    }
+}
+
+/// Pi 官方三色标（粉红/青蓝/金黄），与 Web 端的 PI_LOGO_PARTS 官方 SVG 一致。
+private struct OfficialPiLogo: View {
+    var body: some View {
+        Canvas { context, size in
+            let w = size.width / 469.43
+            let h = size.height / 469.43
+            func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                CGPoint(x: x * w, y: y * h)
+            }
+            // 1. 粉红 #F09082
+            var part1 = Path()
+            part1.move(to: p(0, 0))
+            part1.addLine(to: p(352.07, 0))
+            part1.addLine(to: p(352.07, 234.71))
+            part1.addLine(to: p(234.71, 234.71))
+            part1.addLine(to: p(234.71, 117.36))
+            part1.addLine(to: p(0, 117.36))
+            part1.closeSubpath()
+            context.fill(part1, with: .color(Color(red: 240 / 255, green: 144 / 255, blue: 130 / 255)))
+
+            // 2. 青蓝 #4D9ABF
+            var part2 = Path()
+            part2.move(to: p(0, 117.36))
+            part2.addLine(to: p(117.36, 117.36))
+            part2.addLine(to: p(117.36, 234.71))
+            part2.addLine(to: p(234.71, 234.71))
+            part2.addLine(to: p(234.71, 352.07))
+            part2.addLine(to: p(117.36, 352.07))
+            part2.addLine(to: p(117.36, 469.43))
+            part2.addLine(to: p(0, 469.43))
+            part2.closeSubpath()
+            context.fill(part2, with: .color(Color(red: 77 / 255, green: 154 / 255, blue: 191 / 255)))
+
+            // 3. 金黄 #F1BE58
+            let part3 = Path(CGRect(x: 352.07 * w, y: 234.71 * h, width: 117.36 * w, height: 234.71 * h))
+            context.fill(part3, with: .color(Color(red: 241 / 255, green: 190 / 255, blue: 88 / 255)))
         }
         .aspectRatio(1, contentMode: .fit)
     }

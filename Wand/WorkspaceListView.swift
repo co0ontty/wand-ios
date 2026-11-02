@@ -322,6 +322,18 @@ struct WorkspaceListView: View {
 
     private var sheetContent: some View {
         alertContent
+            .sheet(isPresented: $workspaceCreateExpanded) {
+                NavigationStack {
+                    ScrollView {
+                        WorkspaceCreatePanel(api: api, store: store, onCreated: { _ in
+                            workspaceCreateExpanded = false
+                        }, onBusy: { workspaceCreateBusy = $0 }).padding()
+                    }.navigationTitle("添加工作区")
+                        .toolbar { ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") { workspaceCreateExpanded = false }.disabled(workspaceCreateBusy)
+                        } }
+                }.interactiveDismissDisabled(workspaceCreateBusy)
+            }
             .sheet(item: $sectionCreateTarget) { group in
                 WorkspaceSectionCreateSheet(store: store, group: group) {}
             }
@@ -634,18 +646,6 @@ struct WorkspaceListView: View {
                         workspaceCreateExpanded.toggle()
                     }
                 }, creatingExpanded: workspaceCreateExpanded, disabled: workspaceCreateBusy)
-                Color.clear.frame(height: 0).sheet(isPresented: $workspaceCreateExpanded) {
-                    NavigationStack {
-                        ScrollView {
-                            WorkspaceCreatePanel(api: api, store: store, onCreated: { _ in
-                                workspaceCreateExpanded = false
-                            }, onBusy: { workspaceCreateBusy = $0 }).padding()
-                        }.navigationTitle("添加工作区")
-                            .toolbar { ToolbarItem(placement: .cancellationAction) {
-                                Button("取消") { workspaceCreateExpanded = false }.disabled(workspaceCreateBusy)
-                            } }
-                    }.interactiveDismissDisabled(workspaceCreateBusy)
-                }
             }
             if visible.isEmpty && store.taskGroupsError == nil && !store.taskGroupsLoading {
                 VStack(spacing: 12) {

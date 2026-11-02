@@ -693,14 +693,6 @@ struct NativeRootView: View {
                     EmptyView()
                 }
                 .navigationBarTitleDisplayMode(.inline)
-                .modifier(WorkspaceSystemToolbar(
-                    enabled: homeListMode == .sessions && !systemConversationHome,
-                    busy: homeMutationBusy,
-                    serverName: profile.displayName,
-                    onNewTask: startWorkspaceTask,
-                    onSettings: { showSettings = true },
-                    onSwitchServer: { NotificationCenter.default.post(name: .wandRequestSwitchServer, object: nil) }
-                ))
                 .modifier(conversationHomeToolbar(enabled: navigationSelection.wrappedValue == nil))
             }
         }
@@ -712,7 +704,7 @@ struct NativeRootView: View {
             groups: workspaceStore.conversationTaskGroups,
             enabled: enabled,
             showsFilters: navigationSelection.wrappedValue == nil && (homeListMode == .sessions || homeListMode == .im),
-            showsListActions: navigationSelection.wrappedValue == nil,
+            showsListActions: navigationSelection.wrappedValue == nil && (homeListMode == .sessions || homeListMode == .im),
             onCreate: {
                 let workspaces = conversations.listFilters.workspaces
                 if workspaces.count == 1, case .workspace(let id) = workspaces.first! {
@@ -1941,42 +1933,6 @@ private struct SystemDetailBackToolbar: ViewModifier {
                 content.navigationBarBackButtonHidden(busy)
             }
         } else {
-            content
-        }
-    }
-}
-
-private struct WorkspaceSystemToolbar: ViewModifier {
-    @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
-    let enabled: Bool
-    let busy: Bool
-    let serverName: String
-    let onNewTask: () -> Void
-    let onSettings: () -> Void
-    let onSwitchServer: () -> Void
-
-    @ViewBuilder func body(content: Content) -> some View {
-        if #available(iOS 27.1, *), usesSystemNavigation && enabled {
-            content
-                .navigationTitle("工作区")
-                .toolbar(.visible, for: .navigationBar)
-                .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button("新建任务", systemImage: "plus", action: onNewTask)
-                            .disabled(busy)
-                    }
-                    ToolbarOverflowMenu {
-                        Section(serverName) {
-                            Button("设置", systemImage: "gearshape", action: onSettings)
-                            Button("切换服务器", systemImage: "server.rack", action: onSwitchServer)
-                        }
-                    }
-                }
-        } else if !usesSystemNavigation {
-            content.navigationTitle("").toolbar(.hidden, for: .navigationBar)
-        } else {
-            // Other destinations own their native title and actions. An outer
-            // hidden/empty preference must not suppress their system items.
             content
         }
     }

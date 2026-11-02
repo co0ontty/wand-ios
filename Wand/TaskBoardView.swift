@@ -36,6 +36,7 @@ struct TaskBoardView: View {
     @State private var moveSessionTarget: WandBoardTaskSession?
     @State private var query = ""
     @State private var filterWorkspaceId = ""
+    @State private var addingWorkspace = false
     @State private var selected: WandBoardTask?
     /// 打开子任务时保留父任务栈：返回时回到上一层，而不是直接退出详情。
     @State private var taskPath: [WandBoardTask] = []
@@ -81,6 +82,13 @@ struct TaskBoardView: View {
         .homeNavigationHidden(selected != nil)
         .onAppear { activeView = true }
         .onDisappear { activeView = false; operationGeneration += 1 }
+        .sheet(isPresented: $addingWorkspace) {
+            WorkspaceAddDialog(api: api) { workspace in
+                workspaces.append(workspace)
+                filterWorkspaceId = workspace.id
+                addingWorkspace = false
+            }
+        }
         .sheet(item: $moveSessionTarget) { session in
             SessionMoveSheet(
                 store: workspaceStore,
@@ -398,7 +406,7 @@ struct TaskBoardView: View {
                 Menu {
                     Button("所有项目") { filterWorkspaceId = "" }
                     ForEach(workspaces) { workspace in Button(workspace.name) { filterWorkspaceId = workspace.id } }
-                    AddWorkspaceButton { workspace in workspaces.append(workspace); filterWorkspaceId = workspace.id }
+                    Button("添加工作区", systemImage: "plus") { addingWorkspace = true }
                 } label: {
                     Label(workspaces.first(where: { $0.id == filterWorkspaceId })?.name ?? "所有项目", systemImage: "folder")
                         .font(.subheadline).lineLimit(1)
