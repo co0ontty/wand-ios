@@ -1388,13 +1388,13 @@ struct WorkspaceListView: View {
                             .font(.wand(size: 11, weight: .medium))
                             .foregroundStyle(Theme.textSecondary)
                         if summary.hasActiveExecution {
-                            Text("· 在跑")
+                            Text(summary.hasQueuedExecution ? "· 排队中" : "· 在跑")
                                 .font(.wand(size: 11, weight: .semibold))
                                 .foregroundStyle(Theme.success)
                         }
                     }
                 } else {
-                    Text("暂无会话")
+                    Text(summary.hasQueuedExecution ? "排队中 · 等待执行" : "暂无会话")
                         .font(.wand(size: 11, weight: .regular))
                         .foregroundStyle(Theme.textMuted)
                 }

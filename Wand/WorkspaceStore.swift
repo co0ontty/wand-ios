@@ -158,6 +158,15 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var taskGroupsError: String?
     @Published private(set) var taskGroupsLoading = false
     private var taskGroupsRevision: String?
+    var taskListRevision: String? { taskGroupsRevision }
+
+    /// 看板已经拿到同一次快照时写入目录组，不再二次请求。
+    func adoptTaskListPage(_ page: TaskGroupsPage) {
+        guard !page.unchanged else { return }
+        conversationTaskGroups = applyingWorkspaceGroupOrder(page.groups, order: pendingGroupOrder)
+        taskGroupsRevision = page.revision
+        taskGroupsError = nil
+    }
     @Published private(set) var pendingGroupOrder: [String]?
     @Published private(set) var orderSaveError: String?
     private var orderSaveTail: Task<Void, Never>?
@@ -718,6 +727,9 @@ final class WorkspaceStore: ObservableObject {
                     totalSessions: summary.totalSessions,
                     executionStatus: summary.executionStatus,
                     queuedExecutionCount: summary.queuedExecutionCount,
+                    queuedDispatchCount: summary.queuedDispatchCount,
+                    assignedExecutor: summary.assignedExecutor,
+                    boardTaskIdentifier: summary.boardTaskIdentifier,
                     boardTaskId: summary.boardTaskId,
                     boardTaskStatus: summary.boardTaskStatus,
                     archived: summary.archived,

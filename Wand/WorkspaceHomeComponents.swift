@@ -533,12 +533,15 @@ private struct SessionStatusSpinTrack: View {
     @State private var spinning = false
 
     var body: some View {
+        let lineWidth = max(1.5, size * 0.12)
         ZStack {
             Circle()
-                .stroke(tint.opacity(0.22), lineWidth: max(1.5, size * 0.12))
+                .strokeBorder(tint.opacity(0.22), lineWidth: lineWidth)
             Circle()
+                // Centered strokes otherwise extend outside the frame and get clipped by swipe rows.
+                .inset(by: lineWidth / 2)
                 .trim(from: 0.05, to: 0.7)
-                .stroke(tint, style: StrokeStyle(lineWidth: max(1.5, size * 0.12), lineCap: .round))
+                .stroke(tint, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(spinning && !reduceMotion ? 360 : 0))
         }
         .frame(width: size, height: size)

@@ -19,7 +19,7 @@ root = pathlib.Path(__file__).resolve().parents[1]
 work = pathlib.Path(os.environ.get('LIVE_BACK_BUILD_ROOT', '/Volumes/Wand/Developer/ios/live-native-back'))
 project_dir = work/'source'
 project_dir.mkdir(parents=True, exist_ok=True)
-source_paths=['Wand/App.swift','Wand/ChatDesignPreview.swift','Wand/NativeRootView.swift','Wand/SessionDestinationView.swift','Wand/ChatView.swift','Wand/ConversationViews.swift','Wand/NewConversationView.swift','Wand/ContactsView.swift','Wand/Theme.swift','WandUITests/LiveBackUITests.swift']
+source_paths=['Wand/App.swift','Wand/ChatDesignPreview.swift','Wand/NativeRootView.swift','Wand/SessionDestinationView.swift','Wand/ChatView.swift','Wand/ConversationViews.swift','Wand/NewConversationView.swift','Wand/ContactsView.swift','Wand/Theme.swift','Wand/ConversationListFilters.swift','Wand/WorkspaceCreatePanel.swift','WandUITests/LiveBackUITests.swift']
 def source_hashes(): return {p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in source_paths}
 before=source_hashes()
 snapshot_id=hashlib.sha256(json.dumps(before,sort_keys=True).encode()).hexdigest()[:12]
@@ -78,7 +78,7 @@ if r.returncode:raise SystemExit(r.returncode)
 if os.environ.get('BUILD_ONLY')=='1':raise SystemExit(0)
 device=os.environ.get('SIMULATOR_ID','3148745E-F2CC-48C7-9BA8-BB54B8E0A891')
 filter_name=sys.argv[1] if len(sys.argv)>1 else None
-only=['-only-testing:WandLiveBackUITests/LiveBackUITests/'+filter_name] if filter_name else []
+only=['-only-testing:WandLiveBackUITests/LiveBackUITests/'+name for name in filter_name.split(',')] if filter_name else []
 run_environment=os.environ.copy()
 private_directory=None
 if os.environ.get('WAND_ACCEPTANCE_SESSION_ID'):

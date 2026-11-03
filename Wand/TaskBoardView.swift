@@ -12,6 +12,8 @@ struct TaskBoardView: View {
     var onOpenTeamRun: ((String) -> Void)? = nil
     var onDismiss: (() -> Void)? = nil
     var embedded: Bool = false
+    var initialTaskId: String? = nil
+    var onInitialTaskOpened: () -> Void = {}
     /// 列表级入口随列表一起退场，不叠在任务详情返回/标题行上方。
     var overviewBar: HomeOverviewBar? = nil
 
@@ -102,6 +104,10 @@ struct TaskBoardView: View {
         .task {
             if filterWorkspaceId.isEmpty { filterWorkspaceId = linkedWorkspaceId ?? "" }
             await refresh(showProgress: true)
+            if let id = initialTaskId, let task = tasks.first(where: { $0.id == id }) {
+                openTaskDetail(task)
+                onInitialTaskOpened()
+            }
             workspaces = (try? await api.listWorkspaces()) ?? []
             catalog = try? await api.models()
             lastAgent = (try? await api.boardTaskAgentDefaults()) ?? .default
@@ -129,18 +135,32 @@ struct TaskBoardView: View {
         }
     }
 
-    private var visibleTasks: [WandBoardTask] {
-        let matched = tasks.filter { task in
+    private var matchedTasks: [WandBoardTask] {
+        tasks.filter { task in
             let haystack = "\(task.title) \(task.description) \(task.identifier) \(task.workspace?.name ?? "")"
             let matchesQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || haystack.localizedCaseInsensitiveContains(query)
             let matchesWorkspace = filterWorkspaceId.isEmpty || task.workspaceId == filterWorkspaceId
             return matchesQuery && matchesWorkspace
         }
-        return wandBoardGoalProjection(all: tasks, matched: matched)
     }
 
-    private var boardStats: WandBoardTaskStats { wandBoardTaskStats(visibleTasks) }
+    // Queue membership is a runtime fact, including children with no session yet.
+    private var queuedTasks: [WandBoardTask] {
+        matchedTasks.filter {
+            $0.status != "archived" && ($0.executionStatus == "queued" || $0.pendingExecutionCount > 0)
+                && (statusFilter.isEmpty || $0.status == statusFilter)
+        }
+    }
+
+    private var visibleTasks: [WandBoardTask] {
+        let queuedIds = Set(queuedTasks.map(\.id))
+        return wandBoardGoalProjection(all: tasks, matched: matchedTasks).filter { !queuedIds.contains($0.id) }
+    }
+
+    private var boardStats: WandBoardTaskStats {
+        wandBoardTaskStats(wandBoardGoalProjection(all: tasks, matched: matchedTasks))
+    }
 
     private var formalSessionIDs: Set<String> {
         Set(tasks.filter { $0.status != "archived" }.flatMap { $0.sessionIds + $0.sessions.map(\.id) })
@@ -311,7 +331,15 @@ struct TaskBoardView: View {
                 ForEach(visibleUnassignedGroups) { group in
                     unassignedGroupSection(group)
                 }
-                if visibleTasks.isEmpty && visibleUnassignedGroups.isEmpty {
+                if !queuedTasks.isEmpty {
+                    Section {
+                        ForEach(queuedTasks) { task in boardRow(task) }
+                    } header: {
+                        Label("排队任务 · \(queuedTasks.count)", systemImage: "clock")
+                    }
+                    .accessibilityIdentifier("board-queued-tasks")
+                }
+                if visibleTasks.isEmpty && visibleUnassignedGroups.isEmpty && queuedTasks.isEmpty {
                     Section {
                         boardEmptyState
                             .listRowSeparator(.hidden)
@@ -678,16 +706,21 @@ struct TaskBoardView: View {
         let generation = operationGeneration
         if showProgress { loading = true }
         do {
-            let loadedTasks = try await api.listBoardTasks()
+            let page = try await api.listTaskGroupsPage(revision: workspaceStore.taskListRevision)
             guard activeView, generation == operationGeneration, !Task.isCancelled else { return }
-            tasks = loadedTasks
+            if !page.unchanged {
+                if let formal = page.formalTasks {
+                    tasks = formal
+                } else {
+                    tasks = try await api.listBoardTasks()
+                }
+                workspaceStore.adoptTaskListPage(page)
+            }
             refreshError = nil
         } catch {
             guard activeView, generation == operationGeneration, !Task.isCancelled else { return }
             refreshError = error.localizedDescription
         }
-        // 默认任务组与正式任务必须同一轮刷新，迟到的 WorkspaceStore 请求由其 generation 丢弃。
-        await workspaceStore.loadTaskGroups(force: true)
         guard activeView, generation == operationGeneration, !Task.isCancelled else { return }
         loading = false
         // 卡片被筛掉或已经不在列表里（改状态、归档）时，清掉划开状态。

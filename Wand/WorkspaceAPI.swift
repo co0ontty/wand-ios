@@ -492,13 +492,31 @@ extension WandAPI {
     }
 
     func listTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage {
+        let key = revision ?? ""
+        if let taskListFlight, taskListFlightKey == key {
+            return try await taskListFlight.value
+        }
+        let flight = Task { try await self.loadTaskGroupsPage(revision: revision) }
+        taskListFlight = flight
+        taskListFlightKey = key
+        defer { if taskListFlightKey == key { taskListFlight = nil; taskListFlightKey = nil } }
+        return try await flight.value
+    }
+
+    private func loadTaskGroupsPage(revision: String?) async throws -> TaskGroupsPage {
         // An empty revision opts into the versioned envelope on the first read.
         // Omitting it asks the server for a legacy array without a verifiable revision.
         let data = try await requestData(method: "GET", path: "/api/tasks", queryItems: [
             URLQueryItem(name: "includeArchived", value: "1"),
             URLQueryItem(name: "revision", value: revision ?? ""),
         ])
-        return try TaskGroupsPage.decode(from: data)
+        let page = try TaskGroupsPage.decode(from: data)
+        if !page.unchanged, let formal = page.formalTasks {
+            retainedFormalTasks = formal
+            retainedFormalRevision = page.revision
+            formalTasksKnown = true
+        }
+        return page
     }
 
     func workspaceWorktreeOverview(workspaceId: String) async throws -> WorkspaceWorktreeOverview {

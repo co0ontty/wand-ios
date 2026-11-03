@@ -51,6 +51,7 @@ struct NativeRootView: View {
 
     @EnvironmentObject private var store: ServerStore
     @State private var phase: Phase = .authenticating
+    @State private var queuedBoardTaskID: String?
     @State private var pendingHomeMode: HomeListMode?
     @State private var showSettings = false
     @State private var showMissions = false
@@ -107,6 +108,7 @@ struct NativeRootView: View {
     @State private var homeTeams: [ContactTeam] = []
     @State private var homeContactsGeneration = 0
     @State private var homeModalVisible = false
+    @State private var homeToolbarModalVisible = false
     @State private var homeMutationBusy = false
     @State private var systemConversationHome = false
     @State private var visibleCompletionSnapshot: SessionSnapshot?
@@ -555,6 +557,7 @@ struct NativeRootView: View {
                             selectedSessionID: selectedSessionID, selectedConversationID: selectedConversationID,
                             loading: workspaceStore.taskGroupsLoading, error: workspaceStore.taskGroupsError,
                             onOpenSession: openWorkspaceStandaloneSession,
+                            onOpenQueuedTask: { id in queuedBoardTaskID = id; requestSystemHomeMode(.board) },
                             onCreate: { workspace in
                                 let group = workspaceStore.conversationTaskGroups.first { $0.workspaceId == workspace }
                                 beginPendingConversation(cwd: group?.workspaceCwd ?? "", workspaceID: workspace)
@@ -589,6 +592,8 @@ struct NativeRootView: View {
                             },
                             onOpenTeamRun: openTeamRun,
                             embedded: true,
+                            initialTaskId: queuedBoardTaskID,
+                            onInitialTaskOpened: { queuedBoardTaskID = nil },
                             overviewBar: homeOverviewBar
                         )
                     } else {
@@ -717,7 +722,9 @@ struct NativeRootView: View {
             onMode: requestSystemHomeMode,
             inDetailColumn: inDetailColumn,
             showsCreate: homeListMode == .sessions || homeListMode == .im,
-            showsReturnToSessions: homeListMode != .sessions && homeListMode != .im
+            showsReturnToSessions: homeListMode != .sessions && homeListMode != .im,
+            modalPresented: rootModalVisible,
+            onModalVisibilityChanged: { homeToolbarModalVisible = $0 }
         )
     }
 
@@ -1063,7 +1070,7 @@ struct NativeRootView: View {
     }
 
     private var rootModalVisible: Bool {
-        showSettings || showMissions || homeModalVisible || selectedContactEmployeeID != nil
+        showSettings || showMissions || homeModalVisible || homeToolbarModalVisible || selectedContactEmployeeID != nil
     }
 
     private func openCreatedConversation(_ snapshot: SessionSnapshot) {

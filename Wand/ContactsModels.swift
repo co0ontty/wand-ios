@@ -333,19 +333,6 @@ func employeeConversationBody(employeeId: String, binding: ContactConversationBi
     return body
 }
 
-struct EmployeeKnowledgeEntry: Decodable, Identifiable {
-    let id: String
-    let employeeId: String
-    let content: String
-    let createdAt: String
-}
-struct EmployeeKnowledgePage: Decodable {
-    let employeeId: String
-    let entries: [EmployeeKnowledgeEntry]
-    let total: Int
-    let maxEntries: Int
-}
-
 struct ContactTeamRun: Decodable, Identifiable {
     let id: String
     let teamId: String

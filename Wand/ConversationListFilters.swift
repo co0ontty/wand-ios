@@ -462,6 +462,8 @@ struct ConversationHomeToolbar: ViewModifier {
     var inDetailColumn = false
     var showsCreate = true
     var showsReturnToSessions = false
+    var modalPresented = false
+    var onModalVisibilityChanged: (Bool) -> Void = { _ in }
     private enum RailSlot: Int, CaseIterable { case create, more, runtime, workspace, employee }
     @State private var expanded: RailSlot?
     @State private var railTop: CGFloat = 0
@@ -524,6 +526,9 @@ struct ConversationHomeToolbar: ViewModifier {
     func body(content: Content) -> some View {
         toolbarContent(content)
             .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { bottom in
+                // A presented form owns its keyboard. Feeding its safe-area
+                // changes back into the covered native rail creates a layout loop.
+                guard !addingWorkspace, !modalPresented else { return }
                 if abs(contentBottom - bottom) > 1 { contentBottom = bottom }
             }
             .overlay {
@@ -546,7 +551,8 @@ struct ConversationHomeToolbar: ViewModifier {
                     addingWorkspace = false
                 }
             }
-            .onDisappear { expanded = nil; labelActions = [:] }
+            .onDisappear { expanded = nil; labelActions = [:]; onModalVisibilityChanged(false) }
+            .onChange(of: addingWorkspace) { _, visible in onModalVisibilityChanged(visible) }
             .onChange(of: enabled && controlsEnabled) { _, value in if !value { expanded = nil } }
             .onChange(of: verticalBarVisible) { _, _ in expanded = nil; railTop = 0 }
             .onChange(of: showsFilters) { _, _ in expanded = nil }
@@ -587,6 +593,7 @@ struct ConversationHomeToolbar: ViewModifier {
         }
         .frame(width: 48, height: railHeight, alignment: .top)
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { top in
+            guard !addingWorkspace, !modalPresented else { return }
             if abs(railTop - top) > 1 { railTop = top }
         }
         .foregroundStyle(Theme.brand)
@@ -736,6 +743,7 @@ struct UnifiedConversationSidebar: View {
     let loading: Bool
     let error: String?
     let onOpenSession: (String) -> Void
+    let onOpenQueuedTask: (String) -> Void
     let onCreate: (String?) -> Void
     let onReload: () -> Void
     let showsFilters: Bool
@@ -746,7 +754,6 @@ struct UnifiedConversationSidebar: View {
     let onModalVisibilityChanged: (Bool) -> Void
     let onMutationBusyChanged: (Bool) -> Void
     @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
-    @Environment(\.systemHomeVerticalBarVisible) private var verticalBarVisible
     @Environment(\.systemHomeToolbarInDetail) private var toolbarInDetail
     @Environment(\.systemHomeSidebarToggle) private var sidebarToggle
     @Environment(\.systemHomeSidebarCollapsed) private var sidebarCollapsed
@@ -766,11 +773,30 @@ struct UnifiedConversationSidebar: View {
     }
     private var employeeOptions: [ConversationEmployeeOption] {
         var seen = Set<String>()
-        return HomePresentation.conversations(groups, includeArchived: true).compactMap { item -> ConversationEmployeeOption? in
+        let sessions = HomePresentation.conversations(groups, includeArchived: true).compactMap { item -> ConversationEmployeeOption? in
             guard let id = item.session.employeeId, seen.insert(id).inserted else { return nil }
             let name = (item.session.employeeName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return ConversationEmployeeOption(id: id, title: name.isEmpty ? store.employees.first { $0.id == id }?.name ?? "员工" : name)
-        }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        }
+        let queued = groups.flatMap(\.tasks).compactMap { task -> ConversationEmployeeOption? in
+            guard task.pendingDispatchCount > 0, let owner = task.assignedExecutor, seen.insert(owner.id).inserted else { return nil }
+            return ConversationEmployeeOption(id: owner.id, title: owner.name)
+        }
+        return (sessions + queued).sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+    private var queuedTasks: [(group: TaskDirectoryGroup, task: WorkspaceTaskSummary)] {
+        groups.flatMap { group in
+            group.tasks.compactMap { task in
+                guard task.pendingDispatchCount > 0, task.archived != true, task.boardTaskId != nil else { return nil }
+                let facts = ConversationFilterFacts(
+                    stage: .businessStatus(task.boardTaskStatus),
+                    workspace: .resolve(id: group.workspaceId, synthetic: group.userAdded != true || group.isSynthetic, global: group.isGlobal),
+                    archived: false, active: true,
+                    searchText: [task.name, task.boardTaskIdentifier ?? "", group.workspaceName, task.assignedExecutor?.name ?? ""].joined(separator: " "),
+                    runtime: .queued, employee: task.assignedExecutor?.id ?? "none")
+                return store.listFilters.matches(facts, query: query) ? (group, task) : nil
+            }
+        }
     }
     private func currentOutside(entries: [HomeRecentConversation], rows: [HomeRecentConversation], history: [ConversationInstance]) -> Bool {
         if let id = selectedSessionID { return entries.contains { $0.id == id } && !rows.contains { $0.id == id } }
@@ -849,9 +875,27 @@ struct UnifiedConversationSidebar: View {
                 if let deletionError {
                     Text("删除会话失败：" + deletionError).font(.caption).foregroundStyle(Theme.danger)
                 }
+                if !queuedTasks.isEmpty {
+                    Section("排队任务 · \(queuedTasks.count)") {
+                        ForEach(queuedTasks, id: \.task.id) { entry in
+                            Button {
+                                guard let id = entry.task.boardTaskId else { return }
+                                revealedRowID = nil; searchFocused = false
+                                onOpenQueuedTask(id)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(entry.task.name).font(.body).foregroundStyle(Theme.textPrimary).lineLimit(2)
+                                    Label([entry.task.boardTaskIdentifier, entry.task.assignedExecutor?.name, entry.group.workspaceName,
+                                        "\(entry.task.pendingDispatchCount) 条派发排队中"].compactMap { $0 }.joined(separator: " · "), systemImage: "clock")
+                                        .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2)
+                                }.frame(maxWidth: .infinity, minHeight: WandLayout.controlTouch, alignment: .leading)
+                            }.buttonStyle(.plain).accessibilityIdentifier("queued-task-" + entry.task.id)
+                        }
+                    }
+                }
                 if !attention.isEmpty { Section("我需要关注") { ForEach(attention) { sessionRow($0) } } }
                 Section { ForEach(other) { sessionRow($0) } }
-                if rows.isEmpty && history.isEmpty && !loading && !store.loading {
+                if rows.isEmpty && history.isEmpty && queuedTasks.isEmpty && !loading && !store.loading {
                     // The default projection omits archived rows, so "no sessions yet" would be false here.
                     Text(store.listFilters.isDefault && query.isEmpty
                         ? (entries.isEmpty ? "还没有会话" : "没有未归档的会话")
@@ -862,6 +906,8 @@ struct UnifiedConversationSidebar: View {
                 }
             }.listStyle(.plain).scrollContentBackground(.hidden)
                 .contentMargins(.top, 0, for: .scrollContent)
+                // Keep row content clear of the indicator without widening the page gutter.
+                .contentMargins(.trailing, 12, for: .scrollContent)
                 .scrollDismissesKeyboard(.interactively)
                 .homeSwipeDismissal($revealedRowID)
                 .onChange(of: query) { _, _ in revealedRowID = nil }
@@ -875,8 +921,8 @@ struct UnifiedConversationSidebar: View {
                 }
                 .accessibilityIdentifier("unified-conversation-sidebar")
         }
-        .padding(.leading, WandLayout.pageInset)
-        .padding(.trailing, verticalBarVisible ? 48 : WandLayout.pageInset)
+        // UIKit already reserves the vertical toolbar in the content safe area.
+        .padding(.horizontal, WandLayout.pageInset)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !usesSystemNavigation && showsFilters && !searchFocused {
                     HStack(spacing: 6) {

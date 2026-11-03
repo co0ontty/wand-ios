@@ -484,6 +484,11 @@ struct WorkspaceTask: Codable, Equatable, Identifiable {
     var kind: String? = nil
 }
 
+struct WorkspaceTaskExecutor: Codable, Equatable {
+    let id: String
+    let name: String
+}
+
 /// GET /api/tasks 聚合行：任务 + 运行期派生字段；目录信息在 TaskDirectoryGroup 上。
 struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
     var kind: String? = nil
@@ -494,6 +499,10 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
     var parentWorkspaceTaskId: String? = nil
     var executionStatus: String? = nil
     var queuedExecutionCount: Int? = nil
+    var queuedDispatchCount: Int? = nil
+    var assignedExecutor: WorkspaceTaskExecutor? = nil
+    var boardTaskIdentifier: String? = nil
+    var pendingDispatchCount: Int { queuedDispatchCount ?? (hasQueuedExecution ? queuedExecutionCount ?? 0 : 0) }
     var hasQueuedExecution: Bool { executionStatus == "queued" }
     var hasActiveExecution: Bool { executionStatus == "queued" || executionStatus == "running" }
     let id: String
@@ -529,6 +538,9 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
         totalSessions: Int? = nil,
         executionStatus: String? = nil,
         queuedExecutionCount: Int? = nil,
+        queuedDispatchCount: Int? = nil,
+        assignedExecutor: WorkspaceTaskExecutor? = nil,
+        boardTaskIdentifier: String? = nil,
         boardTaskId: String? = nil,
         boardTaskStatus: String? = nil,
         archived: Bool? = nil,
@@ -551,6 +563,9 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
         self.totalSessions = totalSessions ?? sessions.count
         self.executionStatus = executionStatus
         self.queuedExecutionCount = queuedExecutionCount
+        self.queuedDispatchCount = queuedDispatchCount
+        self.assignedExecutor = assignedExecutor
+        self.boardTaskIdentifier = boardTaskIdentifier
         self.boardTaskId = boardTaskId
         self.boardTaskStatus = boardTaskStatus
         self.archived = archived
@@ -562,7 +577,8 @@ struct WorkspaceTaskSummary: Codable, Equatable, Identifiable {
             layout: layout, status: status, createdAt: createdAt, lastOpenedAt: lastOpenedAt,
             cwd: cwd, isolated: isolated, worktreeError: worktreeError, sessions: sessions,
             totalSessions: totalSessions ?? self.totalSessions, executionStatus: executionStatus,
-            queuedExecutionCount: queuedExecutionCount, boardTaskId: boardTaskId, boardTaskStatus: boardTaskStatus,
+            queuedExecutionCount: queuedExecutionCount, queuedDispatchCount: queuedDispatchCount,
+            assignedExecutor: assignedExecutor, boardTaskIdentifier: boardTaskIdentifier, boardTaskId: boardTaskId, boardTaskStatus: boardTaskStatus,
             archived: archived, parentWorkspaceTaskId: parentWorkspaceTaskId, kind: kind)
     }
 
@@ -680,6 +696,8 @@ struct TaskGroupsPage: Equatable {
     let groups: [TaskDirectoryGroup]
     let revision: String?
     let unchanged: Bool
+    /// nil：旧服务端没有正式任务数组。空数组表示这次快照确实没有正式任务。
+    var formalTasks: [WandBoardTask]? = nil
 
     /// Legacy home/workspace consumers keep their non-archived projection while IM uses the full page.
     static func currentGroups(_ groups: [TaskDirectoryGroup]) -> [TaskDirectoryGroup] {
@@ -727,7 +745,14 @@ struct TaskGroupsPage: Equatable {
         } else {
             groups = []
         }
-        return TaskGroupsPage(groups: groups, revision: revision, unchanged: unchanged)
+        let formalTasks: [WandBoardTask]?
+        if let raw = dict["tasks"] {
+            let encoded = try JSONSerialization.data(withJSONObject: raw)
+            formalTasks = try JSONDecoder().decode([WandBoardTask].self, from: encoded)
+        } else {
+            formalTasks = nil
+        }
+        return TaskGroupsPage(groups: groups, revision: revision, unchanged: unchanged, formalTasks: formalTasks)
     }
 }
 

@@ -140,6 +140,108 @@ final class LiveBackUITests: XCTestCase {
         try? app.screenshot().pngRepresentation.write(to: evidence)
     }
 
+    func testInstalledWorkspaceAliasFocusAndCancel() throws {
+        guard ProcessInfo.processInfo.environment["WAND_UI_ACCEPTANCE_PROFILE"] != nil
+            || ProcessInfo.processInfo.environment["TEST_RUNNER_WAND_UI_ACCEPTANCE_PROFILE"] != nil else {
+            throw XCTSkip("Explicit installed-service workspace UI acceptance only")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        defer { app.terminate() }
+        let picker = app.buttons["工作区筛选"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 30), "The actual conversation list must load")
+        picker.tap()
+        let add = app.buttons["添加工作区"]
+        XCTAssertTrue(add.waitForExistence(timeout: 10))
+        add.tap()
+        let alias = app.textFields["路径别名"]
+        XCTAssertTrue(alias.waitForExistence(timeout: 10))
+        alias.tap()
+        alias.typeText("Workspace alias")
+        XCTAssertEqual(alias.value as? String, "Workspace alias")
+        let directory = app.textFields["工作目录"]
+        directory.tap()
+        alias.tap()
+        XCTAssertEqual(alias.value as? String, "Workspace alias", "Switching focus must preserve the alias")
+        app.buttons["取消"].tap()
+        XCTAssertFalse(alias.exists)
+        picker.tap()
+        app.buttons["添加工作区"].tap()
+        XCTAssertTrue(alias.waitForExistence(timeout: 10))
+        alias.tap()
+        alias.typeText("Second alias")
+        XCTAssertEqual(alias.value as? String, "Second alias")
+        app.buttons["取消"].tap()
+    }
+
+    func testInstalledWorkspaceCreationAndFilter() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let directoryPath = environment["TEST_RUNNER_WAND_UI_WORKSPACE_DIRECTORY"]
+            ?? environment["WAND_UI_WORKSPACE_DIRECTORY"] else {
+            throw XCTSkip("Explicit task-owned workspace directory required")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        defer { app.terminate() }
+        let picker = app.buttons["工作区筛选"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 30))
+        picker.tap()
+        let wand = app.buttons["wand"]
+        XCTAssertTrue(wand.waitForExistence(timeout: 10), "Registered Wand must be a real workspace option")
+        wand.tap()
+        XCTAssertEqual(wand.value as? String, "已选中")
+        picker.tap()
+        let assignedRow = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", " · wand")).firstMatch
+        XCTAssertTrue(assignedRow.waitForExistence(timeout: 10), "The actual filtered list must name Wand, not mark bound sessions unassigned")
+        picker.tap()
+        app.buttons["添加工作区"].tap()
+        let alias = app.textFields["路径别名"]
+        XCTAssertTrue(alias.waitForExistence(timeout: 10))
+        alias.tap()
+        let name = "键盘验收-2946-" + UUID().uuidString.prefix(8)
+        alias.typeText(name)
+        XCTAssertEqual(alias.value as? String, name)
+        let directory = app.textFields["工作目录"]
+        directory.tap()
+        directory.press(forDuration: 1)
+        let selectAll = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label IN %@", ["全选", "Select All"])).firstMatch
+        XCTAssertTrue(selectAll.waitForExistence(timeout: 5), "Use the native selection menu rather than deleting from an arbitrary caret position")
+        selectAll.tap()
+        directory.typeText(directoryPath)
+        XCTAssertEqual(directory.value as? String, directoryPath)
+        app.buttons["浏览目录"].tap()
+        let browserNavigation = app.navigationBars["选择目录"]
+        let cancelBrowser = browserNavigation.buttons["取消"]
+        XCTAssertTrue(cancelBrowser.waitForExistence(timeout: 10))
+        cancelBrowser.tap()
+        let browserClosed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: browserNavigation)
+        XCTAssertEqual(XCTWaiter.wait(for: [browserClosed], timeout: 10), .completed)
+        XCTAssertTrue(alias.waitForExistence(timeout: 10))
+        XCTAssertEqual(alias.value as? String, name, "Browsing must not discard the alias")
+        alias.tap()
+        app.buttons["创建工作区"].tap()
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: alias)
+        let savedResult = XCTWaiter.wait(for: [saved], timeout: 20)
+        if savedResult != .completed {
+            let failure = XCTAttachment(screenshot: app.screenshot())
+            failure.name = "workspace-create-ack-failure"
+            failure.lifetime = .keepAlways
+            add(failure)
+        }
+        XCTAssertEqual(savedResult, .completed, "Creation must receive its acknowledgement before the form closes")
+        XCTAssertTrue(picker.exists)
+        picker.tap()
+        XCTAssertTrue(app.buttons[name].waitForExistence(timeout: 20), "Saved workspace must remain selected and selectable")
+        XCTAssertEqual(app.buttons[name].value as? String, "已选中")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "workspace-created-and-selected"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testDuoRegularLivePagesCancelAndCommit() { exercise("system-regular") }
     func testDuoCompactLivePagesCancelAndCommit() { exercise("system-compact") }
     func testHiddenBarChatUsesNativeLivePages() { exercise("hidden") }

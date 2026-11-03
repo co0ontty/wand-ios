@@ -108,23 +108,6 @@ extension WandAPI: ContactDirectoryService, EmployeeEditingService, ContactTeamS
         _ = try await requestData(method: action == "delete" ? "DELETE" : "POST",
                                   path: action == "delete" ? base : base + "/" + action)
     }
-    func contactKnowledge(employeeId: String, query: String) async throws -> EmployeeKnowledgePage {
-        let page = try await request(EmployeeKnowledgePage.self, method: "GET",
-                                    path: "/api/silicon-employees/\(percentEncodePathComponent(employeeId))/knowledge",
-                                    queryItems: [URLQueryItem(name: "q", value: query)])
-        guard page.employeeId == employeeId, page.entries.allSatisfy({ $0.employeeId == employeeId }) else {
-            throw APIError.network("知识归属不一致，已停止显示。")
-        }
-        return page
-    }
-    func addContactKnowledge(employeeId: String, text: String) async throws -> EmployeeKnowledgeEntry {
-        try await request(EmployeeKnowledgeEntry.self, method: "POST",
-                          path: "/api/silicon-employees/\(percentEncodePathComponent(employeeId))/knowledge", body: ["content": text])
-    }
-    func deleteContactKnowledge(employeeId: String, entryId: String?) async throws {
-        let base = "/api/silicon-employees/\(percentEncodePathComponent(employeeId))/knowledge"
-        _ = try await requestData(method: "DELETE", path: base + (entryId.map { "/" + percentEncodePathComponent($0) } ?? ""))
-    }
     func contactTeam(_ id: String) async throws -> ContactTeamInfo {
         try await request(ContactTeamInfo.self, method: "GET", path: "/api/ai-teams/\(percentEncodePathComponent(id))")
     }

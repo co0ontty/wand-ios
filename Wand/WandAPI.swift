@@ -26,6 +26,12 @@ final class WandAPI: SessionInputTransport {
     /// Captured once so resetting an endpoint retires this client instead of letting a stale
     /// owner recreate a session and authenticate again with an obsolete token.
     let endpointSession: SelfSignedSession
+    /// 正式任务与目录组共用同一次 GET /api/tasks。旧服务端没有 tasks 时回退数组路由。
+    var taskListFlightKey: String?
+    var taskListFlight: Task<TaskGroupsPage, Error>?
+    var retainedFormalTasks: [WandBoardTask] = []
+    var retainedFormalRevision: String?
+    var formalTasksKnown = false
 
     init(baseURL: URL, token: String?) {
         self.baseURL = baseURL
@@ -960,11 +966,21 @@ final class WandAPI: SessionInputTransport {
     }
 
     func listBoardTasks(workspaceId: String? = nil) async throws -> [WandBoardTask] {
-        var queryItems: [URLQueryItem]?
-        if let workspaceId, !workspaceId.isEmpty {
-            queryItems = [URLQueryItem(name: "workspaceId", value: workspaceId)]
+        let page = try await listTaskGroupsPage(revision: formalTasksKnown ? retainedFormalRevision : nil)
+        let tasks: [WandBoardTask]
+        if page.unchanged && formalTasksKnown {
+            tasks = retainedFormalTasks
+        } else if let formal = page.formalTasks {
+            tasks = formal
+        } else {
+            var queryItems: [URLQueryItem]?
+            if let workspaceId, !workspaceId.isEmpty {
+                queryItems = [URLQueryItem(name: "workspaceId", value: workspaceId)]
+            }
+            return try await request([WandBoardTask].self, method: "GET", path: "/api/wand-tasks", queryItems: queryItems)
         }
-        return try await request([WandBoardTask].self, method: "GET", path: "/api/wand-tasks", queryItems: queryItems)
+        guard let workspaceId, !workspaceId.isEmpty else { return tasks }
+        return tasks.filter { $0.workspaceId == workspaceId }
     }
 
     func createBoardTask(
