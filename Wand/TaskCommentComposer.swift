@@ -41,7 +41,11 @@ struct TaskCommentComposer: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var focused = false
     private var phase: String { busy ? "sending" : outcome }
-    private var boundName: String { employees.first { $0.id == employeeId }?.name ?? "" }
+    // 派发目标直接由正文里的 @名字 决定：只要 @ 了在职员工就视为派发，不再要求必须从下拉里选过。
+    private var bound: (id: String, name: String)? {
+        TaskCommentMention.resolve(bodyText, employees: employees) ?? employees.first { $0.id == employeeId }
+    }
+    private var boundName: String { bound?.name ?? "" }
     private var dispatching: Bool { TaskCommentMention.holds(bodyText, name: boundName) }
     private var caret: Int {
         guard let range = Range(selection, in: bodyText) else { return bodyText.count }
@@ -93,7 +97,12 @@ struct TaskCommentComposer: View {
 
     private func replaceBody(_ value: String) {
         bodyText = value
-        if !boundName.isEmpty && !TaskCommentMention.holds(value, name: boundName) { employeeId = "" }
+        // 正文里 @ 到的在职员工就是派发目标；下拉选过的那位作为兜底，均不在正文里时清空。
+        if let person = TaskCommentMention.resolve(value, employees: employees) {
+            employeeId = person.id
+        } else if !boundName.isEmpty && !TaskCommentMention.holds(value, name: boundName) {
+            employeeId = ""
+        }
         changed()
     }
 
@@ -355,7 +364,7 @@ struct TaskCommentComposer: View {
             return
         }
         let text = TaskCommentMention.submissionBody(bodyText, name: name)
-        let employee = name.isEmpty ? "" : employeeId
+        let employee = name.isEmpty ? "" : (bound?.id ?? employeeId)
         let source = sourceCommentId, version = revision
         busy = true; mentionDismissed = mentionKey; referenceDismissed = referenceKey; message = ""
         let identity = TaskCommentRequestIdentity(taskId: taskId, body: text, employeeId: employee, sourceCommentId: source, purpose: employee.isEmpty ? "execution" : dispatchPurpose)

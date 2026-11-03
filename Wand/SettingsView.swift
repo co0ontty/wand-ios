@@ -52,6 +52,8 @@ struct SettingsView: View {
     @ObservedObject private var liveActivityPush = LiveActivityPushController.shared
     @State private var logShare: LogShareItem?
     @State private var logExportEmpty = false
+    @State private var exportingDiagnostics = false
+    @State private var diagnosticsResult: String?
     @State private var showRenameServer = false
     @State private var serverNameDraft = ""
     private var iosUpdate: IosIpaUpdateInfo? { appUpdater.info }
@@ -367,6 +369,32 @@ struct SettingsView: View {
 
     private var diagnosticsSection: some View {
         Group {
+            Button {
+                guard !exportingDiagnostics else { return }
+                exportingDiagnostics = true
+                diagnosticsResult = nil
+                Task { @MainActor in
+                    defer { exportingDiagnostics = false }
+                    do {
+                        let data = try await WandAPI(baseURL: serverURL, token: token)
+                            .requestData(method: "GET", path: "/api/diagnostics/export")
+                        let url = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("wand-diagnostics-\(UUID().uuidString).json")
+                        try data.write(to: url, options: .atomic)
+                        logShare = LogShareItem(url: url)
+                        diagnosticsResult = "诊断文件已生成"
+                    } catch {
+                        diagnosticsResult = "导出失败，请确认服务端已更新且连接正常"
+                    }
+                }
+            } label: {
+                Label(exportingDiagnostics ? "正在导出…" : diagnosticsResult ?? "导出服务端诊断", systemImage: "square.and.arrow.up")
+                    .font(.wand(size: 15))
+                    .frame(maxWidth: .infinity, minHeight: WandLayout.controlTouch, alignment: .leading)
+            }
+            .disabled(exportingDiagnostics)
+            Text("包含最近 30 分钟的恢复、停止、删除记录及运行状态，不含聊天正文、终端输出或凭据，不会自动上传。")
+                .font(.caption).foregroundStyle(Theme.textSecondary)
             Button {
                 exportLogs()
             } label: {

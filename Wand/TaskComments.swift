@@ -407,4 +407,9 @@ enum TaskCommentMention {
         !mentionRanges(in: body, name: name).isEmpty
     }
 
+    /// 正文里 @ 到的在职员工即派发目标；名字可能含空格，优先匹配最长（最具体）的名字。
+    static func resolve(_ body: String, employees: [(id: String, name: String)]) -> (id: String, name: String)? {
+        employees.filter { !$0.name.isEmpty }.sorted { $0.name.count > $1.name.count }.first { holds(body, name: $0.name) }
+    }
+
 }

@@ -883,13 +883,30 @@ struct UnifiedConversationSidebar: View {
                                 revealedRowID = nil; searchFocused = false
                                 onOpenQueuedTask(id)
                             } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(entry.task.name).font(.body).foregroundStyle(Theme.textPrimary).lineLimit(2)
-                                    Label([entry.task.boardTaskIdentifier, entry.task.assignedExecutor?.name, entry.group.workspaceName,
-                                        "\(entry.task.pendingDispatchCount) 条派发排队中"].compactMap { $0 }.joined(separator: " · "), systemImage: "clock")
-                                        .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2)
-                                }.frame(maxWidth: .infinity, minHeight: WandLayout.controlTouch, alignment: .leading)
-                            }.buttonStyle(.plain).accessibilityIdentifier("queued-task-" + entry.task.id)
+                                HStack(alignment: .center, spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(entry.task.name)
+                                            .font(.body.weight(.medium))
+                                            .foregroundStyle(Theme.textPrimary)
+                                            .lineLimit(2)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        Text([entry.task.boardTaskIdentifier, entry.task.assignedExecutor?.name, entry.group.workspaceName,
+                                            "\(entry.task.pendingDispatchCount) 条派发排队中"].compactMap { $0 }.joined(separator: " · "))
+                                            .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    Image(systemName: "clock")
+                                        .font(.system(size: 16))
+                                        .foregroundStyle(Theme.textSecondary)
+                                        .accessibilityHidden(true)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: WandLayout.controlTouch, alignment: .leading)
+                                .padding(.vertical, 4)
+                            }
+                            .buttonStyle(.plain)
+                            .listRowInsets(EdgeInsets(top: 10, leading: 0, bottom: 10, trailing: 0))
+                            .listRowBackground(Color.clear)
+                            .accessibilityIdentifier("queued-task-" + entry.task.id)
                         }
                     }
                 }
