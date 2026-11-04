@@ -204,6 +204,20 @@ final class NewConversationCoordinator: ObservableObject {
         persist(phase)
     }
 
+    func startSeparateSession() {
+        guard case .deliveryUnknown = phase, unknownOperation == .session else { return }
+        creationRequestID = nil
+        unknownSessionID = nil
+        unknownOperation = nil
+        creationError = nil
+        if let acceptedTaskID {
+            phase = .taskAccepted(taskID: acceptedTaskID)
+        } else {
+            phase = skipsTaskCreation ? .conversationOnly : .idle
+        }
+        persist(phase)
+    }
+
     func rejectUnknownSessionAfterCheck() {
         guard unknownOperation == .session, case .deliveryUnknown = phase else { return }
         keepDeliveryUnknown("会话创建结果仍无法与请求可靠关联；请勿重复创建。")

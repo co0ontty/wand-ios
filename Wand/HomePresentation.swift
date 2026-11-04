@@ -298,7 +298,7 @@ extension HomeRecentConversation {
         ConversationFilterFacts(stage: filterStage, workspace: filterWorkspace,
             archived: filterArchived, active: !filterArchived && HomePresentation.isActive(session),
             searchText: (HomePresentation.sessionFields(session, employees: employees)
-                + [task?.name, filterWorkspaceTitle]).compactMap { $0 }.joined(separator: " "),
+                + [task?.name, filterWorkspaceTitle, task?.worktree?.branch, task?.worktree?.path, session.cwd]).compactMap { $0 }.joined(separator: " "),
             runtime: filterArchived ? ConversationRuntime.resolveArchived(session) : ConversationRuntime.resolve(session),
             employee: session.employeeId ?? "none")
     }

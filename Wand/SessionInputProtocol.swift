@@ -1,18 +1,26 @@
 import Foundation
 
 /// Receipt timing never determines whether an input starts or joins the server queue.
-func structuredInputRequest(input: String) -> [String: Any] {
-    ["input": input, "respondImmediately": true, "idempotencyKey": UUID().uuidString]
+func structuredInputRequest(input: String, expectedQuestionId: String? = nil) -> [String: Any] {
+    var body: [String: Any] = ["input": input, "respondImmediately": true, "idempotencyKey": UUID().uuidString]
+    if let expectedQuestionId { body["expectedQuestionId"] = expectedQuestionId }
+    return body
 }
 
 protocol SessionInputTransport {
-    func sendStructuredInput(id: String, input: String) async throws -> SessionSnapshot
+    func sendStructuredInput(id: String, input: String, expectedQuestionId: String?) async throws -> SessionSnapshot
     func sendPtyInputChunk(
         id: String,
         input: String,
         view: String,
         shortcutKey: String?
     ) async throws
+}
+
+extension SessionInputTransport {
+    func sendStructuredInput(id: String, input: String) async throws -> SessionSnapshot {
+        try await sendStructuredInput(id: id, input: input, expectedQuestionId: nil)
+    }
 }
 
 /// A chunk has already reached the terminal. A subsequent 4xx cannot make the

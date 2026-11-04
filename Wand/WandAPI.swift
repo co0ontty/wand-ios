@@ -472,12 +472,12 @@ final class WandAPI: SessionInputTransport {
     }
 
     /// Structured input always asks for a receipt, including while the server is busy.
-    func sendStructuredInput(id: String, input: String) async throws -> SessionSnapshot {
+    func sendStructuredInput(id: String, input: String, expectedQuestionId: String? = nil) async throws -> SessionSnapshot {
         try await request(
             SessionSnapshot.self,
             method: "POST",
             path: "/api/sessions/\(percentEncodePathComponent(id))/input",
-            body: structuredInputRequest(input: input)
+            body: structuredInputRequest(input: input, expectedQuestionId: expectedQuestionId)
         )
     }
 

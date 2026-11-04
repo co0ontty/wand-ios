@@ -593,7 +593,7 @@ private final class ChatLoadingURLProtocol: URLProtocol {
 
 @MainActor private final class FreezeReceiptTransport: SessionInputTransport {
     var inputs: [String] = []
-    func sendStructuredInput(id: String, input: String) async throws -> SessionSnapshot {
+    func sendStructuredInput(id: String, input: String, expectedQuestionId: String?) async throws -> SessionSnapshot {
         inputs.append(input)
         return try JSONDecoder().decode(SessionSnapshot.self, from: Data("{\"id\":\"\(id)\",\"sessionKind\":\"structured\",\"status\":\"running\",\"structuredState\":{\"inFlight\":true}}".utf8))
     }

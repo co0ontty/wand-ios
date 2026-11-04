@@ -735,6 +735,7 @@ struct ConversationRailScrollClip: Shape {
 
 /// One session row and two independent OR filters; selecting never changes execution or read state.
 struct UnifiedConversationSidebar: View {
+    let serverID: String
     @ObservedObject var store: ConversationStore
     @ObservedObject var workspaceStore: WorkspaceStore
     let groups: [TaskDirectoryGroup]
@@ -910,8 +911,8 @@ struct UnifiedConversationSidebar: View {
                         }
                     }
                 }
-                if !attention.isEmpty { Section("我需要关注") { ForEach(attention) { sessionRow($0) } } }
-                Section { ForEach(other) { sessionRow($0) } }
+                SessionDirectorySections(groups: groups, rows: attention + other, query: query, filtered: !store.listFilters.isDefault,
+                    api: store.api, serverID: serverID, onCreated: onOpenSession, onReload: onReload) { item, depth in sessionRow(item, depth: depth) }
                 if rows.isEmpty && history.isEmpty && queuedTasks.isEmpty && !loading && !store.loading {
                     // The default projection omits archived rows, so "no sessions yet" would be false here.
                     Text(store.listFilters.isDefault && query.isEmpty
@@ -1056,7 +1057,7 @@ struct UnifiedConversationSidebar: View {
         return parts.joined(separator: " · ")
     }
 
-    private func sessionRow(_ item: HomeRecentConversation) -> some View {
+    private func sessionRow(_ item: HomeRecentConversation, depth: Int) -> some View {
         Button {
             openSession(item.id)
         } label: {
@@ -1088,7 +1089,7 @@ struct UnifiedConversationSidebar: View {
             .accessibilityAddTraits(selectedSessionID == item.id || store.items.contains { $0.id == selectedConversationID && ($0.communicationSessionId ?? $0.sessionId) == item.id } ? .isSelected : [])
             .homeSwipeActions(id: "session-" + item.id, revealedID: $revealedRowID,
                 actions: sessionActions(item.session), enabled: !deletionBusy, surface: Theme.workspaceCanvas)
-            .listRowInsets(EdgeInsets(top: 10, leading: 0, bottom: 10, trailing: 0))
+            .listRowInsets(EdgeInsets(top: 10, leading: 28 + CGFloat(depth) * 20, bottom: 10, trailing: 0))
             .listRowBackground(Color.clear)
             .accessibilityIdentifier("conversation-session-" + item.id)
     }

@@ -1254,7 +1254,7 @@ final class ChatStore: ObservableObject {
             do {
                 if structured {
                     let accepted = try await inputTransport.sendStructuredInput(
-                        id: sessionId, input: answerText
+                        id: sessionId, input: answerText, expectedQuestionId: toolUseId
                     )
                     if realtimeRevision == requestRevision { apply(snapshot: accepted) }
                     socket.requestResync()

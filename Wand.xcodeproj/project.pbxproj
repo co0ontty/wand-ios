@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F10400000000000000000001 /* SessionDirectoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10400000000000000000002 /* SessionDirectoryView.swift */; };
 		F271A0000000000000000201 /* KnowledgeLibraryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F271A0000000000000000202 /* KnowledgeLibraryTests.swift */; };
 		F271A0000000000000000101 /* KnowledgeLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F271A0000000000000000102 /* KnowledgeLibraryView.swift */; };
 		F271A0000000000000000001 /* KnowledgeLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = F271A0000000000000000002 /* KnowledgeLibrary.swift */; };
@@ -171,6 +172,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F10400000000000000000002 /* SessionDirectoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionDirectoryView.swift; sourceTree = "<group>"; };
 		F271A0000000000000000202 /* KnowledgeLibraryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeLibraryTests.swift; sourceTree = "<group>"; };
 		F271A0000000000000000102 /* KnowledgeLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeLibraryView.swift; sourceTree = "<group>"; };
 		F271A0000000000000000002 /* KnowledgeLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KnowledgeLibrary.swift; sourceTree = "<group>"; };
@@ -440,6 +442,7 @@
 				E7000000000000000000BC07 /* WorkspaceTargetPicker.swift */,
 				E7000000000000000000BC09 /* WorkspaceWorktreeModels.swift */,
 				E7000000000000000000BC10 /* WorkspaceWorktreeReviewView.swift */,
+				F10400000000000000000002 /* SessionDirectoryView.swift */,
 				E9000000000000000000BC13 /* WorkspaceNewTaskSheet.swift */,
 				E9000000000000000000BC14 /* SessionMoveSheet.swift */,
 				A100000000000000000000D1 /* Assets.xcassets */,
@@ -750,6 +753,7 @@
 				E7000000000000000000AC07 /* WorkspaceTargetPicker.swift in Sources */,
 				E7000000000000000000AC09 /* WorkspaceWorktreeModels.swift in Sources */,
 				E7000000000000000000AC10 /* WorkspaceWorktreeReviewView.swift in Sources */,
+				F10400000000000000000001 /* SessionDirectoryView.swift in Sources */,
 				E9000000000000000000AC13 /* WorkspaceNewTaskSheet.swift in Sources */,
 				E9000000000000000000AC14 /* SessionMoveSheet.swift in Sources */,
 			);

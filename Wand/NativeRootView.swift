@@ -552,7 +552,7 @@ struct NativeRootView: View {
                             .padding(.bottom, 4)
                     }
                     if homeListMode == .im || homeListMode == .sessions {
-                        UnifiedConversationSidebar(store: conversations, workspaceStore: workspaceStore,
+                        UnifiedConversationSidebar(serverID: serverID, store: conversations, workspaceStore: workspaceStore,
                             groups: workspaceStore.conversationTaskGroups,
                             selectedSessionID: selectedSessionID, selectedConversationID: selectedConversationID,
                             loading: workspaceStore.taskGroupsLoading, error: workspaceStore.taskGroupsError,

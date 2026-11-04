@@ -67,6 +67,8 @@ struct NewConversationView: View {
     let workspaceID: String?
     let initialWorkspaceTaskID: String?
     let initialEmployeeID: String?
+    let initialPrompt: String?
+    @State private var initialPromptApplied = false
     let initialCreateTask: Bool
     /// 空任务页把它作为任务正文内嵌：不套 NavigationStack 与取消按钮，导航栏归宿主任务页。
     let embedded: Bool
@@ -83,6 +85,9 @@ struct NewConversationView: View {
     @StateObject private var keyboard = KeyboardObserver()
     @StateObject private var composerFocus = ComposerFocusController()
 
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var recoverySessions: [SessionSnapshot] = []
+    @State private var confirmSeparateSession = false
     @Environment(\.dismiss) private var dismiss
     @StateObject private var coordinator: NewConversationCoordinator
     @StateObject private var pendingDraft: ComposerDraftState
@@ -150,6 +155,8 @@ struct NewConversationView: View {
         initialWorkspaceTaskID: String? = nil,
         initialEmployeeID: String? = nil,
         initialCreateTask: Bool = false,
+        initialPrompt: String? = nil,
+        initialDraftScope: String? = nil,
         embedded: Bool = false,
         boundTask: NewConversationBoundTask? = nil,
         onBusyChanged: ((Bool) -> Void)? = nil,
@@ -163,6 +170,7 @@ struct NewConversationView: View {
         self.initialWorkspaceTaskID = initialWorkspaceTaskID
         self.initialEmployeeID = initialEmployeeID
         self.initialCreateTask = initialCreateTask
+        self.initialPrompt = initialPrompt
         self.embedded = embedded
         self.boundTask = boundTask
         self.onBusyChanged = onBusyChanged
@@ -177,7 +185,7 @@ struct NewConversationView: View {
         _taskOwnership = State(initialValue: lockedTaskID == nil ? (initialCreateTask ? "new" : "none") : "existing")
         _targetWorkspaceID = State(initialValue: boundTask?.workspaceId ?? workspaceID ?? "")
         _workspaceSelectionIsLocked = State(initialValue: lockedTaskID != nil)
-        let scope = initialWorkspaceTaskID ?? initialCwd ?? workspaceID ?? "global"
+        let scope = initialDraftScope ?? initialWorkspaceTaskID ?? initialCwd ?? workspaceID ?? "global"
         let pendingID = "pending-new-conversation:\(serverID):\(scope)"
         let draft = SessionDraftStore.shared.draft(sessionId: pendingID, api: api)
         _pendingDraft = StateObject(wrappedValue: draft)
@@ -421,6 +429,10 @@ struct NewConversationView: View {
             if old && !visible { composerFocus.keyboardHidden() }
         }
         .onAppear {
+            if !initialPromptApplied {
+                initialPromptApplied = true
+                if let initialPrompt, pendingDraft.text.isEmpty { pendingDraft.text = initialPrompt }
+            }
             pendingDraft.acquire(pendingDraftConsumer)
             pendingDraftRevision = pendingDraft.textRevision
             pendingAttachmentRevision = stagedAttachments.stagedInputRevision
@@ -471,6 +483,21 @@ struct NewConversationView: View {
             guard taskOwnership == "existing",
                   let task = existingTasks.first(where: { $0.id == taskID }) else { return }
             cwd = task.cwd
+        }
+        .task(id: scenePhase) {
+            if scenePhase == .active, coordinator.unknownOperation == .session {
+                await verifyUnknownSessionCreation()
+            }
+        }
+        .confirmationDialog("另建一个会话？", isPresented: $confirmSeparateSession) {
+            Button("保留草稿，另建会话") {
+                coordinator.startSeparateSession()
+                recoverySessions = []
+                clearFrozenDraft()
+                errorMessage = "草稿已保留，点击发送开始新会话。"
+            }
+        } message: {
+            Text("上一次可能已创建空会话。草稿会留在这里，等你点击发送。")
         }
         .task { await loadConfiguration() }
         .onChange(of: pendingDraft.textRevision) { _, revision in
@@ -870,7 +897,7 @@ struct NewConversationView: View {
                     .font(.footnote).foregroundStyle(Theme.danger)
                 Text(coordinator.unknownOperation == .task
                      ? "可以读取任务列表，选择要继续的任务。输入会保留，任务不会重复创建。"
-                     : "先读取已创建的会话。若上次没有收到会话标识，请返回会话列表打开已有对话。")
+                     : "可以核对上次创建的会话，也可以保留草稿另建会话。")
                     .font(.caption).foregroundStyle(Theme.textSecondary)
                 Button(unknownRecoveryLabel, systemImage: coordinator.unknownOperation == .task ? "checklist" : "arrow.clockwise") {
                     performPrimaryAction()
@@ -878,6 +905,21 @@ struct NewConversationView: View {
                 .buttonStyle(WandQuietButtonStyle())
                 .disabled(!primaryActionEnabled)
                 .accessibilityIdentifier("pending-creation-recovery")
+                if coordinator.unknownOperation == .session {
+                    if !recoverySessions.isEmpty {
+                        Menu("选择近期会话继续") {
+                            ForEach(recoverySessions) { session in
+                                Button("\(session.displayTitle) · \(session.startedAt ?? session.id)") {
+                                    coordinator.resolveUnknownSession(session)
+                                    errorMessage = "已选择会话，点击发送继续。"
+                                }
+                            }
+                        }
+                        .disabled(creating)
+                    }
+                    Button("保留草稿，另建会话") { confirmSeparateSession = true }
+                        .buttonStyle(WandQuietButtonStyle()).disabled(creating)
+                }
                 if coordinator.unknownOperation == .task {
                     Button("跳过任务，直接开始对话", systemImage: "bubble.left") {
                         coordinator.continueWithoutTask()
@@ -910,7 +952,7 @@ struct NewConversationView: View {
 
     private var primaryActionEnabled: Bool {
         let canRecover = coordinator.unknownOperation == .task
-            || (coordinator.unknownOperation == .session && coordinator.unknownSessionID != nil)
+            || coordinator.unknownOperation == .session
         return !creating && !isComposing && !stagedAttachments.isUploading &&
             (isUnknown ? canRecover : (canResumeCreation || canSubmit))
     }
@@ -1039,15 +1081,31 @@ struct NewConversationView: View {
     }
 
     private func verifyUnknownSessionCreation() async {
-        guard !creating, isUnknown, coordinator.unknownOperation == .session,
-              let sessionID = coordinator.unknownSessionID else { return }
+        guard !creating, isUnknown, coordinator.unknownOperation == .session else { return }
         creating = true
         defer { creating = false }
+        let requestID = coordinator.currentCreationRequestID
         do {
-            let snapshot = try await api.getSession(id: sessionID)
-            guard snapshot.id == sessionID else {
-                throw WandAPI.APIError.network("返回的会话与上次创建标识不一致。")
+            let snapshot: SessionSnapshot
+            if let id = coordinator.unknownSessionID {
+                snapshot = try await api.getSession(id: id)
+                guard snapshot.id == id else { throw WandAPI.APIError.network("返回的会话标识不一致。") }
+            } else {
+                let sessions = try await api.listSessions()
+                guard !Task.isCancelled, isUnknown, coordinator.currentCreationRequestID == requestID else { return }
+                let matches = sessions.filter { requestID != nil && $0.creationRequestId == requestID }
+                guard matches.count == 1, let match = matches.first else {
+                    let taskID = coordinator.acceptedTaskIDForContinuation ?? initialWorkspaceTaskID
+                    recoverySessions = Array(sessions.filter {
+                        session in session.archived != true && (taskID == nil || session.workspaceTaskId == taskID)
+                            && (cwd.isEmpty || session.cwd == cwd)
+                    }.sorted { ($0.startedAt ?? "") > ($1.startedAt ?? "") }.prefix(10))
+                    errorMessage = "已核对会话列表，无法确定上一次创建的是哪一个。"
+                    return
+                }
+                snapshot = match
             }
+            guard !Task.isCancelled, isUnknown, coordinator.currentCreationRequestID == requestID else { return }
             coordinator.resolveUnknownSession(snapshot)
             errorMessage = "已找回创建的会话，输入已保留。点击发送继续。"
         } catch {

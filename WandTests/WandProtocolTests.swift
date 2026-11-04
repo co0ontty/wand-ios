@@ -1795,7 +1795,7 @@ private final class InputReceiptStub: SessionInputTransport {
         self.failure = failure
     }
 
-    func sendStructuredInput(id: String, input: String) async throws -> SessionSnapshot {
+    func sendStructuredInput(id: String, input: String, expectedQuestionId: String?) async throws -> SessionSnapshot {
         inputs.append(input)
         await Task.yield()
         if let failure { throw failure }
