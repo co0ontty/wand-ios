@@ -18,7 +18,7 @@ with (work/'build.log').open('w') as log:
  r=subprocess.run(['./scripts/run-tests.sh'],cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=600)
 print('unit build exit='+str(r.returncode),flush=True)
 if r.returncode:raise SystemExit(r.returncode)
-filters=['HomeParityTests/testSystemNavigationKeepsTheSameRealListAndParentControllers','HomeParityTests/testHiddenBarBridgeUsesAndRestoresTheExistingUIKitGesture','HomeParityTests/testSystemNavigationRetainsLiveStackAcrossFourSizes','CurrentAndroidParityTests/testConversationPreviewsShareMarkdownAndDestinationsOwnNavigationChrome']
+filters=['HomeParityTests/testSystemNavigationKeepsTheSameRealListAndParentControllers','HomeParityTests/testHiddenBarBridgeUsesAndRestoresTheExistingUIKitGesture','HomeParityTests/testSystemNavigationPreservesRouteAndDraftAcrossFourSizes','CurrentAndroidParityTests/testConversationPreviewsShareMarkdownAndDestinationsOwnNavigationChrome']
 session=os.environ.get('WAND_ACCEPTANCE_SESSION_ID')
 if session:filters.append('HomeParityTests/testInstalledRootNavigationHidesOnlyWhileDetailsAreOpen')
 args=['xcrun','xcodebuild','-project',str(root/'Wand.xcodeproj'),'-scheme','Wand','-configuration','Debug','-derivedDataPath',str(work/'derived'),'-parallel-testing-enabled','NO','CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','-destination','platform=iOS Simulator,id='+os.environ.get('SIMULATOR_ID','43A9B9F3-B0E2-48F7-8ECE-B04A1222E9CA')]

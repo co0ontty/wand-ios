@@ -48,6 +48,10 @@ final class ConversationOperation: ObservableObject {
 @MainActor
 final class ConversationStore: ObservableObject {
     @Published var listFilters = ConversationListFilters()
+    /// In-memory, endpoint-scoped search survives leaving and rebuilding the sidebar.
+    @Published var sidebarQuery = ""
+    /// Topmost visible sidebar row, in-memory and endpoint-scoped like sidebarQuery.
+    @Published var sidebarScrollAnchorID: String?
     @Published var listTier = ConversationListTier.all
     let api: WandAPI
     let service: any ConversationService

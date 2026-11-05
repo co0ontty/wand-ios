@@ -169,6 +169,8 @@ struct ChatView: View {
     @State private var earlierLoadAnchorID: String?
     /// 列表真实内容高度：首屏不足目标屏数时据此静默往前补页（对齐 Android ChatScreen）。
     @State private var chatContentHeight: CGFloat = 0
+    /// 滚动偏移（内容坐标）：贴底时若落在内容尾部之后的空白区，需要重断言到底部。
+    @State private var chatScrollOffsetY: CGFloat = 0
     @State private var earlierFillPages = 0
     private let earlierFillPageLimit = 8
     /// 应用前后台感知：回前台做连接健康检查 + 拉最新快照，避免半死连接苦等 40s 看门狗。
@@ -763,10 +765,23 @@ struct ChatView: View {
                 // viewport. Never scroll from this observation: scrollTo realizes more
                 // rows and feeds another height change back into the same loop. Native
                 // sizeChanges anchoring above owns layout-only bottom following.
+                // 唯一例外：偏移已越出内容尾部（估算高度回落、尾窗变短）时视口整片白屏，
+                // 此时重断言到底部；纠正后偏移合法，不会形成回路。
                 .onScrollGeometryChange(for: CGFloat.self) { $0.contentSize.height } action: { _, new in
                     chatContentHeight = new
                     // 首次布局可能以 old == new 报到，补页判断只看真实高度，不依赖这次是否变化。
                     fillViewportWithEarlierMessages(viewportHeight: viewportHeight)
+                    if shouldReassertBottomScroll(
+                        stickToBottom: scrollMode == .stickToBottom,
+                        contentHeight: chatContentHeight,
+                        viewportHeight: viewportHeight,
+                        offsetY: chatScrollOffsetY
+                    ) {
+                        scrollToActiveTarget(proxy)
+                    }
+                }
+                .onScrollGeometryChange(for: CGPoint.self) { $0.contentOffset } action: { _, new in
+                    chatScrollOffsetY = new.y
                 }
         }
     }
@@ -1071,9 +1086,9 @@ struct ChatView: View {
         scrollScheduler.request {
             guard scrollMode != .manual else { return }
             if animated && !reduceMotion {
-                withAnimation(WandMotion.scroll) { proxy.scrollTo("chat-bottom") }
+                withAnimation(WandMotion.scroll) { proxy.scrollTo("chat-bottom", anchor: .bottom) }
             } else {
-                proxy.scrollTo("chat-bottom")
+                proxy.scrollTo("chat-bottom", anchor: .bottom)
             }
         }
     }
@@ -2059,6 +2074,20 @@ func shouldLoadEarlierPageToFillViewport(
 ) -> Bool {
     guard canLoadEarlier, !loadingEarlier, viewportHeight > 0, contentHeight > 0 else { return false }
     return contentHeight < viewportHeight * targetScreens
+}
+
+/// 视口偏移越界（落在内容尾部之后的空白区）时需要重断言到底部。
+/// 打开会话时 LazyVStack 的估算高度与真实高度不一致、或尾窗被更短的快照替换，
+/// 偏移会停在内容之外整片白屏，且消息不再变化时没有后续事件纠正。
+/// 仅在贴底跟随模式下纠正；手动浏览不抢位置。
+func shouldReassertBottomScroll(
+    stickToBottom: Bool,
+    contentHeight: CGFloat,
+    viewportHeight: CGFloat,
+    offsetY: CGFloat
+) -> Bool {
+    guard stickToBottom, viewportHeight > 0, contentHeight > 0, offsetY > 0 else { return false }
+    return offsetY > max(0, contentHeight - viewportHeight) + 1
 }
 
 /// 用户气泡最多占阅读宽度的 86%，并至少给左侧留出一截空白。

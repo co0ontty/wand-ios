@@ -43,6 +43,7 @@ final class LiveBackUITests: XCTestCase {
     private func exercise(_ mode: String) {
         let app = launch(mode)
         defer { app.terminate() }
+        let expanded = mode == "system-regular"
         let scroll = app.scrollViews["live-list-scroll"]
         let firstRow = app.staticTexts["list row 0"]
         for _ in 0..<2 {
@@ -58,6 +59,16 @@ final class LiveBackUITests: XCTestCase {
         XCTAssertTrue(app.buttons["open-detail"].waitForExistence(timeout: 10))
         app.buttons["open-detail"].tap()
         XCTAssertTrue(app.staticTexts["live-detail-value"].waitForExistence(timeout: 10))
+        if expanded {
+            // Expanded Duo uses NavigationSplitView: there is no push pop between
+            // detail and parent to swipe — adaptive-axis edge drags are not this
+            // layout's back mechanism. Assert instead that the sidebar stays
+            // visible alongside the detail (fold/expand + ordinary-back behavior
+            // is covered by HomeParityTests against the production container).
+            XCTAssertTrue(app.staticTexts["list row 8"].exists, "Expanded layout must keep the sidebar visible alongside the detail")
+            XCTAssertTrue(app.staticTexts["live-detail-value"].exists)
+            return
+        }
         drag(app, commit: false, from: "detail", to: "parent")
         drag(app, commit: true, from: "detail", to: "parent")
         XCTAssertEqual(app.staticTexts["live-parent-value"].label, "parent revision 2")
@@ -242,7 +253,7 @@ final class LiveBackUITests: XCTestCase {
         add(attachment)
     }
 
-    func testDuoRegularLivePagesCancelAndCommit() { exercise("system-regular") }
+    func testDuoExpandedKeepsSidebarAlongsideDetail() { exercise("system-regular") }
     func testDuoCompactLivePagesCancelAndCommit() { exercise("system-compact") }
     func testHiddenBarChatUsesNativeLivePages() { exercise("hidden") }
 }

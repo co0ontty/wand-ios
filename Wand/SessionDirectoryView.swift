@@ -78,18 +78,47 @@ struct SessionDirectorySections<Row: View>: View {
     }
     private func expanded(_ id: String) -> Bool { !query.isEmpty || !collapsed.contains(id) }
     private func toggle(_ id: String) { if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) } }
-    private func heading(_ name: String, detail: String? = nil, id: String, count: String? = nil, branch: Bool = false) -> some View {
-        Button { toggle(id) } label: {
-            HStack(alignment: .center, spacing: 8) {
-                Image(systemName: expanded(id) ? "chevron.down" : "chevron.right").font(.caption2)
-                Image(systemName: branch ? "arrow.triangle.branch" : "folder").font(.subheadline)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(name).font(.subheadline.weight(.semibold))
-                    if let detail { Text(detail).font(.caption).fixedSize(horizontal: false, vertical: true) }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                if let count { Text(count).font(.caption2) }
-            }.foregroundStyle(Theme.textSecondary).frame(minHeight: 44).contentShape(Rectangle())
-        }.buttonStyle(.plain).accessibilityValue(expanded(id) ? "已展开" : "已收起")
+    private func heading(_ name: String, detail: String? = nil, id: String, count: String? = nil,
+                         branch: Bool = false, gitDetail: Bool = false, sessions: [HomeRecentConversation] = []) -> some View {
+        let states = Set(sessions.map { HomePresentation.executionState($0.session) })
+        return Button { toggle(id) } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .center, spacing: 8) {
+                    Image(systemName: expanded(id) ? "chevron.down" : "chevron.right")
+                        .font(.caption2).foregroundStyle(Theme.textSecondary)
+                    Image(systemName: branch ? "arrow.triangle.branch" : "folder")
+                        .font(.subheadline).foregroundStyle(Theme.textSecondary)
+                    Text(name).font(.headline).foregroundStyle(Theme.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: -4) {
+                        ForEach(HomeExecutionState.allCases.filter { states.contains($0) }, id: \.rawValue) { state in
+                            Image(systemName: state.symbol)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(state.tint)
+                                .frame(width: 24, height: 24)
+                                .background(Theme.workspaceCanvas, in: Circle())
+                                .overlay(Circle().strokeBorder(Theme.border, lineWidth: 0.5))
+                        }
+                    }
+                    .fixedSize()
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("目录状态：" + HomeExecutionState.allCases.filter { states.contains($0) }.map(\.label).joined(separator: "、"))
+                    .accessibilityIdentifier("directory-status-" + id)
+                }
+                if let detail {
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        if gitDetail { Image(systemName: "arrow.triangle.branch").accessibilityHidden(true) }
+                        Text(detail).fixedSize(horizontal: false, vertical: true)
+                    }.font(.caption).foregroundStyle(Theme.textSecondary).padding(.leading, 28)
+                }
+                if let count { Text(count).font(.caption2).foregroundStyle(Theme.textSecondary).padding(.leading, 28) }
+            }
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+            .textCase(nil)
+            .accessibilityValue(expanded(id) ? "已展开" : "已收起")
+            .accessibilityIdentifier("session-directory-" + id)
     }
     var body: some View {
         Group {
@@ -102,9 +131,11 @@ struct SessionDirectorySections<Row: View>: View {
                         if expanded(project.id) {
                             if let error = errors[project.id] {
                                 Text(error).font(.caption).foregroundStyle(Theme.danger)
+                                    .listRowBackground(Color.clear)
                                 Button("重新读取目录") { refresh += 1 }
+                                    .listRowBackground(Color.clear)
                             }
-                            if !trees.isEmpty { heading("主分支", detail: directory?.branch, id: project.id + ":main", count: "\(matches.filter { tree($0, directory) == nil }.count) 个会话", branch: true).listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 0)) }
+                            if !trees.isEmpty { heading("主分支", detail: directory?.branch, id: project.id + ":main", count: "\(matches.filter { tree($0, directory) == nil }.count) 个会话", branch: true, sessions: matches.filter { tree($0, directory) == nil }).listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 0)) }
                             if trees.isEmpty || expanded(project.id + ":main") {
                                 ForEach(matches.filter { tree($0, directory) == nil }) { row($0, trees.isEmpty ? 1 : 2) }
                             }
@@ -112,24 +143,25 @@ struct SessionDirectorySections<Row: View>: View {
                                 let treeRows = matches.filter { tree($0, directory) == worktree.path }
                                 let key = project.id + ":" + worktree.path
                                 if query.isEmpty || !treeRows.isEmpty || (worktree.name + " " + worktree.branch).localizedCaseInsensitiveContains(query) {
-                                    heading(worktree.name, detail: worktree.branch.isEmpty ? "detached HEAD" : worktree.branch, id: key, count: "\(treeRows.count) 个会话", branch: true)
-                                        .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 0))
+                                    heading(worktree.name, detail: worktree.branch.isEmpty ? "detached HEAD" : worktree.branch, id: key, count: "\(treeRows.count) 个会话", branch: true, sessions: treeRows)
+                                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 0))
                                         .contextMenu { Button("合并到项目分支…", systemImage: "arrow.triangle.merge") { target = DirectoryMergeTarget(workspaceId: project.id, path: worktree.path) } }
                                     if expanded(key) {
-                                        if treeRows.isEmpty { Text("暂无匹配会话").font(.caption).foregroundStyle(Theme.textSecondary).listRowInsets(EdgeInsets(top: 6, leading: 68, bottom: 6, trailing: 0)) }
+                                        if treeRows.isEmpty { Text("暂无匹配会话").font(.caption).foregroundStyle(Theme.textSecondary).listRowInsets(EdgeInsets(top: 6, leading: 24, bottom: 6, trailing: 0)).listRowBackground(Color.clear) }
                                         ForEach(treeRows) { row($0, 2) }
                                     }
                                 }
                             }
                         }
                     } header: {
-                        heading(project.workspaceName, detail: errors[project.id] != nil ? "分支与 Worktree 暂不可用" : directory.map { $0.isGit ? "\($0.branch.isEmpty ? "detached HEAD" : $0.branch) · \($0.worktrees.count) 个 Worktree" : "非 Git 目录" } ?? "正在读取目录…", id: project.id)
+                        heading(project.workspaceName, detail: errors[project.id] != nil ? "分支与 Worktree 暂不可用" : directory.map { $0.isGit ? "\($0.branch.isEmpty ? "detached HEAD" : $0.branch) · \($0.worktrees.count) 个 Worktree" : "非 Git 目录" } ?? "正在读取目录…", id: project.id, gitDetail: directory?.isGit == true, sessions: matches)
+                            .listRowInsets(EdgeInsets(top: 12, leading: 0, bottom: 8, trailing: 0))
                     }
                 }
             }
             let other = rows.filter { owner($0) == nil }
             if !other.isEmpty {
-                Section { if expanded("other") { ForEach(other) { row($0, 1) } } } header: { heading("其他会话", id: "other", count: "\(other.count) 个会话") }
+                Section { if expanded("other") { ForEach(other) { row($0, 1) } } } header: { heading("其他会话", id: "other", count: "\(other.count) 个会话", sessions: other) }
             }
         }
         .onAppear { collapsed = Set(UserDefaults.standard.stringArray(forKey: collapseKey) ?? []) }

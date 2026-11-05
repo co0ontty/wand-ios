@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/wand-ios-conversation-filters.XXXXXX")"
 trap 'rm -rf "$TEMP"' EXIT
 mkdir -p "$TEMP/Sources/Wand" "$TEMP/Tests/WandTests"
-cp Wand/ConversationListFilters.swift "$TEMP/Sources/Wand/"
+cp Wand/ConversationListFiltersCore.swift "$TEMP/Sources/Wand/"
 cp WandTests/ConversationListFiltersTests.swift "$TEMP/Tests/WandTests/"
 cat > "$TEMP/Package.swift" <<'SWIFT'
 // swift-tools-version: 5.9

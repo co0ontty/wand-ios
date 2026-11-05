@@ -24,75 +24,7 @@ struct HomeFeatureMenu: View {
     }
 }
 
-/// Business stages come only from wand_tasks, never workspace_tasks.status or runner state.
-enum ConversationTaskStage: String, CaseIterable {
-    case all, backlog, todo, doing, review, ready, archived, none, unknown
-    static var options: [Self] { allCases.filter { $0 != .unknown } }
-    static func businessStatus(_ value: String?) -> Self {
-        if value == "done" { return .review }
-        guard let value, let stage = Self(rawValue: value), ![.all, .none, .unknown].contains(stage) else { return .unknown }
-        return stage
-    }
-    static func resolve(boardStatus: String?, hasTaskContainer: Bool, workspaceTaskId: String?) -> Self {
-        if hasTaskContainer { return businessStatus(boardStatus) }
-        return workspaceTaskId == nil ? .none : .unknown
-    }
-    var title: String {
-        switch self {
-        case .all: return "全部状态"
-        case .backlog: return "待立项"
-        case .todo: return "等待认领"
-        case .doing: return "执行中"
-        case .review: return "待验收"
-        case .ready: return "待归档"
-        case .archived: return "已归档"
-        case .none: return "未关联任务"
-        case .unknown: return "任务状态未知"
-        }
-    }
-}
-
-enum ConversationWorkspaceFilter: Hashable {
-    case all, unassigned, workspace(String), unknown
-    static func resolve(id: String?, synthetic: Bool = false, global: Bool = false) -> Self {
-        if synthetic || global || id == "wand-global" { return .unassigned }
-        guard let id, !id.isEmpty else { return .unknown }
-        return .workspace(id)
-    }
-}
-
-/// `.current` is the baseline projection: archived sessions stay out of the list until the
-/// user explicitly picks another scope, and only then count as an active filter.
-enum ConversationArchiveScope: String, CaseIterable {
-    case current, all, archived
-    var title: String {
-        switch self { case .current: return "未归档"; case .all: return "全部含已归档"; case .archived: return "已归档" }
-    }
-}
-
-enum ConversationRuntime: String, CaseIterable {
-    case confirmation, running, queued, idle, finished, failed
-    static var options: [Self] { [.confirmation, .running, .queued, .idle, .finished, .failed] }
-    var title: String {
-        switch self {
-        case .confirmation: return "需要我确认"
-        case .running: return "运行中"
-        case .queued: return "排队中"
-        case .idle: return "空闲"
-        case .finished: return "已结束"
-        case .failed: return "运行失败"
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .confirmation: return "exclamationmark.bubble"
-        case .running: return "waveform.path.ecg"
-        case .queued: return "clock"
-        case .idle: return "circle"
-        case .finished: return "stop.circle"
-        case .failed: return "xmark.circle"
-        }
-    }
+extension ConversationRuntime {
     static func resolve(_ session: WorkspaceSessionSummary) -> Self {
         if session.activityStatus == "failed" { return .failed }
         guard session.archived != true else { return .idle }
@@ -109,65 +41,6 @@ enum ConversationRuntime: String, CaseIterable {
         return nil
     }
 }
-
-struct ConversationFilterFacts: Equatable {
-    let stage: ConversationTaskStage
-    let workspace: ConversationWorkspaceFilter
-    let archived: Bool
-    let active: Bool
-    let searchText: String
-    var runtime: ConversationRuntime? = .idle
-    /// Server employee ID; "none" is the explicit unassigned value.
-    var employee = "none"
-}
-
-struct ConversationListFilters: Equatable {
-    var runtimes: Set<ConversationRuntime> = []
-    var workspaces: Set<ConversationWorkspaceFilter> = []
-    var employees: Set<String> = []
-    var stage: ConversationTaskStage = .all
-    var workspace: ConversationWorkspaceFilter = .all
-    var archive: ConversationArchiveScope = .current
-    var activeOnly = false
-    var count: Int { (runtimes.isEmpty ? 0 : 1) + (workspaces.isEmpty ? 0 : 1) + (employees.isEmpty ? 0 : 1) + (stage == .all ? 0 : 1) + (workspace == .all ? 0 : 1) + (archive == .current ? 0 : 1) + (activeOnly ? 1 : 0) }
-    var isDefault: Bool { count == 0 }
-
-    /// All predicates run against one association; never combine different siblings' matches.
-    func matches(_ facts: ConversationFilterFacts, query: String = "") -> Bool {
-        (runtimes.isEmpty || (facts.runtime.map(runtimes.contains) ?? false))
-            && (workspaces.isEmpty || workspaces.contains(facts.workspace))
-            && (employees.isEmpty || employees.contains(facts.employee))
-            && (stage == .all || stage == facts.stage)
-            && (workspace == .all || workspace == facts.workspace)
-            && (archive == .all || facts.archived == (archive == .archived))
-            && (!activeOnly || facts.active)
-            && query.split(whereSeparator: { $0.isWhitespace }).allSatisfy { facts.searchText.localizedCaseInsensitiveContains(String($0)) }
-    }
-}
-
-struct ConversationWorkspaceOption: Identifiable {
-    let id: String
-    let title: String
-}
-
-struct ConversationEmployeeOption: Identifiable {
-    let id: String
-    let title: String
-}
-
-enum ConversationFilterDimension {
-    case runtime, workspace, employee
-    var title: String {
-        switch self { case .runtime: return "运行状态"; case .workspace: return "工作区"; case .employee: return "员工" }
-    }
-    var symbol: String {
-        switch self { case .runtime: return "waveform.path.ecg"; case .workspace: return "folder"; case .employee: return "person" }
-    }
-    var identifier: String {
-        switch self { case .runtime: return "conversation-runtime-expand"; case .workspace: return "conversation-workspace-expand"; case .employee: return "conversation-employee-expand" }
-    }
-}
-
 /// The trigger stays mounted while its native popover owns multi-selection and dismissal.
 struct ConversationFilterCapsule: View {
     let dimension: ConversationFilterDimension
@@ -498,7 +371,7 @@ struct ConversationHomeToolbar: ViewModifier {
     }
     private let railSpacing: CGFloat = 12
     private func controlHeight(_ slot: RailSlot) -> CGFloat {
-        slot == .create || slot == .more ? WandLayout.controlTouch : WandLayout.controlTouch * 2 + 4
+        slot == .create || slot == .more ? 56 : WandLayout.controlTouch * 2 + 4
     }
     private var railHeight: CGFloat {
         // Reserve one option row even below the last capsule, within the native slot.
@@ -603,15 +476,21 @@ struct ConversationHomeToolbar: ViewModifier {
         switch slot {
         case .create:
             Button(action: onCreate) {
-                Image(systemName: "plus").font(.title3).frame(width: 44, height: 44).wandGlassCapsule()
+                VStack(spacing: 3) {
+                    Image(systemName: "plus").font(.title3)
+                    Text("新建").font(.caption2)
+                }.frame(width: 44, height: 56).wandGlassCapsule()
             }.buttonStyle(.plain).accessibilityLabel("新建会话").accessibilityIdentifier("unified-new-session")
         case .more:
             Button { expand(.more) } label: {
+                VStack(spacing: 3) {
                 ZStack {
                     Image(systemName: "ellipsis").opacity(expanded == .more ? 0 : 1)
                     Image(systemName: "xmark").opacity(expanded == .more ? 1 : 0)
                         .rotationEffect(.degrees(reducedMotion || expanded == .more ? 0 : -90))
-                }.font(.title3).frame(width: 44, height: 44).wandGlassCapsule()
+                }.font(.title3)
+                Text(expanded == .more ? "收起" : "更多").font(.caption2)
+                }.frame(width: 44, height: 56).wandGlassCapsule()
             }.buttonStyle(.plain).accessibilityLabel(expanded == .more ? "收起功能菜单" : "更多")
                 .accessibilityIdentifier("home-sidebar-actions")
         case .runtime, .workspace, .employee:
@@ -754,14 +633,19 @@ struct UnifiedConversationSidebar: View {
     let onSessionDeleted: (String) -> Void
     let onModalVisibilityChanged: (Bool) -> Void
     let onMutationBusyChanged: (Bool) -> Void
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.usesSystemHomeNavigation) private var usesSystemNavigation
     @Environment(\.systemHomeToolbarInDetail) private var toolbarInDetail
     @Environment(\.systemHomeSidebarToggle) private var sidebarToggle
     @Environment(\.systemHomeSidebarCollapsed) private var sidebarCollapsed
-    @State private var query = ""
+    private var query: String {
+        get { store.sidebarQuery }
+        nonmutating set { store.sidebarQuery = newValue }
+    }
     @State private var revealedRowID: String?
     @State private var moveSessionTarget: WorkspaceSessionSummary?
     @State private var deleteSessionTarget: WorkspaceSessionSummary?
+    @State private var moreSessionTarget: WorkspaceSessionSummary?
     @State private var deletionBusy = false
     @State private var deletionError: String?
     @State private var addingWorkspace = false
@@ -821,8 +705,13 @@ struct UnifiedConversationSidebar: View {
         let other = rows.filter { ![.confirmation, .failed].contains(ConversationRuntime.resolve($0.session)) }
         let history: [ConversationInstance] = []
         return VStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("会话").font(.title2.bold()).foregroundStyle(Theme.textPrimary)
+                Text("按目录分组").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                Spacer(minLength: 0)
+            }.accessibilityAddTraits(.isHeader)
             HStack(spacing: 12) {
-                HomeSearchField(placeholder: "搜索会话", text: $query, focused: $searchFocused)
+                HomeSearchField(placeholder: "搜索会话", text: $store.sidebarQuery, focused: $searchFocused)
                 if !usesSystemNavigation {
                     Button {
                         let selected = store.listFilters.workspaces
@@ -868,13 +757,17 @@ struct UnifiedConversationSidebar: View {
             List {
                 if (loading || store.loading) && entries.isEmpty && store.items.isEmpty {
                     ProgressView("正在读取会话…")
+                        .listRowBackground(Color.clear)
                 }
                 if let message = error ?? store.error {
                     Text(message).foregroundStyle(Theme.danger)
+                        .listRowBackground(Color.clear)
                     Button("重新读取", action: onReload)
+                        .listRowBackground(Color.clear)
                 }
                 if let deletionError {
-                    Text("删除会话失败：" + deletionError).font(.caption).foregroundStyle(Theme.danger)
+                    Text("会话操作失败：" + deletionError).font(.caption).foregroundStyle(Theme.danger)
+                        .listRowBackground(Color.clear)
                 }
                 if !queuedTasks.isEmpty {
                     Section("排队任务 · \(queuedTasks.count)") {
@@ -908,6 +801,7 @@ struct UnifiedConversationSidebar: View {
                             .listRowInsets(EdgeInsets(top: 10, leading: 0, bottom: 10, trailing: 0))
                             .listRowBackground(Color.clear)
                             .accessibilityIdentifier("queued-task-" + entry.task.id)
+                            .id("sidebar-queued-" + entry.task.id)
                         }
                     }
                 }
@@ -918,11 +812,13 @@ struct UnifiedConversationSidebar: View {
                     Text(store.listFilters.isDefault && query.isEmpty
                         ? (entries.isEmpty ? "还没有会话" : "没有未归档的会话")
                         : "没有匹配的会话").foregroundStyle(Theme.textSecondary)
+                        .listRowBackground(Color.clear)
                     if !query.isEmpty || !store.listFilters.isDefault {
                         Button("清除筛选与搜索") { store.listFilters = ConversationListFilters(); query = "" }
+                            .listRowBackground(Color.clear)
                     }
                 }
-            }.listStyle(.plain).scrollContentBackground(.hidden)
+            }.listStyle(.plain).scrollPosition(id: $store.sidebarScrollAnchorID, anchor: .top).scrollContentBackground(.hidden)
                 .contentMargins(.top, 0, for: .scrollContent)
                 // Keep row content clear of the indicator without widening the page gutter.
                 .contentMargins(.trailing, 12, for: .scrollContent)
@@ -971,6 +867,16 @@ struct UnifiedConversationSidebar: View {
                     sessionTitle: session.title ?? "会话")
                     .presentationDetents([.medium, .large])
             }
+            .confirmationDialog("会话操作", isPresented: Binding(
+                get: { moreSessionTarget != nil },
+                set: { if !$0 { moreSessionTarget = nil } }
+            ), titleVisibility: .visible) {
+                if let session = moreSessionTarget {
+                    Button(session.archived == true ? "恢复会话" : "归档会话") { archiveSession(session) }
+                    Button("删除会话", role: .destructive) { deleteSessionTarget = session }
+                    Button("取消", role: .cancel) { moreSessionTarget = nil }
+                }
+            }
             .alert("删除会话？", isPresented: Binding(
                 get: { deleteSessionTarget != nil },
                 set: { if !$0 { deleteSessionTarget = nil } }
@@ -983,10 +889,22 @@ struct UnifiedConversationSidebar: View {
             } message: {
                 Text("会话「\(deleteSessionTarget?.title ?? "会话")」会结束并被删除，此操作无法撤销。")
             }
-            .onChange(of: addingWorkspace || moveSessionTarget != nil || deleteSessionTarget != nil) { _, visible in
+            .onChange(of: addingWorkspace || moveSessionTarget != nil || deleteSessionTarget != nil || moreSessionTarget != nil) { _, visible in
                 onModalVisibilityChanged(visible)
             }
             .onDisappear { revealedRowID = nil; onModalVisibilityChanged(false) }
+    }
+
+    private func archiveSession(_ session: WorkspaceSessionSummary) {
+        guard !deletionBusy else { return }
+        deletionBusy = true
+        deletionError = nil
+        onMutationBusyChanged(true)
+        Task {
+            defer { deletionBusy = false; onMutationBusyChanged(false) }
+            do { try await workspaceStore.archiveSession(session.id, archived: session.archived != true) }
+            catch { deletionError = error.localizedDescription }
+        }
     }
 
     private func deleteSession(_ session: WorkspaceSessionSummary) {
@@ -1016,9 +934,9 @@ struct UnifiedConversationSidebar: View {
                 searchFocused = false
                 moveSessionTarget = session
             },
-            HomeRowAction(id: "delete", title: "删除", symbol: "trash", tint: Theme.danger) {
+            HomeRowAction(id: "more", title: "更多", symbol: "ellipsis", tint: Theme.textSecondary) {
                 searchFocused = false
-                deleteSessionTarget = session
+                moreSessionTarget = session
             }
         ]
     }
@@ -1052,8 +970,6 @@ struct UnifiedConversationSidebar: View {
         let provider = item.session.providerLabel
         if !provider.isEmpty { parts.append(provider) }
         if let employee = item.session.employeeName, !employee.isEmpty { parts.append(employee) }
-        let workspace = item.filterWorkspaceTitle
-        if !workspace.isEmpty { parts.append(workspace) }
         return parts.joined(separator: " · ")
     }
 
@@ -1066,7 +982,7 @@ struct UnifiedConversationSidebar: View {
                     Text(item.session.title ?? item.task?.name ?? "会话")
                         .font(.body.weight(.medium))
                         .foregroundStyle(Theme.textPrimary)
-                        .lineLimit(2)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     HStack(spacing: 5) {
                         BrandLogo(provider: item.session.provider)
@@ -1080,18 +996,20 @@ struct UnifiedConversationSidebar: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-
                 SessionStatusGlyph(session: item.session, size: 16)
+                    .fixedSize()
             }
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .multilineTextAlignment(.leading)
             .padding(.vertical, 4)
         }.buttonStyle(.plain)
             .accessibilityAddTraits(selectedSessionID == item.id || store.items.contains { $0.id == selectedConversationID && ($0.communicationSessionId ?? $0.sessionId) == item.id } ? .isSelected : [])
             .homeSwipeActions(id: "session-" + item.id, revealedID: $revealedRowID,
                 actions: sessionActions(item.session), enabled: !deletionBusy, surface: Theme.workspaceCanvas)
-            .listRowInsets(EdgeInsets(top: 10, leading: 28 + CGFloat(depth) * 20, bottom: 10, trailing: 0))
+            .listRowInsets(EdgeInsets(top: 10, leading: CGFloat(max(0, depth - 1)) * 12, bottom: 10, trailing: 0))
             .listRowBackground(Color.clear)
             .accessibilityIdentifier("conversation-session-" + item.id)
+            .id("sidebar-session-" + item.id)
     }
 }
 

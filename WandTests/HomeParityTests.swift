@@ -87,8 +87,14 @@ final class HomeParityTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let state = AdaptiveNavigationFixtureState()
         let host = UIHostingController(rootView: AdaptiveNavigationFixture(state: state, systemNavigation: true))
+        host.safeAreaRegions = []
+        let container = UIViewController()
+        container.addChild(host); container.view.addSubview(host.view); host.didMove(toParent: container)
+        host.view.frame = CGRect(x: 0, y: 0, width: 466, height: 678)
+        host.traitOverrides.horizontalSizeClass = .compact
+        host.traitOverrides.verticalSizeClass = .regular
         let window = UIWindow(windowScene: scene)
-        window.rootViewController = host; window.makeKeyAndVisible()
+        window.rootViewController = container; window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil }
         func settled(_ depth: Int) async throws -> UINavigationController {
             for _ in 0..<80 {
@@ -98,6 +104,16 @@ final class HomeParityTests: XCTestCase {
                 try await Task.sleep(for: .milliseconds(50))
             }
             throw NSError(domain: "NativeNavigationAcceptance", code: 1)
+        }
+        func waitForMarker(_ id: String, alongside other: String? = nil) async throws {
+            for _ in 0..<80 {
+                host.view.layoutIfNeeded()
+                let main = homeNavigationMarker(id, in: host.view).map { homeEffectiveVisibleFrame($0, in: host.view) }
+                let alongsideOK = other.map { homeNavigationMarker($0, in: host.view) != nil } ?? true
+                if let frame = main, !frame.isNull, alongsideOK { return }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            throw NSError(domain: "NativeNavigationAcceptance", code: 2)
         }
         let nav = try await settled(1)
         let root = try XCTUnwrap(nav.topViewController)
@@ -121,7 +137,42 @@ final class HomeParityTests: XCTestCase {
         XCTAssertTrue(nav.topViewController === root)
         XCTAssertEqual(state.draft, draft)
         XCTAssertFalse(homeNavigationControllers(host).contains { $0 is UISplitViewController },
-            "A one-page-at-a-time Duo flow must not unmount its list in another split column")
+            "Compact single-column layout must use one native back stack, not a split")
+
+        // Expanded Duo layout (regular, 669x951): the same list stays visible in the
+        // split sidebar while the selected detail is shown alongside it — the old
+        // assertion that forbade UISplitViewController is retired on purpose.
+        host.traitOverrides.horizontalSizeClass = .regular
+        host.traitOverrides.verticalSizeClass = .regular
+        host.view.frame = CGRect(x: 0, y: 0, width: 669, height: 951)
+        try await waitForMarker("adaptive-sidebar")
+        let split = try XCTUnwrap(homeNavigationControllers(host).compactMap { $0 as? UISplitViewController }.first)
+        XCTAssertFalse(split.isCollapsed, "Expanded Duo must keep the sidebar column visible")
+        XCTAssertEqual(state.draft, draft)
+        state.selection = "session"
+        try await waitForMarker("adaptive-detail-session", alongside: "adaptive-sidebar")
+        XCTAssertEqual(state.draft, draft, "Opening a detail in the split must not discard the draft")
+        try XCTUnwrap(state.back)()
+        try await waitForMarker("adaptive-sidebar")
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(state.selection, "Ordinary back in the split must clear the detail selection")
+        XCTAssertEqual(state.draft, draft)
+
+        // Folding back to a compact single column restores the native back stack
+        // and drops the split container instead of keeping a second navigation.
+        host.traitOverrides.horizontalSizeClass = .compact
+        host.traitOverrides.verticalSizeClass = .regular
+        host.view.frame = CGRect(x: 0, y: 0, width: 466, height: 678)
+        var splitGone = 0
+        for _ in 0..<80 {
+            host.view.layoutIfNeeded()
+            if !homeNavigationControllers(host).contains(where: { $0 is UISplitViewController }) { splitGone += 1 } else { splitGone = 0 }
+            if splitGone >= 3 { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertGreaterThanOrEqual(splitGone, 3, "Folding to compact must collapse the split back to a single column")
+        _ = try await settled(1)
+        XCTAssertEqual(state.draft, draft)
     }
 
     @MainActor
@@ -153,7 +204,11 @@ final class HomeParityTests: XCTestCase {
     }
 
     @MainActor
-    func testSystemNavigationRetainsLiveStackAcrossFourSizes() async throws {
+    func testSystemNavigationPreservesRouteAndDraftAcrossFourSizes() async throws {
+        // Approved layout contract: two regular sizes are expanded split
+        // (sidebar + detail), two compact sizes are a single native stack.
+        // Container identity is intentionally not asserted across a fold/expand
+        // — the route, visible marker and draft are the preserved contract.
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let state = AdaptiveNavigationFixtureState()
         let host = UIHostingController(rootView: AdaptiveNavigationFixture(state: state, systemNavigation: true))
@@ -164,11 +219,9 @@ final class HomeParityTests: XCTestCase {
         window.rootViewController = container; window.makeKeyAndVisible()
         defer { window.isHidden = true; window.rootViewController = nil }
         let draft = state.draft
-        var originalNav: UINavigationController?
-        var originalRoot: UIViewController?
-        let sizes: [(CGFloat, CGFloat, UIUserInterfaceSizeClass, UIUserInterfaceSizeClass)] = [
-            (669, 951, .regular, .regular), (951, 669, .regular, .regular),
-            (466, 678, .compact, .regular), (678, 466, .compact, .compact)
+        let sizes: [(CGFloat, CGFloat, UIUserInterfaceSizeClass, UIUserInterfaceSizeClass, Bool)] = [
+            (669, 951, .regular, .regular, true), (951, 669, .regular, .regular, true),
+            (466, 678, .compact, .regular, false), (678, 466, .compact, .compact, false)
         ]
         for phase in 0..<5 {
             switch phase {
@@ -179,28 +232,39 @@ final class HomeParityTests: XCTestCase {
             default: break
             }
             let expected = state.selection ?? state.parents.last
-            for (width, height, horizontal, vertical) in sizes {
+            for (width, height, horizontal, vertical, wide) in sizes {
                 host.traitOverrides.horizontalSizeClass = horizontal
                 host.traitOverrides.verticalSizeClass = vertical
                 host.view.frame = CGRect(x: 0, y: 0, width: width, height: height)
+                let id = expected.map { "adaptive-detail-" + $0 } ?? "adaptive-sidebar"
                 var stable = 0
                 for _ in 0..<80 {
                     host.view.layoutIfNeeded()
-                    let nav = homeNavigationControllers(host).compactMap { $0 as? UINavigationController }.first
-                    let depth = contactNavigationPath(parents: state.parents, selection: state.selection).count + 1
-                    let id = expected.map { "adaptive-detail-" + $0 } ?? "adaptive-sidebar"
-                    let visible = nav?.topViewController?.viewIfLoaded.flatMap { homeNavigationMarker(id, in: $0) } != nil
-                    stable = visible && nav?.viewControllers.count == depth && nav?.transitionCoordinator == nil ? stable + 1 : 0
+                    let controllers = homeNavigationControllers(host)
+                    let hasSplit = controllers.contains { $0 is UISplitViewController }
+                    let marker = homeNavigationMarker(id, in: host.view)
+                    let markerVisible = marker.map { !homeEffectiveVisibleFrame($0, in: host.view).isNull } ?? false
+                    // Expanded split keeps the sidebar visible alongside the detail;
+                    // the single-column stack shows exactly one page marker.
+                    let sidebarAlongside = !wide || expected == nil
+                        || homeNavigationMarker("adaptive-sidebar", in: host.view) != nil
+                    let depthOK: Bool
+                    if wide { depthOK = hasSplit } else {
+                        let depth = contactNavigationPath(parents: state.parents, selection: state.selection).count + 1
+                        let nav = controllers.compactMap { $0 as? UINavigationController }.first
+                        depthOK = !hasSplit && nav?.viewControllers.count == depth && nav?.transitionCoordinator == nil
+                    }
+                    stable = markerVisible && sidebarAlongside && depthOK ? stable + 1 : 0
                     if stable >= 3 { break }
                     try await Task.sleep(for: .milliseconds(50))
                 }
-                XCTAssertGreaterThanOrEqual(stable, 3, "Native stack must settle for phase \(phase), \(width)x\(height)")
-                let nav = try XCTUnwrap(homeNavigationControllers(host).compactMap { $0 as? UINavigationController }.first)
-                if let originalNav { XCTAssertTrue(nav === originalNav) } else { originalNav = nav }
-                if let originalRoot { XCTAssertTrue(nav.viewControllers.first === originalRoot) }
-                else { originalRoot = nav.viewControllers.first }
+                XCTAssertGreaterThanOrEqual(stable, 3,
+                    "Layout must settle for phase \(phase), \(width)x\(height) wide=\(wide)")
                 XCTAssertEqual(host.view.bounds.size, CGSize(width: width, height: height))
-                XCTAssertEqual(state.draft, draft)
+                XCTAssertEqual(state.draft, draft,
+                    "Draft must survive fold/expand for phase \(phase), \(width)x\(height)")
+                XCTAssertEqual(state.selection ?? state.parents.last, expected,
+                    "Route must survive fold/expand for phase \(phase), \(width)x\(height)")
             }
         }
         XCTAssertNil(state.selection); XCTAssertTrue(state.parents.isEmpty)

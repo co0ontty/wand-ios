@@ -117,6 +117,7 @@
 		E8000000000000000000AC01 /* WorkspaceWorktreeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8000000000000000000BC01 /* WorkspaceWorktreeTests.swift */; };
 		F1000000000000000000AC01 /* HomePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC01 /* HomePresentation.swift */; };
 		F1000000000000000000AC09 /* ConversationListFilters.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC09 /* ConversationListFilters.swift */; };
+		F1000000000000000000AC12 /* ConversationListFiltersCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC12 /* ConversationListFiltersCore.swift */; };
 		F1000000000000000000AC02 /* WorkspaceCreatePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC02 /* WorkspaceCreatePanel.swift */; };
 		F1000000000000000000AC03 /* WorkspaceHomeComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC03 /* WorkspaceHomeComponents.swift */; };
 		F1000000000000000000AC04 /* HomeParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000BC04 /* HomeParityTests.swift */; };
@@ -286,6 +287,7 @@
 		C3000000000000000000F101 /* WandTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WandTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F1000000000000000000BC01 /* HomePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomePresentation.swift; sourceTree = "<group>"; };
 		F1000000000000000000BC09 /* ConversationListFilters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationListFilters.swift; sourceTree = "<group>"; };
+		F1000000000000000000BC12 /* ConversationListFiltersCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationListFiltersCore.swift; sourceTree = "<group>"; };
 		F1000000000000000000BC02 /* WorkspaceCreatePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCreatePanel.swift; sourceTree = "<group>"; };
 		F1000000000000000000BC03 /* WorkspaceHomeComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceHomeComponents.swift; sourceTree = "<group>"; };
 		F1000000000000000000BC04 /* HomeParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeParityTests.swift; sourceTree = "<group>"; };
@@ -349,6 +351,7 @@
 				F1000000000000000000BC02 /* WorkspaceCreatePanel.swift */,
 				F1000000000000000000BC01 /* HomePresentation.swift */,
 				F1000000000000000000BC09 /* ConversationListFilters.swift */,
+				F1000000000000000000BC12 /* ConversationListFiltersCore.swift */,
 				A100000000000000000000B1 /* App.swift */,
 				A100000000000000000000B2 /* ContentView.swift */,
 				A100000000000000000000B3 /* ConnectView.swift */,
@@ -663,6 +666,7 @@
 				F1000000000000000000AC02 /* WorkspaceCreatePanel.swift in Sources */,
 				F1000000000000000000AC01 /* HomePresentation.swift in Sources */,
 				F1000000000000000000AC09 /* ConversationListFilters.swift in Sources */,
+				F1000000000000000000AC12 /* ConversationListFiltersCore.swift in Sources */,
 				A100000000000000000000A1 /* App.swift in Sources */,
 				A100000000000000000000A2 /* ContentView.swift in Sources */,
 				A100000000000000000000A3 /* ConnectView.swift in Sources */,

@@ -223,11 +223,15 @@ private final class ChatLoadingURLProtocol: URLProtocol {
         }
         XCTAssertTrue(sawPreCommitState)
         XCTAssertEqual(scrolls, 0, "Never force layout synchronously during publication")
-        try await Task.sleep(for: .milliseconds(80))
+        // Cloud schedulers can defer Task.yield() far past a fixed dwell. Wait for
+        // the actual coalesced scroll receipt instead of racing the clock.
+        for _ in 0..<500 where scrolls == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertEqual(scrolls, 1, "A burst requires only one post-commit scroll, not two per event")
         scheduler.request { XCTFail("Manual history browsing/page exit must cancel pending scrolling") }
         scheduler.cancel()
-        try await Task.sleep(for: .milliseconds(30))
+        try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(scrolls, 1)
     }
 
@@ -256,8 +260,19 @@ private final class ChatLoadingURLProtocol: URLProtocol {
             let payload: [String: Any] = ["type": "output", "data": ["incremental": true, "messageCount": 2,
                 "lastMessage": ["role": "assistant", "content": [["type": "text", "text": Array(repeating: "首条回复逐行增长，保持阅读位置稳定。", count: chunk).joined(separator: "\n")]]], "isResponding": true]]
             store.handle(try JSONDecoder().decode(WsIncoming.self, from: JSONSerialization.data(withJSONObject: payload)))
-            try await Task.sleep(for: .milliseconds(60))
-            host.view.layoutIfNeeded()
+            // The sizeChanges anchor and any reassert apply at layout time, which
+            // a loaded cloud runner defers past any fixed dwell. Poll until the
+            // settled offset (or the timeout) instead of sampling the pre-layout
+            // frame; assertions below still run against the settled geometry.
+            for _ in 0..<100 {
+                try await Task.sleep(for: .milliseconds(20))
+                host.view.layoutIfNeeded()
+                let top = -scroll.adjustedContentInset.top
+                let bottom = max(top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                let expected = bottom == top ? top : bottom
+                let tolerance: CGFloat = bottom == top ? 1 : 8
+                if abs(scroll.contentOffset.y - expected) <= tolerance { break }
+            }
             let top = -scroll.adjustedContentInset.top
             let bottom = max(top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
             print("FIRST-REPLY chunk=\(chunk) content=\(scroll.contentSize.height) viewport=\(scroll.bounds.height) offset=\(scroll.contentOffset.y) bottom=\(bottom)")

@@ -754,6 +754,55 @@ final class WandProtocolTests: XCTestCase {
         XCTAssertNotEqual(claude.id, codex.id)
     }
 
+    func testBottomScrollReassertsOnlyWhenOffsetBeyondContentEnd() {
+        // 偏移越出尾部：视口落在空白区，需要重断言到底部。
+        XCTAssertTrue(shouldReassertBottomScroll(
+            stickToBottom: true,
+            contentHeight: 2000,
+            viewportHeight: 800,
+            offsetY: 1500
+        ))
+        // 内容短于视口、偏移仍为正：同样越界。
+        XCTAssertTrue(shouldReassertBottomScroll(
+            stickToBottom: true,
+            contentHeight: 300,
+            viewportHeight: 800,
+            offsetY: 40
+        ))
+        // 偏移合法（已贴底或在内容范围内）不触发：纠正后不再回触发。
+        XCTAssertFalse(shouldReassertBottomScroll(
+            stickToBottom: true,
+            contentHeight: 2000,
+            viewportHeight: 800,
+            offsetY: 1200
+        ))
+        XCTAssertFalse(shouldReassertBottomScroll(
+            stickToBottom: true,
+            contentHeight: 2000,
+            viewportHeight: 800,
+            offsetY: 1199
+        ))
+        // 手动浏览、几何未就绪不抢位置。
+        XCTAssertFalse(shouldReassertBottomScroll(
+            stickToBottom: false,
+            contentHeight: 2000,
+            viewportHeight: 800,
+            offsetY: 1500
+        ))
+        XCTAssertFalse(shouldReassertBottomScroll(
+            stickToBottom: true,
+            contentHeight: 0,
+            viewportHeight: 800,
+            offsetY: 1500
+        ))
+        XCTAssertFalse(shouldReassertBottomScroll(
+            stickToBottom: true,
+            contentHeight: 2000,
+            viewportHeight: 0,
+            offsetY: 1500
+        ))
+    }
+
     func testEarlierMessagesAutoLoadOnlyAtTopWhileBrowsingHistory() {
         XCTAssertTrue(shouldAutoLoadEarlierMessages(
             isTopSentinelVisible: true,
